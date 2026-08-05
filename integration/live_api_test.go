@@ -162,7 +162,11 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		http.MethodPost,
 		basePath+"/members",
 		map[string]any{
-			"capabilities": []string{"message_fetch", "message_acknowledge"},
+			"capabilities": []string{
+				"blob_fetch",
+				"message_fetch",
+				"message_acknowledge",
+			},
 		},
 		domain.AdministrationCredential.AuthorizationToken,
 		uuid.Nil,
@@ -235,6 +239,37 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 			recipient.Member.MemberID,
 		), http.StatusOK)
 	}
+	blobBytes := []byte("opaque-live-encrypted-blob")
+	blobURL := basePath + "/blobs/" + relay.BlobID(blobBytes)
+	requireStatusAndClose(t, requestRelayBlob(
+		t,
+		client,
+		http.MethodPut,
+		blobURL,
+		blobBytes,
+		domain.MemberCredential.AuthorizationToken,
+		domain.Member.MemberID,
+		"",
+	), http.StatusCreated)
+	blobDownload := requestRelayBlob(
+		t,
+		client,
+		http.MethodGet,
+		blobURL,
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberID,
+		"bytes=7-10",
+	)
+	requireStatus(t, blobDownload, http.StatusPartialContent)
+	downloaded, err := io.ReadAll(blobDownload.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = blobDownload.Body.Close()
+	if !bytes.Equal(downloaded, blobBytes[7:11]) {
+		t.Fatalf("live blob range mismatch: %q", downloaded)
+	}
 	requireStatusAndClose(t, requestRelayJSON(
 		t,
 		client,
@@ -253,6 +288,40 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		recipient.Credential.AuthorizationToken,
 		recipient.Member.MemberID,
 	), http.StatusForbidden)
+}
+
+func requestRelayBlob(
+	t *testing.T,
+	client *http.Client,
+	method string,
+	url string,
+	body []byte,
+	token string,
+	memberID uuid.UUID,
+	byteRange string,
+) *http.Response {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	request, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/octet-stream")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-Facets-Member-ID", memberID.String())
+	if byteRange != "" {
+		request.Header.Set("Range", byteRange)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }
 
 func requestJSON(

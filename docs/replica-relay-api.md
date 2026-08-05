@@ -2,9 +2,10 @@
 
 This API is the first durable data plane shared by Facets Sync and Shared
 Spaces. It carries the frozen `facets.replica-relay-carrier-fixture.v1`
-envelope contract. Facets clients sign and encrypt the complete replica message
-before upload; the Node routes the resulting envelope without an FEF parser or
-the domain content key.
+envelope contract plus independently encrypted, content-addressed blob bytes.
+Facets clients sign and encrypt the complete replica message before upload; the
+Node routes its envelope and blobs without an FEF parser or the domain content
+key.
 
 The API is a development security checkpoint. Public exposure still requires
 reviewed TLS ingress, hosted account admission, distributed rate limits,
@@ -52,8 +53,8 @@ Authorization: Bearer <operator token>
 This endpoint has no body. It is registered only when
 `FACETS_NODE_OPERATOR_TOKEN` is configured. It returns a random tenant/domain,
 the domain-administration credential, and an initial member with every currently
-defined capability. The default domain bounds are 10,000 messages and 1 GiB of
-decoded ciphertext.
+defined capability. The default domain bounds are 10,000 messages, 10,000
+blobs, and 1 GiB shared by decoded message ciphertext and stored blob bytes.
 
 The operator endpoint is a deployment control-plane seam, not hosted account
 admission. Keep it off public application ingress. A later hosted layer will
@@ -79,8 +80,8 @@ Defined capabilities are:
 - `message_publish`
 - `message_fetch`
 - `message_acknowledge`
-- `blob_publish` (reserved; no endpoint yet)
-- `blob_fetch` (reserved; no endpoint yet)
+- `blob_publish`
+- `blob_fetch`
 - `checkpoint_publish` (reserved; no endpoint yet)
 
 ## Revoke a member
@@ -114,7 +115,7 @@ message returns `201` with `accepted` and its sequence. An exact retry by the
 same publisher returns `200` with `duplicate` and the original sequence, without
 charging the quota again. Reusing a message ID with any different visible field
 is a collision. Publication stops with `domain_full` when either the domain's
-message-count or decoded-ciphertext-byte limit is reached.
+message-count or total stored-byte limit is reached.
 
 The envelope has no server-enforced expiry. Offline catch-up and device
 recovery therefore do not depend on client clock agreement. Retention and
@@ -158,15 +159,71 @@ Repeated or lower-stage requests are idempotent and return the highest stored
 stage. Acknowledgments are per-member facts and do not currently trigger
 deletion.
 
+## Store and fetch an encrypted blob
+
+The signed plaintext artifact refers to source bytes, but its encrypted relay
+payload privately maps each source ID to the SHA-256 content address of a
+separately encrypted blob. The server sees only that relay blob ID and the
+encrypted bytes. It cannot associate a blob with a particular message or source
+file from the outer carrier.
+
+```http
+PUT /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{relayBlobID}
+Content-Type: application/octet-stream
+Content-Length: <required byte count>
+Authorization: Bearer <member token>
+X-Facets-Member-ID: <publisher member UUID>
+```
+
+The relay blob ID is canonical unpadded base64url for the 32-byte SHA-256 digest
+of the exact encrypted request body. Upload is streamed to a staging file; the
+Node enforces a 256 MiB per-blob maximum, verifies the declared length and
+digest, syncs the file, and atomically links it into a tenant/domain-scoped
+content store. A new metadata record returns `201` and `accepted`; an exact
+content-addressed retry returns `200` and `duplicate` without charging quotas
+again. Blob count and bytes share the domain's transactional quota counters with
+messages.
+
+Because the relay ID is a ciphertext content address, clients must use
+randomized, domain-bound authenticated encryption and avoid ciphertext reuse
+across domains. The filesystem path is domain-scoped, but an operator could
+still correlate an identical relay ID submitted to two domains.
+
+Authorization and capacity are checked before receiving bytes and again before
+metadata commit. Revocation, expiry, or a quota race during transfer therefore
+fails closed. Because the immutable file is committed before its database fact,
+a database failure at that final boundary can leave an inaccessible orphan; a
+retry heals the record, while automated orphan collection remains pending.
+
+```http
+GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{relayBlobID}
+HEAD /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{relayBlobID}
+Authorization: Bearer <member token>
+X-Facets-Member-ID: <member UUID>
+```
+
+The response is `application/octet-stream`, includes the quoted relay blob ID
+as its immutable `ETag`, and supports standard single or multipart HTTP byte
+ranges through `Range`. This permits interrupted downloads to resume. Uploads
+are currently whole-blob and idempotent: an interrupted upload must restart.
+Multipart/resumable upload is a later storage packet.
+
+Self-hosted Compose stores these bytes in a separate named filesystem volume
+behind a narrow content-store interface; PostgreSQL holds authority, quota, and
+audit metadata only. Hosted multi-instance operation requires an object-store
+adapter and is not implied by the filesystem checkpoint. Backups and restores
+must treat the database and blob store as one coordinated checkpoint.
+
 ## Operations and remaining boundaries
 
 `/livez`, `/readyz`, and `/metrics` have the same private-operations semantics
-as the pairing API. The database records domain/member/message scope, monotonic
-sequence, credential digests, opaque envelope fields, acknowledgments, and
-bounded audit event types. It does not record a content key, decrypted FEF,
-Facets package contents, email address, Persona, or payment identity.
+as the pairing API. The database records domain/member/message/blob scope,
+monotonic sequence, credential digests, opaque envelope fields, byte counts,
+acknowledgments, and bounded audit event types. It does not record a content
+key, decrypted FEF, plaintext package contents, email address, Persona, or
+payment identity.
 
 This checkpoint does not yet provide administration-token rotation, member
-limits, account-wide quotas, retention garbage collection, blob/checkpoint
-storage, multi-region replication, online schema rollback, public ingress, or
-hosted service-level guarantees.
+limits, account-wide quotas, retention/orphan garbage collection, resumable
+upload, checkpoints, hosted object storage, multi-region replication, online
+schema rollback, public ingress, or hosted service-level guarantees.

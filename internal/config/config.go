@@ -13,8 +13,10 @@ type Config struct {
 	DatabaseURL    string
 	ShutdownPeriod time.Duration
 	CleanupPeriod  time.Duration
+	TransferPeriod time.Duration
 	DatabaseConns  int32
 	OperatorToken  string
+	BlobRoot       string
 }
 
 func Load() (Config, error) {
@@ -23,8 +25,10 @@ func Load() (Config, error) {
 		DatabaseURL:    os.Getenv("FACETS_NODE_DATABASE_URL"),
 		ShutdownPeriod: 10 * time.Second,
 		CleanupPeriod:  time.Minute,
+		TransferPeriod: 10 * time.Minute,
 		DatabaseConns:  10,
 		OperatorToken:  os.Getenv("FACETS_NODE_OPERATOR_TOKEN"),
+		BlobRoot:       environment("FACETS_NODE_BLOB_ROOT", "/var/lib/facets-node/blobs"),
 	}
 	if configuration.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("FACETS_NODE_DATABASE_URL is required")
@@ -53,6 +57,15 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("FACETS_NODE_CLEANUP_PERIOD must be a positive duration")
 		}
 		configuration.CleanupPeriod = period
+	}
+	if value := os.Getenv("FACETS_NODE_HTTP_TRANSFER_PERIOD"); value != "" {
+		period, err := time.ParseDuration(value)
+		if err != nil || period <= 0 || period > time.Hour {
+			return Config{}, fmt.Errorf(
+				"FACETS_NODE_HTTP_TRANSFER_PERIOD must be positive and no more than one hour",
+			)
+		}
+		configuration.TransferPeriod = period
 	}
 	if value := os.Getenv("FACETS_NODE_DATABASE_CONNS"); value != "" {
 		count, err := strconv.ParseInt(value, 10, 32)

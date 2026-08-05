@@ -11,6 +11,7 @@ const (
 	CodeInvalidDomain         ErrorCode = "invalid_domain"
 	CodeInvalidMember         ErrorCode = "invalid_member"
 	CodeInvalidEnvelope       ErrorCode = "invalid_envelope"
+	CodeInvalidBlob           ErrorCode = "invalid_blob"
 	CodeInvalidCursor         ErrorCode = "invalid_cursor"
 	CodeInvalidAcknowledgment ErrorCode = "invalid_acknowledgment"
 	CodeUnauthorized          ErrorCode = "unauthorized"
@@ -23,7 +24,9 @@ const (
 	CodeDomainCollision       ErrorCode = "domain_collision"
 	CodeMemberCollision       ErrorCode = "member_collision"
 	CodeMessageCollision      ErrorCode = "message_collision"
+	CodeBlobCollision         ErrorCode = "blob_collision"
 	CodeMessageNotFound       ErrorCode = "message_not_found"
+	CodeBlobNotFound          ErrorCode = "blob_not_found"
 	CodeDomainFull            ErrorCode = "domain_full"
 )
 

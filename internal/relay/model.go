@@ -18,9 +18,12 @@ const (
 	SchemaVersion                  = 1
 	EnvelopeAlgorithm              = "HKDF-SHA256+A256GCM"
 	MaximumCiphertextByteCount     = 16 * 1_024 * 1_024
+	MaximumBlobByteCount           = int64(256 * 1_024 * 1_024)
 	MaximumPageSize                = 100
 	DefaultMaximumMessageCount     = 10_000
 	AbsoluteMaximumMessageCount    = 1_000_000
+	DefaultMaximumBlobCount        = 10_000
+	AbsoluteMaximumBlobCount       = 1_000_000
 	DefaultMaximumStoredByteCount  = int64(1 * 1_024 * 1_024 * 1_024)
 	AbsoluteMaximumStoredByteCount = int64(1 * 1_024 * 1_024 * 1_024 * 1_024)
 	MinimumAuthorizationTokenSize  = 32
@@ -75,6 +78,7 @@ type DomainRegistration struct {
 	AdministrationDigest   string    `json:"administrationDigest"`
 	CreatedAtMilliseconds  int64     `json:"createdAtMilliseconds"`
 	MaximumMessageCount    int       `json:"maximumMessageCount"`
+	MaximumBlobCount       int       `json:"maximumBlobCount"`
 	MaximumStoredByteCount int64     `json:"maximumStoredByteCount"`
 }
 
@@ -83,6 +87,8 @@ func (r DomainRegistration) Validate() error {
 		r.DomainID == uuid.Nil || !validDigest(r.AdministrationDigest) ||
 		r.CreatedAtMilliseconds < 0 || r.MaximumMessageCount <= 0 ||
 		r.MaximumMessageCount > AbsoluteMaximumMessageCount ||
+		r.MaximumBlobCount <= 0 ||
+		r.MaximumBlobCount > AbsoluteMaximumBlobCount ||
 		r.MaximumStoredByteCount <= 0 ||
 		r.MaximumStoredByteCount > AbsoluteMaximumStoredByteCount {
 		return protocolError(CodeInvalidDomain, "domain fields are invalid")
@@ -284,6 +290,43 @@ type FetchResult struct {
 type AcknowledgmentResult struct {
 	Acceptance Acceptance          `json:"acceptance"`
 	Stage      AcknowledgmentStage `json:"stage"`
+}
+
+type BlobMetadata struct {
+	TenantID              uuid.UUID `json:"tenantID"`
+	DomainID              uuid.UUID `json:"domainID"`
+	BlobID                string    `json:"blobID"`
+	PublisherMemberID     uuid.UUID `json:"publisherMemberID"`
+	ByteCount             int64     `json:"byteCount"`
+	CreatedAtMilliseconds int64     `json:"createdAtMilliseconds"`
+}
+
+func (m BlobMetadata) Validate() error {
+	if m.TenantID == uuid.Nil || m.DomainID == uuid.Nil ||
+		m.PublisherMemberID == uuid.Nil || m.ByteCount < 0 ||
+		m.ByteCount > MaximumBlobByteCount || m.CreatedAtMilliseconds < 0 {
+		return protocolError(CodeInvalidBlob, "blob metadata is invalid")
+	}
+	return ValidateBlobID(m.BlobID)
+}
+
+type BlobPublishResult struct {
+	Acceptance Acceptance `json:"acceptance"`
+	ByteCount  int64      `json:"byteCount"`
+}
+
+func BlobID(bytes []byte) string {
+	digest := sha256.Sum256(bytes)
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+func ValidateBlobID(value string) error {
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size ||
+		base64.RawURLEncoding.EncodeToString(decoded) != value {
+		return protocolError(CodeInvalidBlob, "blob identifier is invalid")
+	}
+	return nil
 }
 
 func AuthorizationDigest(credential Credential) (string, error) {

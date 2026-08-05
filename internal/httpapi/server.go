@@ -22,6 +22,7 @@ const maximumRequestByteCount = ((rendezvous.MaximumCiphertextByteCount + 2) / 3
 type Server struct {
 	store                  rendezvous.Store
 	relayStore             relay.Store
+	blobContentStore       relay.BlobContentStore
 	operatorTokenDigest    [32]byte
 	operatorProvisioningOn bool
 	logger                 *slog.Logger
@@ -41,11 +42,13 @@ func New(store rendezvous.Store, logger *slog.Logger) *Server {
 func NewWithRelay(
 	store rendezvous.Store,
 	relayStore relay.Store,
+	blobContentStore relay.BlobContentStore,
 	logger *slog.Logger,
 	operatorToken string,
 ) (*Server, error) {
 	server := New(store, logger)
 	server.relayStore = relayStore
+	server.blobContentStore = blobContentStore
 	if operatorToken != "" {
 		digest, err := operatorDigest(operatorToken)
 		if err != nil {
@@ -97,6 +100,20 @@ func (s *Server) Handler() http.Handler {
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}/acknowledgments",
 			s.handleAcknowledgeRelayMessage,
 		)
+		if s.blobContentStore != nil {
+			mux.HandleFunc(
+				"PUT /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
+				s.handlePublishRelayBlob,
+			)
+			mux.HandleFunc(
+				"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
+				s.handleFetchRelayBlob,
+			)
+			mux.HandleFunc(
+				"HEAD /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
+				s.handleFetchRelayBlob,
+			)
+		}
 	}
 	return s.securityHeaders(s.requestLog(mux))
 }
@@ -285,7 +302,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			message = "The relay request was rejected."
 			switch relayProtocol.Code {
 			case relay.CodeInvalidDomain, relay.CodeInvalidMember,
-				relay.CodeInvalidEnvelope, relay.CodeInvalidCursor,
+				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob,
+				relay.CodeInvalidCursor,
 				relay.CodeWrongScope:
 				status = http.StatusBadRequest
 			case relay.CodeUnauthorized, relay.CodeDomainNotFound,
@@ -294,10 +312,10 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			case relay.CodeMemberExpired, relay.CodeMemberRevoked,
 				relay.CodeMissingCapability:
 				status = http.StatusForbidden
-			case relay.CodeMessageNotFound:
+			case relay.CodeMessageNotFound, relay.CodeBlobNotFound:
 				status = http.StatusNotFound
 			case relay.CodeDomainCollision, relay.CodeMemberCollision,
-				relay.CodeMessageCollision,
+				relay.CodeMessageCollision, relay.CodeBlobCollision,
 				relay.CodeInvalidAcknowledgment:
 				status = http.StatusConflict
 			case relay.CodeDomainFull:

@@ -44,4 +44,24 @@ type Store interface {
 		stage AcknowledgmentStage,
 		nowMilliseconds int64,
 	) (AcknowledgmentResult, error)
+	PrepareBlobPublish(
+		ctx context.Context,
+		credential Credential,
+		blobID string,
+		byteCount int64,
+		nowMilliseconds int64,
+	) error
+	CommitBlobPublish(
+		ctx context.Context,
+		credential Credential,
+		blobID string,
+		byteCount int64,
+		nowMilliseconds int64,
+	) (BlobPublishResult, error)
+	GetBlobMetadata(
+		ctx context.Context,
+		credential Credential,
+		blobID string,
+		nowMilliseconds int64,
+	) (BlobMetadata, error)
 }

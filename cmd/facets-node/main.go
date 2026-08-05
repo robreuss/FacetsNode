@@ -16,6 +16,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/httpapi"
 	"github.com/robreuss/FacetsNode/internal/postgres"
+	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
 func main() {
@@ -61,9 +62,15 @@ func main() {
 	}
 	store := postgres.NewStore(pool)
 	relayStore := postgres.NewRelayStore(pool)
+	blobContentStore, err := relay.NewFileBlobContentStore(configuration.BlobRoot)
+	if err != nil {
+		logger.Error("blob store configuration rejected", "error", err)
+		os.Exit(1)
+	}
 	api, err := httpapi.NewWithRelay(
 		store,
 		relayStore,
+		blobContentStore,
 		logger,
 		configuration.OperatorToken,
 	)
@@ -75,8 +82,8 @@ func main() {
 		Addr:              configuration.ListenAddress,
 		Handler:           api.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		ReadTimeout:       configuration.TransferPeriod,
+		WriteTimeout:      configuration.TransferPeriod,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 * 1_024,
 	}

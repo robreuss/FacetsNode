@@ -27,15 +27,17 @@ Facets core codebase.
 - Explicit tenant, replica-domain, and member scope on every relay operation
 - Capability-scoped relay membership with immediate expiry and revocation
 - Opaque, monotonic catch-up cursors and per-member accepted/applied facts
-- Per-domain message and stored-ciphertext quotas
+- Per-domain message/blob counts and total stored-byte quotas
 - PostgreSQL-backed concurrent publication with restart-safe ordering
 - Cross-language tests against the public Swift replica-carrier fixture
+- Domain-scoped, content-addressed encrypted-blob storage on a separate volume
+- Streaming blob upload with digest verification and Range-capable GET/HEAD
 
-Replica blobs, checkpoints, retention collection, hosted account admission,
-Shared Space membership, billing, and compute are later modules. Capability
-names for blobs and checkpoints are reserved but their endpoints are not yet
-implemented. No valid FEF, device grant, payment record, or Shared Space
-membership will implicitly grant compute execution.
+Resumable/multipart blob upload, checkpoints, retention and orphan collection,
+hosted object storage/account admission, Shared Space membership, billing, and
+compute are later modules. The checkpoint capability name is reserved but its
+endpoint is not yet implemented. No valid FEF, device grant, payment record, or
+Shared Space membership will implicitly grant compute execution.
 
 ## Development
 
@@ -65,6 +67,12 @@ must terminate TLS in front of the Node; never expose its plaintext container
 port directly to an untrusted network. The Compose stack refuses to start until
 `FACETS_NODE_POSTGRES_PASSWORD` is supplied in the ignored `.env` file; never
 reuse that database credential for any Node or external service.
+
+Compose persists PostgreSQL metadata and opaque blob bytes in separate named
+volumes. A valid backup/restore or host migration must treat both volumes as one
+checkpoint. The filesystem blob adapter is the self-hosted checkpoint; hosted
+multi-instance deployment still requires the same narrow content-store
+interface to be backed by reviewed object storage.
 
 ## Security boundary
 

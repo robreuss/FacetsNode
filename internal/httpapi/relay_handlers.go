@@ -6,10 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"mime"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -87,6 +89,7 @@ func (s *Server) handleCreateRelayDomain(writer http.ResponseWriter, request *ht
 		AdministrationDigest:   administrationDigest,
 		CreatedAtMilliseconds:  now,
 		MaximumMessageCount:    relay.DefaultMaximumMessageCount,
+		MaximumBlobCount:       relay.DefaultMaximumBlobCount,
 		MaximumStoredByteCount: relay.DefaultMaximumStoredByteCount,
 	}
 	member := relay.MemberRegistration{
@@ -354,6 +357,128 @@ func (s *Server) handleAcknowledgeRelayMessage(writer http.ResponseWriter, reque
 	}
 	s.metrics.ObserveAcceptance(string(result.Acceptance))
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (s *Server) handlePublishRelayBlob(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	blobID := request.PathValue("blobID")
+	if err := relay.ValidateBlobID(blobID); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/octet-stream" {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeInvalidBlob,
+			"blob content type must be application/octet-stream",
+		))
+		return
+	}
+	if request.ContentLength < 0 || request.ContentLength > relay.MaximumBlobByteCount {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeInvalidBlob,
+			"blob Content-Length is required and outside the supported range",
+		))
+		return
+	}
+	now := s.nowMilliseconds()
+	if err := s.relayStore.PrepareBlobPublish(
+		request.Context(),
+		credential,
+		blobID,
+		request.ContentLength,
+		now,
+	); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	request.Body = http.MaxBytesReader(
+		writer,
+		request.Body,
+		relay.MaximumBlobByteCount+1,
+	)
+	stored, err := s.blobContentStore.Put(
+		request.Context(),
+		relay.BlobScope{TenantID: tenantID, DomainID: domainID},
+		blobID,
+		request.Body,
+		request.ContentLength,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.relayStore.CommitBlobPublish(
+		request.Context(),
+		credential,
+		blobID,
+		stored.ByteCount,
+		s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	status := http.StatusCreated
+	if result.Acceptance == relay.AcceptanceDuplicate {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, result)
+}
+
+func (s *Server) handleFetchRelayBlob(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	blobID := request.PathValue("blobID")
+	if err := relay.ValidateBlobID(blobID); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	metadata, err := s.relayStore.GetBlobMetadata(
+		request.Context(),
+		credential,
+		blobID,
+		s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	content, err := s.blobContentStore.Open(
+		request.Context(),
+		relay.BlobScope{TenantID: tenantID, DomainID: domainID},
+		blobID,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	defer content.Reader.Close()
+	if content.ByteCount != metadata.ByteCount {
+		s.writeError(writer, fmt.Errorf("stored blob content length differs from metadata"))
+		return
+	}
+	writer.Header().Set("Content-Type", "application/octet-stream")
+	writer.Header().Set("ETag", `"`+blobID+`"`)
+	http.ServeContent(writer, request, blobID, time.Time{}, content.Reader)
 }
 
 func (s *Server) authorizeOperator(request *http.Request) error {

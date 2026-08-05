@@ -31,6 +31,8 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		t.Fatal(err)
 	}
 	const concurrentCount = 20
+	blobBytes := []byte("opaque-postgres-relay-blob")
+	blobID := relay.BlobID(blobBytes)
 	pool := openPool(t, ctx, databaseURL)
 	if err := postgresstore.Migrate(ctx, pool); err != nil {
 		pool.Close()
@@ -38,7 +40,7 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	}
 	if _, err := pool.Exec(ctx, `
 		TRUNCATE relay_audit_events, relay_acknowledgments,
-		         relay_messages, relay_members, relay_domains
+		         relay_messages, relay_blobs, relay_members, relay_domains
 	`); err != nil {
 		pool.Close()
 		t.Fatal(err)
@@ -60,10 +62,17 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		DomainID:               admin.DomainID,
 		AdministrationDigest:   adminDigest,
 		CreatedAtMilliseconds:  1_000,
-		MaximumMessageCount:    100,
-		MaximumStoredByteCount: fixtureCiphertextByteCount + concurrentCount,
+		MaximumMessageCount:    concurrentCount + 1,
+		MaximumBlobCount:       1,
+		MaximumStoredByteCount: fixtureCiphertextByteCount + concurrentCount + int64(len(blobBytes)),
 	}
-	acceptance, err := store.CreateDomain(ctx, domain, fixture.PublisherRegistration)
+	publisherRegistration := fixture.PublisherRegistration
+	publisherRegistration.Capabilities = []relay.Capability{
+		relay.CapabilityPublishBlob,
+		relay.CapabilityFetchMessage,
+		relay.CapabilityPublishMessage,
+	}
+	acceptance, err := store.CreateDomain(ctx, domain, publisherRegistration)
 	if err != nil || acceptance != relay.AcceptanceAccepted {
 		pool.Close()
 		t.Fatalf("create domain acceptance=%q err=%v", acceptance, err)
@@ -82,6 +91,7 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		MemberID:            recipientCredential.MemberID,
 		AuthorizationDigest: recipientDigest,
 		Capabilities: []relay.Capability{
+			relay.CapabilityFetchBlob,
 			relay.CapabilityAcknowledgeMessage,
 			relay.CapabilityFetchMessage,
 		},
@@ -170,7 +180,50 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		1_500,
 	); !relay.ErrorHasCode(err, relay.CodeDomainFull) {
 		pool.Close()
-		t.Fatalf("publish beyond stored-byte quota err=%v", err)
+		t.Fatalf("publish beyond message-count quota err=%v", err)
+	}
+	if err := store.PrepareBlobPublish(
+		ctx,
+		fixture.PublisherAccess.Credential(),
+		blobID,
+		int64(len(blobBytes)),
+		1_500,
+	); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	blobPublished, err := store.CommitBlobPublish(
+		ctx,
+		fixture.PublisherAccess.Credential(),
+		blobID,
+		int64(len(blobBytes)),
+		1_500,
+	)
+	if err != nil || blobPublished.Acceptance != relay.AcceptanceAccepted {
+		pool.Close()
+		t.Fatalf("blob publish=%+v err=%v", blobPublished, err)
+	}
+	blobRetry, err := store.CommitBlobPublish(
+		ctx,
+		fixture.PublisherAccess.Credential(),
+		blobID,
+		int64(len(blobBytes)),
+		1_500,
+	)
+	if err != nil || blobRetry.Acceptance != relay.AcceptanceDuplicate {
+		pool.Close()
+		t.Fatalf("blob retry=%+v err=%v", blobRetry, err)
+	}
+	secondBlob := []byte("second")
+	if err := store.PrepareBlobPublish(
+		ctx,
+		fixture.PublisherAccess.Credential(),
+		relay.BlobID(secondBlob),
+		int64(len(secondBlob)),
+		1_500,
+	); !relay.ErrorHasCode(err, relay.CodeDomainFull) {
+		pool.Close()
+		t.Fatalf("blob beyond count quota err=%v", err)
 	}
 	pool.Close()
 
@@ -184,6 +237,12 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	}
 	if fetched.Messages[0].Envelope != fixture.Envelope {
 		t.Fatalf("portable fixture changed after restart")
+	}
+	blobMetadata, err := store.GetBlobMetadata(
+		ctx, recipientCredential, blobID, 1_500,
+	)
+	if err != nil || blobMetadata.ByteCount != int64(len(blobBytes)) {
+		t.Fatalf("restart blob metadata=%+v err=%v", blobMetadata, err)
 	}
 	if _, err := store.Acknowledge(
 		ctx,
@@ -212,13 +271,14 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		t.Fatalf("fetch after revocation err=%v", err)
 	}
 
-	var messageCount, lastSequence, auditCount int
+	var messageCount, blobCount, lastSequence, auditCount int
 	var storedByteCount int64
 	if err := pool.QueryRow(ctx, `
-		SELECT message_count, stored_byte_count, last_sequence
+		SELECT message_count, blob_count, stored_byte_count, last_sequence
 		FROM relay_domains WHERE tenant_id = $1 AND domain_id = $2
 	`, domain.TenantID, domain.DomainID).Scan(
 		&messageCount,
+		&blobCount,
 		&storedByteCount,
 		&lastSequence,
 	); err != nil {
@@ -231,16 +291,38 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		t.Fatal(err)
 	}
 	if messageCount != concurrentCount+1 ||
-		storedByteCount != fixtureCiphertextByteCount+concurrentCount ||
+		blobCount != 1 ||
+		storedByteCount != fixtureCiphertextByteCount+concurrentCount+int64(len(blobBytes)) ||
 		lastSequence != concurrentCount+1 ||
-		auditCount != concurrentCount+7 {
+		auditCount != concurrentCount+8 {
 		t.Fatalf(
-			"message_count=%d stored_byte_count=%d last_sequence=%d audit_count=%d",
+			"message_count=%d blob_count=%d stored_byte_count=%d last_sequence=%d audit_count=%d",
 			messageCount,
+			blobCount,
 			storedByteCount,
 			lastSequence,
 			auditCount,
 		)
+	}
+	result, err := pool.Exec(ctx, `
+		DELETE FROM relay_domains WHERE tenant_id = $1 AND domain_id = $2
+	`, domain.TenantID, domain.DomainID)
+	if err != nil || result.RowsAffected() != 1 {
+		t.Fatalf("delete relay domain rows=%d err=%v", result.RowsAffected(), err)
+	}
+	var remaining int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM relay_members WHERE tenant_id = $1 AND domain_id = $2) +
+			(SELECT count(*) FROM relay_messages WHERE tenant_id = $1 AND domain_id = $2) +
+			(SELECT count(*) FROM relay_acknowledgments WHERE tenant_id = $1 AND domain_id = $2) +
+			(SELECT count(*) FROM relay_blobs WHERE tenant_id = $1 AND domain_id = $2) +
+			(SELECT count(*) FROM relay_audit_events WHERE tenant_id = $1 AND domain_id = $2)
+	`, domain.TenantID, domain.DomainID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("relay domain deletion left %d dependent rows", remaining)
 	}
 }
 

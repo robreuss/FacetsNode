@@ -25,6 +25,8 @@ services:
       FACETS_NODE_DATABASE_URL: postgres://facets:${FACETS_NODE_POSTGRES_PASSWORD:?Set FACETS_NODE_POSTGRES_PASSWORD in .env}@postgres:5432/facets?sslmode=disable
       FACETS_NODE_LISTEN_ADDR: :8080
       FACETS_NODE_OPERATOR_TOKEN: ${FACETS_NODE_OPERATOR_TOKEN:?Set FACETS_NODE_OPERATOR_TOKEN in .env}
+      FACETS_NODE_BLOB_ROOT: /var/lib/facets-node/blobs
+      FACETS_NODE_HTTP_TRANSFER_PERIOD: ${FACETS_NODE_HTTP_TRANSFER_PERIOD:-10m}
     depends_on:
       postgres:
         condition: service_healthy
@@ -37,6 +39,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
+    volumes:
+      - facets-node-blobs:/var/lib/facets-node/blobs
     cap_drop:
       - ALL
     security_opt:
@@ -54,3 +58,4 @@ networks:
 
 volumes:
   facets-node-postgres:
+  facets-node-blobs:

@@ -23,6 +23,7 @@ type memoryDomain struct {
 	members      map[uuid.UUID]MemberRegistration
 	messages     []*memoryMessage
 	messageByID  map[uuid.UUID]*memoryMessage
+	blobs        map[string]BlobMetadata
 	nextSequence uint64
 	storedBytes  int64
 }
@@ -68,6 +69,7 @@ func (s *MemoryStore) CreateDomain(
 			initialMember.MemberID: initialMember,
 		},
 		messageByID: make(map[uuid.UUID]*memoryMessage),
+		blobs:       make(map[string]BlobMetadata),
 	}
 	return AcceptanceAccepted, nil
 }
@@ -281,6 +283,135 @@ func (s *MemoryStore) Acknowledge(
 		Acceptance: AcceptanceAccepted,
 		Stage:      stage,
 	}, nil
+}
+
+func (s *MemoryStore) PrepareBlobPublish(
+	_ context.Context,
+	credential Credential,
+	blobID string,
+	byteCount int64,
+	nowMilliseconds int64,
+) error {
+	if err := validateBlobRequest(blobID, byteCount); err != nil {
+		return err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	domain, err := s.authorizedMember(
+		credential,
+		CapabilityPublishBlob,
+		nowMilliseconds,
+	)
+	if err != nil {
+		return err
+	}
+	if existing, ok := domain.blobs[blobID]; ok {
+		if existing.ByteCount == byteCount {
+			return nil
+		}
+		return protocolError(CodeBlobCollision, "blob ID was reused with a different length")
+	}
+	return ensureBlobCapacity(domain, byteCount)
+}
+
+func (s *MemoryStore) CommitBlobPublish(
+	_ context.Context,
+	credential Credential,
+	blobID string,
+	byteCount int64,
+	nowMilliseconds int64,
+) (BlobPublishResult, error) {
+	if err := validateBlobRequest(blobID, byteCount); err != nil {
+		return BlobPublishResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedMember(
+		credential,
+		CapabilityPublishBlob,
+		nowMilliseconds,
+	)
+	if err != nil {
+		return BlobPublishResult{}, err
+	}
+	if existing, ok := domain.blobs[blobID]; ok {
+		if existing.ByteCount == byteCount {
+			return BlobPublishResult{
+				Acceptance: AcceptanceDuplicate,
+				ByteCount:  byteCount,
+			}, nil
+		}
+		return BlobPublishResult{}, protocolError(
+			CodeBlobCollision,
+			"blob ID was reused with a different length",
+		)
+	}
+	if err := ensureBlobCapacity(domain, byteCount); err != nil {
+		return BlobPublishResult{}, err
+	}
+	metadata := BlobMetadata{
+		TenantID:              credential.TenantID,
+		DomainID:              credential.DomainID,
+		BlobID:                blobID,
+		PublisherMemberID:     credential.MemberID,
+		ByteCount:             byteCount,
+		CreatedAtMilliseconds: nowMilliseconds,
+	}
+	if err := metadata.Validate(); err != nil {
+		return BlobPublishResult{}, err
+	}
+	domain.blobs[blobID] = metadata
+	domain.storedBytes += byteCount
+	return BlobPublishResult{
+		Acceptance: AcceptanceAccepted,
+		ByteCount:  byteCount,
+	}, nil
+}
+
+func (s *MemoryStore) GetBlobMetadata(
+	_ context.Context,
+	credential Credential,
+	blobID string,
+	nowMilliseconds int64,
+) (BlobMetadata, error) {
+	if err := ValidateBlobID(blobID); err != nil {
+		return BlobMetadata{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	domain, err := s.authorizedMember(
+		credential,
+		CapabilityFetchBlob,
+		nowMilliseconds,
+	)
+	if err != nil {
+		return BlobMetadata{}, err
+	}
+	metadata, ok := domain.blobs[blobID]
+	if !ok {
+		return BlobMetadata{}, protocolError(CodeBlobNotFound, "blob was not found")
+	}
+	return metadata, nil
+}
+
+func validateBlobRequest(blobID string, byteCount int64) error {
+	if err := ValidateBlobID(blobID); err != nil {
+		return err
+	}
+	if byteCount < 0 || byteCount > MaximumBlobByteCount {
+		return protocolError(CodeInvalidBlob, "blob byte count is invalid")
+	}
+	return nil
+}
+
+func ensureBlobCapacity(domain *memoryDomain, byteCount int64) error {
+	if len(domain.blobs) >= domain.registration.MaximumBlobCount {
+		return protocolError(CodeDomainFull, "domain reached its blob limit")
+	}
+	if byteCount > domain.registration.MaximumStoredByteCount-domain.storedBytes {
+		return protocolError(CodeDomainFull, "domain reached its stored-byte limit")
+	}
+	return nil
 }
 
 func (s *MemoryStore) authorizedDomain(

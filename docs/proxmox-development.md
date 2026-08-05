@@ -39,7 +39,10 @@ endpoints, monitoring, and incident procedures.
 The persistent integration gate is:
 
 ```sh
-FACETS_NODE_TEST_DATABASE_URL='postgres://facets:<password>@postgres:5432/facets?sslmode=disable' \
+# One-time disposable integration database:
+docker compose exec postgres createdb -U facets facets_test
+
+FACETS_NODE_TEST_DATABASE_URL='postgres://facets:<password>@postgres:5432/facets_test?sslmode=disable' \
   go test ./internal/postgres \
     -run 'TestPostgres(StorePersistsOpaqueMailbox|RelayPersistsSequences)' -v
 
@@ -49,18 +52,30 @@ FACETS_NODE_TEST_OPERATOR_TOKEN='<same operator value from .env>' \
 ```
 
 Run these from an ephemeral Go container attached to the corresponding Compose
-network, or through a development tunnel. The Proxmox gate also tears down both
+network, or through a development tunnel. `facets_test` is disposable; the
+PostgreSQL suite truncates its relay tables and must never target the running
+service database. The Proxmox gate also tears down both
 containers without deleting the named volume, starts the same image again,
-verifies pairing routes and replica domains/messages remain, and confirms
-`/readyz`. Never add `--volumes` to this persistence check.
+verifies pairing routes plus replica domains/messages/blob metadata remain, and
+confirms `/readyz`. The same checkpoint records the sorted SHA-256 digest list
+from every regular file in the `facets-node-blobs` volume before and after
+recreation and requires an exact match. Never add `--volumes` to this
+persistence check.
+
+PostgreSQL metadata and the blob volume are one recovery unit. A backup or host
+migration that captures only one is incomplete. Direct SQL domain deletion is
+not an operational deletion workflow: filesystem orphan collection and a
+coordinated deletion command are still pending.
 
 ## What this checkpoint does not prove
 
 - public internet safety or production TLS;
 - multi-tenant account admission and distributed abuse controls;
-- encrypted backup, restore to a fresh VM, or point-in-time recovery;
+- encrypted coordinated database/blob backup, restore to a fresh VM, or
+  point-in-time recovery;
 - rolling upgrade or schema downgrade behavior;
-- Sync blobs, checkpoints, retention collection, or Shared Space policy;
+- resumable blob upload, checkpoints, retention/orphan collection, or Shared
+  Space policy;
 - hosted scaling, regional placement, billing, or service-level objectives.
 
 Those are explicit later gates, not properties inferred from a healthy local

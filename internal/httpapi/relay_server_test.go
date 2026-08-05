@@ -21,9 +21,14 @@ import (
 func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing.T) {
 	operatorToken := relayTestToken(192)
 	var logs bytes.Buffer
+	blobContentStore, err := relay.NewFileBlobContentStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	server, err := NewWithRelay(
 		rendezvous.NewMemoryStore(),
 		relay.NewMemoryStore(),
+		blobContentStore,
 		slog.New(slog.NewJSONHandler(&logs, nil)),
 		operatorToken,
 	)
@@ -81,7 +86,11 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		http.MethodPost,
 		basePath+"/members",
 		map[string]any{
-			"capabilities": []string{"message_fetch", "message_acknowledge"},
+			"capabilities": []string{
+				"blob_fetch",
+				"message_fetch",
+				"message_acknowledge",
+			},
 		},
 		created.AdministrationCredential.AuthorizationToken,
 		uuid.Nil,
@@ -95,9 +104,10 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		t.Fatal(err)
 	}
 	_ = createMember.Body.Close()
-	if len(recipient.Member.Capabilities) != 2 ||
-		recipient.Member.Capabilities[0] != relay.CapabilityAcknowledgeMessage ||
-		recipient.Member.Capabilities[1] != relay.CapabilityFetchMessage {
+	if len(recipient.Member.Capabilities) != 3 ||
+		recipient.Member.Capabilities[0] != relay.CapabilityFetchBlob ||
+		recipient.Member.Capabilities[1] != relay.CapabilityAcknowledgeMessage ||
+		recipient.Member.Capabilities[2] != relay.CapabilityFetchMessage {
 		t.Fatalf("capabilities were not normalized: %v", recipient.Member.Capabilities)
 	}
 
@@ -182,6 +192,96 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		requireStatus(t, response, http.StatusOK)
 	}
 
+	blobBytes := []byte("opaque independently encrypted blob bytes")
+	blobID := relay.BlobID(blobBytes)
+	blobPath := basePath + "/blobs/" + blobID
+	upload := performRelayBlob(
+		t,
+		handler,
+		http.MethodPut,
+		blobPath,
+		blobBytes,
+		created.MemberCredential.AuthorizationToken,
+		created.Member.MemberID,
+		"",
+	)
+	requireStatus(t, upload, http.StatusCreated)
+	uploadRetry := performRelayBlob(
+		t,
+		handler,
+		http.MethodPut,
+		blobPath,
+		blobBytes,
+		created.MemberCredential.AuthorizationToken,
+		created.Member.MemberID,
+		"",
+	)
+	requireStatus(t, uploadRetry, http.StatusOK)
+	download := performRelayBlob(
+		t,
+		handler,
+		http.MethodGet,
+		blobPath,
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberID,
+		"",
+	)
+	requireStatus(t, download, http.StatusOK)
+	downloaded, err := io.ReadAll(download.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = download.Body.Close()
+	if !bytes.Equal(downloaded, blobBytes) || download.Header.Get("ETag") != `"`+blobID+`"` {
+		t.Fatalf("blob download mismatch headers=%v bytes=%q", download.Header, downloaded)
+	}
+	partial := performRelayBlob(
+		t,
+		handler,
+		http.MethodGet,
+		blobPath,
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberID,
+		"bytes=7-19",
+	)
+	requireStatus(t, partial, http.StatusPartialContent)
+	partialBytes, err := io.ReadAll(partial.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = partial.Body.Close()
+	if !bytes.Equal(partialBytes, blobBytes[7:20]) {
+		t.Fatalf("partial blob=%q", partialBytes)
+	}
+	head := performRelayBlob(
+		t,
+		handler,
+		http.MethodHead,
+		blobPath,
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberID,
+		"",
+	)
+	requireStatus(t, head, http.StatusOK)
+	_ = head.Body.Close()
+	if head.ContentLength != int64(len(blobBytes)) {
+		t.Fatalf("blob HEAD length=%d", head.ContentLength)
+	}
+	digestMismatch := performRelayBlob(
+		t,
+		handler,
+		http.MethodPut,
+		basePath+"/blobs/"+relay.BlobID([]byte("other")),
+		blobBytes,
+		created.MemberCredential.AuthorizationToken,
+		created.Member.MemberID,
+		"",
+	)
+	requireStatus(t, digestMismatch, http.StatusBadRequest)
+
 	revoke := performRelayJSON(
 		t,
 		handler,
@@ -210,6 +310,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		created.MemberCredential.AuthorizationToken,
 		recipient.Credential.AuthorizationToken,
 		envelope.Ciphertext,
+		string(blobBytes),
 	} {
 		if strings.Contains(logText, protected) {
 			t.Fatalf("logs contain protected material %q", protected)
@@ -223,10 +324,40 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 	}
 }
 
+func performRelayBlob(
+	t *testing.T,
+	handler http.Handler,
+	method string,
+	path string,
+	body []byte,
+	token string,
+	memberID uuid.UUID,
+	byteRange string,
+) *http.Response {
+	t.Helper()
+	var requestBody io.Reader
+	if body != nil {
+		requestBody = bytes.NewReader(body)
+	}
+	request := httptest.NewRequest(method, path, requestBody)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/octet-stream")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-Facets-Member-ID", memberID.String())
+	if byteRange != "" {
+		request.Header.Set("Range", byteRange)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder.Result()
+}
+
 func TestRelayDomainProvisioningEndpointIsAbsentWithoutOperatorToken(t *testing.T) {
 	server, err := NewWithRelay(
 		rendezvous.NewMemoryStore(),
 		relay.NewMemoryStore(),
+		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		"",
 	)

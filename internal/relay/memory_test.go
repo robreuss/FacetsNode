@@ -33,6 +33,7 @@ func TestMemoryStoreDeliversOncePerDomainWithPerMemberFacts(t *testing.T) {
 		AdministrationDigest:   adminDigest,
 		CreatedAtMilliseconds:  1_000,
 		MaximumMessageCount:    10,
+		MaximumBlobCount:       10,
 		MaximumStoredByteCount: 2_048,
 	}
 	store := relay.NewMemoryStore()
@@ -177,6 +178,7 @@ func TestMemoryStoreRejectsScopeCapabilityAndMessageCollisions(t *testing.T) {
 		AdministrationDigest:   digest,
 		CreatedAtMilliseconds:  1_000,
 		MaximumMessageCount:    10,
+		MaximumBlobCount:       10,
 		MaximumStoredByteCount: 2_048,
 	}, fixture.PublisherRegistration)
 	if err != nil {
@@ -301,6 +303,7 @@ func TestMemoryStoreEnforcesStoredByteQuotaWithoutChargingRetries(t *testing.T) 
 		AdministrationDigest:   adminDigest,
 		CreatedAtMilliseconds:  1_000,
 		MaximumMessageCount:    10,
+		MaximumBlobCount:       10,
 		MaximumStoredByteCount: ciphertextByteCount,
 	}, fixture.PublisherRegistration)
 	if err != nil {
@@ -319,6 +322,134 @@ func TestMemoryStoreEnforcesStoredByteQuotaWithoutChargingRetries(t *testing.T) 
 	second.MessageID = uuid.New()
 	if _, err := store.Publish(ctx, credential, second, 1_500); !relay.ErrorHasCode(err, relay.CodeDomainFull) {
 		t.Fatalf("publish beyond stored-byte quota err=%v", err)
+	}
+}
+
+func TestMemoryStoreAuthorizesAndAccountsForOpaqueBlobs(t *testing.T) {
+	ctx := context.Background()
+	tenantID := uuid.New()
+	domainID := uuid.New()
+	publisherCredential := relay.Credential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		MemberID: uuid.New(),
+		Token:    token(96),
+	}
+	publisherDigest, err := relay.AuthorizationDigest(publisherCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := relay.AdministrationCredential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		Token:    token(128),
+	}
+	adminDigest, err := relay.AdministrationDigest(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := relay.NewMemoryStore()
+	_, err = store.CreateDomain(ctx, relay.DomainRegistration{
+		Version:                relay.SchemaVersion,
+		TenantID:               tenantID,
+		DomainID:               domainID,
+		AdministrationDigest:   adminDigest,
+		CreatedAtMilliseconds:  1_000,
+		MaximumMessageCount:    1,
+		MaximumBlobCount:       1,
+		MaximumStoredByteCount: 4,
+	}, relay.MemberRegistration{
+		Version:               relay.SchemaVersion,
+		TenantID:              tenantID,
+		DomainID:              domainID,
+		MemberID:              publisherCredential.MemberID,
+		AuthorizationDigest:   publisherDigest,
+		Capabilities:          []relay.Capability{relay.CapabilityPublishBlob},
+		CreatedAtMilliseconds: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobBytes := []byte{1, 2, 3, 4}
+	blobID := relay.BlobID(blobBytes)
+	if err := store.PrepareBlobPublish(
+		ctx, publisherCredential, blobID, int64(len(blobBytes)), 1_500,
+	); err != nil {
+		t.Fatal(err)
+	}
+	published, err := store.CommitBlobPublish(
+		ctx, publisherCredential, blobID, int64(len(blobBytes)), 1_500,
+	)
+	if err != nil || published.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("blob publish=%+v err=%v", published, err)
+	}
+	retry, err := store.CommitBlobPublish(
+		ctx, publisherCredential, blobID, int64(len(blobBytes)), 1_500,
+	)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("blob retry=%+v err=%v", retry, err)
+	}
+	secondBytes := []byte{5}
+	if err := store.PrepareBlobPublish(
+		ctx,
+		publisherCredential,
+		relay.BlobID(secondBytes),
+		int64(len(secondBytes)),
+		1_500,
+	); !relay.ErrorHasCode(err, relay.CodeDomainFull) {
+		t.Fatalf("blob over quota err=%v", err)
+	}
+
+	fetchCredential := relay.Credential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		MemberID: uuid.New(),
+		Token:    token(32),
+	}
+	fetchDigest, err := relay.AuthorizationDigest(fetchCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.CreateMember(ctx, admin, relay.MemberRegistration{
+		Version:               relay.SchemaVersion,
+		TenantID:              tenantID,
+		DomainID:              domainID,
+		MemberID:              fetchCredential.MemberID,
+		AuthorizationDigest:   fetchDigest,
+		Capabilities:          []relay.Capability{relay.CapabilityFetchBlob},
+		CreatedAtMilliseconds: 1_000,
+	}, 1_500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := store.GetBlobMetadata(ctx, fetchCredential, blobID, 1_500)
+	if err != nil || metadata.ByteCount != int64(len(blobBytes)) ||
+		metadata.PublisherMemberID != publisherCredential.MemberID {
+		t.Fatalf("blob metadata=%+v err=%v", metadata, err)
+	}
+	if _, err := store.RevokeMember(
+		ctx, admin, fetchCredential.MemberID, 1_600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetBlobMetadata(
+		ctx, fetchCredential, blobID, 1_600,
+	); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("blob fetch after revocation err=%v", err)
+	}
+	if _, err := store.RevokeMember(
+		ctx, admin, publisherCredential.MemberID, 1_700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitBlobPublish(
+		ctx,
+		publisherCredential,
+		blobID,
+		int64(len(blobBytes)),
+		1_700,
+	); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("blob commit after publisher revocation err=%v", err)
 	}
 }
 
