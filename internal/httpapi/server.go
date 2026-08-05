@@ -13,16 +13,20 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 )
 
 const maximumRequestByteCount = ((rendezvous.MaximumCiphertextByteCount + 2) / 3 * 4) + 16_384
 
 type Server struct {
-	store   rendezvous.Store
-	logger  *slog.Logger
-	metrics *Metrics
-	now     func() time.Time
+	store                  rendezvous.Store
+	relayStore             relay.Store
+	operatorTokenDigest    [32]byte
+	operatorProvisioningOn bool
+	logger                 *slog.Logger
+	metrics                *Metrics
+	now                    func() time.Time
 }
 
 func New(store rendezvous.Store, logger *slog.Logger) *Server {
@@ -32,6 +36,25 @@ func New(store rendezvous.Store, logger *slog.Logger) *Server {
 		metrics: &Metrics{},
 		now:     time.Now,
 	}
+}
+
+func NewWithRelay(
+	store rendezvous.Store,
+	relayStore relay.Store,
+	logger *slog.Logger,
+	operatorToken string,
+) (*Server, error) {
+	server := New(store, logger)
+	server.relayStore = relayStore
+	if operatorToken != "" {
+		digest, err := operatorDigest(operatorToken)
+		if err != nil {
+			return nil, err
+		}
+		server.operatorTokenDigest = digest
+		server.operatorProvisioningOn = true
+	}
+	return server, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -50,6 +73,31 @@ func (s *Server) Handler() http.Handler {
 		s.handleAcknowledge,
 	)
 	mux.HandleFunc("POST /v1/pairing/routes/{routeID}/close", s.handleClose)
+	if s.relayStore != nil {
+		if s.operatorProvisioningOn {
+			mux.HandleFunc("POST /v1/relay/domains", s.handleCreateRelayDomain)
+		}
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members",
+			s.handleCreateRelayMember,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members/{memberID}/revocation",
+			s.handleRevokeRelayMember,
+		)
+		mux.HandleFunc(
+			"PUT /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}",
+			s.handlePublishRelayMessage,
+		)
+		mux.HandleFunc(
+			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages",
+			s.handleFetchRelayMessages,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}/acknowledgments",
+			s.handleAcknowledgeRelayMessage,
+		)
+	}
 	return s.securityHeaders(s.requestLog(mux))
 }
 
@@ -231,7 +279,33 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			status = http.StatusTooManyRequests
 		}
 	} else {
-		s.logger.Error("rendezvous request failed", "error", err)
+		var relayProtocol *relay.ProtocolError
+		if errors.As(err, &relayProtocol) {
+			code = string(relayProtocol.Code)
+			message = "The relay request was rejected."
+			switch relayProtocol.Code {
+			case relay.CodeInvalidDomain, relay.CodeInvalidMember,
+				relay.CodeInvalidEnvelope, relay.CodeInvalidCursor,
+				relay.CodeWrongScope:
+				status = http.StatusBadRequest
+			case relay.CodeUnauthorized, relay.CodeDomainNotFound,
+				relay.CodeMemberNotFound:
+				status = http.StatusUnauthorized
+			case relay.CodeMemberExpired, relay.CodeMemberRevoked,
+				relay.CodeMissingCapability:
+				status = http.StatusForbidden
+			case relay.CodeMessageNotFound:
+				status = http.StatusNotFound
+			case relay.CodeDomainCollision, relay.CodeMemberCollision,
+				relay.CodeMessageCollision,
+				relay.CodeInvalidAcknowledgment:
+				status = http.StatusConflict
+			case relay.CodeDomainFull:
+				status = http.StatusTooManyRequests
+			}
+		} else {
+			s.logger.Error("request failed", "error", err)
+		}
 	}
 	writeJSON(writer, status, struct {
 		Error struct {
@@ -249,18 +323,36 @@ func (s *Server) nowMilliseconds() int64 {
 }
 
 func readJSON(writer http.ResponseWriter, request *http.Request, destination any) error {
+	return decodeJSONWithLimit(
+		writer,
+		request,
+		destination,
+		maximumRequestByteCount,
+		func(message string) error {
+			return rendezvous.NewProtocolError(rendezvous.CodeInvalidEnvelope, message)
+		},
+	)
+}
+
+func decodeJSONWithLimit(
+	writer http.ResponseWriter,
+	request *http.Request,
+	destination any,
+	maximumByteCount int,
+	invalidRequest func(string) error,
+) error {
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		return rendezvous.NewProtocolError(rendezvous.CodeInvalidEnvelope, "content type must be application/json")
+		return invalidRequest("content type must be application/json")
 	}
-	request.Body = http.MaxBytesReader(writer, request.Body, maximumRequestByteCount)
+	request.Body = http.MaxBytesReader(writer, request.Body, int64(maximumByteCount))
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
-		return rendezvous.NewProtocolError(rendezvous.CodeInvalidEnvelope, "request JSON is invalid")
+		return invalidRequest("request JSON is invalid")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return rendezvous.NewProtocolError(rendezvous.CodeInvalidEnvelope, "request contains multiple JSON values")
+		return invalidRequest("request contains multiple JSON values")
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 )
 
@@ -123,6 +124,137 @@ func TestLivePairingRendezvousRoundTrip(t *testing.T) {
 	), http.StatusOK)
 }
 
+func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
+	baseURL := strings.TrimRight(os.Getenv("FACETS_NODE_TEST_BASE_URL"), "/")
+	operatorToken := os.Getenv("FACETS_NODE_TEST_OPERATOR_TOKEN")
+	if baseURL == "" || operatorToken == "" {
+		t.Skip("FACETS_NODE_TEST_BASE_URL and FACETS_NODE_TEST_OPERATOR_TOKEN are required")
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	create := requestRelayJSON(
+		t, client, http.MethodPost, baseURL+"/v1/relay/domains", nil,
+		operatorToken, uuid.Nil,
+	)
+	requireStatus(t, create, http.StatusCreated)
+	var domain struct {
+		Domain                   relay.DomainRegistration `json:"domain"`
+		AdministrationCredential struct {
+			AuthorizationToken string `json:"authorizationToken"`
+		} `json:"administrationCredential"`
+		Member           relay.MemberRegistration `json:"member"`
+		MemberCredential struct {
+			AuthorizationToken string `json:"authorizationToken"`
+		} `json:"memberCredential"`
+	}
+	if err := json.NewDecoder(create.Body).Decode(&domain); err != nil {
+		t.Fatal(err)
+	}
+	_ = create.Body.Close()
+	basePath := fmt.Sprintf(
+		"%s/v1/relay/tenants/%s/domains/%s",
+		baseURL,
+		domain.Domain.TenantID,
+		domain.Domain.DomainID,
+	)
+	createMember := requestRelayJSON(
+		t,
+		client,
+		http.MethodPost,
+		basePath+"/members",
+		map[string]any{
+			"capabilities": []string{"message_fetch", "message_acknowledge"},
+		},
+		domain.AdministrationCredential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, createMember, http.StatusCreated)
+	var recipient struct {
+		Member     relay.MemberRegistration `json:"member"`
+		Credential struct {
+			AuthorizationToken string `json:"authorizationToken"`
+		} `json:"credential"`
+	}
+	if err := json.NewDecoder(createMember.Body).Decode(&recipient); err != nil {
+		t.Fatal(err)
+	}
+	_ = createMember.Body.Close()
+	now := time.Now().UnixMilli()
+	envelope := relay.Envelope{
+		Version:               relay.SchemaVersion,
+		Algorithm:             relay.EnvelopeAlgorithm,
+		TenantID:              domain.Domain.TenantID,
+		DomainID:              domain.Domain.DomainID,
+		MessageID:             uuid.New(),
+		PublisherMemberID:     domain.Member.MemberID,
+		KeyEpoch:              1,
+		CreatedAtMilliseconds: now,
+		Nonce:                 base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xc3}, 12)),
+		Ciphertext:            base64.RawURLEncoding.EncodeToString([]byte("opaque-live-relay-payload")),
+		AuthenticationTag:     base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xd4}, 16)),
+	}
+	publishURL := basePath + "/messages/" + envelope.MessageID.String()
+	requireStatusAndClose(t, requestRelayJSON(
+		t,
+		client,
+		http.MethodPut,
+		publishURL,
+		envelope,
+		domain.MemberCredential.AuthorizationToken,
+		domain.Member.MemberID,
+	), http.StatusCreated)
+	fetch := requestRelayJSON(
+		t,
+		client,
+		http.MethodGet,
+		basePath+"/messages",
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberID,
+	)
+	requireStatus(t, fetch, http.StatusOK)
+	var fetched struct {
+		Messages []relay.Message `json:"messages"`
+		Cursor   string          `json:"cursor"`
+	}
+	if err := json.NewDecoder(fetch.Body).Decode(&fetched); err != nil {
+		t.Fatal(err)
+	}
+	_ = fetch.Body.Close()
+	if len(fetched.Messages) != 1 || fetched.Messages[0].Envelope != envelope ||
+		fetched.Cursor != relay.EncodeCursor(1) {
+		t.Fatalf("live relay fetch mismatch: %+v", fetched)
+	}
+	for _, stage := range []string{"accepted", "applied"} {
+		requireStatusAndClose(t, requestRelayJSON(
+			t,
+			client,
+			http.MethodPost,
+			publishURL+"/acknowledgments",
+			map[string]string{"stage": stage},
+			recipient.Credential.AuthorizationToken,
+			recipient.Member.MemberID,
+		), http.StatusOK)
+	}
+	requireStatusAndClose(t, requestRelayJSON(
+		t,
+		client,
+		http.MethodPost,
+		basePath+"/members/"+recipient.Member.MemberID.String()+"/revocation",
+		nil,
+		domain.AdministrationCredential.AuthorizationToken,
+		uuid.Nil,
+	), http.StatusOK)
+	requireStatusAndClose(t, requestRelayJSON(
+		t,
+		client,
+		http.MethodGet,
+		basePath+"/messages",
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberID,
+	), http.StatusForbidden)
+}
+
 func requestJSON(
 	t *testing.T,
 	client *http.Client,
@@ -150,6 +282,42 @@ func requestJSON(
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-Facets-Rendezvous-Role", string(role))
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func requestRelayJSON(
+	t *testing.T,
+	client *http.Client,
+	method string,
+	url string,
+	body any,
+	token string,
+	memberID uuid.UUID,
+) *http.Response {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	if memberID != uuid.Nil {
+		request.Header.Set("X-Facets-Member-ID", memberID.String())
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)

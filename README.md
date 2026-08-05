@@ -5,11 +5,11 @@ Facets Sync and Shared Spaces. The project is a Go modular monolith packaged as
 an OCI image. Hosted Facets infrastructure and a user's own server run the same
 protocol implementation.
 
-The first implemented role is the attended device-pairing rendezvous. It stores
-only random route and message identifiers, role-scoped capability digests,
-bounded timing metadata, and client-encrypted envelopes. Pairing payload kinds,
-principal IDs, device IDs, key material, and bearer capabilities are never
-stored in plaintext.
+The implemented roles are an attended device-pairing rendezvous and the first
+general replica-message relay. They store only random routing identifiers,
+domain-separated capability digests, bounded metadata, and client-encrypted
+envelopes. Pairing payload kinds, FEF messages, principal IDs, device IDs, key
+material, and bearer capabilities are never stored in plaintext.
 
 This repository is intentionally separate from the Facets application. Relay
 development after a shared-contract freeze does not require changes to the
@@ -24,11 +24,18 @@ Facets core codebase.
 - Request limits, timeouts, structured redacted logs, health, and metrics
 - Local Compose profile and a single production OCI image
 - Cross-language tests against the public Swift rendezvous fixture
+- Explicit tenant, replica-domain, and member scope on every relay operation
+- Capability-scoped relay membership with immediate expiry and revocation
+- Opaque, monotonic catch-up cursors and per-member accepted/applied facts
+- Per-domain message and stored-ciphertext quotas
+- PostgreSQL-backed concurrent publication with restart-safe ordering
+- Cross-language tests against the public Swift replica-carrier fixture
 
-The general Facets Sync mailbox, blobs, checkpoints, multi-tenant admission,
-Shared Space membership, billing, and compute are later modules. No valid FEF,
-device grant, payment record, or Shared Space membership will implicitly grant
-compute execution.
+Replica blobs, checkpoints, retention collection, hosted account admission,
+Shared Space membership, billing, and compute are later modules. Capability
+names for blobs and checkpoints are reserved but their endpoints are not yet
+implemented. No valid FEF, device grant, payment record, or Shared Space
+membership will implicitly grant compute execution.
 
 ## Development
 
@@ -61,10 +68,12 @@ reuse that database credential for any Node or external service.
 
 ## Security boundary
 
-The pairing bearer token is a high-entropy secret. Send it only in the
-`Authorization` header over TLS. Facets Node does not log authorization headers,
-request bodies, ciphertext, or client IP addresses. See [SECURITY.md](SECURITY.md)
-for reporting and deployment requirements.
+Pairing, relay-member, relay-administration, and operator bearer tokens are
+independent high-entropy secrets. Send them only in the `Authorization` header
+over TLS. Facets Node does not log authorization headers, request bodies,
+ciphertext, or client IP addresses. See [SECURITY.md](SECURITY.md) for reporting
+and deployment requirements, and
+[docs/replica-relay-api.md](docs/replica-relay-api.md) for the relay contract.
 
 ## License
 

@@ -24,6 +24,7 @@ services:
     environment:
       FACETS_NODE_DATABASE_URL: postgres://facets:${FACETS_NODE_POSTGRES_PASSWORD:?Set FACETS_NODE_POSTGRES_PASSWORD in .env}@postgres:5432/facets?sslmode=disable
       FACETS_NODE_LISTEN_ADDR: :8080
+      FACETS_NODE_OPERATOR_TOKEN: ${FACETS_NODE_OPERATOR_TOKEN:?Set FACETS_NODE_OPERATOR_TOKEN in .env}
     depends_on:
       postgres:
         condition: service_healthy

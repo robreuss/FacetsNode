@@ -60,7 +60,17 @@ func main() {
 		os.Exit(1)
 	}
 	store := postgres.NewStore(pool)
-	api := httpapi.New(store, logger)
+	relayStore := postgres.NewRelayStore(pool)
+	api, err := httpapi.NewWithRelay(
+		store,
+		relayStore,
+		logger,
+		configuration.OperatorToken,
+	)
+	if err != nil {
+		logger.Error("relay API configuration rejected", "error", err)
+		os.Exit(1)
+	}
 	httpServer := &http.Server{
 		Addr:              configuration.ListenAddress,
 		Handler:           api.Handler(),

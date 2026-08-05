@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,6 +14,7 @@ type Config struct {
 	ShutdownPeriod time.Duration
 	CleanupPeriod  time.Duration
 	DatabaseConns  int32
+	OperatorToken  string
 }
 
 func Load() (Config, error) {
@@ -22,9 +24,21 @@ func Load() (Config, error) {
 		ShutdownPeriod: 10 * time.Second,
 		CleanupPeriod:  time.Minute,
 		DatabaseConns:  10,
+		OperatorToken:  os.Getenv("FACETS_NODE_OPERATOR_TOKEN"),
 	}
 	if configuration.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("FACETS_NODE_DATABASE_URL is required")
+	}
+	if configuration.OperatorToken != "" {
+		decoded, err := base64.RawURLEncoding.Strict().DecodeString(
+			configuration.OperatorToken,
+		)
+		if err != nil || len(decoded) != 32 ||
+			base64.RawURLEncoding.EncodeToString(decoded) != configuration.OperatorToken {
+			return Config{}, fmt.Errorf(
+				"FACETS_NODE_OPERATOR_TOKEN must be 32-byte unpadded base64url",
+			)
+		}
 	}
 	if value := os.Getenv("FACETS_NODE_SHUTDOWN_PERIOD"); value != "" {
 		period, err := time.ParseDuration(value)

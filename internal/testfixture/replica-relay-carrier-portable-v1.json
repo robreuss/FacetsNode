@@ -1,0 +1,49 @@
+{
+  "envelope" : {
+    "algorithm" : "HKDF-SHA256+A256GCM",
+    "authenticationTag" : "10BkHBRqO4qkuXYCr5P-nQ",
+    "ciphertext" : "EJ0rH-QejOAn_A38FDM23KS-5O8TMn2xucEBy3s9c6AtQlHOs386oLSAlxDSkqUk5taVWvHxtZjGtXkzUdl8FEPSt6A4l0NRK1GPYjbCepDhw9nNUO6XYVeMt3dRposAGqPUs_-0Oepl3H-9DH8zjgm1NGSQcJCaOVZ2lhO3Rp9E7I-N5Kgb64fKhNuBU35AhdL_SG1jGtIe8R6xa4PM5MvRelWnSK0HuIW3Zx1LzzPLYeECiO96LA2vNT98jM1PQRQfd080Bf_vcGYuNlUBmEA3wSdsv_IQXvweTYJjs53RmxxgM8d4OIbGoK8VFFzJTqqPxCquTbcriw2BvG0UFkDlafQH0pyXdMiZ-9AV44vJnPFmIqXdgrUS0JsK1xE9UyqWR2MtsPhUGLyWRnNr4pRQvPxv4hcNXZuedGZToz3QDvtz6RUcMx-W5d7KDDcaVWM53dv1gPEYhEQ4ySPfxVYAWIIw2wxeC2F_LblGt9DMPue1cWw8VnK5FwYRaXp8PvWTkdYwCdor785xcDV1fXtzji_K2ToPrrsL--e5lXKSOL5Cgx0kLf_JSvZDigEJd_KK_b8CEq0MU77ozY5_gFVn_91biBXsouO4JSqvCA5Baj2XLJf9Q1sKyEu3Sswa2ucoNZjejw6hfQADXD8WGZ4Ge0Kn_BpL7cv9oKHxbrJntm-PqP5qWRIoIV-UloMFng3OVKeWHcyaizL3hemA5Bj2RxggpfPS_HigqJYhU-PWN-cmLFUHTqfWL74wFjnXWsLJjZ3SR3iGJrddGXS_JfxWPm9HMbS-s9udf4yIhdrWPiDTqes-wAexYySnssaZpsJNFcpymtVCt_X2cRFOysU7u0_gwrRjabiPYRoXsjhTfAMNcnO4W7bxatLuLf80bkx45gTJ8KaObRI8TPIdG5ApIjIMkGjB1ARycMdECvIr2R-R6-0NfGulmgJiURxMgPBD2lDYACxvmxl5OnK-hMazJM0y6oF0Wj9sjtgqvaepojp4yQli7691DrH-XRtCTnvYD7kD2foEwsuME3ncWxy5sO7beMHBjW4tJ1L098oZ-WIPVHxHyTTDFC4_W1a7BX2vrHLD7HZHFBpZBJgd8k6BVuIsCMp_TQQIuCTKgsswu5g_UPga1OEQFY9hXD39V-I92YgzSPcqtp-tpEqRw9Xfvv9Ce4H5TFQ4xgIOuy-0mL7t8LB2R5wKPbln5oD6zOpPsYICcUqdUbaM4xJKBNXM1g4p2CfRrHgYt0Wzws2rTSqZtEPTbF6OnDg786n9zo9ideORBXNVpei6RPDozlGPeWHvAjWYydCjgql5rs63k8dpKgvd6OGIVMjiBBGqAdLcJ2YwCGwP1Itcxdo8ixG3g8_yW4vkGBc1KWnlm8P6yN0iMAOIIuENyA",
+    "createdAtMilliseconds" : 1000,
+    "domainID" : "20000000-0000-4000-8000-000000000002",
+    "keyEpoch" : 1,
+    "messageID" : "70000000-0000-4000-8000-000000000007",
+    "nonce" : "TR8USdacVM5xvsKt",
+    "publisherMemberID" : "30000000-0000-4000-8000-000000000003",
+    "tenantID" : "10000000-0000-4000-8000-000000000001",
+    "version" : 1
+  },
+  "expectedEnvelopeReferenceDigest" : "e57b9d00c3e1bc3f85b23385e4abf49de80cc4bf9b9830f0f0fbc6ca267163c3",
+  "format" : "facets.replica-relay-carrier-fixture.v1",
+  "publisherAccess" : {
+    "domainID" : "20000000-0000-4000-8000-000000000002",
+    "encryptionKeyMaterial" : "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "keyEpoch" : 1,
+    "memberID" : "30000000-0000-4000-8000-000000000003",
+    "routerAuthorizationToken" : "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+    "tenantID" : "10000000-0000-4000-8000-000000000001",
+    "version" : 1
+  },
+  "publisherRegistration" : {
+    "authorizationDigest" : "08385def490b15b6eb0540b144649df95e1951c266b2577a1308470c7db63582",
+    "capabilities" : [
+      "message_fetch",
+      "message_publish"
+    ],
+    "createdAtMilliseconds" : 1000,
+    "domainID" : "20000000-0000-4000-8000-000000000002",
+    "expiresAtMilliseconds" : 2000,
+    "memberID" : "30000000-0000-4000-8000-000000000003",
+    "tenantID" : "10000000-0000-4000-8000-000000000001",
+    "version" : 1
+  },
+  "recipientAccess" : {
+    "domainID" : "20000000-0000-4000-8000-000000000002",
+    "encryptionKeyMaterial" : "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "keyEpoch" : 1,
+    "memberID" : "40000000-0000-4000-8000-000000000004",
+    "routerAuthorizationToken" : "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8",
+    "tenantID" : "10000000-0000-4000-8000-000000000001",
+    "version" : 1
+  },
+  "warning" : "TEST FIXTURE ONLY. These public bearer tokens and encryption key must never be used outside interoperability tests."
+}
