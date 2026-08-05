@@ -19,6 +19,20 @@ type RelayAdmissionCredential struct {
 	AuthorizationToken string    `json:"authorizationToken"`
 }
 
+type RelayAdministrationCredential struct {
+	TenantID           uuid.UUID `json:"tenantID"`
+	DomainID           uuid.UUID `json:"domainID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+func (c RelayAdministrationCredential) Credential() relay.AdministrationCredential {
+	return relay.AdministrationCredential{
+		TenantID: c.TenantID,
+		DomainID: c.DomainID,
+		Token:    c.AuthorizationToken,
+	}
+}
+
 func (c RelayAdmissionCredential) Credential() relay.AdmissionCredential {
 	return relay.AdmissionCredential{
 		TenantID:    c.TenantID,
@@ -52,14 +66,16 @@ type RelayAdmissionCreateRequest struct {
 }
 
 type RelayMemberAdmissionFixture struct {
-	Format                               string                      `json:"format"`
-	Warning                              string                      `json:"warning"`
-	AdmissionCredential                  RelayAdmissionCredential    `json:"admissionCredential"`
-	ExpectedAdmissionAuthorizationDigest string                      `json:"expectedAdmissionAuthorizationDigest"`
-	MemberCredential                     RelayMemberCredential       `json:"memberCredential"`
-	ExpectedMemberAuthorizationDigest    string                      `json:"expectedMemberAuthorizationDigest"`
-	CreateRequest                        RelayAdmissionCreateRequest `json:"createRequest"`
-	ClaimRequest                         relay.MemberAdmissionClaim  `json:"claimRequest"`
+	Format                                    string                        `json:"format"`
+	Warning                                   string                        `json:"warning"`
+	AdministrationCredential                  RelayAdministrationCredential `json:"administrationCredential"`
+	ExpectedAdministrationAuthorizationDigest string                        `json:"expectedAdministrationAuthorizationDigest"`
+	AdmissionCredential                       RelayAdmissionCredential      `json:"admissionCredential"`
+	ExpectedAdmissionAuthorizationDigest      string                        `json:"expectedAdmissionAuthorizationDigest"`
+	MemberCredential                          RelayMemberCredential         `json:"memberCredential"`
+	ExpectedMemberAuthorizationDigest         string                        `json:"expectedMemberAuthorizationDigest"`
+	CreateRequest                             RelayAdmissionCreateRequest   `json:"createRequest"`
+	ClaimRequest                              relay.MemberAdmissionClaim    `json:"claimRequest"`
 }
 
 func LoadRelayMemberAdmission() (RelayMemberAdmissionFixture, error) {

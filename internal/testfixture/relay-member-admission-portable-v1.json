@@ -1,6 +1,12 @@
 {
   "format": "facets.relay-member-admission-fixture.v1",
   "warning": "TEST FIXTURE ONLY. These bearer capabilities are public and must never be used outside interoperability tests.",
+  "administrationCredential": {
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "domainID": "22222222-2222-4222-8222-222222222222",
+    "authorizationToken": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  },
+  "expectedAdministrationAuthorizationDigest": "7ab443a26c0ab73f958659ad4cb40dc4798cebafd301cd67e0a5d72af7075baf",
   "admissionCredential": {
     "tenantID": "11111111-1111-4111-8111-111111111111",
     "domainID": "22222222-2222-4222-8222-222222222222",

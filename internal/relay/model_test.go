@@ -166,6 +166,16 @@ func TestPortableMemberAdmissionFixtureFreezesClientGeneratedDigests(t *testing.
 		!strings.HasPrefix(fixture.Warning, "TEST FIXTURE ONLY.") {
 		t.Fatal("unexpected admission fixture metadata")
 	}
+	administrationDigest, err := relay.AdministrationDigest(
+		fixture.AdministrationCredential.Credential(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if administrationDigest !=
+		fixture.ExpectedAdministrationAuthorizationDigest {
+		t.Fatalf("administration digest=%s", administrationDigest)
+	}
 	admissionDigest, err := relay.AdmissionAuthorizationDigest(
 		fixture.AdmissionCredential.Credential(),
 	)
