@@ -62,6 +62,16 @@ from every regular file in the `facets-node-blobs` volume before and after
 recreation and requires an exact match. Never add `--volumes` to this
 persistence check.
 
+The live replica pattern includes the delivery-matrix harness. It publishes
+client timestamps out of order, retries exact messages, replays a cursor after
+simulated response loss, introduces a delayed wave, publishes concurrently,
+and verifies gapless server sequences plus independent recipient catch-up and
+acknowledgments. It also truncates an upload mid-request and requires a full
+retry, exact blob retry, and cross-member download to succeed. Restart safety
+is a separate compositional gate: the PostgreSQL test closes and recreates its
+pool around the same domain, while the Proxmox recreation check preserves both
+the database and exact blob-volume digest set.
+
 PostgreSQL metadata and the blob volume are one recovery unit. A backup or host
 migration that captures only one is incomplete. Direct SQL domain deletion is
 not an operational deletion workflow: filesystem orphan collection and a

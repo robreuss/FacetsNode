@@ -304,6 +304,14 @@ audit metadata only. Hosted multi-instance operation requires an object-store
 adapter and is not implied by the filesystem checkpoint. Backups and restores
 must treat the database and blob store as one coordinated checkpoint.
 
+The live delivery-matrix integration gate exercises the contract through HTTP
+and the real PostgreSQL/filesystem stack. It covers exact message retries,
+replayed cursors, delayed and concurrently published traffic, independent
+recipient progress and acknowledgments, a truncated upload followed by a full
+retry, exact blob retry, and cross-member download. Restart persistence remains
+proved independently at the PostgreSQL-store and persistent-Compose gates; the
+HTTP matrix does not control or assume a particular service supervisor.
+
 ## Operations and remaining boundaries
 
 `/livez`, `/readyz`, and `/metrics` have the same private-operations semantics

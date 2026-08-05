@@ -31,6 +31,8 @@ Facets core codebase.
 - Opaque, monotonic catch-up cursors and per-member accepted/applied facts
 - Per-domain message/blob counts and total stored-byte quotas
 - PostgreSQL-backed concurrent publication with restart-safe ordering
+- Live delivery-matrix proof for cursor replay, delayed and concurrent traffic,
+  independent recipients, acknowledgment progression, and interrupted uploads
 - Cross-language tests against the public Swift replica-carrier fixture
 - Domain-scoped, content-addressed encrypted-blob storage on a separate volume
 - Streaming blob upload with digest verification and Range-capable GET/HEAD
