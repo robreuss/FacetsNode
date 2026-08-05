@@ -77,12 +77,21 @@ migration that captures only one is incomplete. Direct SQL domain deletion is
 not an operational deletion workflow: filesystem orphan collection and a
 coordinated deletion command are still pending.
 
+The coordinated recovery gate uses the checked-in operations Compose file and
+scripts documented in [backup-and-restore.md](backup-and-restore.md). The first
+Proxmox proof stopped the Node writer, encrypted one PostgreSQL dump plus the
+exact blob tree into a Restic snapshot, and restored it into a different
+Compose project and fresh named volumes on another loopback port. All relay
+table counts, blob paths and digests, and both `/readyz` results matched. This
+same-host proof does not replace an off-host repository, fresh-VM drill, or a
+documented retention schedule.
+
 ## What this checkpoint does not prove
 
 - public internet safety or production TLS;
 - multi-tenant account admission and distributed abuse controls;
-- encrypted coordinated database/blob backup, restore to a fresh VM, or
-  point-in-time recovery;
+- restore to a fresh VM, periodic off-host recovery drills, or point-in-time
+  recovery;
 - rolling upgrade or schema downgrade behavior;
 - resumable blob upload, checkpoints, retention/orphan collection, or Shared
   Space policy;

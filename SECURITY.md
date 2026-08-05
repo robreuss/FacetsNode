@@ -49,5 +49,8 @@ records are not yet collected. Compromised member authorization can
 read or publish opaque envelopes within its capabilities even though it cannot
 decrypt them without the content key. Account admission, credential rotation,
 abuse resistance, distributed rate limiting, retention policy, independent
-review, backup/restore drills, and hosted incident procedures remain required
-before public exposure.
+review, periodic off-host and fresh-machine backup/restore drills, and hosted
+incident procedures remain required before public exposure. The checked-in
+operations bundle proves an encrypted same-host restore into isolated fresh
+volumes, but that is a recovery primitive rather than a production backup
+policy.

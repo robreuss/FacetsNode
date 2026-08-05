@@ -80,6 +80,11 @@ checkpoint. The filesystem blob adapter is the self-hosted checkpoint; hosted
 multi-instance deployment still requires the same narrow content-store
 interface to be backed by reviewed object storage.
 
+The operations bundle can create an encrypted, coordinated Restic checkpoint
+and restore it only into a fresh Compose project. See
+[docs/backup-and-restore.md](docs/backup-and-restore.md). Keep the repository
+and its separate password off the Node host for actual disaster recovery.
+
 ## Security boundary
 
 Pairing, relay-member-admission, relay-member, relay-administration, and
