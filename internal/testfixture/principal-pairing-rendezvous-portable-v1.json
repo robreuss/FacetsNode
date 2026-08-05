@@ -1,0 +1,62 @@
+{
+  "candidateAccess" : {
+    "encryptionKeyMaterial" : "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "role" : "candidate",
+    "routeID" : "11111111-2222-4333-8444-555555555555",
+    "routerAuthorizationToken" : "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+    "version" : 1
+  },
+  "cryptography" : {
+    "authenticationTagEncoding" : "16-byte raw, unpadded base64url",
+    "canonicalJSON" : "UTF-8 JSON with lexicographically sorted object keys",
+    "contentEncryption" : "AES-256-GCM",
+    "keyDerivation" : "HKDF-SHA-256",
+    "keyMaterialEncoding" : "32-byte raw, unpadded base64url",
+    "nonceEncoding" : "12-byte raw, unpadded base64url",
+    "tokenDigestEncoding" : "SHA-256, lowercase hexadecimal"
+  },
+  "domainsBase64URL" : {
+    "encryptionKeyInfo" : "RmFjZXRzIHByaW5jaXBhbCBwYWlyaW5nIHJlbmRlenZvdXMgZW5jcnlwdGlvbiBrZXkgdjEA",
+    "envelopeReference" : "RmFjZXRzIHByaW5jaXBhbCBwYWlyaW5nIHJlbmRlenZvdXMgZW52ZWxvcGUgcmVmZXJlbmNlIHYxAA",
+    "routerAuthorization" : "RmFjZXRzIHByaW5jaXBhbCBwYWlyaW5nIHJvdXRlciBhdXRob3JpemF0aW9uIHYxAA"
+  },
+  "envelope" : {
+    "algorithm" : "HKDF-SHA256+A256GCM",
+    "authenticationTag" : "LBHFYvdBSMzTox7FYu5kUg",
+    "ciphertext" : "lv6zDNBm9621X-EvXfPOU89z2nKbgAhVi0XwSLES0CdKwu_i8NMPat8kMoo4aCpZXN1Qjc_eIE4J5lDJKM2bAZg5K2iH3HFQ9Fqisw",
+    "createdAtMilliseconds" : 2000,
+    "expiresAtMilliseconds" : 9000,
+    "messageID" : "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+    "nonce" : "oKGio6Slpqeoqaqr",
+    "routeID" : "11111111-2222-4333-8444-555555555555",
+    "version" : 1
+  },
+  "expected" : {
+    "associatedDataBase64URL" : "eyJhbGdvcml0aG0iOiJIS0RGLVNIQTI1NitBMjU2R0NNIiwiY3JlYXRlZEF0TWlsbGlzZWNvbmRzIjoyMDAwLCJleHBpcmVzQXRNaWxsaXNlY29uZHMiOjkwMDAsIm1lc3NhZ2VJRCI6IkFBQUFBQUFBLUJCQkItNENDQy04RERELUVFRUVFRUVFRUVFRSIsInJvdXRlSUQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJ2ZXJzaW9uIjoxfQ",
+    "derivedEncryptionKeyBase64URL" : "JfKR_7Aw0mcGvVeQKxHj72bC2Cwlaw6RsUrzUKc-D-M",
+    "envelopeReferenceDigest" : "7c688dabf5af31d9b99d9f13cf047a19140da40197d2c7027ca9eb9cd6b156fa",
+    "payloadCanonicalJSONBase64URL" : "eyJib2R5IjoiY0c5eWRHRmliR1V0Y0dGcGNtbHVaeTF5WlhGMVpYTjBMWFl4Iiwia2luZCI6InJlcXVlc3QiLCJ2ZXJzaW9uIjoxfQ"
+  },
+  "format" : "facets.principal-pairing-rendezvous-fixture.v1",
+  "payload" : {
+    "body" : "cG9ydGFibGUtcGFpcmluZy1yZXF1ZXN0LXYx",
+    "kind" : "request",
+    "version" : 1
+  },
+  "registration" : {
+    "candidateAuthorizationDigest" : "274cf49ca884dc04a91ed38182755487e2f9700326e6ae8a3d079a12d2ad94a4",
+    "createdAtMilliseconds" : 1000,
+    "expiresAtMilliseconds" : 10000,
+    "routeID" : "11111111-2222-4333-8444-555555555555",
+    "sponsorAuthorizationDigest" : "6a3557eb0e149299786d7ac990a4f4267a023b75dbf70e0f7c81bd5fb45ed88e",
+    "version" : 1
+  },
+  "sponsorAccess" : {
+    "encryptionKeyMaterial" : "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "role" : "sponsor",
+    "routeID" : "11111111-2222-4333-8444-555555555555",
+    "routerAuthorizationToken" : "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+    "version" : 1
+  },
+  "warning" : "TEST FIXTURE ONLY. These public bearer tokens and encryption key must never be used outside interoperability tests."
+}

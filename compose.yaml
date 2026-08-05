@@ -1,0 +1,55 @@
+name: facets-node
+
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: facets
+      POSTGRES_USER: facets
+      POSTGRES_PASSWORD: ${FACETS_NODE_POSTGRES_PASSWORD:?Set FACETS_NODE_POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U facets -d facets"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+    volumes:
+      - facets-node-postgres:/var/lib/postgresql/data
+    networks:
+      - private
+
+  node:
+    build:
+      context: .
+    environment:
+      FACETS_NODE_DATABASE_URL: postgres://facets:${FACETS_NODE_POSTGRES_PASSWORD:?Set FACETS_NODE_POSTGRES_PASSWORD in .env}@postgres:5432/facets?sslmode=disable
+      FACETS_NODE_LISTEN_ADDR: :8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/facets-node", "healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    ports:
+      - 127.0.0.1:8080:8080
+    networks:
+      - private
+      - edge
+
+networks:
+  private:
+    internal: true
+  edge:
+
+volumes:
+  facets-node-postgres:
