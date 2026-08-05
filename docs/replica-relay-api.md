@@ -17,10 +17,12 @@ Every durable relay key includes a random tenant ID and replica-domain ID. A
 member adds a random member ID. These are routing scopes, not real-world
 identities, email addresses, Personas, or Facets principal identifiers.
 
-Four secrets have distinct authority:
+Five secrets have distinct authority:
 
 - the operator token provisions a new domain;
 - a domain-administration token creates and revokes members;
+- a one-time member-admission token can create one member with frozen
+  capabilities before a bounded expiry;
 - each member token exercises only that member's granted capabilities;
 - the domain content key remains client-side and encrypts/decrypts messages.
 
@@ -83,6 +85,94 @@ Defined capabilities are:
 - `blob_publish`
 - `blob_fetch`
 - `checkpoint_publish` (reserved; no endpoint yet)
+
+Direct member creation is appropriate for a private control plane that can
+deliver the response directly to an approved secret store. Do not give the
+domain-administration token to a joining device. Use a member admission when a
+joining client must establish its own member credential.
+
+## Issue a one-time member admission
+
+The admitting client generates a random admission ID and independent 32-byte
+admission token locally, computes the domain-separated authorization digest,
+and sends only the ID and digest to the Node:
+
+```http
+POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions
+Content-Type: application/json
+Authorization: Bearer <domain-administration token>
+
+{
+  "admissionID": "33333333-3333-4333-8333-333333333333",
+  "authorizationDigest": "6d0f62f5a34571b5aee55a85e6e46c3e702f213201400f538c4552b17f8fbafe",
+  "capabilities": ["blob_fetch", "message_acknowledge", "message_fetch"],
+  "expiresAtMilliseconds": 1710000000000,
+  "memberExpiresAtMilliseconds": 1800000000000
+}
+```
+
+Admission expiry is mandatory and may be no more than seven days after
+creation. Member expiry is optional; when present it must follow admission
+expiry so a successful claim cannot create an already expired member.
+Capabilities and member expiry are frozen at admission creation. An exact
+creation retry returns the original record and its current claimed or revoked
+state; reusing an admission ID with different authority is a collision.
+
+The admission token must be delivered through an authenticated, user-approved
+channel. For Personal Sync or an end-to-end encrypted Shared Space, that
+channel must separately convey or authorize the client-held content key. The
+Node never receives that key. Possession of an admission token grants only the
+listed relay capabilities; it is not proof of a durable Facets principal,
+device grant, Persona, subscription, or Space membership.
+
+The admission-token digest is:
+
+```text
+SHA-256(
+  "Facets replica relay member admission v1\0" ||
+  lowercase(tenantID) || "\0" ||
+  lowercase(domainID) || "\0" ||
+  lowercase(admissionID) || "\0" ||
+  admissionToken
+)
+```
+
+The versioned
+`internal/testfixture/relay-member-admission-portable-v1.json` fixture freezes
+this digest, the existing member-token digest, and both request bodies for
+independent client implementations.
+
+## Claim a member admission
+
+The joining client independently generates its random member ID and member
+token, computes the existing member-authorization digest, stores both secrets
+locally, and sends only the member ID and digest in the claim body:
+
+```http
+POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/claim
+Content-Type: application/json
+Authorization: Bearer <member-admission token>
+
+{
+  "memberID": "44444444-4444-4444-8444-444444444444",
+  "authorizationDigest": "7c17f23651cc8a3e9823393ba6995b858fc3ba570aaef56e2a3d1ca26fb7aa8f"
+}
+```
+
+The Node atomically consumes the admission and creates the member. It never
+stores either plaintext bearer token. An exact retry with the same member ID
+and digest returns the original member even after admission expiry, allowing a
+client to recover from response loss. A different second claim is rejected.
+
+An unclaimed admission can be cancelled idempotently:
+
+```http
+POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/revocation
+Authorization: Bearer <domain-administration token>
+```
+
+After claim, revoke the resulting member instead. Revoking an admission does
+not revoke a member that was already created from it.
 
 ## Revoke a member
 
@@ -217,13 +307,14 @@ must treat the database and blob store as one coordinated checkpoint.
 ## Operations and remaining boundaries
 
 `/livez`, `/readyz`, and `/metrics` have the same private-operations semantics
-as the pairing API. The database records domain/member/message/blob scope,
+as the pairing API. The database records domain/admission/member/message/blob scope,
 monotonic sequence, credential digests, opaque envelope fields, byte counts,
 acknowledgments, and bounded audit event types. It does not record a content
 key, decrypted FEF, plaintext package contents, email address, Persona, or
 payment identity.
 
-This checkpoint does not yet provide administration-token rotation, member
-limits, account-wide quotas, retention/orphan garbage collection, resumable
-upload, checkpoints, hosted object storage, multi-region replication, online
-schema rollback, public ingress, or hosted service-level guarantees.
+This checkpoint does not yet provide administration-token rotation, admission
+collection, member/admission limits, account-wide quotas, retention/orphan
+garbage collection, resumable upload, checkpoints, hosted object storage,
+multi-region replication, online schema rollback, public ingress, or hosted
+service-level guarantees.

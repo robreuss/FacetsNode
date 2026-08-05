@@ -26,6 +26,8 @@ Facets core codebase.
 - Cross-language tests against the public Swift rendezvous fixture
 - Explicit tenant, replica-domain, and member scope on every relay operation
 - Capability-scoped relay membership with immediate expiry and revocation
+- One-time, expiry-bound member admissions that never expose domain
+  administration credentials to joining clients
 - Opaque, monotonic catch-up cursors and per-member accepted/applied facts
 - Per-domain message/blob counts and total stored-byte quotas
 - PostgreSQL-backed concurrent publication with restart-safe ordering
@@ -35,9 +37,11 @@ Facets core codebase.
 
 Resumable/multipart blob upload, checkpoints, retention and orphan collection,
 hosted object storage/account admission, Shared Space membership, billing, and
-compute are later modules. The checkpoint capability name is reserved but its
-endpoint is not yet implemented. No valid FEF, device grant, payment record, or
-Shared Space membership will implicitly grant compute execution.
+compute are later modules. Relay member admission grants routing authority
+only; it does not verify identity or carry a domain content key. The checkpoint
+capability name is reserved but its endpoint is not yet implemented. No valid
+FEF, device grant, payment record, or Shared Space membership will implicitly
+grant compute execution.
 
 ## Development
 
@@ -76,11 +80,11 @@ interface to be backed by reviewed object storage.
 
 ## Security boundary
 
-Pairing, relay-member, relay-administration, and operator bearer tokens are
-independent high-entropy secrets. Send them only in the `Authorization` header
-over TLS. Facets Node does not log authorization headers, request bodies,
-ciphertext, or client IP addresses. See [SECURITY.md](SECURITY.md) for reporting
-and deployment requirements, and
+Pairing, relay-member-admission, relay-member, relay-administration, and
+operator bearer tokens are independent high-entropy secrets. Send them only in
+the `Authorization` header over TLS. Facets Node does not log authorization
+headers, request bodies, ciphertext, or client IP addresses. See
+[SECURITY.md](SECURITY.md) for reporting and deployment requirements, and
 [docs/replica-relay-api.md](docs/replica-relay-api.md) for the relay contract.
 
 ## License

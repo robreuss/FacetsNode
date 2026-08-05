@@ -18,6 +18,24 @@ type Store interface {
 		registration MemberRegistration,
 		nowMilliseconds int64,
 	) (Acceptance, error)
+	CreateAdmission(
+		ctx context.Context,
+		credential AdministrationCredential,
+		registration MemberAdmission,
+		nowMilliseconds int64,
+	) (AdmissionCreateResult, error)
+	ClaimAdmission(
+		ctx context.Context,
+		credential AdmissionCredential,
+		claim MemberAdmissionClaim,
+		nowMilliseconds int64,
+	) (AdmissionClaimResult, error)
+	RevokeAdmission(
+		ctx context.Context,
+		credential AdministrationCredential,
+		admissionID uuid.UUID,
+		nowMilliseconds int64,
+	) (Acceptance, error)
 	RevokeMember(
 		ctx context.Context,
 		credential AdministrationCredential,

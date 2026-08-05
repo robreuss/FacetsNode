@@ -376,6 +376,241 @@ func TestRelayDomainProvisioningEndpointIsAbsentWithoutOperatorToken(t *testing.
 	requireStatus(t, response, http.StatusNotFound)
 }
 
+func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
+	operatorToken := relayTestToken(192)
+	var logs bytes.Buffer
+	server, err := NewWithRelay(
+		rendezvous.NewMemoryStore(),
+		relay.NewMemoryStore(),
+		nil,
+		slog.New(slog.NewJSONHandler(&logs, nil)),
+		operatorToken,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowMilliseconds := int64(1_000)
+	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
+	handler := server.Handler()
+
+	createDomain := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		"/v1/relay/domains",
+		nil,
+		operatorToken,
+		uuid.Nil,
+	)
+	requireStatus(t, createDomain, http.StatusCreated)
+	var created struct {
+		Domain                   relay.DomainRegistration `json:"domain"`
+		AdministrationCredential struct {
+			AuthorizationToken string `json:"authorizationToken"`
+		} `json:"administrationCredential"`
+	}
+	if err := json.NewDecoder(createDomain.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	_ = createDomain.Body.Close()
+	basePath := "/v1/relay/tenants/" + created.Domain.TenantID.String() +
+		"/domains/" + created.Domain.DomainID.String()
+
+	admissionToken := relayTestToken(64)
+	admissionCredential := relay.AdmissionCredential{
+		TenantID:    created.Domain.TenantID,
+		DomainID:    created.Domain.DomainID,
+		AdmissionID: uuid.New(),
+		Token:       admissionToken,
+	}
+	admissionDigest, err := relay.AdmissionAuthorizationDigest(admissionCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createAdmissionBody := map[string]any{
+		"admissionID":           admissionCredential.AdmissionID,
+		"authorizationDigest":   admissionDigest,
+		"capabilities":          []string{"message_fetch"},
+		"expiresAtMilliseconds": 2_000,
+	}
+	createAdmission := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		basePath+"/admissions",
+		createAdmissionBody,
+		created.AdministrationCredential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, createAdmission, http.StatusCreated)
+	var admissionResponse struct {
+		Acceptance relay.Acceptance      `json:"acceptance"`
+		Admission  relay.MemberAdmission `json:"admission"`
+	}
+	if err := json.NewDecoder(createAdmission.Body).Decode(&admissionResponse); err != nil {
+		t.Fatal(err)
+	}
+	_ = createAdmission.Body.Close()
+	if admissionResponse.Acceptance != relay.AcceptanceAccepted ||
+		admissionResponse.Admission.AdmissionID != admissionCredential.AdmissionID ||
+		admissionResponse.Admission.AuthorizationDigest != admissionDigest {
+		t.Fatalf("unexpected admission response: %+v", admissionResponse)
+	}
+
+	memberToken := relayTestToken(32)
+	memberCredential := relay.Credential{
+		TenantID: created.Domain.TenantID,
+		DomainID: created.Domain.DomainID,
+		MemberID: uuid.New(),
+		Token:    memberToken,
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimBody := relay.MemberAdmissionClaim{
+		MemberID:            memberCredential.MemberID,
+		AuthorizationDigest: memberDigest,
+	}
+	claimPath := basePath + "/admissions/" +
+		admissionCredential.AdmissionID.String() + "/claim"
+	wrongClaim := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		claimPath,
+		claimBody,
+		relayTestToken(65),
+		uuid.Nil,
+	)
+	requireStatus(t, wrongClaim, http.StatusUnauthorized)
+	claim := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		claimPath,
+		claimBody,
+		admissionToken,
+		uuid.Nil,
+	)
+	requireStatus(t, claim, http.StatusCreated)
+	var claimed relay.AdmissionClaimResult
+	if err := json.NewDecoder(claim.Body).Decode(&claimed); err != nil {
+		t.Fatal(err)
+	}
+	_ = claim.Body.Close()
+	if claimed.Acceptance != relay.AcceptanceAccepted ||
+		claimed.Member.MemberID != memberCredential.MemberID ||
+		len(claimed.Member.Capabilities) != 1 ||
+		claimed.Member.Capabilities[0] != relay.CapabilityFetchMessage {
+		t.Fatalf("unexpected claim response: %+v", claimed)
+	}
+
+	// Response-loss recovery uses the same candidate-generated member secret;
+	// no plaintext member credential must be retained by the Node.
+	nowMilliseconds = 3_000
+	claimRetry := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		claimPath,
+		claimBody,
+		admissionToken,
+		uuid.Nil,
+	)
+	requireStatus(t, claimRetry, http.StatusOK)
+	otherClaimBody := claimBody
+	otherClaimBody.MemberID = uuid.New()
+	secondClaim := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		claimPath,
+		otherClaimBody,
+		admissionToken,
+		uuid.Nil,
+	)
+	requireStatus(t, secondClaim, http.StatusConflict)
+	fetch := performRelayJSON(
+		t,
+		handler,
+		http.MethodGet,
+		basePath+"/messages",
+		nil,
+		memberToken,
+		memberCredential.MemberID,
+	)
+	requireStatus(t, fetch, http.StatusOK)
+
+	revokedCredential := relay.AdmissionCredential{
+		TenantID:    created.Domain.TenantID,
+		DomainID:    created.Domain.DomainID,
+		AdmissionID: uuid.New(),
+		Token:       relayTestToken(96),
+	}
+	revokedDigest, err := relay.AdmissionAuthorizationDigest(revokedCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowMilliseconds = 3_100
+	createRevoked := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		basePath+"/admissions",
+		map[string]any{
+			"admissionID":           revokedCredential.AdmissionID,
+			"authorizationDigest":   revokedDigest,
+			"capabilities":          []string{"message_fetch"},
+			"expiresAtMilliseconds": 4_000,
+		},
+		created.AdministrationCredential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, createRevoked, http.StatusCreated)
+	revokePath := basePath + "/admissions/" +
+		revokedCredential.AdmissionID.String() + "/revocation"
+	revoke := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		revokePath,
+		nil,
+		created.AdministrationCredential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, revoke, http.StatusOK)
+	revokedClaim := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		basePath+"/admissions/"+revokedCredential.AdmissionID.String()+"/claim",
+		claimBody,
+		revokedCredential.Token,
+		uuid.Nil,
+	)
+	requireStatus(t, revokedClaim, http.StatusForbidden)
+
+	logText := logs.String()
+	for _, protected := range []string{
+		operatorToken,
+		created.AdministrationCredential.AuthorizationToken,
+		admissionToken,
+		memberToken,
+		revokedCredential.Token,
+	} {
+		if strings.Contains(logText, protected) {
+			t.Fatalf("logs contain protected material %q", protected)
+		}
+	}
+	if !strings.Contains(
+		logText,
+		`"pattern":"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/claim"`,
+	) {
+		t.Fatalf("logs did not use the bounded admission pattern: %s", logText)
+	}
+}
+
 func performRelayJSON(
 	t *testing.T,
 	handler http.Handler,

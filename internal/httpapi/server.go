@@ -85,6 +85,18 @@ func (s *Server) Handler() http.Handler {
 			s.handleCreateRelayMember,
 		)
 		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions",
+			s.handleCreateRelayAdmission,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/claim",
+			s.handleClaimRelayAdmission,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/revocation",
+			s.handleRevokeRelayAdmission,
+		)
+		mux.HandleFunc(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members/{memberID}/revocation",
 			s.handleRevokeRelayMember,
 		)
@@ -302,19 +314,22 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			message = "The relay request was rejected."
 			switch relayProtocol.Code {
 			case relay.CodeInvalidDomain, relay.CodeInvalidMember,
+				relay.CodeInvalidAdmission,
 				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob,
 				relay.CodeInvalidCursor,
 				relay.CodeWrongScope:
 				status = http.StatusBadRequest
 			case relay.CodeUnauthorized, relay.CodeDomainNotFound,
-				relay.CodeMemberNotFound:
+				relay.CodeMemberNotFound, relay.CodeAdmissionNotFound:
 				status = http.StatusUnauthorized
 			case relay.CodeMemberExpired, relay.CodeMemberRevoked,
+				relay.CodeAdmissionExpired, relay.CodeAdmissionRevoked,
 				relay.CodeMissingCapability:
 				status = http.StatusForbidden
 			case relay.CodeMessageNotFound, relay.CodeBlobNotFound:
 				status = http.StatusNotFound
 			case relay.CodeDomainCollision, relay.CodeMemberCollision,
+				relay.CodeAdmissionCollision, relay.CodeAdmissionClaimed,
 				relay.CodeMessageCollision, relay.CodeBlobCollision,
 				relay.CodeInvalidAcknowledgment:
 				status = http.StatusConflict

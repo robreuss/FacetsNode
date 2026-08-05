@@ -1,0 +1,32 @@
+{
+  "format": "facets.relay-member-admission-fixture.v1",
+  "warning": "TEST FIXTURE ONLY. These bearer capabilities are public and must never be used outside interoperability tests.",
+  "admissionCredential": {
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "domainID": "22222222-2222-4222-8222-222222222222",
+    "admissionID": "33333333-3333-4333-8333-333333333333",
+    "authorizationToken": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8"
+  },
+  "expectedAdmissionAuthorizationDigest": "6d0f62f5a34571b5aee55a85e6e46c3e702f213201400f538c4552b17f8fbafe",
+  "memberCredential": {
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "domainID": "22222222-2222-4222-8222-222222222222",
+    "memberID": "44444444-4444-4444-8444-444444444444",
+    "authorizationToken": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8"
+  },
+  "expectedMemberAuthorizationDigest": "7c17f23651cc8a3e9823393ba6995b858fc3ba570aaef56e2a3d1ca26fb7aa8f",
+  "createRequest": {
+    "admissionID": "33333333-3333-4333-8333-333333333333",
+    "authorizationDigest": "6d0f62f5a34571b5aee55a85e6e46c3e702f213201400f538c4552b17f8fbafe",
+    "capabilities": [
+      "blob_fetch",
+      "message_acknowledge",
+      "message_fetch"
+    ],
+    "expiresAtMilliseconds": 1710000000000
+  },
+  "claimRequest": {
+    "memberID": "44444444-4444-4444-8444-444444444444",
+    "authorizationDigest": "7c17f23651cc8a3e9823393ba6995b858fc3ba570aaef56e2a3d1ca26fb7aa8f"
+  }
+}

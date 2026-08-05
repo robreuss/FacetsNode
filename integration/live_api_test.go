@@ -156,33 +156,68 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		domain.Domain.TenantID,
 		domain.Domain.DomainID,
 	)
-	createMember := requestRelayJSON(
+	now := time.Now().UnixMilli()
+	admissionToken := encodedBytes(64)
+	admissionCredential := relay.AdmissionCredential{
+		TenantID:    domain.Domain.TenantID,
+		DomainID:    domain.Domain.DomainID,
+		AdmissionID: uuid.New(),
+		Token:       admissionToken,
+	}
+	admissionDigest, err := relay.AdmissionAuthorizationDigest(admissionCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createAdmission := requestRelayJSON(
 		t,
 		client,
 		http.MethodPost,
-		basePath+"/members",
+		basePath+"/admissions",
 		map[string]any{
+			"admissionID":         admissionCredential.AdmissionID,
+			"authorizationDigest": admissionDigest,
 			"capabilities": []string{
 				"blob_fetch",
 				"message_fetch",
 				"message_acknowledge",
 			},
+			"expiresAtMilliseconds": now + 60_000,
 		},
 		domain.AdministrationCredential.AuthorizationToken,
 		uuid.Nil,
 	)
-	requireStatus(t, createMember, http.StatusCreated)
-	var recipient struct {
-		Member     relay.MemberRegistration `json:"member"`
-		Credential struct {
-			AuthorizationToken string `json:"authorizationToken"`
-		} `json:"credential"`
+	requireStatusAndClose(t, createAdmission, http.StatusCreated)
+	memberToken := encodedBytes(96)
+	memberCredential := relay.Credential{
+		TenantID: domain.Domain.TenantID,
+		DomainID: domain.Domain.DomainID,
+		MemberID: uuid.New(),
+		Token:    memberToken,
 	}
-	if err := json.NewDecoder(createMember.Body).Decode(&recipient); err != nil {
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
 		t.Fatal(err)
 	}
-	_ = createMember.Body.Close()
-	now := time.Now().UnixMilli()
+	claim := requestRelayJSON(
+		t,
+		client,
+		http.MethodPost,
+		basePath+"/admissions/"+admissionCredential.AdmissionID.String()+"/claim",
+		relay.MemberAdmissionClaim{
+			MemberID:            memberCredential.MemberID,
+			AuthorizationDigest: memberDigest,
+		},
+		admissionToken,
+		uuid.Nil,
+	)
+	requireStatus(t, claim, http.StatusCreated)
+	var recipient struct {
+		Member relay.MemberRegistration `json:"member"`
+	}
+	if err := json.NewDecoder(claim.Body).Decode(&recipient); err != nil {
+		t.Fatal(err)
+	}
+	_ = claim.Body.Close()
 	envelope := relay.Envelope{
 		Version:               relay.SchemaVersion,
 		Algorithm:             relay.EnvelopeAlgorithm,
@@ -212,7 +247,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		http.MethodGet,
 		basePath+"/messages",
 		nil,
-		recipient.Credential.AuthorizationToken,
+		memberToken,
 		recipient.Member.MemberID,
 	)
 	requireStatus(t, fetch, http.StatusOK)
@@ -235,7 +270,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 			http.MethodPost,
 			publishURL+"/acknowledgments",
 			map[string]string{"stage": stage},
-			recipient.Credential.AuthorizationToken,
+			memberToken,
 			recipient.Member.MemberID,
 		), http.StatusOK)
 	}
@@ -257,7 +292,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		http.MethodGet,
 		blobURL,
 		nil,
-		recipient.Credential.AuthorizationToken,
+		memberToken,
 		recipient.Member.MemberID,
 		"bytes=7-10",
 	)
@@ -285,7 +320,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		http.MethodGet,
 		basePath+"/messages",
 		nil,
-		recipient.Credential.AuthorizationToken,
+		memberToken,
 		recipient.Member.MemberID,
 	), http.StatusForbidden)
 }

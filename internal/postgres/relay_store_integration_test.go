@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -40,7 +41,8 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	}
 	if _, err := pool.Exec(ctx, `
 		TRUNCATE relay_audit_events, relay_acknowledgments,
-		         relay_messages, relay_blobs, relay_members, relay_domains
+		         relay_messages, relay_blobs, relay_member_admissions,
+		         relay_members, relay_domains
 	`); err != nil {
 		pool.Close()
 		t.Fatal(err)
@@ -95,12 +97,47 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 			relay.CapabilityAcknowledgeMessage,
 			relay.CapabilityFetchMessage,
 		},
-		CreatedAtMilliseconds: 1_000,
+		CreatedAtMilliseconds: 1_500,
 	}
-	acceptance, err = store.CreateMember(ctx, admin, recipient, 1_500)
-	if err != nil || acceptance != relay.AcceptanceAccepted {
+	admissionCredential := relay.AdmissionCredential{
+		TenantID:    admin.TenantID,
+		DomainID:    admin.DomainID,
+		AdmissionID: uuid.New(),
+		Token:       postgresRelayToken(160),
+	}
+	admissionDigest, err := relay.AdmissionAuthorizationDigest(admissionCredential)
+	if err != nil {
 		pool.Close()
-		t.Fatalf("create member acceptance=%q err=%v", acceptance, err)
+		t.Fatal(err)
+	}
+	admission := relay.MemberAdmission{
+		Version:               relay.SchemaVersion,
+		TenantID:              admin.TenantID,
+		DomainID:              admin.DomainID,
+		AdmissionID:           admissionCredential.AdmissionID,
+		AuthorizationDigest:   admissionDigest,
+		Capabilities:          recipient.Capabilities,
+		CreatedAtMilliseconds: 1_500,
+		ExpiresAtMilliseconds: 2_500,
+	}
+	admissionCreated, err := store.CreateAdmission(ctx, admin, admission, 1_500)
+	if err != nil || admissionCreated.Acceptance != relay.AcceptanceAccepted {
+		pool.Close()
+		t.Fatalf("create admission result=%+v err=%v", admissionCreated, err)
+	}
+	admitted, err := store.ClaimAdmission(
+		ctx,
+		admissionCredential,
+		relay.MemberAdmissionClaim{
+			MemberID:            recipient.MemberID,
+			AuthorizationDigest: recipient.AuthorizationDigest,
+		},
+		1_500,
+	)
+	if err != nil || admitted.Acceptance != relay.AcceptanceAccepted ||
+		!reflect.DeepEqual(admitted.Member, recipient) {
+		pool.Close()
+		t.Fatalf("claim admission result=%+v err=%v", admitted, err)
 	}
 
 	first, err := store.Publish(
@@ -230,6 +267,19 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	pool = openPool(t, ctx, databaseURL)
 	defer pool.Close()
 	store = postgresstore.NewRelayStore(pool)
+	admissionRetry, err := store.ClaimAdmission(
+		ctx,
+		admissionCredential,
+		relay.MemberAdmissionClaim{
+			MemberID:            recipient.MemberID,
+			AuthorizationDigest: recipient.AuthorizationDigest,
+		},
+		3_000,
+	)
+	if err != nil || admissionRetry.Acceptance != relay.AcceptanceDuplicate ||
+		!reflect.DeepEqual(admissionRetry.Member, recipient) {
+		t.Fatalf("restart admission retry=%+v err=%v", admissionRetry, err)
+	}
 	fetched, err := store.Fetch(ctx, recipientCredential, 0, 100, 1_500)
 	if err != nil || len(fetched.Messages) != concurrentCount+1 ||
 		fetched.NextSequence != concurrentCount+1 {
@@ -294,7 +344,7 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		blobCount != 1 ||
 		storedByteCount != fixtureCiphertextByteCount+concurrentCount+int64(len(blobBytes)) ||
 		lastSequence != concurrentCount+1 ||
-		auditCount != concurrentCount+8 {
+		auditCount != concurrentCount+10 {
 		t.Fatalf(
 			"message_count=%d blob_count=%d stored_byte_count=%d last_sequence=%d audit_count=%d",
 			messageCount,
@@ -313,6 +363,7 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	var remaining int
 	if err := pool.QueryRow(ctx, `
 		SELECT
+			(SELECT count(*) FROM relay_member_admissions WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_members WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_messages WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_acknowledgments WHERE tenant_id = $1 AND domain_id = $2) +

@@ -15,25 +15,27 @@ import (
 )
 
 const (
-	SchemaVersion                  = 1
-	EnvelopeAlgorithm              = "HKDF-SHA256+A256GCM"
-	MaximumCiphertextByteCount     = 16 * 1_024 * 1_024
-	MaximumBlobByteCount           = int64(256 * 1_024 * 1_024)
-	MaximumPageSize                = 100
-	DefaultMaximumMessageCount     = 10_000
-	AbsoluteMaximumMessageCount    = 1_000_000
-	DefaultMaximumBlobCount        = 10_000
-	AbsoluteMaximumBlobCount       = 1_000_000
-	DefaultMaximumStoredByteCount  = int64(1 * 1_024 * 1_024 * 1_024)
-	AbsoluteMaximumStoredByteCount = int64(1 * 1_024 * 1_024 * 1_024 * 1_024)
-	MinimumAuthorizationTokenSize  = 32
-	MaximumSequence                = uint64(1<<63 - 1)
+	SchemaVersion                        = 1
+	EnvelopeAlgorithm                    = "HKDF-SHA256+A256GCM"
+	MaximumCiphertextByteCount           = 16 * 1_024 * 1_024
+	MaximumBlobByteCount                 = int64(256 * 1_024 * 1_024)
+	MaximumPageSize                      = 100
+	DefaultMaximumMessageCount           = 10_000
+	AbsoluteMaximumMessageCount          = 1_000_000
+	DefaultMaximumBlobCount              = 10_000
+	AbsoluteMaximumBlobCount             = 1_000_000
+	DefaultMaximumStoredByteCount        = int64(1 * 1_024 * 1_024 * 1_024)
+	AbsoluteMaximumStoredByteCount       = int64(1 * 1_024 * 1_024 * 1_024 * 1_024)
+	MaximumAdmissionLifetimeMilliseconds = int64(7 * 24 * 60 * 60 * 1_000)
+	MinimumAuthorizationTokenSize        = 32
+	MaximumSequence                      = uint64(1<<63 - 1)
 )
 
 var (
-	memberAuthorizationDomain = []byte("Facets replica relay member authorization v1\x00")
-	domainAuthorizationDomain = []byte("Facets replica relay domain administration v1\x00")
-	envelopeReferenceDomain   = []byte("Facets replica relay envelope reference v1\x00")
+	memberAuthorizationDomain    = []byte("Facets replica relay member authorization v1\x00")
+	domainAuthorizationDomain    = []byte("Facets replica relay domain administration v1\x00")
+	admissionAuthorizationDomain = []byte("Facets replica relay member admission v1\x00")
+	envelopeReferenceDomain      = []byte("Facets replica relay envelope reference v1\x00")
 )
 
 type Capability string
@@ -69,6 +71,16 @@ type AdministrationCredential struct {
 	TenantID uuid.UUID
 	DomainID uuid.UUID
 	Token    string
+}
+
+// AdmissionCredential is a one-time, domain-scoped bearer capability. It can
+// create exactly one relay member with the admission's frozen capabilities;
+// it is not a content key, principal grant, or domain-administration secret.
+type AdmissionCredential struct {
+	TenantID    uuid.UUID
+	DomainID    uuid.UUID
+	AdmissionID uuid.UUID
+	Token       string
 }
 
 type DomainRegistration struct {
@@ -120,6 +132,109 @@ type MemberRegistration struct {
 	CreatedAtMilliseconds int64        `json:"createdAtMilliseconds"`
 	ExpiresAtMilliseconds *int64       `json:"expiresAtMilliseconds,omitempty"`
 	RevokedAtMilliseconds *int64       `json:"revokedAtMilliseconds,omitempty"`
+}
+
+type MemberAdmission struct {
+	Version                     int          `json:"version"`
+	TenantID                    uuid.UUID    `json:"tenantID"`
+	DomainID                    uuid.UUID    `json:"domainID"`
+	AdmissionID                 uuid.UUID    `json:"admissionID"`
+	AuthorizationDigest         string       `json:"authorizationDigest"`
+	Capabilities                []Capability `json:"capabilities"`
+	CreatedAtMilliseconds       int64        `json:"createdAtMilliseconds"`
+	ExpiresAtMilliseconds       int64        `json:"expiresAtMilliseconds"`
+	MemberExpiresAtMilliseconds *int64       `json:"memberExpiresAtMilliseconds,omitempty"`
+	RevokedAtMilliseconds       *int64       `json:"revokedAtMilliseconds,omitempty"`
+	ClaimedAtMilliseconds       *int64       `json:"claimedAtMilliseconds,omitempty"`
+	ClaimedMemberID             *uuid.UUID   `json:"claimedMemberID,omitempty"`
+}
+
+func (a MemberAdmission) Validate() error {
+	if a.Version != SchemaVersion || a.TenantID == uuid.Nil ||
+		a.DomainID == uuid.Nil || a.AdmissionID == uuid.Nil ||
+		!validDigest(a.AuthorizationDigest) || len(a.Capabilities) == 0 ||
+		a.CreatedAtMilliseconds < 0 ||
+		a.ExpiresAtMilliseconds <= a.CreatedAtMilliseconds ||
+		a.ExpiresAtMilliseconds-a.CreatedAtMilliseconds >
+			MaximumAdmissionLifetimeMilliseconds {
+		return protocolError(CodeInvalidAdmission, "admission fields are invalid")
+	}
+	for index, capability := range a.Capabilities {
+		if !capability.Valid() ||
+			(index > 0 && a.Capabilities[index-1] >= capability) {
+			return protocolError(CodeInvalidAdmission, "admission capabilities are invalid")
+		}
+	}
+	if a.MemberExpiresAtMilliseconds != nil &&
+		*a.MemberExpiresAtMilliseconds <= a.ExpiresAtMilliseconds {
+		return protocolError(
+			CodeInvalidAdmission,
+			"member expiry must follow admission expiry",
+		)
+	}
+	if a.RevokedAtMilliseconds != nil &&
+		*a.RevokedAtMilliseconds < a.CreatedAtMilliseconds {
+		return protocolError(CodeInvalidAdmission, "admission revocation is invalid")
+	}
+	if (a.ClaimedAtMilliseconds == nil) != (a.ClaimedMemberID == nil) {
+		return protocolError(CodeInvalidAdmission, "admission claim state is incomplete")
+	}
+	if a.ClaimedAtMilliseconds != nil &&
+		(*a.ClaimedAtMilliseconds < a.CreatedAtMilliseconds ||
+			*a.ClaimedAtMilliseconds >= a.ExpiresAtMilliseconds ||
+			*a.ClaimedMemberID == uuid.Nil) {
+		return protocolError(CodeInvalidAdmission, "admission claim state is invalid")
+	}
+	return nil
+}
+
+func (a MemberAdmission) VerifyCredential(credential AdmissionCredential) error {
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	if credential.TenantID != a.TenantID || credential.DomainID != a.DomainID ||
+		credential.AdmissionID != a.AdmissionID {
+		return protocolError(CodeWrongScope, "admission credential belongs to another scope")
+	}
+	actual, err := AdmissionAuthorizationDigest(credential)
+	if err != nil || !constantTimeDigestEqual(actual, a.AuthorizationDigest) {
+		return protocolError(CodeUnauthorized, "admission credential is invalid")
+	}
+	return nil
+}
+
+func (a MemberAdmission) RequireActive(nowMilliseconds int64) error {
+	if nowMilliseconds < a.CreatedAtMilliseconds ||
+		nowMilliseconds >= a.ExpiresAtMilliseconds {
+		return protocolError(CodeAdmissionExpired, "admission is not active")
+	}
+	if a.RevokedAtMilliseconds != nil &&
+		nowMilliseconds >= *a.RevokedAtMilliseconds {
+		return protocolError(CodeAdmissionRevoked, "admission is revoked")
+	}
+	return nil
+}
+
+type MemberAdmissionClaim struct {
+	MemberID            uuid.UUID `json:"memberID"`
+	AuthorizationDigest string    `json:"authorizationDigest"`
+}
+
+func (c MemberAdmissionClaim) Validate() error {
+	if c.MemberID == uuid.Nil || !validDigest(c.AuthorizationDigest) {
+		return protocolError(CodeInvalidMember, "member claim fields are invalid")
+	}
+	return nil
+}
+
+type AdmissionClaimResult struct {
+	Acceptance Acceptance         `json:"acceptance"`
+	Member     MemberRegistration `json:"member"`
+}
+
+type AdmissionCreateResult struct {
+	Acceptance Acceptance      `json:"acceptance"`
+	Admission  MemberAdmission `json:"admission"`
 }
 
 func (r MemberRegistration) Validate() error {
@@ -357,6 +472,23 @@ func AdministrationDigest(credential AdministrationCredential) (string, error) {
 		domainAuthorizationDomain,
 		credential.TenantID.String(),
 		credential.DomainID.String(),
+		credential.Token,
+	), nil
+}
+
+func AdmissionAuthorizationDigest(credential AdmissionCredential) (string, error) {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil ||
+		credential.AdmissionID == uuid.Nil {
+		return "", fmt.Errorf("admission scope is invalid")
+	}
+	if err := validateToken(credential.Token); err != nil {
+		return "", err
+	}
+	return scopedDigest(
+		admissionAuthorizationDomain,
+		credential.TenantID.String(),
+		credential.DomainID.String(),
+		credential.AdmissionID.String(),
 		credential.Token,
 	), nil
 }

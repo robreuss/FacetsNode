@@ -42,6 +42,13 @@ type relayMemberCredential struct {
 	AuthorizationToken string    `json:"authorizationToken"`
 }
 
+type relayAdmissionCredential struct {
+	TenantID           uuid.UUID `json:"tenantID"`
+	DomainID           uuid.UUID `json:"domainID"`
+	AdmissionID        uuid.UUID `json:"admissionID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
 func (s *Server) handleCreateRelayDomain(writer http.ResponseWriter, request *http.Request) {
 	if err := s.authorizeOperator(request); err != nil {
 		s.writeError(writer, err)
@@ -202,6 +209,140 @@ func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *ht
 			MemberID:           memberID,
 			AuthorizationToken: token,
 		},
+	})
+}
+
+func (s *Server) handleCreateRelayAdmission(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(
+		request, tenantID, domainID,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input struct {
+		AdmissionID                 uuid.UUID          `json:"admissionID"`
+		AuthorizationDigest         string             `json:"authorizationDigest"`
+		Capabilities                []relay.Capability `json:"capabilities"`
+		ExpiresAtMilliseconds       int64              `json:"expiresAtMilliseconds"`
+		MemberExpiresAtMilliseconds *int64             `json:"memberExpiresAtMilliseconds,omitempty"`
+	}
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	capabilities, err := normalizedCapabilities(input.Capabilities)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	now := s.nowMilliseconds()
+	registration := relay.MemberAdmission{
+		Version:                     relay.SchemaVersion,
+		TenantID:                    tenantID,
+		DomainID:                    domainID,
+		AdmissionID:                 input.AdmissionID,
+		AuthorizationDigest:         input.AuthorizationDigest,
+		Capabilities:                capabilities,
+		CreatedAtMilliseconds:       now,
+		ExpiresAtMilliseconds:       input.ExpiresAtMilliseconds,
+		MemberExpiresAtMilliseconds: input.MemberExpiresAtMilliseconds,
+	}
+	result, err := s.relayStore.CreateAdmission(
+		request.Context(), credential, registration, now,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	status := http.StatusCreated
+	if result.Acceptance == relay.AcceptanceDuplicate {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, result)
+}
+
+func (s *Server) handleClaimRelayAdmission(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	admissionID, err := parseRelayUUID(request.PathValue("admissionID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdmissionCredentialFromRequest(
+		request, tenantID, domainID, admissionID,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var claim relay.MemberAdmissionClaim
+	if err := readRelayJSON(writer, request, &claim, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.relayStore.ClaimAdmission(
+		request.Context(), credential, claim, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	status := http.StatusCreated
+	if result.Acceptance == relay.AcceptanceDuplicate {
+		status = http.StatusOK
+	}
+	writeJSON(writer, status, result)
+}
+
+func (s *Server) handleRevokeRelayAdmission(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	admissionID, err := parseRelayUUID(request.PathValue("admissionID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(
+		request, tenantID, domainID,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	acceptance, err := s.relayStore.RevokeAdmission(
+		request.Context(), credential, admissionID, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(acceptance))
+	writeJSON(writer, http.StatusOK, map[string]string{
+		"acceptance": string(acceptance),
 	})
 }
 
@@ -617,6 +758,28 @@ func relayCredentialFromRequest(
 		DomainID: domainID,
 		MemberID: memberID,
 		Token:    token,
+	}, nil
+}
+
+func relayAdmissionCredentialFromRequest(
+	request *http.Request,
+	tenantID uuid.UUID,
+	domainID uuid.UUID,
+	admissionID uuid.UUID,
+) (relay.AdmissionCredential, error) {
+	authorization := request.Header.Get("Authorization")
+	if !strings.HasPrefix(authorization, "Bearer ") ||
+		strings.TrimPrefix(authorization, "Bearer ") == "" {
+		return relay.AdmissionCredential{}, relay.NewProtocolError(
+			relay.CodeUnauthorized,
+			"admission credential is required",
+		)
+	}
+	return relay.AdmissionCredential{
+		TenantID:    tenantID,
+		DomainID:    domainID,
+		AdmissionID: admissionID,
+		Token:       strings.TrimPrefix(authorization, "Bearer "),
 	}, nil
 }
 

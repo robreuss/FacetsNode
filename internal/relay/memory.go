@@ -21,6 +21,7 @@ type memoryMessage struct {
 type memoryDomain struct {
 	registration DomainRegistration
 	members      map[uuid.UUID]MemberRegistration
+	admissions   map[uuid.UUID]MemberAdmission
 	messages     []*memoryMessage
 	messageByID  map[uuid.UUID]*memoryMessage
 	blobs        map[string]BlobMetadata
@@ -68,9 +69,151 @@ func (s *MemoryStore) CreateDomain(
 		members: map[uuid.UUID]MemberRegistration{
 			initialMember.MemberID: initialMember,
 		},
+		admissions:  make(map[uuid.UUID]MemberAdmission),
 		messageByID: make(map[uuid.UUID]*memoryMessage),
 		blobs:       make(map[string]BlobMetadata),
 	}
+	return AcceptanceAccepted, nil
+}
+
+func (s *MemoryStore) CreateAdmission(
+	_ context.Context,
+	credential AdministrationCredential,
+	registration MemberAdmission,
+	nowMilliseconds int64,
+) (AdmissionCreateResult, error) {
+	if err := registration.Validate(); err != nil {
+		return AdmissionCreateResult{}, err
+	}
+	if registration.RevokedAtMilliseconds != nil ||
+		registration.ClaimedAtMilliseconds != nil ||
+		registration.ClaimedMemberID != nil {
+		return AdmissionCreateResult{}, protocolError(
+			CodeInvalidAdmission,
+			"new admission already has terminal state",
+		)
+	}
+	if registration.CreatedAtMilliseconds > nowMilliseconds ||
+		registration.ExpiresAtMilliseconds <= nowMilliseconds {
+		return AdmissionCreateResult{}, protocolError(CodeInvalidAdmission, "admission is not currently issuable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return AdmissionCreateResult{}, err
+	}
+	if registration.TenantID != credential.TenantID ||
+		registration.DomainID != credential.DomainID {
+		return AdmissionCreateResult{}, protocolError(CodeWrongScope, "admission belongs to another domain")
+	}
+	if existing, ok := domain.admissions[registration.AdmissionID]; ok {
+		if admissionCreationEqual(existing, registration) {
+			return AdmissionCreateResult{
+				Acceptance: AcceptanceDuplicate,
+				Admission:  existing,
+			}, nil
+		}
+		return AdmissionCreateResult{}, protocolError(CodeAdmissionCollision, "admission ID was reused")
+	}
+	domain.admissions[registration.AdmissionID] = registration
+	return AdmissionCreateResult{
+		Acceptance: AcceptanceAccepted,
+		Admission:  registration,
+	}, nil
+}
+
+func (s *MemoryStore) ClaimAdmission(
+	_ context.Context,
+	credential AdmissionCredential,
+	claim MemberAdmissionClaim,
+	nowMilliseconds int64,
+) (AdmissionClaimResult, error) {
+	if err := claim.Validate(); err != nil {
+		return AdmissionClaimResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, ok := s.domains[domainKey{credential.TenantID, credential.DomainID}]
+	if !ok {
+		return AdmissionClaimResult{}, protocolError(CodeDomainNotFound, "domain was not found")
+	}
+	admission, ok := domain.admissions[credential.AdmissionID]
+	if !ok {
+		return AdmissionClaimResult{}, protocolError(CodeAdmissionNotFound, "admission was not found")
+	}
+	if err := admission.VerifyCredential(credential); err != nil {
+		return AdmissionClaimResult{}, err
+	}
+	if admission.ClaimedMemberID != nil {
+		member := domain.members[*admission.ClaimedMemberID]
+		if *admission.ClaimedMemberID == claim.MemberID &&
+			member.AuthorizationDigest == claim.AuthorizationDigest {
+			return AdmissionClaimResult{
+				Acceptance: AcceptanceDuplicate,
+				Member:     member,
+			}, nil
+		}
+		return AdmissionClaimResult{}, protocolError(CodeAdmissionClaimed, "admission was already claimed")
+	}
+	if err := admission.RequireActive(nowMilliseconds); err != nil {
+		return AdmissionClaimResult{}, err
+	}
+	if _, exists := domain.members[claim.MemberID]; exists {
+		return AdmissionClaimResult{}, protocolError(CodeMemberCollision, "member ID was reused")
+	}
+	member := MemberRegistration{
+		Version:               SchemaVersion,
+		TenantID:              admission.TenantID,
+		DomainID:              admission.DomainID,
+		MemberID:              claim.MemberID,
+		AuthorizationDigest:   claim.AuthorizationDigest,
+		Capabilities:          append([]Capability(nil), admission.Capabilities...),
+		CreatedAtMilliseconds: nowMilliseconds,
+		ExpiresAtMilliseconds: admission.MemberExpiresAtMilliseconds,
+	}
+	if err := member.Validate(); err != nil {
+		return AdmissionClaimResult{}, err
+	}
+	claimedAt := nowMilliseconds
+	claimedMemberID := claim.MemberID
+	admission.ClaimedAtMilliseconds = &claimedAt
+	admission.ClaimedMemberID = &claimedMemberID
+	domain.members[member.MemberID] = member
+	domain.admissions[admission.AdmissionID] = admission
+	return AdmissionClaimResult{
+		Acceptance: AcceptanceAccepted,
+		Member:     member,
+	}, nil
+}
+
+func (s *MemoryStore) RevokeAdmission(
+	_ context.Context,
+	credential AdministrationCredential,
+	admissionID uuid.UUID,
+	nowMilliseconds int64,
+) (Acceptance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return "", err
+	}
+	admission, ok := domain.admissions[admissionID]
+	if !ok {
+		return "", protocolError(CodeAdmissionNotFound, "admission was not found")
+	}
+	if admission.ClaimedMemberID != nil {
+		return "", protocolError(CodeAdmissionClaimed, "claimed admission cannot be revoked")
+	}
+	if admission.RevokedAtMilliseconds != nil {
+		return AcceptanceDuplicate, nil
+	}
+	if nowMilliseconds < admission.CreatedAtMilliseconds {
+		return "", protocolError(CodeInvalidAdmission, "revocation precedes admission")
+	}
+	admission.RevokedAtMilliseconds = &nowMilliseconds
+	domain.admissions[admissionID] = admission
 	return AcceptanceAccepted, nil
 }
 
@@ -453,6 +596,23 @@ func memberEqual(lhs, rhs MemberRegistration) bool {
 		lhs.CreatedAtMilliseconds != rhs.CreatedAtMilliseconds ||
 		!optionalInt64Equal(lhs.ExpiresAtMilliseconds, rhs.ExpiresAtMilliseconds) ||
 		!optionalInt64Equal(lhs.RevokedAtMilliseconds, rhs.RevokedAtMilliseconds) ||
+		len(lhs.Capabilities) != len(rhs.Capabilities) {
+		return false
+	}
+	for index := range lhs.Capabilities {
+		if lhs.Capabilities[index] != rhs.Capabilities[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func admissionCreationEqual(lhs, rhs MemberAdmission) bool {
+	if lhs.Version != rhs.Version || lhs.TenantID != rhs.TenantID ||
+		lhs.DomainID != rhs.DomainID || lhs.AdmissionID != rhs.AdmissionID ||
+		lhs.AuthorizationDigest != rhs.AuthorizationDigest ||
+		lhs.ExpiresAtMilliseconds != rhs.ExpiresAtMilliseconds ||
+		!optionalInt64Equal(lhs.MemberExpiresAtMilliseconds, rhs.MemberExpiresAtMilliseconds) ||
 		len(lhs.Capabilities) != len(rhs.Capabilities) {
 		return false
 	}

@@ -201,6 +201,338 @@ func (s *RelayStore) CreateMember(
 	return relay.AcceptanceAccepted, nil
 }
 
+func (s *RelayStore) CreateAdmission(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	registration relay.MemberAdmission,
+	nowMilliseconds int64,
+) (relay.AdmissionCreateResult, error) {
+	if err := registration.Validate(); err != nil {
+		return relay.AdmissionCreateResult{}, err
+	}
+	if registration.RevokedAtMilliseconds != nil ||
+		registration.ClaimedAtMilliseconds != nil ||
+		registration.ClaimedMemberID != nil {
+		return relay.AdmissionCreateResult{}, relay.NewProtocolError(
+			relay.CodeInvalidAdmission,
+			"new admission already has terminal state",
+		)
+	}
+	if registration.CreatedAtMilliseconds > nowMilliseconds ||
+		registration.ExpiresAtMilliseconds <= nowMilliseconds {
+		return relay.AdmissionCreateResult{}, relay.NewProtocolError(
+			relay.CodeInvalidAdmission,
+			"admission is not currently issuable",
+		)
+	}
+	transaction, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.AdmissionCreateResult{}, fmt.Errorf("begin relay admission creation: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	domain, _, _, _, _, err := loadRelayDomain(
+		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
+	)
+	if err != nil {
+		return relay.AdmissionCreateResult{}, err
+	}
+	if err := domain.Authorize(credential); err != nil {
+		return relay.AdmissionCreateResult{}, err
+	}
+	if registration.TenantID != credential.TenantID ||
+		registration.DomainID != credential.DomainID {
+		return relay.AdmissionCreateResult{}, relay.NewProtocolError(
+			relay.CodeWrongScope,
+			"admission belongs to another domain",
+		)
+	}
+	result, err := transaction.Exec(ctx, `
+		INSERT INTO relay_member_admissions (
+			tenant_id, domain_id, admission_id, version,
+			authorization_digest, capabilities, created_at_milliseconds,
+			expires_at_milliseconds, member_expires_at_milliseconds,
+			revoked_at_milliseconds, claimed_at_milliseconds,
+			claimed_member_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		ON CONFLICT (tenant_id, domain_id, admission_id) DO NOTHING
+	`, registration.TenantID, registration.DomainID,
+		registration.AdmissionID, registration.Version,
+		registration.AuthorizationDigest,
+		capabilityStrings(registration.Capabilities),
+		registration.CreatedAtMilliseconds,
+		registration.ExpiresAtMilliseconds,
+		registration.MemberExpiresAtMilliseconds,
+		registration.RevokedAtMilliseconds,
+		registration.ClaimedAtMilliseconds,
+		registration.ClaimedMemberID)
+	if err != nil {
+		return relay.AdmissionCreateResult{}, fmt.Errorf("insert relay admission: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		existing, found, err := loadRelayAdmission(
+			ctx,
+			transaction,
+			registration.TenantID,
+			registration.DomainID,
+			registration.AdmissionID,
+			"FOR UPDATE",
+		)
+		if err != nil {
+			return relay.AdmissionCreateResult{}, err
+		}
+		if found && admissionCreationEqual(existing, registration) {
+			return relay.AdmissionCreateResult{
+				Acceptance: relay.AcceptanceDuplicate,
+				Admission:  existing,
+			}, nil
+		}
+		return relay.AdmissionCreateResult{}, relay.NewProtocolError(
+			relay.CodeAdmissionCollision,
+			"admission ID was reused",
+		)
+	}
+	if err := insertRelayAdmissionAudit(
+		ctx,
+		transaction,
+		registration.TenantID,
+		registration.DomainID,
+		registration.AdmissionID,
+		nil,
+		"admission_created",
+		nowMilliseconds,
+	); err != nil {
+		return relay.AdmissionCreateResult{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return relay.AdmissionCreateResult{}, fmt.Errorf("commit relay admission creation: %w", err)
+	}
+	return relay.AdmissionCreateResult{
+		Acceptance: relay.AcceptanceAccepted,
+		Admission:  registration,
+	}, nil
+}
+
+func (s *RelayStore) ClaimAdmission(
+	ctx context.Context,
+	credential relay.AdmissionCredential,
+	claim relay.MemberAdmissionClaim,
+	nowMilliseconds int64,
+) (relay.AdmissionClaimResult, error) {
+	if err := claim.Validate(); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
+	transaction, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.AdmissionClaimResult{}, fmt.Errorf(
+			"begin relay admission claim: %w",
+			err,
+		)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	admission, found, err := loadRelayAdmission(
+		ctx,
+		transaction,
+		credential.TenantID,
+		credential.DomainID,
+		credential.AdmissionID,
+		"FOR UPDATE",
+	)
+	if err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
+	if !found {
+		return relay.AdmissionClaimResult{}, relay.NewProtocolError(
+			relay.CodeAdmissionNotFound,
+			"admission was not found",
+		)
+	}
+	if err := admission.VerifyCredential(credential); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
+	if admission.ClaimedMemberID != nil {
+		member, found, err := loadRelayMember(
+			ctx,
+			transaction,
+			credential.TenantID,
+			credential.DomainID,
+			*admission.ClaimedMemberID,
+			"FOR SHARE",
+		)
+		if err != nil {
+			return relay.AdmissionClaimResult{}, err
+		}
+		if found && member.MemberID == claim.MemberID &&
+			member.AuthorizationDigest == claim.AuthorizationDigest {
+			return relay.AdmissionClaimResult{
+				Acceptance: relay.AcceptanceDuplicate,
+				Member:     member,
+			}, nil
+		}
+		return relay.AdmissionClaimResult{}, relay.NewProtocolError(
+			relay.CodeAdmissionClaimed,
+			"admission was already claimed",
+		)
+	}
+	if err := admission.RequireActive(nowMilliseconds); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
+	if _, found, err := loadRelayMember(
+		ctx,
+		transaction,
+		credential.TenantID,
+		credential.DomainID,
+		claim.MemberID,
+		"FOR UPDATE",
+	); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	} else if found {
+		return relay.AdmissionClaimResult{}, relay.NewProtocolError(
+			relay.CodeMemberCollision,
+			"member ID was reused",
+		)
+	}
+	member := relay.MemberRegistration{
+		Version:               relay.SchemaVersion,
+		TenantID:              admission.TenantID,
+		DomainID:              admission.DomainID,
+		MemberID:              claim.MemberID,
+		AuthorizationDigest:   claim.AuthorizationDigest,
+		Capabilities:          append([]relay.Capability(nil), admission.Capabilities...),
+		CreatedAtMilliseconds: nowMilliseconds,
+		ExpiresAtMilliseconds: admission.MemberExpiresAtMilliseconds,
+	}
+	if err := member.Validate(); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
+	if err := insertRelayMember(ctx, transaction, member); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
+	if _, err := transaction.Exec(ctx, `
+		UPDATE relay_member_admissions
+		SET claimed_at_milliseconds = $4, claimed_member_id = $5,
+		    updated_at = now()
+		WHERE tenant_id = $1 AND domain_id = $2 AND admission_id = $3
+	`, admission.TenantID, admission.DomainID, admission.AdmissionID,
+		nowMilliseconds, member.MemberID); err != nil {
+		return relay.AdmissionClaimResult{}, fmt.Errorf(
+			"record relay admission claim: %w",
+			err,
+		)
+	}
+	if err := insertRelayAudit(
+		ctx,
+		transaction,
+		member.TenantID,
+		member.DomainID,
+		&member.MemberID,
+		nil,
+		"member_created",
+		nowMilliseconds,
+	); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
+	if err := insertRelayAdmissionAudit(
+		ctx,
+		transaction,
+		admission.TenantID,
+		admission.DomainID,
+		admission.AdmissionID,
+		&member.MemberID,
+		"admission_claimed",
+		nowMilliseconds,
+	); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return relay.AdmissionClaimResult{}, fmt.Errorf(
+			"commit relay admission claim: %w",
+			err,
+		)
+	}
+	return relay.AdmissionClaimResult{
+		Acceptance: relay.AcceptanceAccepted,
+		Member:     member,
+	}, nil
+}
+
+func (s *RelayStore) RevokeAdmission(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	admissionID uuid.UUID,
+	nowMilliseconds int64,
+) (relay.Acceptance, error) {
+	transaction, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", fmt.Errorf("begin relay admission revocation: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	domain, _, _, _, _, err := loadRelayDomain(
+		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
+	)
+	if err != nil {
+		return "", err
+	}
+	if err := domain.Authorize(credential); err != nil {
+		return "", err
+	}
+	admission, found, err := loadRelayAdmission(
+		ctx,
+		transaction,
+		credential.TenantID,
+		credential.DomainID,
+		admissionID,
+		"FOR UPDATE",
+	)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", relay.NewProtocolError(
+			relay.CodeAdmissionNotFound,
+			"admission was not found",
+		)
+	}
+	if admission.ClaimedMemberID != nil {
+		return "", relay.NewProtocolError(
+			relay.CodeAdmissionClaimed,
+			"claimed admission cannot be revoked",
+		)
+	}
+	if admission.RevokedAtMilliseconds != nil {
+		return relay.AcceptanceDuplicate, nil
+	}
+	if nowMilliseconds < admission.CreatedAtMilliseconds {
+		return "", relay.NewProtocolError(
+			relay.CodeInvalidAdmission,
+			"revocation precedes admission",
+		)
+	}
+	if _, err := transaction.Exec(ctx, `
+		UPDATE relay_member_admissions
+		SET revoked_at_milliseconds = $4, updated_at = now()
+		WHERE tenant_id = $1 AND domain_id = $2 AND admission_id = $3
+	`, credential.TenantID, credential.DomainID, admissionID,
+		nowMilliseconds); err != nil {
+		return "", fmt.Errorf("revoke relay admission: %w", err)
+	}
+	if err := insertRelayAdmissionAudit(
+		ctx,
+		transaction,
+		credential.TenantID,
+		credential.DomainID,
+		admissionID,
+		nil,
+		"admission_revoked",
+		nowMilliseconds,
+	); err != nil {
+		return "", err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit relay admission revocation: %w", err)
+	}
+	return relay.AcceptanceAccepted, nil
+}
+
 func (s *RelayStore) RevokeMember(
 	ctx context.Context,
 	credential relay.AdministrationCredential,
@@ -1018,6 +1350,64 @@ func loadRelayMember(
 	return registration, true, nil
 }
 
+func loadRelayAdmission(
+	ctx context.Context,
+	querier relayQuerier,
+	tenantID uuid.UUID,
+	domainID uuid.UUID,
+	admissionID uuid.UUID,
+	lockClause string,
+) (relay.MemberAdmission, bool, error) {
+	query := `
+		SELECT version, authorization_digest, capabilities,
+		       created_at_milliseconds, expires_at_milliseconds,
+		       member_expires_at_milliseconds, revoked_at_milliseconds,
+		       claimed_at_milliseconds, claimed_member_id
+		FROM relay_member_admissions
+		WHERE tenant_id = $1 AND domain_id = $2 AND admission_id = $3
+	`
+	if lockClause != "" {
+		query += " " + lockClause
+	}
+	registration := relay.MemberAdmission{
+		TenantID:    tenantID,
+		DomainID:    domainID,
+		AdmissionID: admissionID,
+	}
+	var capabilities []string
+	err := querier.QueryRow(ctx, query, tenantID, domainID, admissionID).Scan(
+		&registration.Version,
+		&registration.AuthorizationDigest,
+		&capabilities,
+		&registration.CreatedAtMilliseconds,
+		&registration.ExpiresAtMilliseconds,
+		&registration.MemberExpiresAtMilliseconds,
+		&registration.RevokedAtMilliseconds,
+		&registration.ClaimedAtMilliseconds,
+		&registration.ClaimedMemberID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return relay.MemberAdmission{}, false, nil
+	}
+	if err != nil {
+		return relay.MemberAdmission{}, false, fmt.Errorf(
+			"load relay admission: %w",
+			err,
+		)
+	}
+	registration.Capabilities = make([]relay.Capability, len(capabilities))
+	for index, capability := range capabilities {
+		registration.Capabilities[index] = relay.Capability(capability)
+	}
+	if err := registration.Validate(); err != nil {
+		return relay.MemberAdmission{}, false, fmt.Errorf(
+			"stored relay admission failed validation: %v",
+			err,
+		)
+	}
+	return registration, true, nil
+}
+
 func loadRelayMessage(
 	ctx context.Context,
 	querier relayQuerier,
@@ -1167,6 +1557,28 @@ func insertRelayAudit(
 	return nil
 }
 
+func insertRelayAdmissionAudit(
+	ctx context.Context,
+	transaction pgx.Tx,
+	tenantID uuid.UUID,
+	domainID uuid.UUID,
+	admissionID uuid.UUID,
+	memberID *uuid.UUID,
+	eventType string,
+	nowMilliseconds int64,
+) error {
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO relay_audit_events (
+			tenant_id, domain_id, admission_id, member_id,
+			event_type, occurred_at_milliseconds
+		) VALUES ($1, $2, $3, $4, $5, $6)
+	`, tenantID, domainID, admissionID, memberID, eventType,
+		nowMilliseconds); err != nil {
+		return fmt.Errorf("insert relay admission audit event: %w", err)
+	}
+	return nil
+}
+
 func insertRelayBlobAudit(
 	ctx context.Context,
 	transaction pgx.Tx,
@@ -1199,6 +1611,23 @@ func memberEqual(lhs, rhs relay.MemberRegistration) bool {
 		lhs.CreatedAtMilliseconds != rhs.CreatedAtMilliseconds ||
 		!optionalInt64Equal(lhs.ExpiresAtMilliseconds, rhs.ExpiresAtMilliseconds) ||
 		!optionalInt64Equal(lhs.RevokedAtMilliseconds, rhs.RevokedAtMilliseconds) ||
+		len(lhs.Capabilities) != len(rhs.Capabilities) {
+		return false
+	}
+	for index := range lhs.Capabilities {
+		if lhs.Capabilities[index] != rhs.Capabilities[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func admissionCreationEqual(lhs, rhs relay.MemberAdmission) bool {
+	if lhs.Version != rhs.Version || lhs.TenantID != rhs.TenantID ||
+		lhs.DomainID != rhs.DomainID || lhs.AdmissionID != rhs.AdmissionID ||
+		lhs.AuthorizationDigest != rhs.AuthorizationDigest ||
+		lhs.ExpiresAtMilliseconds != rhs.ExpiresAtMilliseconds ||
+		!optionalInt64Equal(lhs.MemberExpiresAtMilliseconds, rhs.MemberExpiresAtMilliseconds) ||
 		len(lhs.Capabilities) != len(rhs.Capabilities) {
 		return false
 	}
