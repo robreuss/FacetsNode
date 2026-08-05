@@ -85,8 +85,20 @@ func (s *Server) Handler() http.Handler {
 			s.handleCreateRelayMember,
 		)
 		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/administration/credential-rotations/{rotationID}",
+			s.handleRotateRelayAdministrationCredential,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members/{memberID}/credential-rotations/{rotationID}",
+			s.handleRotateRelayMemberCredential,
+		)
+		mux.HandleFunc(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions",
 			s.handleCreateRelayAdmission,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/collection",
+			s.handleCollectRelayAdmissions,
 		)
 		mux.HandleFunc(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/claim",
@@ -315,6 +327,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			switch relayProtocol.Code {
 			case relay.CodeInvalidDomain, relay.CodeInvalidMember,
 				relay.CodeInvalidAdmission,
+				relay.CodeInvalidCredentialRotation,
 				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob,
 				relay.CodeInvalidCursor,
 				relay.CodeWrongScope:
@@ -330,6 +343,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				status = http.StatusNotFound
 			case relay.CodeDomainCollision, relay.CodeMemberCollision,
 				relay.CodeAdmissionCollision, relay.CodeAdmissionClaimed,
+				relay.CodeCredentialRotationCollision,
+				relay.CodeCredentialReuse,
 				relay.CodeMessageCollision, relay.CodeBlobCollision,
 				relay.CodeInvalidAcknowledgment:
 				status = http.StatusConflict

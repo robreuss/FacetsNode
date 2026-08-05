@@ -44,7 +44,7 @@ docker compose exec postgres createdb -U facets facets_test
 
 FACETS_NODE_TEST_DATABASE_URL='postgres://facets:<password>@postgres:5432/facets_test?sslmode=disable' \
   go test ./internal/postgres \
-    -run 'TestPostgres(StorePersistsOpaqueMailbox|RelayPersistsSequences)' -v
+    -run 'TestPostgres(StorePersistsOpaqueMailbox|Relay(PersistsSequences|SerializesOutstandingAdmissionLimit))' -v
 
 FACETS_NODE_TEST_BASE_URL='http://node:8080' \
 FACETS_NODE_TEST_OPERATOR_TOKEN='<same operator value from .env>' \
@@ -72,6 +72,13 @@ is a separate compositional gate: the PostgreSQL test closes and recreates its
 pool around the same domain, while the Proxmox recreation check preserves both
 the database and exact blob-volume digest set.
 
+The live authority-lifecycle harness rotates both administration and member
+credentials, proves old/new exact retries after simulated response loss,
+rejects old credentials for ordinary operations, rejects prior-secret reuse,
+and exercises admission collection. The PostgreSQL gate additionally proves
+rotation records across a pool restart and serializes concurrent admission
+issuance at the domain limit.
+
 PostgreSQL metadata and the blob volume are one recovery unit. A backup or host
 migration that captures only one is incomplete. Direct SQL domain deletion is
 not an operational deletion workflow: filesystem orphan collection and a
@@ -85,6 +92,11 @@ Compose project and fresh named volumes on another loopback port. All relay
 table counts, blob paths and digests, and both `/readyz` results matched. This
 same-host proof does not replace an off-host repository, fresh-VM drill, or a
 documented retention schedule.
+
+The authority-lifecycle deployment repeated that isolated restore after
+credential rotations were present. Source and recovery matched rotation,
+admission, and audit counts, both services became ready, and the temporary
+recovery stack and test repository were removed afterward.
 
 ## What this checkpoint does not prove
 

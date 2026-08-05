@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/google/uuid"
@@ -25,9 +26,23 @@ type memoryDomain struct {
 	messages     []*memoryMessage
 	messageByID  map[uuid.UUID]*memoryMessage
 	blobs        map[string]BlobMetadata
+	rotations    map[uuid.UUID]memoryCredentialRotation
 	nextSequence uint64
 	storedBytes  int64
 }
+
+type memoryCredentialRotation struct {
+	subjectType                 string
+	subjectID                   uuid.UUID
+	previousAuthorizationDigest string
+	newAuthorizationDigest      string
+	rotatedAtMilliseconds       int64
+}
+
+const (
+	administrationRotationSubject = "administration"
+	memberRotationSubject         = "member"
+)
 
 type MemoryStore struct {
 	mu      sync.RWMutex
@@ -72,8 +87,156 @@ func (s *MemoryStore) CreateDomain(
 		admissions:  make(map[uuid.UUID]MemberAdmission),
 		messageByID: make(map[uuid.UUID]*memoryMessage),
 		blobs:       make(map[string]BlobMetadata),
+		rotations:   make(map[uuid.UUID]memoryCredentialRotation),
 	}
 	return AcceptanceAccepted, nil
+}
+
+func (s *MemoryStore) RotateAdministrationCredential(
+	_ context.Context,
+	credential AdministrationCredential,
+	rotation CredentialRotation,
+	nowMilliseconds int64,
+) (CredentialRotationResult, error) {
+	if err := rotation.Validate(); err != nil {
+		return CredentialRotationResult{}, err
+	}
+	actualDigest, err := AdministrationDigest(credential)
+	if err != nil {
+		return CredentialRotationResult{}, protocolError(
+			CodeUnauthorized,
+			"administration credential is invalid",
+		)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, ok := s.domains[domainKey{credential.TenantID, credential.DomainID}]
+	if !ok {
+		return CredentialRotationResult{}, protocolError(CodeDomainNotFound, "domain was not found")
+	}
+	if existing, ok := domain.rotations[rotation.RotationID]; ok {
+		return memoryRotationRetryResult(
+			existing,
+			administrationRotationSubject,
+			credential.DomainID,
+			actualDigest,
+			rotation,
+		)
+	}
+	if err := domain.registration.Authorize(credential); err != nil {
+		return CredentialRotationResult{}, err
+	}
+	if nowMilliseconds < domain.registration.CreatedAtMilliseconds {
+		return CredentialRotationResult{}, protocolError(
+			CodeInvalidCredentialRotation,
+			"credential rotation precedes domain creation",
+		)
+	}
+	if rotationDigestWasUsed(
+		domain.rotations,
+		administrationRotationSubject,
+		credential.DomainID,
+		rotation.AuthorizationDigest,
+	) || rotation.AuthorizationDigest == domain.registration.AdministrationDigest {
+		return CredentialRotationResult{}, protocolError(
+			CodeCredentialReuse,
+			"administration credential digest was already used",
+		)
+	}
+	if err := ensureCredentialRotationCapacity(
+		domain.rotations,
+		administrationRotationSubject,
+		credential.DomainID,
+	); err != nil {
+		return CredentialRotationResult{}, err
+	}
+	domain.rotations[rotation.RotationID] = memoryCredentialRotation{
+		subjectType:                 administrationRotationSubject,
+		subjectID:                   credential.DomainID,
+		previousAuthorizationDigest: domain.registration.AdministrationDigest,
+		newAuthorizationDigest:      rotation.AuthorizationDigest,
+		rotatedAtMilliseconds:       nowMilliseconds,
+	}
+	domain.registration.AdministrationDigest = rotation.AuthorizationDigest
+	return CredentialRotationResult{
+		Acceptance:            AcceptanceAccepted,
+		RotationID:            rotation.RotationID,
+		AuthorizationDigest:   rotation.AuthorizationDigest,
+		RotatedAtMilliseconds: nowMilliseconds,
+	}, nil
+}
+
+func (s *MemoryStore) RotateMemberCredential(
+	_ context.Context,
+	credential Credential,
+	rotation CredentialRotation,
+	nowMilliseconds int64,
+) (CredentialRotationResult, error) {
+	if err := rotation.Validate(); err != nil {
+		return CredentialRotationResult{}, err
+	}
+	actualDigest, err := AuthorizationDigest(credential)
+	if err != nil {
+		return CredentialRotationResult{}, protocolError(
+			CodeUnauthorized,
+			"member credential is invalid",
+		)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, ok := s.domains[domainKey{credential.TenantID, credential.DomainID}]
+	if !ok {
+		return CredentialRotationResult{}, protocolError(CodeDomainNotFound, "domain was not found")
+	}
+	if existing, ok := domain.rotations[rotation.RotationID]; ok {
+		return memoryRotationRetryResult(
+			existing,
+			memberRotationSubject,
+			credential.MemberID,
+			actualDigest,
+			rotation,
+		)
+	}
+	member, ok := domain.members[credential.MemberID]
+	if !ok {
+		return CredentialRotationResult{}, protocolError(CodeMemberNotFound, "member was not found")
+	}
+	if err := member.VerifyCredential(credential, nowMilliseconds); err != nil {
+		return CredentialRotationResult{}, err
+	}
+	if rotationDigestWasUsed(
+		domain.rotations,
+		memberRotationSubject,
+		credential.MemberID,
+		rotation.AuthorizationDigest,
+	) || rotation.AuthorizationDigest == member.AuthorizationDigest {
+		return CredentialRotationResult{}, protocolError(
+			CodeCredentialReuse,
+			"member credential digest was already used",
+		)
+	}
+	if err := ensureCredentialRotationCapacity(
+		domain.rotations,
+		memberRotationSubject,
+		credential.MemberID,
+	); err != nil {
+		return CredentialRotationResult{}, err
+	}
+	domain.rotations[rotation.RotationID] = memoryCredentialRotation{
+		subjectType:                 memberRotationSubject,
+		subjectID:                   credential.MemberID,
+		previousAuthorizationDigest: member.AuthorizationDigest,
+		newAuthorizationDigest:      rotation.AuthorizationDigest,
+		rotatedAtMilliseconds:       nowMilliseconds,
+	}
+	member.AuthorizationDigest = rotation.AuthorizationDigest
+	domain.members[credential.MemberID] = member
+	return CredentialRotationResult{
+		Acceptance:            AcceptanceAccepted,
+		RotationID:            rotation.RotationID,
+		AuthorizationDigest:   rotation.AuthorizationDigest,
+		RotatedAtMilliseconds: nowMilliseconds,
+	}, nil
 }
 
 func (s *MemoryStore) CreateAdmission(
@@ -115,6 +278,19 @@ func (s *MemoryStore) CreateAdmission(
 			}, nil
 		}
 		return AdmissionCreateResult{}, protocolError(CodeAdmissionCollision, "admission ID was reused")
+	}
+	if len(domain.admissions) >= MaximumRetainedAdmissionCount {
+		return AdmissionCreateResult{}, protocolError(
+			CodeDomainFull,
+			"domain reached its retained admission limit",
+		)
+	}
+	if countOutstandingAdmissions(domain.admissions, nowMilliseconds) >=
+		MaximumOutstandingAdmissionCount {
+		return AdmissionCreateResult{}, protocolError(
+			CodeDomainFull,
+			"domain reached its outstanding admission limit",
+		)
 	}
 	domain.admissions[registration.AdmissionID] = registration
 	return AdmissionCreateResult{
@@ -162,6 +338,9 @@ func (s *MemoryStore) ClaimAdmission(
 	if _, exists := domain.members[claim.MemberID]; exists {
 		return AdmissionClaimResult{}, protocolError(CodeMemberCollision, "member ID was reused")
 	}
+	if err := ensureMemberCapacity(domain.members, nowMilliseconds); err != nil {
+		return AdmissionClaimResult{}, err
+	}
 	member := MemberRegistration{
 		Version:               SchemaVersion,
 		TenantID:              admission.TenantID,
@@ -184,6 +363,43 @@ func (s *MemoryStore) ClaimAdmission(
 	return AdmissionClaimResult{
 		Acceptance: AcceptanceAccepted,
 		Member:     member,
+	}, nil
+}
+
+func (s *MemoryStore) CollectAdmissions(
+	_ context.Context,
+	credential AdministrationCredential,
+	nowMilliseconds int64,
+) (AdmissionCollectionResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return AdmissionCollectionResult{}, err
+	}
+	cutoff := admissionCollectionCutoff(nowMilliseconds)
+	eligible := make([]uuid.UUID, 0)
+	if nowMilliseconds > AdmissionRecoveryWindowMilliseconds {
+		for admissionID, admission := range domain.admissions {
+			if admissionCollectibleAt(admission, cutoff) {
+				eligible = append(eligible, admissionID)
+			}
+		}
+	}
+	sort.Slice(eligible, func(left, right int) bool {
+		return eligible[left].String() < eligible[right].String()
+	})
+	hasMore := len(eligible) > MaximumAdmissionCollectionBatch
+	if hasMore {
+		eligible = eligible[:MaximumAdmissionCollectionBatch]
+	}
+	for _, admissionID := range eligible {
+		delete(domain.admissions, admissionID)
+	}
+	return AdmissionCollectionResult{
+		CollectedCount:             len(eligible),
+		HasMore:                    hasMore,
+		EligibleBeforeMilliseconds: cutoff,
 	}, nil
 }
 
@@ -245,8 +461,139 @@ func (s *MemoryStore) CreateMember(
 		}
 		return "", protocolError(CodeMemberCollision, "member ID was reused")
 	}
+	if registration.ExpiresAtMilliseconds != nil &&
+		*registration.ExpiresAtMilliseconds <= nowMilliseconds {
+		return "", protocolError(CodeInvalidMember, "member is not currently issuable")
+	}
+	if err := ensureMemberCapacity(domain.members, nowMilliseconds); err != nil {
+		return "", err
+	}
 	domain.members[registration.MemberID] = registration
 	return AcceptanceAccepted, nil
+}
+
+func memoryRotationRetryResult(
+	existing memoryCredentialRotation,
+	subjectType string,
+	subjectID uuid.UUID,
+	actualDigest string,
+	rotation CredentialRotation,
+) (CredentialRotationResult, error) {
+	if actualDigest != existing.previousAuthorizationDigest &&
+		actualDigest != existing.newAuthorizationDigest {
+		return CredentialRotationResult{}, protocolError(
+			CodeUnauthorized,
+			"credential is not authorized for this rotation",
+		)
+	}
+	if existing.subjectType != subjectType || existing.subjectID != subjectID ||
+		existing.newAuthorizationDigest != rotation.AuthorizationDigest {
+		return CredentialRotationResult{}, protocolError(
+			CodeCredentialRotationCollision,
+			"credential rotation ID was reused",
+		)
+	}
+	return CredentialRotationResult{
+		Acceptance:            AcceptanceDuplicate,
+		RotationID:            rotation.RotationID,
+		AuthorizationDigest:   existing.newAuthorizationDigest,
+		RotatedAtMilliseconds: existing.rotatedAtMilliseconds,
+	}, nil
+}
+
+func rotationDigestWasUsed(
+	rotations map[uuid.UUID]memoryCredentialRotation,
+	subjectType string,
+	subjectID uuid.UUID,
+	digest string,
+) bool {
+	for _, rotation := range rotations {
+		if rotation.subjectType == subjectType && rotation.subjectID == subjectID &&
+			(rotation.previousAuthorizationDigest == digest ||
+				rotation.newAuthorizationDigest == digest) {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureCredentialRotationCapacity(
+	rotations map[uuid.UUID]memoryCredentialRotation,
+	subjectType string,
+	subjectID uuid.UUID,
+) error {
+	if len(rotations) >= MaximumCredentialRotationsPerDomain {
+		return protocolError(CodeDomainFull, "domain reached its credential rotation limit")
+	}
+	subjectCount := 0
+	for _, rotation := range rotations {
+		if rotation.subjectType == subjectType && rotation.subjectID == subjectID {
+			subjectCount++
+		}
+	}
+	if subjectCount >= MaximumCredentialRotationsPerSubject {
+		return protocolError(CodeDomainFull, "subject reached its credential rotation limit")
+	}
+	return nil
+}
+
+func ensureMemberCapacity(
+	members map[uuid.UUID]MemberRegistration,
+	nowMilliseconds int64,
+) error {
+	if len(members) >= MaximumRetainedMemberCountPerDomain {
+		return protocolError(CodeDomainFull, "domain reached its retained member limit")
+	}
+	activeCount := 0
+	for _, member := range members {
+		if memberActiveAt(member, nowMilliseconds) {
+			activeCount++
+		}
+	}
+	if activeCount >= MaximumActiveMemberCountPerDomain {
+		return protocolError(CodeDomainFull, "domain reached its active member limit")
+	}
+	return nil
+}
+
+func memberActiveAt(member MemberRegistration, nowMilliseconds int64) bool {
+	return nowMilliseconds >= member.CreatedAtMilliseconds &&
+		(member.ExpiresAtMilliseconds == nil || nowMilliseconds < *member.ExpiresAtMilliseconds) &&
+		(member.RevokedAtMilliseconds == nil || nowMilliseconds < *member.RevokedAtMilliseconds)
+}
+
+func countOutstandingAdmissions(
+	admissions map[uuid.UUID]MemberAdmission,
+	nowMilliseconds int64,
+) int {
+	count := 0
+	for _, admission := range admissions {
+		if admission.ClaimedAtMilliseconds == nil &&
+			(admission.RevokedAtMilliseconds == nil || nowMilliseconds < *admission.RevokedAtMilliseconds) &&
+			nowMilliseconds >= admission.CreatedAtMilliseconds &&
+			nowMilliseconds < admission.ExpiresAtMilliseconds {
+			count++
+		}
+	}
+	return count
+}
+
+func admissionCollectionCutoff(nowMilliseconds int64) int64 {
+	if nowMilliseconds <= AdmissionRecoveryWindowMilliseconds {
+		return 0
+	}
+	return nowMilliseconds - AdmissionRecoveryWindowMilliseconds
+}
+
+func admissionCollectibleAt(admission MemberAdmission, cutoff int64) bool {
+	terminalAt := admission.ExpiresAtMilliseconds
+	if admission.RevokedAtMilliseconds != nil {
+		terminalAt = *admission.RevokedAtMilliseconds
+	}
+	if admission.ClaimedAtMilliseconds != nil {
+		terminalAt = *admission.ClaimedAtMilliseconds
+	}
+	return terminalAt <= cutoff
 }
 
 func (s *MemoryStore) RevokeMember(

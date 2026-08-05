@@ -25,6 +25,9 @@ Supported production deployments must:
   the provisioning route through public application ingress;
 - deliver newly issued domain-administration and member credentials exactly
   once into an approved client secret store;
+- rotate a domain-administration or member credential by generating its
+  replacement locally and sending only the domain-separated digest; an exact
+  retry may use either side of that one recorded rotation;
 - deliver short-lived member-admission credentials only through an
   authenticated, user-approved channel; possession grants the frozen relay
   capabilities but proves neither a Facets principal nor a Shared Space role;
@@ -39,16 +42,17 @@ Supported production deployments must:
 
 The pairing, member-admission, replica-message, and encrypted-blob APIs are
 security checkpoints, not a production hosted-service declaration. The message
-relay has per-domain message and stored
-ciphertext quotas. Blob upload verifies the declared length and SHA-256 content
+relay has per-domain message, stored-ciphertext, member, admission, and
+credential-rotation bounds. Blob upload verifies the declared length and SHA-256 content
 address before an atomic filesystem commit, but failed post-write metadata
 commits can leave unreferenced files until orphan collection is implemented.
-The service does not yet collect retained data or apply
-distributed/account-level rate limits. Expired, claimed, and revoked admission
-records are not yet collected. Compromised member authorization can
+An administrator can collect terminal admissions only after their 30-day
+response-recovery window; message/blob retention and audit-history policy are
+not yet implemented. The service does not apply distributed/account-level rate
+limits. Compromised member authorization can
 read or publish opaque envelopes within its capabilities even though it cannot
-decrypt them without the content key. Account admission, credential rotation,
-abuse resistance, distributed rate limiting, retention policy, independent
+decrypt them without the content key. Account admission, operator-credential
+rotation, abuse resistance, distributed rate limiting, retention policy, independent
 review, periodic off-host and fresh-machine backup/restore drills, and hosted
 incident procedures remain required before public exposure. The checked-in
 operations bundle proves an encrypted same-host restore into isolated fresh

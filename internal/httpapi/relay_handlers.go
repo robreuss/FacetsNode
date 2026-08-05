@@ -212,6 +212,124 @@ func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *ht
 	})
 }
 
+func (s *Server) handleRotateRelayAdministrationCredential(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	rotationID, err := parseRelayUUID(request.PathValue("rotationID"))
+	if err != nil {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeInvalidCredentialRotation,
+			"credential rotation identifier is invalid",
+		))
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(
+		request, tenantID, domainID,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	rotation, err := relayCredentialRotationFromRequest(writer, request, rotationID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.relayStore.RotateAdministrationCredential(
+		request.Context(), credential, rotation, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleRotateRelayMemberCredential(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	memberID, err := parseRelayUUID(request.PathValue("memberID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	rotationID, err := parseRelayUUID(request.PathValue("rotationID"))
+	if err != nil {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeInvalidCredentialRotation,
+			"credential rotation identifier is invalid",
+		))
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if credential.MemberID != memberID {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeWrongScope,
+			"member credential and path identifiers differ",
+		))
+		return
+	}
+	rotation, err := relayCredentialRotationFromRequest(writer, request, rotationID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.relayStore.RotateMemberCredential(
+		request.Context(), credential, rotation, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func relayCredentialRotationFromRequest(
+	writer http.ResponseWriter,
+	request *http.Request,
+	rotationID uuid.UUID,
+) (relay.CredentialRotation, error) {
+	var input struct {
+		AuthorizationDigest string `json:"authorizationDigest"`
+	}
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		return relay.CredentialRotation{}, err
+	}
+	rotation := relay.CredentialRotation{
+		RotationID:          rotationID,
+		AuthorizationDigest: input.AuthorizationDigest,
+	}
+	if err := rotation.Validate(); err != nil {
+		return relay.CredentialRotation{}, err
+	}
+	return rotation, nil
+}
+
+func relayAcceptanceStatus(acceptance relay.Acceptance) int {
+	if acceptance == relay.AcceptanceDuplicate {
+		return http.StatusOK
+	}
+	return http.StatusCreated
+}
+
 func (s *Server) handleCreateRelayAdmission(
 	writer http.ResponseWriter,
 	request *http.Request,
@@ -269,6 +387,32 @@ func (s *Server) handleCreateRelayAdmission(
 		status = http.StatusOK
 	}
 	writeJSON(writer, status, result)
+}
+
+func (s *Server) handleCollectRelayAdmissions(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(
+		request, tenantID, domainID,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.relayStore.CollectAdmissions(
+		request.Context(), credential, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 func (s *Server) handleClaimRelayAdmission(

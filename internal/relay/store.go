@@ -18,6 +18,18 @@ type Store interface {
 		registration MemberRegistration,
 		nowMilliseconds int64,
 	) (Acceptance, error)
+	RotateAdministrationCredential(
+		ctx context.Context,
+		credential AdministrationCredential,
+		rotation CredentialRotation,
+		nowMilliseconds int64,
+	) (CredentialRotationResult, error)
+	RotateMemberCredential(
+		ctx context.Context,
+		credential Credential,
+		rotation CredentialRotation,
+		nowMilliseconds int64,
+	) (CredentialRotationResult, error)
 	CreateAdmission(
 		ctx context.Context,
 		credential AdministrationCredential,
@@ -36,6 +48,11 @@ type Store interface {
 		admissionID uuid.UUID,
 		nowMilliseconds int64,
 	) (Acceptance, error)
+	CollectAdmissions(
+		ctx context.Context,
+		credential AdministrationCredential,
+		nowMilliseconds int64,
+	) (AdmissionCollectionResult, error)
 	RevokeMember(
 		ctx context.Context,
 		credential AdministrationCredential,

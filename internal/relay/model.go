@@ -27,6 +27,14 @@ const (
 	DefaultMaximumStoredByteCount        = int64(1 * 1_024 * 1_024 * 1_024)
 	AbsoluteMaximumStoredByteCount       = int64(1 * 1_024 * 1_024 * 1_024 * 1_024)
 	MaximumAdmissionLifetimeMilliseconds = int64(7 * 24 * 60 * 60 * 1_000)
+	MaximumActiveMemberCountPerDomain    = 256
+	MaximumRetainedMemberCountPerDomain  = 4_096
+	MaximumOutstandingAdmissionCount     = 64
+	MaximumRetainedAdmissionCount        = 4_096
+	MaximumAdmissionCollectionBatch      = 256
+	AdmissionRecoveryWindowMilliseconds  = int64(30 * 24 * 60 * 60 * 1_000)
+	MaximumCredentialRotationsPerSubject = 256
+	MaximumCredentialRotationsPerDomain  = 4_096
 	MinimumAuthorizationTokenSize        = 32
 	MaximumSequence                      = uint64(1<<63 - 1)
 )
@@ -71,6 +79,34 @@ type AdministrationCredential struct {
 	TenantID uuid.UUID
 	DomainID uuid.UUID
 	Token    string
+}
+
+type CredentialRotation struct {
+	RotationID          uuid.UUID `json:"rotationID"`
+	AuthorizationDigest string    `json:"authorizationDigest"`
+}
+
+func (r CredentialRotation) Validate() error {
+	if r.RotationID == uuid.Nil || !validDigest(r.AuthorizationDigest) {
+		return protocolError(
+			CodeInvalidCredentialRotation,
+			"credential rotation fields are invalid",
+		)
+	}
+	return nil
+}
+
+type CredentialRotationResult struct {
+	Acceptance            Acceptance `json:"acceptance"`
+	RotationID            uuid.UUID  `json:"rotationID"`
+	AuthorizationDigest   string     `json:"authorizationDigest"`
+	RotatedAtMilliseconds int64      `json:"rotatedAtMilliseconds"`
+}
+
+type AdmissionCollectionResult struct {
+	CollectedCount             int   `json:"collectedCount"`
+	HasMore                    bool  `json:"hasMore"`
+	EligibleBeforeMilliseconds int64 `json:"eligibleBeforeMilliseconds"`
 }
 
 // AdmissionCredential is a one-time, domain-scoped bearer capability. It can
@@ -266,6 +302,22 @@ func (r MemberRegistration) Authorize(
 	capability Capability,
 	nowMilliseconds int64,
 ) error {
+	if err := r.VerifyCredential(credential, nowMilliseconds); err != nil {
+		return err
+	}
+	index := sort.Search(len(r.Capabilities), func(index int) bool {
+		return r.Capabilities[index] >= capability
+	})
+	if index == len(r.Capabilities) || r.Capabilities[index] != capability {
+		return protocolError(CodeMissingCapability, "member lacks the required capability")
+	}
+	return nil
+}
+
+func (r MemberRegistration) VerifyCredential(
+	credential Credential,
+	nowMilliseconds int64,
+) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
@@ -279,12 +331,6 @@ func (r MemberRegistration) Authorize(
 	}
 	if r.RevokedAtMilliseconds != nil && nowMilliseconds >= *r.RevokedAtMilliseconds {
 		return protocolError(CodeMemberRevoked, "member is revoked")
-	}
-	index := sort.Search(len(r.Capabilities), func(index int) bool {
-		return r.Capabilities[index] >= capability
-	})
-	if index == len(r.Capabilities) || r.Capabilities[index] != capability {
-		return protocolError(CodeMissingCapability, "member lacks the required capability")
 	}
 	actual, err := AuthorizationDigest(credential)
 	if err != nil || !constantTimeDigestEqual(actual, r.AuthorizationDigest) {

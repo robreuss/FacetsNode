@@ -40,7 +40,8 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
-		TRUNCATE relay_audit_events, relay_acknowledgments,
+		TRUNCATE relay_audit_events, relay_credential_rotations,
+		         relay_acknowledgments,
 		         relay_messages, relay_blobs, relay_member_admissions,
 		         relay_members, relay_domains
 	`); err != nil {
@@ -262,11 +263,74 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		pool.Close()
 		t.Fatalf("blob beyond count quota err=%v", err)
 	}
+	newAdmin := admin
+	newAdmin.Token = postgresRelayToken(161)
+	newAdminDigest, err := relay.AdministrationDigest(newAdmin)
+	if err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	adminRotation := relay.CredentialRotation{
+		RotationID:          uuid.New(),
+		AuthorizationDigest: newAdminDigest,
+	}
+	adminRotated, err := store.RotateAdministrationCredential(
+		ctx, admin, adminRotation, 1_700,
+	)
+	if err != nil || adminRotated.Acceptance != relay.AcceptanceAccepted {
+		pool.Close()
+		t.Fatalf("rotate admin=%+v err=%v", adminRotated, err)
+	}
+	newRecipientCredential := recipientCredential
+	newRecipientCredential.Token = postgresRelayToken(162)
+	newRecipientDigest, err := relay.AuthorizationDigest(newRecipientCredential)
+	if err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	recipientRotation := relay.CredentialRotation{
+		RotationID:          uuid.New(),
+		AuthorizationDigest: newRecipientDigest,
+	}
+	recipientRotated, err := store.RotateMemberCredential(
+		ctx, recipientCredential, recipientRotation, 1_700,
+	)
+	if err != nil || recipientRotated.Acceptance != relay.AcceptanceAccepted {
+		pool.Close()
+		t.Fatalf("rotate recipient=%+v err=%v", recipientRotated, err)
+	}
+	recipient.AuthorizationDigest = newRecipientDigest
 	pool.Close()
 
 	pool = openPool(t, ctx, databaseURL)
 	defer pool.Close()
 	store = postgresstore.NewRelayStore(pool)
+	adminRetry, err := store.RotateAdministrationCredential(
+		ctx, admin, adminRotation, 2_000,
+	)
+	if err != nil || adminRetry.Acceptance != relay.AcceptanceDuplicate ||
+		adminRetry.RotatedAtMilliseconds != 1_700 {
+		t.Fatalf("restart admin rotation retry=%+v err=%v", adminRetry, err)
+	}
+	recipientRotationRetry, err := store.RotateMemberCredential(
+		ctx, recipientCredential, recipientRotation, 2_000,
+	)
+	if err != nil || recipientRotationRetry.Acceptance != relay.AcceptanceDuplicate ||
+		recipientRotationRetry.RotatedAtMilliseconds != 1_700 {
+		t.Fatalf("restart member rotation retry=%+v err=%v", recipientRotationRetry, err)
+	}
+	if _, err := store.CollectAdmissions(
+		ctx, admin, 2_000,
+	); !relay.ErrorHasCode(err, relay.CodeUnauthorized) {
+		t.Fatalf("old admin remained authorized after restart err=%v", err)
+	}
+	if _, err := store.Fetch(
+		ctx, recipientCredential, 0, 100, 2_000,
+	); !relay.ErrorHasCode(err, relay.CodeUnauthorized) {
+		t.Fatalf("old member remained authorized after restart err=%v", err)
+	}
+	admin = newAdmin
+	recipientCredential = newRecipientCredential
 	admissionRetry, err := store.ClaimAdmission(
 		ctx,
 		admissionCredential,
@@ -320,6 +384,30 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	if _, err := store.Fetch(ctx, recipientCredential, 0, 100, 1_600); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("fetch after revocation err=%v", err)
 	}
+	earlyCollection, err := store.CollectAdmissions(
+		ctx,
+		admin,
+		1_500+relay.AdmissionRecoveryWindowMilliseconds-1,
+	)
+	if err != nil || earlyCollection.CollectedCount != 0 {
+		t.Fatalf("early admission collection=%+v err=%v", earlyCollection, err)
+	}
+	collectionTime := int64(1_500) + relay.AdmissionRecoveryWindowMilliseconds
+	collection, err := store.CollectAdmissions(ctx, admin, collectionTime)
+	if err != nil || collection.CollectedCount != 1 || collection.HasMore {
+		t.Fatalf("admission collection=%+v err=%v", collection, err)
+	}
+	if _, err := store.ClaimAdmission(
+		ctx,
+		admissionCredential,
+		relay.MemberAdmissionClaim{
+			MemberID:            recipient.MemberID,
+			AuthorizationDigest: recipient.AuthorizationDigest,
+		},
+		collectionTime,
+	); !relay.ErrorHasCode(err, relay.CodeAdmissionNotFound) {
+		t.Fatalf("collected admission remained retryable err=%v", err)
+	}
 
 	var messageCount, blobCount, lastSequence, auditCount int
 	var storedByteCount int64
@@ -344,7 +432,7 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 		blobCount != 1 ||
 		storedByteCount != fixtureCiphertextByteCount+concurrentCount+int64(len(blobBytes)) ||
 		lastSequence != concurrentCount+1 ||
-		auditCount != concurrentCount+10 {
+		auditCount != concurrentCount+13 {
 		t.Fatalf(
 			"message_count=%d blob_count=%d stored_byte_count=%d last_sequence=%d audit_count=%d",
 			messageCount,
@@ -364,6 +452,7 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			(SELECT count(*) FROM relay_member_admissions WHERE tenant_id = $1 AND domain_id = $2) +
+			(SELECT count(*) FROM relay_credential_rotations WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_members WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_messages WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_acknowledgments WHERE tenant_id = $1 AND domain_id = $2) +
@@ -374,6 +463,135 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	}
 	if remaining != 0 {
 		t.Fatalf("relay domain deletion left %d dependent rows", remaining)
+	}
+}
+
+func TestPostgresRelaySerializesOutstandingAdmissionLimit(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_NODE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_NODE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool := openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := postgresstore.NewRelayStore(pool)
+	tenantID := uuid.New()
+	domainID := uuid.New()
+	admin := relay.AdministrationCredential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		Token:    postgresRelayToken(180),
+	}
+	adminDigest, err := relay.AdministrationDigest(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialCredential := relay.Credential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		MemberID: uuid.New(),
+		Token:    postgresRelayToken(181),
+	}
+	initialDigest, err := relay.AuthorizationDigest(initialCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDomain(ctx, relay.DomainRegistration{
+		Version:                relay.SchemaVersion,
+		TenantID:               tenantID,
+		DomainID:               domainID,
+		AdministrationDigest:   adminDigest,
+		CreatedAtMilliseconds:  1_000,
+		MaximumMessageCount:    10,
+		MaximumBlobCount:       10,
+		MaximumStoredByteCount: 1_024,
+	}, relay.MemberRegistration{
+		Version:               relay.SchemaVersion,
+		TenantID:              tenantID,
+		DomainID:              domainID,
+		MemberID:              initialCredential.MemberID,
+		AuthorizationDigest:   initialDigest,
+		Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+		CreatedAtMilliseconds: 1_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			"DELETE FROM relay_domains WHERE tenant_id = $1 AND domain_id = $2",
+			tenantID,
+			domainID,
+		)
+	})
+
+	const attemptCount = relay.MaximumOutstandingAdmissionCount + 1
+	registrations := make([]relay.MemberAdmission, attemptCount)
+	for index := range registrations {
+		credential := relay.AdmissionCredential{
+			TenantID:    tenantID,
+			DomainID:    domainID,
+			AdmissionID: uuid.New(),
+			Token:       postgresRelayToken(byte(index)),
+		}
+		digest, err := relay.AdmissionAuthorizationDigest(credential)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registrations[index] = relay.MemberAdmission{
+			Version:               relay.SchemaVersion,
+			TenantID:              tenantID,
+			DomainID:              domainID,
+			AdmissionID:           credential.AdmissionID,
+			AuthorizationDigest:   digest,
+			Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+			CreatedAtMilliseconds: 1_000,
+			ExpiresAtMilliseconds: 2_000,
+		}
+	}
+	type outcome struct {
+		index      int
+		acceptance relay.Acceptance
+		err        error
+	}
+	outcomes := make(chan outcome, attemptCount)
+	var group sync.WaitGroup
+	for index, registration := range registrations {
+		group.Add(1)
+		go func(index int, registration relay.MemberAdmission) {
+			defer group.Done()
+			result, err := store.CreateAdmission(ctx, admin, registration, 1_000)
+			outcomes <- outcome{index: index, acceptance: result.Acceptance, err: err}
+		}(index, registration)
+	}
+	group.Wait()
+	close(outcomes)
+	acceptedIndexes := make([]int, 0, relay.MaximumOutstandingAdmissionCount)
+	domainFullCount := 0
+	for outcome := range outcomes {
+		switch {
+		case outcome.err == nil && outcome.acceptance == relay.AcceptanceAccepted:
+			acceptedIndexes = append(acceptedIndexes, outcome.index)
+		case relay.ErrorHasCode(outcome.err, relay.CodeDomainFull):
+			domainFullCount++
+		default:
+			t.Fatalf("unexpected admission outcome index=%d acceptance=%q err=%v",
+				outcome.index, outcome.acceptance, outcome.err)
+		}
+	}
+	if len(acceptedIndexes) != relay.MaximumOutstandingAdmissionCount ||
+		domainFullCount != 1 {
+		t.Fatalf("accepted=%d domain_full=%d", len(acceptedIndexes), domainFullCount)
+	}
+	retry, err := store.CreateAdmission(
+		ctx, admin, registrations[acceptedIndexes[0]], 1_000,
+	)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("capacity-bound exact retry=%+v err=%v", retry, err)
 	}
 }
 

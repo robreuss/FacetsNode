@@ -251,7 +251,7 @@ func TestMemoryStoreRejectsScopeCapabilityAndMessageCollisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	expiresAt := int64(1_400)
-	_, err = store.CreateMember(ctx, admin, relay.MemberRegistration{
+	expiredRegistration := relay.MemberRegistration{
 		Version:               relay.SchemaVersion,
 		TenantID:              expiredCredential.TenantID,
 		DomainID:              expiredCredential.DomainID,
@@ -260,9 +260,15 @@ func TestMemoryStoreRejectsScopeCapabilityAndMessageCollisions(t *testing.T) {
 		Capabilities:          []relay.Capability{relay.CapabilityPublishMessage},
 		CreatedAtMilliseconds: 1_000,
 		ExpiresAtMilliseconds: &expiresAt,
-	}, 1_200)
+	}
+	_, err = store.CreateMember(ctx, admin, expiredRegistration, 1_200)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if acceptance, err := store.CreateMember(
+		ctx, admin, expiredRegistration, 1_500,
+	); err != nil || acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("expired member exact retry acceptance=%q err=%v", acceptance, err)
 	}
 	expiredEnvelope := fixture.Envelope
 	expiredEnvelope.MessageID = uuid.New()
@@ -629,6 +635,283 @@ func TestMemoryStoreClaimsAdmissionOnceAndRevokesBeforeClaim(t *testing.T) {
 		}, 3_300,
 	); !relay.ErrorHasCode(err, relay.CodeAdmissionRevoked) {
 		t.Fatalf("claim revoked admission err=%v", err)
+	}
+	beforeRecovery := int64(1_700) + relay.AdmissionRecoveryWindowMilliseconds - 1
+	collection, err := store.CollectAdmissions(ctx, admin, beforeRecovery)
+	if err != nil || collection.CollectedCount != 0 {
+		t.Fatalf("early admission collection=%+v err=%v", collection, err)
+	}
+	afterRecovery := int64(3_100) + relay.AdmissionRecoveryWindowMilliseconds
+	collection, err = store.CollectAdmissions(ctx, admin, afterRecovery)
+	if err != nil || collection.CollectedCount != 2 || collection.HasMore {
+		t.Fatalf("admission collection=%+v err=%v", collection, err)
+	}
+	if _, err := store.ClaimAdmission(
+		ctx, admissionCredential, claim, afterRecovery,
+	); !relay.ErrorHasCode(err, relay.CodeAdmissionNotFound) {
+		t.Fatalf("collected admission remained retryable err=%v", err)
+	}
+}
+
+func TestMemoryStoreRotatesCredentialsWithoutChangingAuthority(t *testing.T) {
+	ctx := context.Background()
+	tenantID := uuid.New()
+	domainID := uuid.New()
+	oldAdmin := relay.AdministrationCredential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		Token:    token(200),
+	}
+	oldMember := relay.Credential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		MemberID: uuid.New(),
+		Token:    token(201),
+	}
+	adminDigest, err := relay.AdministrationDigest(oldAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberDigest, err := relay.AuthorizationDigest(oldMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := relay.NewMemoryStore()
+	if _, err := store.CreateDomain(ctx, relay.DomainRegistration{
+		Version:                relay.SchemaVersion,
+		TenantID:               tenantID,
+		DomainID:               domainID,
+		AdministrationDigest:   adminDigest,
+		CreatedAtMilliseconds:  1_000,
+		MaximumMessageCount:    10,
+		MaximumBlobCount:       10,
+		MaximumStoredByteCount: 1_024,
+	}, relay.MemberRegistration{
+		Version:               relay.SchemaVersion,
+		TenantID:              tenantID,
+		DomainID:              domainID,
+		MemberID:              oldMember.MemberID,
+		AuthorizationDigest:   memberDigest,
+		Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+		CreatedAtMilliseconds: 1_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	newAdmin := oldAdmin
+	newAdmin.Token = token(202)
+	newAdminDigest, err := relay.AdministrationDigest(newAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminRotation := relay.CredentialRotation{
+		RotationID:          uuid.New(),
+		AuthorizationDigest: newAdminDigest,
+	}
+	rotatedAdmin, err := store.RotateAdministrationCredential(
+		ctx, oldAdmin, adminRotation, 1_500,
+	)
+	if err != nil || rotatedAdmin.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("rotate admin=%+v err=%v", rotatedAdmin, err)
+	}
+	for _, credential := range []relay.AdministrationCredential{oldAdmin, newAdmin} {
+		retry, err := store.RotateAdministrationCredential(
+			ctx, credential, adminRotation, 1_600,
+		)
+		if err != nil || retry.Acceptance != relay.AcceptanceDuplicate ||
+			retry.RotatedAtMilliseconds != 1_500 {
+			t.Fatalf("admin rotation retry=%+v err=%v", retry, err)
+		}
+	}
+	if _, err := store.CollectAdmissions(ctx, oldAdmin, 1_600); !relay.ErrorHasCode(err, relay.CodeUnauthorized) {
+		t.Fatalf("old admin remained authorized err=%v", err)
+	}
+	if _, err := store.RotateAdministrationCredential(
+		ctx,
+		newAdmin,
+		relay.CredentialRotation{
+			RotationID:          uuid.New(),
+			AuthorizationDigest: adminDigest,
+		},
+		1_700,
+	); !relay.ErrorHasCode(err, relay.CodeCredentialReuse) {
+		t.Fatalf("admin credential reuse err=%v", err)
+	}
+	collision := adminRotation
+	collision.AuthorizationDigest = memberDigest
+	if _, err := store.RotateAdministrationCredential(
+		ctx, newAdmin, collision, 1_700,
+	); !relay.ErrorHasCode(err, relay.CodeCredentialRotationCollision) {
+		t.Fatalf("admin rotation collision err=%v", err)
+	}
+
+	newMember := oldMember
+	newMember.Token = token(203)
+	newMemberDigest, err := relay.AuthorizationDigest(newMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberRotation := relay.CredentialRotation{
+		RotationID:          uuid.New(),
+		AuthorizationDigest: newMemberDigest,
+	}
+	rotatedMember, err := store.RotateMemberCredential(
+		ctx, oldMember, memberRotation, 1_500,
+	)
+	if err != nil || rotatedMember.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("rotate member=%+v err=%v", rotatedMember, err)
+	}
+	for _, credential := range []relay.Credential{oldMember, newMember} {
+		retry, err := store.RotateMemberCredential(
+			ctx, credential, memberRotation, 1_600,
+		)
+		if err != nil || retry.Acceptance != relay.AcceptanceDuplicate ||
+			retry.RotatedAtMilliseconds != 1_500 {
+			t.Fatalf("member rotation retry=%+v err=%v", retry, err)
+		}
+	}
+	if _, err := store.Fetch(ctx, oldMember, 0, 10, 1_600); !relay.ErrorHasCode(err, relay.CodeUnauthorized) {
+		t.Fatalf("old member remained authorized err=%v", err)
+	}
+	if _, err := store.Fetch(ctx, newMember, 0, 10, 1_600); err != nil {
+		t.Fatalf("new member was not authorized: %v", err)
+	}
+}
+
+func TestMemoryStoreBoundsActiveMembersAndOutstandingAdmissions(t *testing.T) {
+	ctx := context.Background()
+	tenantID := uuid.New()
+	domainID := uuid.New()
+	admin := relay.AdministrationCredential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		Token:    token(210),
+	}
+	adminDigest, err := relay.AdministrationDigest(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := relay.Credential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		MemberID: uuid.New(),
+		Token:    token(211),
+	}
+	initialDigest, err := relay.AuthorizationDigest(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := relay.NewMemoryStore()
+	if _, err := store.CreateDomain(ctx, relay.DomainRegistration{
+		Version:                relay.SchemaVersion,
+		TenantID:               tenantID,
+		DomainID:               domainID,
+		AdministrationDigest:   adminDigest,
+		CreatedAtMilliseconds:  1_000,
+		MaximumMessageCount:    10,
+		MaximumBlobCount:       10,
+		MaximumStoredByteCount: 1_024,
+	}, relay.MemberRegistration{
+		Version:               relay.SchemaVersion,
+		TenantID:              tenantID,
+		DomainID:              domainID,
+		MemberID:              initial.MemberID,
+		AuthorizationDigest:   initialDigest,
+		Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+		CreatedAtMilliseconds: 1_000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createdMemberIDs := make([]uuid.UUID, 0, relay.MaximumActiveMemberCountPerDomain-1)
+	for index := 1; index < relay.MaximumActiveMemberCountPerDomain; index++ {
+		credential := relay.Credential{
+			TenantID: tenantID,
+			DomainID: domainID,
+			MemberID: uuid.New(),
+			Token:    token(byte(index)),
+		}
+		digest, err := relay.AuthorizationDigest(credential)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registration := relay.MemberRegistration{
+			Version:               relay.SchemaVersion,
+			TenantID:              tenantID,
+			DomainID:              domainID,
+			MemberID:              credential.MemberID,
+			AuthorizationDigest:   digest,
+			Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+			CreatedAtMilliseconds: 1_500,
+		}
+		if _, err := store.CreateMember(ctx, admin, registration, 1_500); err != nil {
+			t.Fatalf("create member %d: %v", index, err)
+		}
+		createdMemberIDs = append(createdMemberIDs, credential.MemberID)
+	}
+	overflowMember := relay.MemberRegistration{
+		Version:               relay.SchemaVersion,
+		TenantID:              tenantID,
+		DomainID:              domainID,
+		MemberID:              uuid.New(),
+		AuthorizationDigest:   initialDigest,
+		Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+		CreatedAtMilliseconds: 1_500,
+	}
+	if _, err := store.CreateMember(ctx, admin, overflowMember, 1_500); !relay.ErrorHasCode(err, relay.CodeDomainFull) {
+		t.Fatalf("active member limit err=%v", err)
+	}
+	if _, err := store.RevokeMember(ctx, admin, createdMemberIDs[0], 1_600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateMember(ctx, admin, overflowMember, 1_600); err != nil {
+		t.Fatalf("member slot was not released after revocation: %v", err)
+	}
+
+	admissionIDs := make([]uuid.UUID, 0, relay.MaximumOutstandingAdmissionCount)
+	for index := 0; index < relay.MaximumOutstandingAdmissionCount; index++ {
+		credential := relay.AdmissionCredential{
+			TenantID:    tenantID,
+			DomainID:    domainID,
+			AdmissionID: uuid.New(),
+			Token:       token(byte(index + 40)),
+		}
+		digest, err := relay.AdmissionAuthorizationDigest(credential)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registration := relay.MemberAdmission{
+			Version:               relay.SchemaVersion,
+			TenantID:              tenantID,
+			DomainID:              domainID,
+			AdmissionID:           credential.AdmissionID,
+			AuthorizationDigest:   digest,
+			Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+			CreatedAtMilliseconds: 2_000,
+			ExpiresAtMilliseconds: 3_000,
+		}
+		if _, err := store.CreateAdmission(ctx, admin, registration, 2_000); err != nil {
+			t.Fatalf("create admission %d: %v", index, err)
+		}
+		admissionIDs = append(admissionIDs, credential.AdmissionID)
+	}
+	overflowAdmission := relay.MemberAdmission{
+		Version:               relay.SchemaVersion,
+		TenantID:              tenantID,
+		DomainID:              domainID,
+		AdmissionID:           uuid.New(),
+		AuthorizationDigest:   initialDigest,
+		Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+		CreatedAtMilliseconds: 2_000,
+		ExpiresAtMilliseconds: 3_000,
+	}
+	if _, err := store.CreateAdmission(ctx, admin, overflowAdmission, 2_000); !relay.ErrorHasCode(err, relay.CodeDomainFull) {
+		t.Fatalf("outstanding admission limit err=%v", err)
+	}
+	if _, err := store.RevokeAdmission(ctx, admin, admissionIDs[0], 2_100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateAdmission(ctx, admin, overflowAdmission, 2_100); err != nil {
+		t.Fatalf("admission slot was not released after revocation: %v", err)
 	}
 }
 

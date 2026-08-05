@@ -28,6 +28,10 @@ Facets core codebase.
 - Capability-scoped relay membership with immediate expiry and revocation
 - One-time, expiry-bound member admissions that never expose domain
   administration credentials to joining clients
+- Atomic, response-loss-safe domain/member credential rotation with old-secret
+  reuse rejection and bounded history
+- Bounded active/retained members and admissions, plus administrator-driven
+  collection after a 30-day admission retry window
 - Opaque, monotonic catch-up cursors and per-member accepted/applied facts
 - Per-domain message/blob counts and total stored-byte quotas
 - PostgreSQL-backed concurrent publication with restart-safe ordering
@@ -37,7 +41,7 @@ Facets core codebase.
 - Domain-scoped, content-addressed encrypted-blob storage on a separate volume
 - Streaming blob upload with digest verification and Range-capable GET/HEAD
 
-Resumable/multipart blob upload, checkpoints, retention and orphan collection,
+Resumable/multipart blob upload, checkpoints, message/blob retention and orphan collection,
 hosted object storage/account admission, Shared Space membership, billing, and
 compute are later modules. Relay member admission grants routing authority
 only; it does not verify identity or carry a domain content key. The checkpoint

@@ -97,7 +97,12 @@ counts for every pairing/relay authority table, identical sorted blob paths and
 digests, and healthy private endpoints. The temporary decrypted tree was also
 removed successfully.
 
+The authority-lifecycle checkpoint repeated the isolated restore with retained
+credential rotations present and matched rotation, admission, and audit counts
+before removing the temporary recovery resources.
+
 Still required before production are a fresh-VM/off-host restore drill,
 scheduled repository integrity checks, a versioned retention/pruning policy,
 capacity and duration measurements at realistic data size, credential-rotation
-and ingress-switch procedures, monitoring, and a point-in-time recovery policy.
+drills (including operator provisioning), ingress-switch procedures,
+monitoring, and a point-in-time recovery policy.

@@ -91,6 +91,41 @@ deliver the response directly to an approved secret store. Do not give the
 domain-administration token to a joining device. Use a member admission when a
 joining client must establish its own member credential.
 
+## Rotate a routing credential
+
+The client generates a replacement token locally, computes its ordinary
+domain-separated authorization digest, and sends only the new digest. The
+rotation UUID is a client-generated idempotency key:
+
+```http
+POST /v1/relay/tenants/{tenantID}/domains/{domainID}/administration/credential-rotations/{rotationID}
+Content-Type: application/json
+Authorization: Bearer <current domain-administration token>
+
+{"authorizationDigest":"<new administration-token digest>"}
+```
+
+```http
+POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members/{memberID}/credential-rotations/{rotationID}
+Content-Type: application/json
+Authorization: Bearer <current member token>
+X-Facets-Member-ID: <same member UUID>
+
+{"authorizationDigest":"<new member-token digest>"}
+```
+
+The digest replacement and rotation record commit atomically. A new rotation
+returns `201 accepted`. If the response is lost, the exact request may be
+retried with either the previous or replacement token and returns `200
+duplicate` with the original rotation time. The previous token cannot perform
+any other operation after the commit. Reusing a rotation ID with different
+content or reintroducing any prior digest is rejected.
+
+Member rotation is self-service and does not change the member ID,
+capabilities, Facets principal/Persona, content key, or Space role. A lost
+member token is recovered by revoking that member and admitting a replacement,
+not by asking the relay to disclose or reset its secret.
+
 ## Issue a one-time member admission
 
 The admitting client generates a random admission ID and independent 32-byte
@@ -115,8 +150,9 @@ Admission expiry is mandatory and may be no more than seven days after
 creation. Member expiry is optional; when present it must follow admission
 expiry so a successful claim cannot create an already expired member.
 Capabilities and member expiry are frozen at admission creation. An exact
-creation retry returns the original record and its current claimed or revoked
-state; reusing an admission ID with different authority is a collision.
+creation retry made while the admission remains issuable returns the original
+record and its current claimed or revoked state; reusing an admission ID with
+different authority is a collision.
 
 The admission token must be delivered through an authenticated, user-approved
 channel. For Personal Sync or an end-to-end encrypted Shared Space, that
@@ -161,8 +197,9 @@ Authorization: Bearer <member-admission token>
 
 The Node atomically consumes the admission and creates the member. It never
 stores either plaintext bearer token. An exact retry with the same member ID
-and digest returns the original member even after admission expiry, allowing a
-client to recover from response loss. A different second claim is rejected.
+and digest returns the original member after admission expiry, allowing a
+client to recover from response loss during the 30-day recovery window. A
+different second claim is rejected.
 
 An unclaimed admission can be cancelled idempotently:
 
@@ -173,6 +210,33 @@ Authorization: Bearer <domain-administration token>
 
 After claim, revoke the resulting member instead. Revoking an admission does
 not revoke a member that was already created from it.
+
+Terminal admission rows are retained for at least 30 days from claim,
+revocation, or unclaimed expiry so exact claim retries remain recoverable. An
+administrator then collects at most 256 eligible rows per call:
+
+```http
+POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/collection
+Authorization: Bearer <domain-administration token>
+```
+
+The response reports `collectedCount`, `hasMore`, and
+`eligibleBeforeMilliseconds`. Collection deletes the admission credential
+record but preserves its typed audit event. A collected admission is no
+longer retryable.
+
+## Authority bounds
+
+This checkpoint applies hard self-hosted safety bounds independently of later
+hosted plans and billing quotas:
+
+- 256 active and 4,096 retained members per domain;
+- 64 outstanding and 4,096 retained admissions per domain;
+- 256 retained credential rotations per subject and 4,096 per domain;
+- 256 admission rows collected per request after a 30-day recovery window.
+
+Exact retries are evaluated before capacity checks. Expiry or revocation frees
+an active/outstanding slot without erasing the retained authority record.
 
 ## Revoke a member
 
@@ -315,14 +379,15 @@ HTTP matrix does not control or assume a particular service supervisor.
 ## Operations and remaining boundaries
 
 `/livez`, `/readyz`, and `/metrics` have the same private-operations semantics
-as the pairing API. The database records domain/admission/member/message/blob scope,
-monotonic sequence, credential digests, opaque envelope fields, byte counts,
-acknowledgments, and bounded audit event types. It does not record a content
+as the pairing API. The database records domain/admission/member/message/blob
+scope, monotonic sequence, current and prior credential digests, rotation
+idempotency facts, opaque envelope fields, byte counts, acknowledgments, and
+bounded audit event types. It does not record a content
 key, decrypted FEF, plaintext package contents, email address, Persona, or
 payment identity.
 
-This checkpoint does not yet provide administration-token rotation, admission
-collection, member/admission limits, account-wide quotas, retention/orphan
-garbage collection, resumable upload, checkpoints, hosted object storage,
+This checkpoint does not yet provide operator-token rotation, account-wide
+quotas, message/blob retention or orphan garbage collection, resumable upload,
+checkpoints, hosted object storage,
 multi-region replication, online schema rollback, public ingress, or hosted
 service-level guarantees.

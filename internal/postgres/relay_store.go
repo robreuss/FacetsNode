@@ -139,7 +139,7 @@ func (s *RelayStore) CreateMember(
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
 	domain, _, _, _, _, err := loadRelayDomain(
-		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
+		ctx, transaction, credential.TenantID, credential.DomainID, "FOR UPDATE",
 	)
 	if err != nil {
 		return "", err
@@ -151,37 +151,41 @@ func (s *RelayStore) CreateMember(
 		registration.DomainID != credential.DomainID {
 		return "", relay.NewProtocolError(relay.CodeWrongScope, "member belongs to another domain")
 	}
-	result, err := transaction.Exec(ctx, `
-		INSERT INTO relay_members (
-			tenant_id, domain_id, member_id, version, authorization_digest,
-			capabilities, created_at_milliseconds, expires_at_milliseconds,
-			revoked_at_milliseconds
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (tenant_id, domain_id, member_id) DO NOTHING
-	`, registration.TenantID, registration.DomainID, registration.MemberID,
-		registration.Version, registration.AuthorizationDigest,
-		capabilityStrings(registration.Capabilities),
-		registration.CreatedAtMilliseconds, registration.ExpiresAtMilliseconds,
-		registration.RevokedAtMilliseconds)
+	existing, found, err := loadRelayMember(
+		ctx,
+		transaction,
+		registration.TenantID,
+		registration.DomainID,
+		registration.MemberID,
+		"FOR UPDATE",
+	)
 	if err != nil {
-		return "", fmt.Errorf("insert relay member: %w", err)
+		return "", err
 	}
-	if result.RowsAffected() == 0 {
-		existing, found, err := loadRelayMember(
-			ctx,
-			transaction,
-			registration.TenantID,
-			registration.DomainID,
-			registration.MemberID,
-			"FOR UPDATE",
-		)
-		if err != nil {
-			return "", err
-		}
-		if found && memberEqual(existing, registration) {
+	if found {
+		if memberEqual(existing, registration) {
 			return relay.AcceptanceDuplicate, nil
 		}
 		return "", relay.NewProtocolError(relay.CodeMemberCollision, "member ID was reused")
+	}
+	if registration.ExpiresAtMilliseconds != nil &&
+		*registration.ExpiresAtMilliseconds <= nowMilliseconds {
+		return "", relay.NewProtocolError(
+			relay.CodeInvalidMember,
+			"member is not currently issuable",
+		)
+	}
+	if err := ensurePostgresMemberCapacity(
+		ctx,
+		transaction,
+		registration.TenantID,
+		registration.DomainID,
+		nowMilliseconds,
+	); err != nil {
+		return "", err
+	}
+	if err := insertRelayMember(ctx, transaction, registration); err != nil {
+		return "", err
 	}
 	if err := insertRelayAudit(
 		ctx,
@@ -231,7 +235,7 @@ func (s *RelayStore) CreateAdmission(
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
 	domain, _, _, _, _, err := loadRelayDomain(
-		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
+		ctx, transaction, credential.TenantID, credential.DomainID, "FOR UPDATE",
 	)
 	if err != nil {
 		return relay.AdmissionCreateResult{}, err
@@ -246,41 +250,19 @@ func (s *RelayStore) CreateAdmission(
 			"admission belongs to another domain",
 		)
 	}
-	result, err := transaction.Exec(ctx, `
-		INSERT INTO relay_member_admissions (
-			tenant_id, domain_id, admission_id, version,
-			authorization_digest, capabilities, created_at_milliseconds,
-			expires_at_milliseconds, member_expires_at_milliseconds,
-			revoked_at_milliseconds, claimed_at_milliseconds,
-			claimed_member_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		ON CONFLICT (tenant_id, domain_id, admission_id) DO NOTHING
-	`, registration.TenantID, registration.DomainID,
-		registration.AdmissionID, registration.Version,
-		registration.AuthorizationDigest,
-		capabilityStrings(registration.Capabilities),
-		registration.CreatedAtMilliseconds,
-		registration.ExpiresAtMilliseconds,
-		registration.MemberExpiresAtMilliseconds,
-		registration.RevokedAtMilliseconds,
-		registration.ClaimedAtMilliseconds,
-		registration.ClaimedMemberID)
+	existing, found, err := loadRelayAdmission(
+		ctx,
+		transaction,
+		registration.TenantID,
+		registration.DomainID,
+		registration.AdmissionID,
+		"FOR UPDATE",
+	)
 	if err != nil {
-		return relay.AdmissionCreateResult{}, fmt.Errorf("insert relay admission: %w", err)
+		return relay.AdmissionCreateResult{}, err
 	}
-	if result.RowsAffected() == 0 {
-		existing, found, err := loadRelayAdmission(
-			ctx,
-			transaction,
-			registration.TenantID,
-			registration.DomainID,
-			registration.AdmissionID,
-			"FOR UPDATE",
-		)
-		if err != nil {
-			return relay.AdmissionCreateResult{}, err
-		}
-		if found && admissionCreationEqual(existing, registration) {
+	if found {
+		if admissionCreationEqual(existing, registration) {
 			return relay.AdmissionCreateResult{
 				Acceptance: relay.AcceptanceDuplicate,
 				Admission:  existing,
@@ -290,6 +272,35 @@ func (s *RelayStore) CreateAdmission(
 			relay.CodeAdmissionCollision,
 			"admission ID was reused",
 		)
+	}
+	if err := ensurePostgresAdmissionCapacity(
+		ctx,
+		transaction,
+		registration.TenantID,
+		registration.DomainID,
+		nowMilliseconds,
+	); err != nil {
+		return relay.AdmissionCreateResult{}, err
+	}
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO relay_member_admissions (
+			tenant_id, domain_id, admission_id, version,
+			authorization_digest, capabilities, created_at_milliseconds,
+			expires_at_milliseconds, member_expires_at_milliseconds,
+			revoked_at_milliseconds, claimed_at_milliseconds,
+			claimed_member_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`, registration.TenantID, registration.DomainID,
+		registration.AdmissionID, registration.Version,
+		registration.AuthorizationDigest,
+		capabilityStrings(registration.Capabilities),
+		registration.CreatedAtMilliseconds,
+		registration.ExpiresAtMilliseconds,
+		registration.MemberExpiresAtMilliseconds,
+		registration.RevokedAtMilliseconds,
+		registration.ClaimedAtMilliseconds,
+		registration.ClaimedMemberID); err != nil {
+		return relay.AdmissionCreateResult{}, fmt.Errorf("insert relay admission: %w", err)
 	}
 	if err := insertRelayAdmissionAudit(
 		ctx,
@@ -329,6 +340,15 @@ func (s *RelayStore) ClaimAdmission(
 		)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
+	if _, _, _, _, _, err := loadRelayDomain(
+		ctx,
+		transaction,
+		credential.TenantID,
+		credential.DomainID,
+		"FOR UPDATE",
+	); err != nil {
+		return relay.AdmissionClaimResult{}, err
+	}
 	admission, found, err := loadRelayAdmission(
 		ctx,
 		transaction,
@@ -390,6 +410,15 @@ func (s *RelayStore) ClaimAdmission(
 			relay.CodeMemberCollision,
 			"member ID was reused",
 		)
+	}
+	if err := ensurePostgresMemberCapacity(
+		ctx,
+		transaction,
+		credential.TenantID,
+		credential.DomainID,
+		nowMilliseconds,
+	); err != nil {
+		return relay.AdmissionClaimResult{}, err
 	}
 	member := relay.MemberRegistration{
 		Version:               relay.SchemaVersion,
