@@ -16,7 +16,7 @@ const (
 	EnvelopeAlgorithm          = "HKDF-SHA256+A256GCM"
 	MaximumCiphertextByteCount = 1_048_576
 	MaximumMessageCount        = 256
-	MaximumRouteLifetimeMS     = int64(15 * 60 * 1_000)
+	MaximumRouteLifetimeMS     = int64(24 * 60 * 60 * 1_000)
 )
 
 var authorizationDomain = []byte("Facets principal pairing router authorization v1\x00")

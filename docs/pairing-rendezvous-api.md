@@ -31,7 +31,7 @@ X-Facets-Rendezvous-Role: sponsor
 ```
 
 The body is `FEFPrincipalPairingRendezvousRegistration` JSON. The route must be
-active at the server's current time and may live for at most 15 minutes. The
+active at the server's current time and may live for at most 24 hours. The
 server verifies that the caller possesses the sponsor capability represented by
 the submitted digest. An exact retry returns `200` and `duplicate`; a new route
 returns `201` and `accepted`. A route ID can never replace different stored

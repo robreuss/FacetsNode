@@ -148,8 +148,17 @@ func TestMemoryStoreMatchesFrozenMailboxSemantics(t *testing.T) {
 func TestRegistrationAndEnvelopeLimitsFailClosed(t *testing.T) {
 	t.Parallel()
 	fixture := loadFixture(t)
+	maximumLifetime := fixture.Registration
+	maximumLifetime.CreatedAtMilliseconds = 2_000
+	maximumLifetime.ExpiresAtMilliseconds =
+		maximumLifetime.CreatedAtMilliseconds + rendezvous.MaximumRouteLifetimeMS
+	if err := maximumLifetime.ValidateAt(2_000); err != nil {
+		t.Fatalf("maximum route lifetime was rejected: %v", err)
+	}
 	tooLong := fixture.Registration
-	tooLong.ExpiresAtMilliseconds = tooLong.CreatedAtMilliseconds + rendezvous.MaximumRouteLifetimeMS + 1
+	tooLong.CreatedAtMilliseconds = 2_000
+	tooLong.ExpiresAtMilliseconds =
+		tooLong.CreatedAtMilliseconds + rendezvous.MaximumRouteLifetimeMS + 1
 	if err := tooLong.ValidateAt(2_000); err == nil {
 		t.Fatal("overlong route registration was accepted")
 	} else {
