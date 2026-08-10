@@ -272,7 +272,8 @@ func provisionLiveRelayDomain(
 ) liveRelayDomain {
 	t.Helper()
 	response := requestRelayJSON(
-		t, client, http.MethodPost, baseURL+"/v1/relay/domains", nil,
+		t, client, http.MethodPost, baseURL+"/v1/relay/domains",
+		newLiveRelayDomainProvisioningRequest(time.Now().UnixMilli()),
 		operatorToken, uuid.Nil,
 	)
 	requireStatus(t, response, http.StatusCreated)

@@ -37,13 +37,14 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 	}
 	server.now = func() time.Time { return time.UnixMilli(1_500) }
 	handler := server.Handler()
+	provisioning := newRelayDomainProvisioningRequest(1_500, 16, 64)
 
 	wrongOperator := performRelayJSON(
 		t,
 		handler,
 		http.MethodPost,
 		"/v1/relay/domains",
-		nil,
+		provisioning,
 		relayTestToken(160),
 		uuid.Nil,
 	)
@@ -54,12 +55,13 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		handler,
 		http.MethodPost,
 		"/v1/relay/domains",
-		nil,
+		provisioning,
 		operatorToken,
 		uuid.Nil,
 	)
 	requireStatus(t, create, http.StatusCreated)
 	var created struct {
+		Acceptance               relay.Acceptance         `json:"acceptance"`
 		Domain                   relay.DomainRegistration `json:"domain"`
 		AdministrationCredential struct {
 			AuthorizationToken string `json:"authorizationToken"`
@@ -77,6 +79,50 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		created.MemberCredential.AuthorizationToken == "" {
 		t.Fatalf("incomplete domain creation response: %+v", created)
 	}
+	if created.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("unexpected domain acceptance: %q", created.Acceptance)
+	}
+	provisionRetry := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		"/v1/relay/domains",
+		provisioning,
+		operatorToken,
+		uuid.Nil,
+	)
+	requireStatus(t, provisionRetry, http.StatusOK)
+	var retried struct {
+		Acceptance               relay.Acceptance              `json:"acceptance"`
+		Domain                   relay.DomainRegistration      `json:"domain"`
+		AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
+		Member                   relay.MemberRegistration      `json:"member"`
+		MemberCredential         relayMemberCredential         `json:"memberCredential"`
+	}
+	if err := json.NewDecoder(provisionRetry.Body).Decode(&retried); err != nil {
+		t.Fatal(err)
+	}
+	_ = provisionRetry.Body.Close()
+	if retried.Acceptance != relay.AcceptanceDuplicate ||
+		retried.Domain != created.Domain ||
+		retried.MemberCredential != created.MemberCredential ||
+		retried.AdministrationCredential.AuthorizationToken !=
+			created.AdministrationCredential.AuthorizationToken {
+		t.Fatalf("provisioning retry changed authority: %+v", retried)
+	}
+	collision := provisioning
+	collision.MemberCapabilities = []relay.Capability{
+		relay.CapabilityFetchMessage,
+	}
+	requireStatus(t, performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		"/v1/relay/domains",
+		collision,
+		operatorToken,
+		uuid.Nil,
+	), http.StatusConflict)
 
 	basePath := "/v1/relay/tenants/" + created.Domain.TenantID.String() +
 		"/domains/" + created.Domain.DomainID.String()
@@ -398,7 +444,7 @@ func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 		handler,
 		http.MethodPost,
 		"/v1/relay/domains",
-		nil,
+		newRelayDomainProvisioningRequest(nowMilliseconds, 32, 96),
 		operatorToken,
 		uuid.Nil,
 	)
@@ -648,4 +694,35 @@ func relayTestToken(seed byte) string {
 		value[index] = seed + byte(index)
 	}
 	return base64.RawURLEncoding.EncodeToString(value)
+}
+
+type relayDomainProvisioningRequest struct {
+	AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
+	MemberCredential         relayMemberCredential         `json:"memberCredential"`
+	MemberCapabilities       []relay.Capability            `json:"memberCapabilities"`
+	CreatedAtMilliseconds    int64                         `json:"createdAtMilliseconds"`
+}
+
+func newRelayDomainProvisioningRequest(
+	createdAtMilliseconds int64,
+	administrationTokenSeed byte,
+	memberTokenSeed byte,
+) relayDomainProvisioningRequest {
+	tenantID := uuid.New()
+	domainID := uuid.New()
+	return relayDomainProvisioningRequest{
+		AdministrationCredential: relayAdministrationCredential{
+			TenantID:           tenantID,
+			DomainID:           domainID,
+			AuthorizationToken: relayTestToken(administrationTokenSeed),
+		},
+		MemberCredential: relayMemberCredential{
+			TenantID:           tenantID,
+			DomainID:           domainID,
+			MemberID:           uuid.New(),
+			AuthorizationToken: relayTestToken(memberTokenSeed),
+		},
+		MemberCapabilities:    append([]relay.Capability(nil), allRelayCapabilities...),
+		CreatedAtMilliseconds: createdAtMilliseconds,
+	}
 }

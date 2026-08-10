@@ -92,9 +92,11 @@ and its separate password off the Node host for actual disaster recovery.
 ## Security boundary
 
 Pairing, relay-member-admission, relay-member, relay-administration, and
-operator bearer tokens are independent high-entropy secrets. Send them only in
-the `Authorization` header over TLS. Facets Node does not log authorization
-headers, request bodies, ciphertext, or client IP addresses. See
+operator bearer tokens are independent high-entropy secrets. Send bearer
+credentials only in the `Authorization` header over TLS; the one exception is
+the client-generated relay credentials inside the retry-safe, TLS-protected
+operator provisioning request. Facets Node does not log authorization headers,
+request bodies, ciphertext, or client IP addresses. See
 [SECURITY.md](SECURITY.md) for reporting and deployment requirements, and
 [docs/replica-relay-api.md](docs/replica-relay-api.md) for the relay contract.
 

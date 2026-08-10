@@ -131,8 +131,11 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		t.Skip("FACETS_NODE_TEST_BASE_URL and FACETS_NODE_TEST_OPERATOR_TOKEN are required")
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
+	provisioning := newLiveRelayDomainProvisioningRequest(
+		time.Now().UnixMilli(),
+	)
 	create := requestRelayJSON(
-		t, client, http.MethodPost, baseURL+"/v1/relay/domains", nil,
+		t, client, http.MethodPost, baseURL+"/v1/relay/domains", provisioning,
 		operatorToken, uuid.Nil,
 	)
 	requireStatus(t, create, http.StatusCreated)
@@ -150,6 +153,11 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = create.Body.Close()
+	retry := requestRelayJSON(
+		t, client, http.MethodPost, baseURL+"/v1/relay/domains", provisioning,
+		operatorToken, uuid.Nil,
+	)
+	requireStatusAndClose(t, retry, http.StatusOK)
 	basePath := fmt.Sprintf(
 		"%s/v1/relay/tenants/%s/domains/%s",
 		baseURL,
@@ -451,4 +459,53 @@ func encodedBytes(start byte) string {
 		value[index] = start + byte(index)
 	}
 	return base64.RawURLEncoding.EncodeToString(value)
+}
+
+type liveRelayAdministrationCredential struct {
+	TenantID           uuid.UUID `json:"tenantID"`
+	DomainID           uuid.UUID `json:"domainID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+type liveRelayMemberCredential struct {
+	TenantID           uuid.UUID `json:"tenantID"`
+	DomainID           uuid.UUID `json:"domainID"`
+	MemberID           uuid.UUID `json:"memberID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+type liveRelayDomainProvisioningRequest struct {
+	AdministrationCredential liveRelayAdministrationCredential `json:"administrationCredential"`
+	MemberCredential         liveRelayMemberCredential         `json:"memberCredential"`
+	MemberCapabilities       []relay.Capability                `json:"memberCapabilities"`
+	CreatedAtMilliseconds    int64                             `json:"createdAtMilliseconds"`
+}
+
+func newLiveRelayDomainProvisioningRequest(
+	createdAtMilliseconds int64,
+) liveRelayDomainProvisioningRequest {
+	tenantID := uuid.New()
+	domainID := uuid.New()
+	return liveRelayDomainProvisioningRequest{
+		AdministrationCredential: liveRelayAdministrationCredential{
+			TenantID:           tenantID,
+			DomainID:           domainID,
+			AuthorizationToken: encodedBytes(192),
+		},
+		MemberCredential: liveRelayMemberCredential{
+			TenantID:           tenantID,
+			DomainID:           domainID,
+			MemberID:           uuid.New(),
+			AuthorizationToken: encodedBytes(224),
+		},
+		MemberCapabilities: []relay.Capability{
+			relay.CapabilityFetchBlob,
+			relay.CapabilityPublishBlob,
+			relay.CapabilityPublishCheckpoint,
+			relay.CapabilityAcknowledgeMessage,
+			relay.CapabilityFetchMessage,
+			relay.CapabilityPublishMessage,
+		},
+		CreatedAtMilliseconds: createdAtMilliseconds,
+	}
 }

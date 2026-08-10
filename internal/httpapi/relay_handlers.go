@@ -54,23 +54,33 @@ func (s *Server) handleCreateRelayDomain(writer http.ResponseWriter, request *ht
 		s.writeError(writer, err)
 		return
 	}
-	tenantID := uuid.New()
-	domainID := uuid.New()
-	memberID := uuid.New()
-	administrationToken, err := randomToken()
-	if err != nil {
+	var input struct {
+		AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
+		MemberCredential         relayMemberCredential         `json:"memberCredential"`
+		MemberCapabilities       []relay.Capability            `json:"memberCapabilities"`
+		CreatedAtMilliseconds    int64                         `json:"createdAtMilliseconds"`
+	}
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	memberToken, err := randomToken()
+	if input.AdministrationCredential.TenantID != input.MemberCredential.TenantID ||
+		input.AdministrationCredential.DomainID != input.MemberCredential.DomainID {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeWrongScope,
+			"initial member belongs to another domain",
+		))
+		return
+	}
+	capabilities, err := normalizedCapabilities(input.MemberCapabilities)
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
 	administrationCredential := relay.AdministrationCredential{
-		TenantID: tenantID,
-		DomainID: domainID,
-		Token:    administrationToken,
+		TenantID: input.AdministrationCredential.TenantID,
+		DomainID: input.AdministrationCredential.DomainID,
+		Token:    input.AdministrationCredential.AuthorizationToken,
 	}
 	administrationDigest, err := relay.AdministrationDigest(administrationCredential)
 	if err != nil {
@@ -78,35 +88,34 @@ func (s *Server) handleCreateRelayDomain(writer http.ResponseWriter, request *ht
 		return
 	}
 	memberCredential := relay.Credential{
-		TenantID: tenantID,
-		DomainID: domainID,
-		MemberID: memberID,
-		Token:    memberToken,
+		TenantID: input.MemberCredential.TenantID,
+		DomainID: input.MemberCredential.DomainID,
+		MemberID: input.MemberCredential.MemberID,
+		Token:    input.MemberCredential.AuthorizationToken,
 	}
 	memberDigest, err := relay.AuthorizationDigest(memberCredential)
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	now := s.nowMilliseconds()
 	domain := relay.DomainRegistration{
 		Version:                relay.SchemaVersion,
-		TenantID:               tenantID,
-		DomainID:               domainID,
+		TenantID:               administrationCredential.TenantID,
+		DomainID:               administrationCredential.DomainID,
 		AdministrationDigest:   administrationDigest,
-		CreatedAtMilliseconds:  now,
+		CreatedAtMilliseconds:  input.CreatedAtMilliseconds,
 		MaximumMessageCount:    relay.DefaultMaximumMessageCount,
 		MaximumBlobCount:       relay.DefaultMaximumBlobCount,
 		MaximumStoredByteCount: relay.DefaultMaximumStoredByteCount,
 	}
 	member := relay.MemberRegistration{
 		Version:               relay.SchemaVersion,
-		TenantID:              tenantID,
-		DomainID:              domainID,
-		MemberID:              memberID,
+		TenantID:              memberCredential.TenantID,
+		DomainID:              memberCredential.DomainID,
+		MemberID:              memberCredential.MemberID,
 		AuthorizationDigest:   memberDigest,
-		Capabilities:          append([]relay.Capability(nil), allRelayCapabilities...),
-		CreatedAtMilliseconds: now,
+		Capabilities:          capabilities,
+		CreatedAtMilliseconds: input.CreatedAtMilliseconds,
 	}
 	acceptance, err := s.relayStore.CreateDomain(request.Context(), domain, member)
 	if err != nil {
@@ -114,25 +123,18 @@ func (s *Server) handleCreateRelayDomain(writer http.ResponseWriter, request *ht
 		return
 	}
 	s.metrics.ObserveAcceptance(string(acceptance))
-	writeJSON(writer, http.StatusCreated, struct {
+	writeJSON(writer, relayAcceptanceStatus(acceptance), struct {
+		Acceptance               relay.Acceptance              `json:"acceptance"`
 		Domain                   relay.DomainRegistration      `json:"domain"`
 		AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
 		Member                   relay.MemberRegistration      `json:"member"`
 		MemberCredential         relayMemberCredential         `json:"memberCredential"`
 	}{
-		Domain: domain,
-		AdministrationCredential: relayAdministrationCredential{
-			TenantID:           tenantID,
-			DomainID:           domainID,
-			AuthorizationToken: administrationToken,
-		},
-		Member: member,
-		MemberCredential: relayMemberCredential{
-			TenantID:           tenantID,
-			DomainID:           domainID,
-			MemberID:           memberID,
-			AuthorizationToken: memberToken,
-		},
+		Acceptance:               acceptance,
+		Domain:                   domain,
+		AdministrationCredential: input.AdministrationCredential,
+		Member:                   member,
+		MemberCredential:         input.MemberCredential,
 	})
 }
 

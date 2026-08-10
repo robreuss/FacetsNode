@@ -35,7 +35,7 @@ func TestRelayAuthorityRotationAndAdmissionCollection(t *testing.T) {
 		handler,
 		http.MethodPost,
 		"/v1/relay/domains",
-		nil,
+		newRelayDomainProvisioningRequest(nowMilliseconds, 40, 80),
 		operatorToken,
 		uuid.Nil,
 	)

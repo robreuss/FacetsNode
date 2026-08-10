@@ -19,7 +19,7 @@ identities, email addresses, Personas, or Facets principal identifiers.
 
 Five secrets have distinct authority:
 
-- the operator token provisions a new domain;
+- the operator token authorizes an exact new domain registration;
 - a domain-administration token creates and revokes members;
 - a one-time member-admission token can create one member with frozen
   capabilities before a bounded expiry;
@@ -28,10 +28,11 @@ Five secrets have distinct authority:
 
 Each token is independently generated as 32 bytes of unpadded base64url. The
 Node stores only a domain-separated SHA-256 digest and compares derived digests
-in constant time. Do not reuse one secret in another role. Credentials returned
-by a provisioning response are shown once and must be placed directly in an
-approved client secret store. Send all tokens only as bearer credentials over
-TLS.
+in constant time. Do not reuse one secret in another role. Provisioning
+credentials are generated in an approved client secret store and sent once in
+the TLS-protected provisioning request; the response echoes them so the client
+can verify the exact registration. Other tokens are sent only as bearer
+credentials over TLS.
 
 Member requests also identify the member in a header:
 
@@ -50,13 +51,40 @@ headers, bodies, ciphertext, tokens, and client IP addresses.
 ```http
 POST /v1/relay/domains
 Authorization: Bearer <operator token>
+Content-Type: application/json
+
+{
+  "administrationCredential": {
+    "tenantID": "<tenant UUID>",
+    "domainID": "<domain UUID>",
+    "authorizationToken": "<32-byte unpadded base64url token>"
+  },
+  "memberCredential": {
+    "tenantID": "<same tenant UUID>",
+    "domainID": "<same domain UUID>",
+    "memberID": "<member UUID>",
+    "authorizationToken": "<independent 32-byte token>"
+  },
+  "memberCapabilities": [
+    "message_publish", "message_fetch", "message_acknowledge"
+  ],
+  "createdAtMilliseconds": 1786381200000
+}
 ```
 
-This endpoint has no body. It is registered only when
-`FACETS_NODE_OPERATOR_TOKEN` is configured. It returns a random tenant/domain,
-the domain-administration credential, and an initial member with every currently
-defined capability. The default domain bounds are 10,000 messages, 10,000
-blobs, and 1 GiB shared by decoded message ciphertext and stored blob bytes.
+This endpoint is registered only when `FACETS_NODE_OPERATOR_TOKEN` is
+configured. The authorized client generates and durably retains one exact
+request before sending it. The Node validates both credentials, their common
+scope, the requested capabilities, and the stable creation time; it controls
+the domain quotas. The default bounds are 10,000 messages, 10,000 blobs, and 1
+GiB shared by decoded message ciphertext and stored blob bytes.
+
+The first exact request returns `201` with `"acceptance":"accepted"`. Replaying
+the same request returns `200` with `"acceptance":"duplicate"` and the same
+domain, member, and credentials. Reusing the tenant/domain identity with any
+different field fails closed as a collision. This lets a client recover from a
+lost response without creating a second routing authority or requiring the Node
+to retain plaintext credentials.
 
 The operator endpoint is a deployment control-plane seam, not hosted account
 admission. Keep it off public application ingress. A later hosted layer will
