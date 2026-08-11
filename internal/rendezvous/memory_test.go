@@ -155,6 +155,19 @@ func TestRegistrationAndEnvelopeLimitsFailClosed(t *testing.T) {
 	if err := maximumLifetime.ValidateAt(2_000); err != nil {
 		t.Fatalf("maximum route lifetime was rejected: %v", err)
 	}
+	futureCreated := fixture.Registration
+	futureCreated.CreatedAtMilliseconds = 1_000_000
+	futureCreated.ExpiresAtMilliseconds = 1_060_000
+	earliestAccepted := futureCreated.CreatedAtMilliseconds -
+		rendezvous.MaximumCreationClockSkewMS
+	if err := futureCreated.ValidateAt(earliestAccepted); err != nil {
+		t.Fatalf("bounded creation clock skew was rejected: %v", err)
+	}
+	if err := futureCreated.ValidateAt(earliestAccepted - 1); err == nil {
+		t.Fatal("creation clock skew beyond the bound was accepted")
+	} else {
+		requireCode(t, err, rendezvous.CodeRouteExpired)
+	}
 	tooLong := fixture.Registration
 	tooLong.CreatedAtMilliseconds = 2_000
 	tooLong.ExpiresAtMilliseconds =

@@ -17,6 +17,7 @@ const (
 	MaximumCiphertextByteCount = 1_048_576
 	MaximumMessageCount        = 256
 	MaximumRouteLifetimeMS     = int64(24 * 60 * 60 * 1_000)
+	MaximumCreationClockSkewMS = int64(5 * 60 * 1_000)
 )
 
 var authorizationDomain = []byte("Facets principal pairing router authorization v1\x00")
@@ -66,7 +67,7 @@ func (r Registration) ValidateAt(nowMilliseconds int64) error {
 	if r.ExpiresAtMilliseconds-r.CreatedAtMilliseconds > MaximumRouteLifetimeMS {
 		return protocolError(CodeInvalidRegistration, "route lifetime exceeds the carrier limit")
 	}
-	if nowMilliseconds < r.CreatedAtMilliseconds || nowMilliseconds >= r.ExpiresAtMilliseconds {
+	if !r.activeAt(nowMilliseconds) {
 		return protocolError(CodeRouteExpired, "route is not active")
 	}
 	return nil
@@ -82,7 +83,7 @@ func (r Registration) Authorize(credential Credential, nowMilliseconds int64) er
 	if !credential.Role.Valid() {
 		return protocolError(CodeUnauthorized, "credential role is invalid")
 	}
-	if nowMilliseconds < r.CreatedAtMilliseconds || nowMilliseconds >= r.ExpiresAtMilliseconds {
+	if !r.activeAt(nowMilliseconds) {
 		return protocolError(CodeRouteExpired, "route is not active")
 	}
 	actual, err := AuthorizationDigest(credential.Token, r.RouteID, credential.Role)
@@ -99,6 +100,15 @@ func (r Registration) Authorize(credential Credential, nowMilliseconds int64) er
 		return protocolError(CodeUnauthorized, "credential token is invalid")
 	}
 	return nil
+}
+
+func (r Registration) activeAt(nowMilliseconds int64) bool {
+	earliestAcceptedTime := r.CreatedAtMilliseconds - MaximumCreationClockSkewMS
+	if earliestAcceptedTime < 0 {
+		earliestAcceptedTime = 0
+	}
+	return nowMilliseconds >= earliestAcceptedTime &&
+		nowMilliseconds < r.ExpiresAtMilliseconds
 }
 
 type Envelope struct {
