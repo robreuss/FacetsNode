@@ -72,6 +72,53 @@ func (s *MemoryStore) CreateDomain(
 	key := domainKey{registration.TenantID, registration.DomainID}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.createDomainLocked(key, registration, initialMember)
+}
+
+func (s *MemoryStore) CreateDelegatedDomain(
+	_ context.Context,
+	authorizingCredential AdministrationCredential,
+	registration DomainRegistration,
+	initialMember MemberRegistration,
+	nowMilliseconds int64,
+) (Acceptance, error) {
+	if err := registration.Validate(); err != nil {
+		return "", err
+	}
+	if err := initialMember.Validate(); err != nil {
+		return "", err
+	}
+	if registration.TenantID != authorizingCredential.TenantID ||
+		registration.DomainID == authorizingCredential.DomainID ||
+		initialMember.TenantID != registration.TenantID ||
+		initialMember.DomainID != registration.DomainID {
+		return "", protocolError(CodeWrongScope, "delegated domain has an invalid scope")
+	}
+	if registration.CreatedAtMilliseconds > nowMilliseconds ||
+		initialMember.CreatedAtMilliseconds < registration.CreatedAtMilliseconds {
+		return "", protocolError(CodeInvalidDomain, "delegated domain has an invalid creation time")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	authorizingDomain, ok := s.domains[domainKey{
+		authorizingCredential.TenantID,
+		authorizingCredential.DomainID,
+	}]
+	if !ok {
+		return "", protocolError(CodeDomainNotFound, "authorizing domain was not found")
+	}
+	if err := authorizingDomain.registration.Authorize(authorizingCredential); err != nil {
+		return "", err
+	}
+	key := domainKey{registration.TenantID, registration.DomainID}
+	return s.createDomainLocked(key, registration, initialMember)
+}
+
+func (s *MemoryStore) createDomainLocked(
+	key domainKey,
+	registration DomainRegistration,
+	initialMember MemberRegistration,
+) (Acceptance, error) {
 	if existing, ok := s.domains[key]; ok {
 		member := existing.members[initialMember.MemberID]
 		if existing.registration == registration && memberEqual(member, initialMember) {

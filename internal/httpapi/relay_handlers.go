@@ -51,17 +51,45 @@ type relayAdmissionCredential struct {
 	AuthorizationToken string    `json:"authorizationToken"`
 }
 
+type relayDomainProvisioningInput struct {
+	AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
+	MemberCredential         relayMemberCredential         `json:"memberCredential"`
+	MemberCapabilities       []relay.Capability            `json:"memberCapabilities"`
+	CreatedAtMilliseconds    int64                         `json:"createdAtMilliseconds"`
+}
+
 func (s *Server) handleCreateRelayDomain(writer http.ResponseWriter, request *http.Request) {
 	if err := s.authorizeOperator(request); err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	var input struct {
-		AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
-		MemberCredential         relayMemberCredential         `json:"memberCredential"`
-		MemberCapabilities       []relay.Capability            `json:"memberCapabilities"`
-		CreatedAtMilliseconds    int64                         `json:"createdAtMilliseconds"`
+	s.createRelayDomainFromRequest(writer, request, nil)
+}
+
+func (s *Server) handleCreateDelegatedRelayDomain(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
 	}
+	credential, err := relayAdministrationCredentialFromRequest(
+		request,
+		tenantID,
+		domainID,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.createRelayDomainFromRequest(writer, request, &credential)
+}
+
+func (s *Server) createRelayDomainFromRequest(
+	writer http.ResponseWriter,
+	request *http.Request,
+	authorizingCredential *relay.AdministrationCredential,
+) {
+	var input relayDomainProvisioningInput
 	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
 		s.writeError(writer, err)
 		return
@@ -119,7 +147,18 @@ func (s *Server) handleCreateRelayDomain(writer http.ResponseWriter, request *ht
 		Capabilities:          capabilities,
 		CreatedAtMilliseconds: input.CreatedAtMilliseconds,
 	}
-	acceptance, err := s.relayStore.CreateDomain(request.Context(), domain, member)
+	var acceptance relay.Acceptance
+	if authorizingCredential == nil {
+		acceptance, err = s.relayStore.CreateDomain(request.Context(), domain, member)
+	} else {
+		acceptance, err = s.relayStore.CreateDelegatedDomain(
+			request.Context(),
+			*authorizingCredential,
+			domain,
+			member,
+			s.nowMilliseconds(),
+		)
+	}
 	if err != nil {
 		s.writeError(writer, err)
 		return

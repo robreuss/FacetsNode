@@ -1,0 +1,10 @@
+:8443 {
+	tls /etc/facets-node/tls/server.crt /etc/facets-node/tls/server.key
+
+	@public path /livez /readyz /v1/*
+	handle @public {
+		reverse_proxy node:8080
+	}
+
+	respond 404
+}

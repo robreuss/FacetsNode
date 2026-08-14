@@ -51,6 +51,28 @@ services:
       - private
       - edge
 
+  ingress:
+    image: caddy:2.10.2-alpine
+    depends_on:
+      node:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /config:size=16m,mode=0755
+      - /data:size=16m,mode=0755
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/tls:/etc/facets-node/tls:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    ports:
+      - ${FACETS_NODE_HTTPS_PORT:-8443}:8443
+    networks:
+      - edge
+
 networks:
   private:
     internal: true

@@ -44,6 +44,85 @@ func (s *RelayStore) CreateDomain(
 		return "", fmt.Errorf("begin relay domain creation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
+	acceptance, err := createRelayDomain(ctx, transaction, registration, initialMember)
+	if err != nil {
+		return "", err
+	}
+	if acceptance == relay.AcceptanceDuplicate {
+		return acceptance, nil
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit relay domain creation: %w", err)
+	}
+	return acceptance, nil
+}
+
+func (s *RelayStore) CreateDelegatedDomain(
+	ctx context.Context,
+	authorizingCredential relay.AdministrationCredential,
+	registration relay.DomainRegistration,
+	initialMember relay.MemberRegistration,
+	nowMilliseconds int64,
+) (relay.Acceptance, error) {
+	if err := registration.Validate(); err != nil {
+		return "", err
+	}
+	if err := initialMember.Validate(); err != nil {
+		return "", err
+	}
+	if registration.TenantID != authorizingCredential.TenantID ||
+		registration.DomainID == authorizingCredential.DomainID ||
+		initialMember.TenantID != registration.TenantID ||
+		initialMember.DomainID != registration.DomainID {
+		return "", relay.NewProtocolError(
+			relay.CodeWrongScope,
+			"delegated domain has an invalid scope",
+		)
+	}
+	if registration.CreatedAtMilliseconds > nowMilliseconds ||
+		initialMember.CreatedAtMilliseconds < registration.CreatedAtMilliseconds {
+		return "", relay.NewProtocolError(
+			relay.CodeInvalidDomain,
+			"delegated domain has an invalid creation time",
+		)
+	}
+	transaction, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", fmt.Errorf("begin delegated relay domain creation: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	authorizingDomain, _, _, _, _, err := loadRelayDomain(
+		ctx,
+		transaction,
+		authorizingCredential.TenantID,
+		authorizingCredential.DomainID,
+		"FOR UPDATE",
+	)
+	if err != nil {
+		return "", err
+	}
+	if err := authorizingDomain.Authorize(authorizingCredential); err != nil {
+		return "", err
+	}
+	acceptance, err := createRelayDomain(ctx, transaction, registration, initialMember)
+	if err != nil {
+		return "", err
+	}
+	if acceptance == relay.AcceptanceDuplicate {
+		return acceptance, nil
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit delegated relay domain creation: %w", err)
+	}
+	return acceptance, nil
+}
+
+func createRelayDomain(
+	ctx context.Context,
+	transaction pgx.Tx,
+	registration relay.DomainRegistration,
+	initialMember relay.MemberRegistration,
+) (relay.Acceptance, error) {
 	result, err := transaction.Exec(ctx, `
 		INSERT INTO relay_domains (
 			tenant_id, domain_id, version, administration_digest,
@@ -114,9 +193,6 @@ func (s *RelayStore) CreateDomain(
 		initialMember.CreatedAtMilliseconds,
 	); err != nil {
 		return "", err
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit relay domain creation: %w", err)
 	}
 	return relay.AcceptanceAccepted, nil
 }

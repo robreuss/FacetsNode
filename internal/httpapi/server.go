@@ -83,6 +83,10 @@ func (s *Server) Handler() http.Handler {
 			mux.HandleFunc("POST /v1/relay/domains", s.handleCreateRelayDomain)
 		}
 		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/delegated-domains",
+			s.handleCreateDelegatedRelayDomain,
+		)
+		mux.HandleFunc(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members",
 			s.handleCreateRelayMember,
 		)

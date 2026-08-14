@@ -12,6 +12,13 @@ type Store interface {
 		registration DomainRegistration,
 		initialMember MemberRegistration,
 	) (Acceptance, error)
+	CreateDelegatedDomain(
+		ctx context.Context,
+		authorizingCredential AdministrationCredential,
+		registration DomainRegistration,
+		initialMember MemberRegistration,
+		nowMilliseconds int64,
+	) (Acceptance, error)
 	CreateMember(
 		ctx context.Context,
 		credential AdministrationCredential,

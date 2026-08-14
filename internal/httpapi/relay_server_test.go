@@ -472,6 +472,85 @@ func TestRelayDomainProvisioningEndpointIsAbsentWithoutOperatorToken(t *testing.
 	requireStatus(t, response, http.StatusNotFound)
 }
 
+func TestRelayDelegatedDomainProvisioningUsesExistingTenantAuthority(t *testing.T) {
+	operatorToken := relayTestToken(192)
+	server, err := NewWithRelay(
+		rendezvous.NewMemoryStore(),
+		relay.NewMemoryStore(),
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		operatorToken,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return time.UnixMilli(1_500) }
+	handler := server.Handler()
+	parentRequest := newRelayDomainProvisioningRequest(1_000, 32, 64)
+	parentResponse := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		"/v1/relay/domains",
+		parentRequest,
+		operatorToken,
+		uuid.Nil,
+	)
+	requireStatus(t, parentResponse, http.StatusCreated)
+	_ = parentResponse.Body.Close()
+	basePath := "/v1/relay/tenants/" +
+		parentRequest.AdministrationCredential.TenantID.String() +
+		"/domains/" + parentRequest.AdministrationCredential.DomainID.String()
+
+	childRequest := newRelayDomainProvisioningRequest(1_500, 96, 128)
+	childRequest.AdministrationCredential.TenantID =
+		parentRequest.AdministrationCredential.TenantID
+	childRequest.MemberCredential.TenantID =
+		parentRequest.AdministrationCredential.TenantID
+	delegated := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		basePath+"/delegated-domains",
+		childRequest,
+		parentRequest.AdministrationCredential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, delegated, http.StatusCreated)
+	_ = delegated.Body.Close()
+	retry := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		basePath+"/delegated-domains",
+		childRequest,
+		parentRequest.AdministrationCredential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, retry, http.StatusOK)
+	_ = retry.Body.Close()
+
+	wrongTenant := newRelayDomainProvisioningRequest(1_500, 160, 176)
+	requireStatus(t, performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		basePath+"/delegated-domains",
+		wrongTenant,
+		parentRequest.AdministrationCredential.AuthorizationToken,
+		uuid.Nil,
+	), http.StatusBadRequest)
+	requireStatus(t, performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		basePath+"/delegated-domains",
+		childRequest,
+		relayTestToken(208),
+		uuid.Nil,
+	), http.StatusUnauthorized)
+}
+
 func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 	operatorToken := relayTestToken(192)
 	var logs bytes.Buffer
