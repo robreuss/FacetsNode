@@ -33,6 +33,7 @@ Facets core codebase.
 - Bounded active/retained members and admissions, plus administrator-driven
   collection after a 30-day admission retry window
 - Opaque, monotonic catch-up cursors and per-member accepted/applied facts
+- Disposable domain change hints that accelerate, but never replace, cursor polling
 - Per-domain message/blob counts and total stored-byte quotas
 - PostgreSQL-backed concurrent publication with restart-safe ordering
 - Live delivery-matrix proof for cursor replay, delayed and concurrent traffic,

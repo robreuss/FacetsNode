@@ -304,6 +304,26 @@ recovery therefore do not depend on client clock agreement. Retention and
 deletion are server policy, but collection is not implemented in this
 checkpoint.
 
+## Wait for a disposable change hint
+
+```http
+GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/wake?cursor={cursor}&waitMilliseconds=25000
+Authorization: Bearer <member token>
+X-Facets-Member-ID: <member UUID>
+```
+
+This optional long poll asks the Node to report whether another member has a
+durable message after the caller's cursor. It returns `200` with
+`{"changed":true}` when the member should fetch, or `204` when the bounded wait
+expires. The maximum wait is 25 seconds.
+
+The hint carries no envelope or message metadata and never advances the
+caller's cursor. It is deliberately non-authoritative: clients must run the
+ordinary authenticated fetch after a positive hint and must retain periodic
+cursor reconciliation when a hint is lost, a connection fails, or an older
+Node does not provide this endpoint. Exact publication retries do not emit a
+second hint.
+
 ## Fetch with an opaque cursor
 
 ```http
