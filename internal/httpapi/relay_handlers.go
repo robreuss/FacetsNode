@@ -20,6 +20,8 @@ import (
 
 const maximumRelayRequestByteCount = ((relay.MaximumCiphertextByteCount + 2) / 3 * 4) + 32_768
 
+const maximumRelayWakeWait = 25 * time.Second
+
 var allRelayCapabilities = []relay.Capability{
 	relay.CapabilityFetchBlob,
 	relay.CapabilityPublishBlob,
@@ -391,6 +393,81 @@ func (s *Server) handleCreateRelayAdmission(
 	writeJSON(writer, status, result)
 }
 
+func (s *Server) handleWaitForRelayMessages(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	after, err := relay.DecodeCursor(request.URL.Query().Get("cursor"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	wait := maximumRelayWakeWait
+	if rawWait := request.URL.Query().Get("waitMilliseconds"); rawWait != "" {
+		waitMilliseconds, parseErr := strconv.Atoi(rawWait)
+		if parseErr != nil || waitMilliseconds <= 0 ||
+			time.Duration(waitMilliseconds)*time.Millisecond > maximumRelayWakeWait {
+			s.writeError(writer, relay.NewProtocolError(
+				relay.CodeInvalidCursor,
+				"wake wait is invalid",
+			))
+			return
+		}
+		wait = time.Duration(waitMilliseconds) * time.Millisecond
+	}
+
+	// Subscribe before checking the durable store so publication cannot fall
+	// into a gap between the check and the wait.
+	wake := s.relayWakeBroker.subscribe(tenantID, domainID)
+	hasChanges := func() (bool, error) {
+		result, fetchErr := s.relayStore.Fetch(
+			request.Context(), credential, after, 1, s.nowMilliseconds(),
+		)
+		return len(result.Messages) > 0, fetchErr
+	}
+	changed, err := hasChanges()
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if changed {
+		writeJSON(writer, http.StatusOK, map[string]bool{"changed": true})
+		return
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-request.Context().Done():
+		return
+	case <-timer.C:
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	case <-wake:
+	}
+
+	changed, err = hasChanges()
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if !changed {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]bool{"changed": true})
+}
+
 func (s *Server) handleCollectRelayAdmissions(
 	writer http.ResponseWriter,
 	request *http.Request,
@@ -565,6 +642,8 @@ func (s *Server) handlePublishRelayMessage(writer http.ResponseWriter, request *
 	status := http.StatusCreated
 	if result.Acceptance == relay.AcceptanceDuplicate {
 		status = http.StatusOK
+	} else {
+		s.relayWakeBroker.notify(tenantID, domainID)
 	}
 	writeJSON(writer, status, result)
 }

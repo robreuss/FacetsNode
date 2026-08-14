@@ -23,6 +23,7 @@ type Server struct {
 	store                  rendezvous.Store
 	relayStore             relay.Store
 	blobContentStore       relay.BlobContentStore
+	relayWakeBroker        *relayWakeBroker
 	operatorTokenDigest    [32]byte
 	operatorProvisioningOn bool
 	logger                 *slog.Logger
@@ -32,10 +33,11 @@ type Server struct {
 
 func New(store rendezvous.Store, logger *slog.Logger) *Server {
 	return &Server{
-		store:   store,
-		logger:  logger,
-		metrics: &Metrics{},
-		now:     time.Now,
+		store:           store,
+		logger:          logger,
+		metrics:         &Metrics{},
+		now:             time.Now,
+		relayWakeBroker: newRelayWakeBroker(),
 	}
 }
 
@@ -119,6 +121,10 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages",
 			s.handleFetchRelayMessages,
+		)
+		mux.HandleFunc(
+			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/wake",
+			s.handleWaitForRelayMessages,
 		)
 		mux.HandleFunc(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}/acknowledgments",

@@ -171,6 +171,10 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		AuthenticationTag:     base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xb2}, 16)),
 	}
 	publishPath := basePath + "/messages/" + envelope.MessageID.String()
+	publishedWake := server.relayWakeBroker.subscribe(
+		created.Domain.TenantID,
+		created.Domain.DomainID,
+	)
 	publish := performRelayJSON(
 		t,
 		handler,
@@ -181,6 +185,15 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		created.Member.MemberID,
 	)
 	requireStatus(t, publish, http.StatusCreated)
+	select {
+	case <-publishedWake:
+	case <-time.After(time.Second):
+		t.Fatal("accepted relay publish did not emit a wake hint")
+	}
+	retryWake := server.relayWakeBroker.subscribe(
+		created.Domain.TenantID,
+		created.Domain.DomainID,
+	)
 	retry := performRelayJSON(
 		t,
 		handler,
@@ -191,6 +204,31 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		created.Member.MemberID,
 	)
 	requireStatus(t, retry, http.StatusOK)
+	select {
+	case <-retryWake:
+		t.Fatal("duplicate relay publish emitted another wake hint")
+	default:
+	}
+	wake := performRelayJSON(
+		t,
+		handler,
+		http.MethodGet,
+		basePath+"/messages/wake?waitMilliseconds=10",
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberID,
+	)
+	requireStatus(t, wake, http.StatusOK)
+	var wakeResponse struct {
+		Changed bool `json:"changed"`
+	}
+	if err := json.NewDecoder(wake.Body).Decode(&wakeResponse); err != nil {
+		t.Fatal(err)
+	}
+	_ = wake.Body.Close()
+	if !wakeResponse.Changed {
+		t.Fatal("wake response did not report the durable relay message")
+	}
 
 	fetch := performRelayJSON(
 		t,
@@ -214,6 +252,18 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		fetched.Cursor != relay.EncodeCursor(1) {
 		t.Fatalf("unexpected fetch: %+v", fetched)
 	}
+	quietWake := performRelayJSON(
+		t,
+		handler,
+		http.MethodGet,
+		basePath+"/messages/wake?cursor="+fetched.Cursor+
+			"&waitMilliseconds=1",
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberID,
+	)
+	requireStatus(t, quietWake, http.StatusNoContent)
+	_ = quietWake.Body.Close()
 
 	appliedFirst := performRelayJSON(
 		t,
