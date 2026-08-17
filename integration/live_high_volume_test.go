@@ -874,6 +874,10 @@ func validateHighVolumeStatePath(t *testing.T, path string) {
 		if _, statErr := os.Stat(filepath.Join(repositoryRoot, ".git")); statErr == nil {
 			break
 		}
+		if goModule, readErr := os.ReadFile(filepath.Join(repositoryRoot, "go.mod")); readErr == nil &&
+			strings.HasPrefix(string(goModule), "module github.com/robreuss/FacetsNode\n") {
+			break
+		}
 		parent := filepath.Dir(repositoryRoot)
 		if parent == repositoryRoot {
 			t.Fatal("cannot locate FacetsNode repository root for state-path validation")
