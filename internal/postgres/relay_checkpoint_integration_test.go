@@ -74,7 +74,8 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID,
 		MemberID: recipient.MemberID, AuthorizationDigest: recipientDigest,
 		Capabilities: []relay.Capability{
-			relay.CapabilityAcknowledgeMessage, relay.CapabilityFetchMessage, relay.CapabilityPublishMessage,
+			relay.CapabilityPublishBlob, relay.CapabilityAcknowledgeMessage,
+			relay.CapabilityFetchMessage, relay.CapabilityPublishMessage,
 		},
 		CreatedAtMilliseconds: 1_050,
 	}
