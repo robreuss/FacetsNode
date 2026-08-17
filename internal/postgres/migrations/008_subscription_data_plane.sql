@@ -91,7 +91,11 @@ CREATE TABLE relay_subscription_status_changes (
     result_start_sequence bigint CHECK (result_start_sequence >= 0),
     stored_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, domain_id, retry_id),
-    FOREIGN KEY (tenant_id, domain_id, subscription_id) REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id)
+    FOREIGN KEY (tenant_id, domain_id)
+        REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, domain_id, subscription_id)
+        REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id)
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE relay_members (
@@ -108,7 +112,11 @@ CREATE TABLE relay_members (
     stored_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, domain_id, member_id),
-    FOREIGN KEY (tenant_id, domain_id, subscription_id) REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id),
+    FOREIGN KEY (tenant_id, domain_id)
+        REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, domain_id, subscription_id)
+        REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id)
+        DEFERRABLE INITIALLY DEFERRED,
     CHECK (expires_at_milliseconds IS NULL OR expires_at_milliseconds > created_at_milliseconds),
     CHECK (revoked_at_milliseconds IS NULL OR revoked_at_milliseconds >= created_at_milliseconds)
 );
@@ -130,7 +138,11 @@ CREATE TABLE relay_member_admissions (
     stored_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, domain_id, admission_id),
-    FOREIGN KEY (tenant_id, domain_id, subscription_id) REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id),
+    FOREIGN KEY (tenant_id, domain_id)
+        REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, domain_id, subscription_id)
+        REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id)
+        DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (tenant_id, domain_id, claimed_member_id) REFERENCES relay_members(tenant_id, domain_id, member_id) DEFERRABLE INITIALLY DEFERRED,
     CHECK (expires_at_milliseconds > created_at_milliseconds),
     CHECK (member_expires_at_milliseconds IS NULL OR member_expires_at_milliseconds > expires_at_milliseconds),
@@ -155,8 +167,12 @@ CREATE TABLE relay_messages (
     stored_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, domain_id, message_id),
     UNIQUE (tenant_id, domain_id, domain_sequence),
+    FOREIGN KEY (tenant_id, domain_id)
+        REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE,
     FOREIGN KEY (tenant_id, domain_id, publisher_member_id) REFERENCES relay_members(tenant_id, domain_id, member_id) DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (tenant_id, domain_id, publisher_subscription_id) REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id)
+    FOREIGN KEY (tenant_id, domain_id, publisher_subscription_id)
+        REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id)
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE relay_acknowledgments (
@@ -169,8 +185,12 @@ CREATE TABLE relay_acknowledgments (
     applied_at_milliseconds bigint,
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, domain_id, message_id, subscription_id),
+    FOREIGN KEY (tenant_id, domain_id)
+        REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE,
     FOREIGN KEY (tenant_id, domain_id, message_id) REFERENCES relay_messages(tenant_id, domain_id, message_id) ON DELETE CASCADE,
-    FOREIGN KEY (tenant_id, domain_id, subscription_id) REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id),
+    FOREIGN KEY (tenant_id, domain_id, subscription_id)
+        REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id)
+        DEFERRABLE INITIALLY DEFERRED,
     CHECK ((stage = 'accepted' AND applied_at_milliseconds IS NULL) OR (stage = 'applied' AND applied_at_milliseconds IS NOT NULL))
 );
 
@@ -183,6 +203,8 @@ CREATE TABLE relay_blobs (
     created_at_milliseconds bigint NOT NULL CHECK (created_at_milliseconds >= 0),
     stored_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, domain_id, blob_id),
+    FOREIGN KEY (tenant_id, domain_id)
+        REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE,
     FOREIGN KEY (tenant_id, domain_id, publisher_member_id) REFERENCES relay_members(tenant_id, domain_id, member_id) DEFERRABLE INITIALLY DEFERRED
 );
 
@@ -223,7 +245,9 @@ CREATE TABLE relay_audit_events (
     event_type text NOT NULL,
     occurred_at_milliseconds bigint NOT NULL CHECK (occurred_at_milliseconds >= 0),
     stored_at timestamptz NOT NULL DEFAULT now(),
-    FOREIGN KEY (tenant_id) REFERENCES relay_tenants(tenant_id) ON DELETE CASCADE
+    FOREIGN KEY (tenant_id) REFERENCES relay_tenants(tenant_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, domain_id)
+        REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE
 );
 
 CREATE INDEX relay_messages_fetch_idx ON relay_messages (tenant_id, domain_id, domain_sequence);

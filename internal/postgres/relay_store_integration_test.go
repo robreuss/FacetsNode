@@ -456,6 +456,8 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	var remaining int
 	if err := pool.QueryRow(ctx, `
 		SELECT
+			(SELECT count(*) FROM relay_subscriptions WHERE tenant_id = $1 AND domain_id = $2) +
+			(SELECT count(*) FROM relay_subscription_status_changes WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_member_admissions WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_credential_rotations WHERE tenant_id = $1 AND domain_id = $2) +
 			(SELECT count(*) FROM relay_members WHERE tenant_id = $1 AND domain_id = $2) +
