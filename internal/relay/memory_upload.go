@@ -48,6 +48,9 @@ func (s *MemoryStore) CreateBlobUpload(
 		}
 		return BlobUploadCreateResponse{}, protocolError(CodeBlobUploadCollision, "blob upload retry ID was reused")
 	}
+	if err := memoryFenceAllowsWrite(domain, subscription.SubscriptionID, nowMilliseconds); err != nil {
+		return BlobUploadCreateResponse{}, err
+	}
 	if existing := domain.blobUploads[request.UploadID]; existing != nil {
 		return BlobUploadCreateResponse{}, protocolError(CodeBlobUploadCollision, "blob upload ID was reused")
 	}
@@ -129,6 +132,9 @@ func (s *MemoryStore) AppendBlobUploadChunk(
 		}
 		return BlobUploadStatus{}, protocolError(CodeBlobUploadCollision, "blob upload chunk offset was reused")
 	}
+	if err := memoryFenceAllowsWrite(domain, subscription.SubscriptionID, nowMilliseconds); err != nil {
+		return BlobUploadStatus{}, err
+	}
 	if upload.status.Finalized || request.Offset != upload.status.CommittedOffset ||
 		request.ByteCount > upload.status.ByteCount-request.Offset {
 		return BlobUploadStatus{}, protocolError(CodeInvalidBlobUpload, "blob upload chunk is not contiguous")
@@ -174,6 +180,9 @@ func (s *MemoryStore) FinalizeBlobUpload(
 	if err != nil || subscription.SubscriptionID != upload.subscriptionID {
 		return BlobUploadFinalizationResponse{}, protocolError(CodeWrongScope, "blob upload belongs to another subscription")
 	}
+	if err := memoryFenceAllowsWrite(domain, subscription.SubscriptionID, nowMilliseconds); err != nil {
+		return BlobUploadFinalizationResponse{}, err
+	}
 	if request.RelayBlobID != upload.status.RelayBlobID || request.ByteCount != upload.status.ByteCount ||
 		upload.status.CommittedOffset != upload.status.ByteCount ||
 		request.FinalizedAtMilliseconds < upload.status.UpdatedAtMilliseconds {
@@ -194,6 +203,9 @@ func (s *MemoryStore) FinalizeBlobUpload(
 			TenantID: credential.TenantID, DomainID: credential.DomainID,
 			BlobID: request.RelayBlobID, PublisherMemberID: upload.publisherMemberID,
 			ByteCount: request.ByteCount, CreatedAtMilliseconds: request.FinalizedAtMilliseconds,
+		}
+		if fence := memoryActiveFenceForSubscription(domain, subscription.SubscriptionID); fence != nil {
+			domain.blobFenceIDs[request.RelayBlobID] = fence.state.FenceID
 		}
 		domain.blobBytes += request.ByteCount
 	}

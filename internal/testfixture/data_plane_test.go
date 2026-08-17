@@ -13,7 +13,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
-const dataPlaneFixtureSHA256 = "d81b42bc95b1e7adda3ef2ff6c5dbaa471512787481c9fe8b42a563e4b07293f"
+const dataPlaneFixtureSHA256 = "15ed50e43d159f41b750d5f2a48afc20135d4c64be0f83266b577df22c802537"
 
 func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 	path := filepath.Join("replica-relay-data-plane-portable-v1.json")
@@ -37,6 +37,11 @@ func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 		SubscriptionCreateResponse        relay.SubscriptionCreateResponse        `json:"subscriptionCreateResponse"`
 		SubscriptionStatusChangeRequest   relay.SubscriptionStatusChangeRequest   `json:"subscriptionStatusChangeRequest"`
 		SubscriptionStatusChangeResponse  relay.SubscriptionStatusChangeResponse  `json:"subscriptionStatusChangeResponse"`
+		CheckpointFenceRequest            relay.CheckpointFenceRequest            `json:"checkpointFenceRequest"`
+		CheckpointFenceResponse           relay.CheckpointFenceResponse           `json:"checkpointFenceResponse"`
+		CheckpointFenceState              relay.CheckpointFenceState              `json:"checkpointFenceState"`
+		CheckpointFenceAbortRequest       relay.CheckpointFenceAbortRequest       `json:"checkpointFenceAbortRequest"`
+		CheckpointFenceAbortResponse      relay.CheckpointFenceAbortResponse      `json:"checkpointFenceAbortResponse"`
 		CheckpointCandidate               relay.CheckpointCandidate               `json:"checkpointCandidate"`
 		ActivationRequest                 relay.CheckpointActivationRequest       `json:"activationRequest"`
 		CheckpointStageResponse           relay.CheckpointStageResponse           `json:"checkpointStageResponse"`
@@ -82,6 +87,9 @@ func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 		"subscription create response": fixture.SubscriptionCreateResponse.Subscription.Validate,
 		"subscription status request":  fixture.SubscriptionStatusChangeRequest.Validate,
 		"subscription status response": fixture.SubscriptionStatusChangeResponse.Subscription.Validate,
+		"checkpoint fence request":     fixture.CheckpointFenceRequest.Validate,
+		"checkpoint fence state":       fixture.CheckpointFenceState.Validate,
+		"checkpoint fence abort":       fixture.CheckpointFenceAbortRequest.Validate,
 		"checkpoint candidate":         fixture.CheckpointCandidate.Validate,
 		"checkpoint activation":        fixture.ActivationRequest.Validate,
 		"checkpoint collection":        fixture.CollectionRequest.Validate,
@@ -107,6 +115,9 @@ func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 		t.Fatal("upload fixture responses are not bound to their exact requests")
 	}
 	if fixture.CheckpointStageResponse.CheckpointID != fixture.CheckpointCandidate.CheckpointID ||
+		fixture.CheckpointCandidate.FenceID != fixture.CheckpointFenceRequest.FenceID ||
+		fixture.CheckpointFenceResponse.FenceID != fixture.CheckpointFenceRequest.FenceID ||
+		fixture.CheckpointFenceAbortResponse.FenceID != fixture.CheckpointFenceAbortRequest.FenceID ||
 		fixture.CheckpointActivationResponse.CheckpointID != fixture.CheckpointCandidate.CheckpointID ||
 		fixture.DryRunResponse.CheckpointID != fixture.CheckpointCandidate.CheckpointID ||
 		fixture.CollectionResponse.PlanDigest != fixture.CollectionRequest.PlanDigest {

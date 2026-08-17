@@ -386,6 +386,89 @@ func (s *Server) handleRelayDomainStatus(writer http.ResponseWriter, request *ht
 	writeJSON(writer, http.StatusOK, status)
 }
 
+func (s *Server) handleCreateRelayCheckpointFence(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.CheckpointFenceRequest
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.relayStore.CreateCheckpointFence(request.Context(), credential, input, s.nowMilliseconds())
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleGetRelayCheckpointFence(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	fenceID, err := parseRelayUUID(request.PathValue("fenceID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.relayStore.GetCheckpointFence(request.Context(), credential, fenceID, s.nowMilliseconds())
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (s *Server) handleAbortRelayCheckpointFence(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	fenceID, err := parseRelayUUID(request.PathValue("fenceID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.CheckpointFenceAbortRequest
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.FenceID != fenceID {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeWrongScope, "fence path and body differ"))
+		return
+	}
+	result, err := s.relayStore.AbortCheckpointFence(request.Context(), credential, input, s.nowMilliseconds())
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func (s *Server) handleStageRelayCheckpoint(writer http.ResponseWriter, request *http.Request) {
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {
@@ -416,7 +499,7 @@ func (s *Server) handleStageRelayCheckpoint(writer http.ResponseWriter, request 
 }
 
 func (s *Server) handleActivateRelayCheckpoint(writer http.ResponseWriter, request *http.Request) {
-	_, _, checkpointID, credential, err := s.relayCheckpointAdministration(request)
+	tenantID, domainID, checkpointID, credential, err := s.relayCheckpointAdministration(request)
 	if err != nil {
 		s.writeError(writer, err)
 		return
@@ -426,16 +509,19 @@ func (s *Server) handleActivateRelayCheckpoint(writer http.ResponseWriter, reque
 		s.writeError(writer, err)
 		return
 	}
-	if input.CheckpointID != checkpointID || input.ActivatedAtMilliseconds > s.nowMilliseconds() {
+	if input.CheckpointID != checkpointID {
 		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "checkpoint activation path or time is invalid"))
 		return
 	}
-	result, err := s.relayStore.ActivateCheckpoint(request.Context(), credential, input)
+	result, err := s.relayStore.ActivateCheckpoint(request.Context(), credential, input, s.nowMilliseconds())
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
 	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	if result.Acceptance == relay.AcceptanceAccepted {
+		s.relayWakeBroker.notify(tenantID, domainID)
+	}
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 

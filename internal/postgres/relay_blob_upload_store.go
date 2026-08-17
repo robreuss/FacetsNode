@@ -58,6 +58,9 @@ func (s *RelayStore) CreateBlobUpload(
 		}
 		return relay.BlobUploadCreateResponse{}, relay.NewProtocolError(relay.CodeBlobUploadCollision, "blob upload retry ID was reused")
 	}
+	if err := postgresFenceAllowsWrite(ctx, tx, credential.TenantID, credential.DomainID, subscriptionID, nowMilliseconds); err != nil {
+		return relay.BlobUploadCreateResponse{}, err
+	}
 	if _, found, err := loadBlobUpload(ctx, tx, credential.TenantID, credential.DomainID, request.UploadID, "FOR UPDATE"); err != nil {
 		return relay.BlobUploadCreateResponse{}, err
 	} else if found {
@@ -146,6 +149,12 @@ func (s *RelayStore) AppendBlobUploadChunk(
 		return relay.BlobUploadStatus{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR UPDATE"); err != nil {
+		return relay.BlobUploadStatus{}, err
+	}
+	if _, _, _, _, _, _, err := loadRelayDomain(ctx, tx, credential.TenantID, credential.DomainID, "FOR UPDATE"); err != nil {
+		return relay.BlobUploadStatus{}, err
+	}
 	subscriptionID, err := authorizeBlobUploadMember(ctx, tx, credential, nowMilliseconds)
 	if err != nil {
 		return relay.BlobUploadStatus{}, err
@@ -170,6 +179,9 @@ func (s *RelayStore) AppendBlobUploadChunk(
 		return relay.BlobUploadStatus{}, relay.NewProtocolError(relay.CodeBlobUploadCollision, "blob upload chunk offset was reused")
 	}
 	if err != pgx.ErrNoRows {
+		return relay.BlobUploadStatus{}, err
+	}
+	if err := postgresFenceAllowsWrite(ctx, tx, credential.TenantID, credential.DomainID, subscriptionID, nowMilliseconds); err != nil {
 		return relay.BlobUploadStatus{}, err
 	}
 	if upload.state != "active" || request.Offset != upload.status.CommittedOffset || request.ByteCount > upload.status.ByteCount-request.Offset {
@@ -247,6 +259,13 @@ func (s *RelayStore) FinalizeBlobUpload(
 	if upload.subscriptionID != subscriptionID {
 		return relay.BlobUploadFinalizationResponse{}, relay.NewProtocolError(relay.CodeWrongScope, "blob upload belongs to another subscription")
 	}
+	if err := postgresFenceAllowsWrite(ctx, tx, credential.TenantID, credential.DomainID, subscriptionID, nowMilliseconds); err != nil {
+		return relay.BlobUploadFinalizationResponse{}, err
+	}
+	fenceID, err := postgresActiveFenceForSubscription(ctx, tx, credential.TenantID, credential.DomainID, subscriptionID)
+	if err != nil {
+		return relay.BlobUploadFinalizationResponse{}, err
+	}
 	if upload.state != "active" || request.RelayBlobID != upload.status.RelayBlobID || request.ByteCount != upload.status.ByteCount || upload.status.CommittedOffset != upload.status.ByteCount || request.FinalizedAtMilliseconds < upload.status.UpdatedAtMilliseconds {
 		return relay.BlobUploadFinalizationResponse{}, relay.NewProtocolError(relay.CodeInvalidBlobUpload, "blob upload finalization does not match staged content")
 	}
@@ -267,7 +286,7 @@ func (s *RelayStore) FinalizeBlobUpload(
 		if err := publish(upload.status); err != nil {
 			return relay.BlobUploadFinalizationResponse{}, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO relay_blobs (tenant_id,domain_id,blob_id,publisher_member_id,byte_count,created_at_milliseconds) VALUES ($1,$2,$3,$4,$5,$6)`, credential.TenantID, credential.DomainID, request.RelayBlobID, upload.publisherMemberID, request.ByteCount, request.FinalizedAtMilliseconds); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO relay_blobs (tenant_id,domain_id,blob_id,publisher_member_id,byte_count,created_at_milliseconds,checkpoint_fence_id) VALUES ($1,$2,$3,$4,$5,$6,$7)`, credential.TenantID, credential.DomainID, request.RelayBlobID, upload.publisherMemberID, request.ByteCount, request.FinalizedAtMilliseconds, fenceID); err != nil {
 			return relay.BlobUploadFinalizationResponse{}, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE relay_domains SET blob_count=blob_count+1,blob_byte_count=blob_byte_count+$3,reserved_blob_count=reserved_blob_count-1,reserved_blob_byte_count=reserved_blob_byte_count-$3 WHERE tenant_id=$1 AND domain_id=$2`, credential.TenantID, credential.DomainID, request.ByteCount); err != nil {

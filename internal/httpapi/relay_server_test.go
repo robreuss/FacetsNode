@@ -1027,11 +1027,21 @@ func TestRelayCheckpointHTTPStagesActivatesPlansAndCollects(t *testing.T) {
 		"/domains/" + authority.Domain.DomainID.String()
 
 	nowMilliseconds = 1_100
+	fenceRequest := relay.CheckpointFenceRequest{RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: nowMilliseconds}
+	fencePath := domainRoot + "/checkpoint-fences"
+	fenceResponse := performRelayJSON(t, handler, http.MethodPost, fencePath, fenceRequest, authority.MemberCredential.AuthorizationToken, authority.Member.MemberID)
+	requireStatus(t, fenceResponse, http.StatusCreated)
+	var fence relay.CheckpointFenceResponse
+	if err := json.NewDecoder(fenceResponse.Body).Decode(&fence); err != nil {
+		t.Fatal(err)
+	}
+	_ = fenceResponse.Body.Close()
 	candidate := relay.CheckpointCandidate{
 		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID:  fence.FenceID,
 		TenantID: authority.Domain.TenantID, DomainID: authority.Domain.DomainID,
 		PublisherSubscriptionID: authority.SubscriptionID,
-		CoveredThroughCursor:    relay.EncodeCursor(0),
+		CoveredThroughCursor:    fence.BoundaryCursor,
 		RetainedMessageIDs:      []uuid.UUID{}, RetainedBlobIDs: []string{},
 		CreatedAtMilliseconds: nowMilliseconds,
 	}
@@ -1062,6 +1072,16 @@ func TestRelayCheckpointHTTPStagesActivatesPlansAndCollects(t *testing.T) {
 	_ = activate.Body.Close()
 	if activationResult.StartCursor != relay.EncodeCursor(0) {
 		t.Fatalf("unexpected checkpoint start cursor: %+v", activationResult)
+	}
+	activatedFenceResponse := performRelayJSON(t, handler, http.MethodGet, fencePath+"/"+fence.FenceID.String(), nil, authority.MemberCredential.AuthorizationToken, authority.Member.MemberID)
+	requireStatus(t, activatedFenceResponse, http.StatusOK)
+	var activatedFence relay.CheckpointFenceState
+	if err := json.NewDecoder(activatedFenceResponse.Body).Decode(&activatedFence); err != nil {
+		t.Fatal(err)
+	}
+	_ = activatedFenceResponse.Body.Close()
+	if activatedFence.Status != relay.CheckpointFenceActivated {
+		t.Fatalf("activated fence state=%+v", activatedFence)
 	}
 
 	dryRun := performRelayJSON(t, handler, http.MethodPost, checkpointRoot+"/collection-dry-run", relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID}, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
@@ -1100,6 +1120,21 @@ func TestRelayCheckpointHTTPStagesActivatesPlansAndCollects(t *testing.T) {
 	if !retried.Duplicate || !retried.Completed {
 		t.Fatalf("unexpected checkpoint collection retry: %+v", retried)
 	}
+	nowMilliseconds = 1_400
+	abortFenceRequest := relay.CheckpointFenceRequest{RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: nowMilliseconds}
+	abortFenceResponse := performRelayJSON(t, handler, http.MethodPost, fencePath, abortFenceRequest, authority.MemberCredential.AuthorizationToken, authority.Member.MemberID)
+	requireStatus(t, abortFenceResponse, http.StatusCreated)
+	_ = abortFenceResponse.Body.Close()
+	statusResponse := performRelayJSON(t, handler, http.MethodGet, fencePath+"/"+abortFenceRequest.FenceID.String(), nil, authority.MemberCredential.AuthorizationToken, authority.Member.MemberID)
+	requireStatus(t, statusResponse, http.StatusOK)
+	_ = statusResponse.Body.Close()
+	abortRequest := relay.CheckpointFenceAbortRequest{RetryID: uuid.New(), FenceID: abortFenceRequest.FenceID, AbortedAtMilliseconds: nowMilliseconds}
+	abortResponse := performRelayJSON(t, handler, http.MethodPost, fencePath+"/"+abortFenceRequest.FenceID.String()+"/abort", abortRequest, authority.MemberCredential.AuthorizationToken, authority.Member.MemberID)
+	requireStatus(t, abortResponse, http.StatusOK)
+	_ = abortResponse.Body.Close()
+	abortRetry := performRelayJSON(t, handler, http.MethodPost, fencePath+"/"+abortFenceRequest.FenceID.String()+"/abort", abortRequest, authority.MemberCredential.AuthorizationToken, authority.Member.MemberID)
+	requireStatus(t, abortRetry, http.StatusOK)
+	_ = abortRetry.Body.Close()
 }
 
 func relayTestToken(seed byte) string {

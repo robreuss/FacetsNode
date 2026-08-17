@@ -14,7 +14,7 @@ CREATE TABLE relay_checkpoints (
     covered_through_sequence bigint NOT NULL CHECK (covered_through_sequence >= 0),
     created_at_milliseconds bigint NOT NULL CHECK (created_at_milliseconds >= 0),
     state text NOT NULL DEFAULT 'staged'
-        CHECK (state IN ('staged', 'activated', 'retired')),
+        CHECK (state IN ('staged', 'activated', 'retired', 'invalidated')),
     activation_retry_id uuid,
     activation_ordinal bigint CHECK (activation_ordinal > 0),
     activated_at_milliseconds bigint,
@@ -34,7 +34,7 @@ CREATE TABLE relay_checkpoints (
         REFERENCES relay_members(tenant_id, domain_id, member_id)
         DEFERRABLE INITIALLY DEFERRED,
     CHECK (
-        (state = 'staged' AND activation_retry_id IS NULL AND
+        (state IN ('staged', 'invalidated') AND activation_retry_id IS NULL AND
             activation_ordinal IS NULL AND activated_at_milliseconds IS NULL AND
             start_sequence IS NULL) OR
         (state IN ('activated', 'retired') AND activation_retry_id IS NOT NULL AND

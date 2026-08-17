@@ -58,19 +58,22 @@ func (s *MemoryStore) StageCheckpoint(_ context.Context, credential Credential, 
 	}
 	if existingID, ok := domain.checkpointStageRetries[candidate.RetryID]; ok {
 		existing := domain.checkpoints[existingID]
-		if existing != nil && existing.candidateDigest == CheckpointCandidateDigest(candidate) && existing.publisherMemberID == credential.MemberID {
+		if existing != nil && existing.candidateDigest == CheckpointCandidateDigest(candidate) && existing.candidate.PublisherSubscriptionID == subscription.SubscriptionID {
 			return CheckpointStageResponse{Acceptance: AcceptanceDuplicate, RetryID: candidate.RetryID, CheckpointID: candidate.CheckpointID}, nil
 		}
 		return CheckpointStageResponse{}, protocolError(CodeCheckpointCollision, "checkpoint retry ID was reused")
 	}
+	refreshMemoryFence(domain, nowMilliseconds)
+	fence := domain.checkpointFences[candidate.FenceID]
+	if fence == nil || fence.state.Status != CheckpointFenceActive || nowMilliseconds >= fence.state.ExpiresAtMilliseconds ||
+		fence.holderSubscriptionID != subscription.SubscriptionID || candidate.CoveredThroughCursor != fence.state.BoundaryCursor {
+		return CheckpointStageResponse{}, protocolError(CodeInvalidCheckpointFence, "checkpoint candidate does not match an active fence")
+	}
 	if _, ok := domain.checkpoints[candidate.CheckpointID]; ok {
 		return CheckpointStageResponse{}, protocolError(CodeCheckpointCollision, "checkpoint ID was reused")
 	}
-	for _, messageID := range candidate.RetainedMessageIDs {
-		message := domain.messageByID[messageID]
-		if message == nil || message.message.Sequence > coveredThrough {
-			return CheckpointStageResponse{}, protocolError(CodeInvalidCheckpoint, "retained message is missing or beyond coverage")
-		}
+	if !memoryFenceSuffixMatches(domain, fence, candidate.RetainedMessageIDs) {
+		return CheckpointStageResponse{}, protocolError(CodeInvalidCheckpoint, "retained messages are not the exact fenced holder suffix")
 	}
 	for _, blobID := range candidate.RetainedBlobIDs {
 		if _, ok := domain.blobs[blobID]; !ok {
@@ -86,7 +89,7 @@ func (s *MemoryStore) StageCheckpoint(_ context.Context, credential Credential, 
 	return CheckpointStageResponse{Acceptance: AcceptanceAccepted, RetryID: candidate.RetryID, CheckpointID: candidate.CheckpointID}, nil
 }
 
-func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential AdministrationCredential, request CheckpointActivationRequest) (CheckpointActivationResponse, error) {
+func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential AdministrationCredential, request CheckpointActivationRequest, nowMilliseconds int64) (CheckpointActivationResponse, error) {
 	if err := request.Validate(); err != nil {
 		return CheckpointActivationResponse{}, err
 	}
@@ -108,8 +111,16 @@ func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential Administr
 	if checkpoint == nil {
 		return CheckpointActivationResponse{}, protocolError(CodeCheckpointNotFound, "checkpoint was not found")
 	}
+	refreshMemoryFence(domain, nowMilliseconds)
+	fence := domain.checkpointFences[checkpoint.candidate.FenceID]
 	if checkpoint.state != "staged" || request.ActivatedAtMilliseconds < checkpoint.candidate.CreatedAtMilliseconds {
+		if fence != nil && (fence.state.Status == CheckpointFenceExpired || fence.state.Status == CheckpointFenceAborted) {
+			return CheckpointActivationResponse{}, protocolError(CodeInvalidCheckpointFence, "checkpoint fence is no longer activatable")
+		}
 		return CheckpointActivationResponse{}, protocolError(CodeCheckpointCollision, "checkpoint was already activated or activation time is invalid")
+	}
+	if fence == nil || fence.state.Status != CheckpointFenceActive || !memoryFenceSuffixMatches(domain, fence, checkpoint.candidate.RetainedMessageIDs) {
+		return CheckpointActivationResponse{}, protocolError(CodeInvalidCheckpointFence, "checkpoint fence is no longer activatable")
 	}
 	retainedMessages := make(map[uuid.UUID]struct{})
 	retainedBlobs := make(map[string]struct{})
@@ -149,16 +160,11 @@ func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential Administr
 		}
 	}
 	checkpoint.startSequence = checkpoint.coveredThrough
-	for _, id := range checkpoint.candidate.RetainedMessageIDs {
-		sequence := domain.messageByID[id].message.Sequence
-		if sequence > 0 && (checkpoint.startSequence == checkpoint.coveredThrough || sequence-1 < checkpoint.startSequence) {
-			checkpoint.startSequence = sequence - 1
-		}
-	}
 	domain.checkpointOrdinal++
 	checkpoint.activationOrdinal = domain.checkpointOrdinal
 	checkpoint.activationRequest = request
 	checkpoint.state = "activated"
+	fence.state.Status = CheckpointFenceActivated
 	domain.activatedCheckpoints = append(domain.activatedCheckpoints, request.CheckpointID)
 	if len(domain.activatedCheckpoints) > 2 {
 		retiredID := domain.activatedCheckpoints[len(domain.activatedCheckpoints)-3]
@@ -173,6 +179,29 @@ func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential Administr
 	result := CheckpointActivationResponse{Acceptance: AcceptanceAccepted, RetryID: request.RetryID, CheckpointID: request.CheckpointID, ActivatedAtMilliseconds: request.ActivatedAtMilliseconds, StartCursor: EncodeCursor(checkpoint.startSequence)}
 	domain.checkpointActivations[request.RetryID] = memoryCheckpointActivation{checkpointID: request.CheckpointID, request: request, result: result}
 	return result, nil
+}
+
+func memoryFenceSuffixMatches(domain *memoryDomain, fence *memoryCheckpointFence, retained []uuid.UUID) bool {
+	boundary, err := DecodeCursor(fence.state.BoundaryCursor)
+	if err != nil {
+		return false
+	}
+	expected := make([]uuid.UUID, 0)
+	for _, message := range domain.messages {
+		if message.publisherSubscription == fence.holderSubscriptionID && message.message.Sequence > boundary {
+			expected = append(expected, message.message.Envelope.MessageID)
+		}
+	}
+	sort.Slice(expected, func(i, j int) bool { return expected[i].String() < expected[j].String() })
+	if len(expected) != len(retained) {
+		return false
+	}
+	for index := range expected {
+		if expected[index] != retained[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *MemoryStore) DryRunCheckpointCollection(_ context.Context, credential AdministrationCredential, request CheckpointDryRunRequest) (CheckpointDryRunResponse, error) {

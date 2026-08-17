@@ -14,16 +14,21 @@ import (
 )
 
 type RelayStore struct {
-	pool          *pgxpool.Pool
-	blobUploadTTL time.Duration
+	pool               *pgxpool.Pool
+	blobUploadTTL      time.Duration
+	checkpointFenceTTL time.Duration
 }
 
-func NewRelayStore(pool *pgxpool.Pool, uploadTTL ...time.Duration) *RelayStore {
-	ttl := 7 * 24 * time.Hour
-	if len(uploadTTL) > 0 && uploadTTL[0] > 0 {
-		ttl = uploadTTL[0]
+func NewRelayStore(pool *pgxpool.Pool, durations ...time.Duration) *RelayStore {
+	uploadTTL := 7 * 24 * time.Hour
+	fenceTTL := time.Duration(relay.DefaultCheckpointFenceLifetimeMilliseconds) * time.Millisecond
+	if len(durations) > 0 && durations[0] > 0 {
+		uploadTTL = durations[0]
 	}
-	return &RelayStore{pool: pool, blobUploadTTL: ttl}
+	if len(durations) > 1 && durations[1] >= time.Duration(relay.MinimumCheckpointFenceLifetimeMilliseconds)*time.Millisecond && durations[1] <= time.Duration(relay.MaximumCheckpointFenceLifetimeMilliseconds)*time.Millisecond {
+		fenceTTL = durations[1]
+	}
+	return &RelayStore{pool: pool, blobUploadTTL: uploadTTL, checkpointFenceTTL: fenceTTL}
 }
 
 func (s *RelayStore) CreateDomain(
@@ -731,6 +736,30 @@ func (s *RelayStore) Publish(
 			"message ID was reused with different content",
 		)
 	}
+	var tombstoneMember uuid.UUID
+	var tombstoneDigest string
+	var tombstoneSequence int64
+	tombstoneErr := transaction.QueryRow(ctx, `SELECT publisher_member_id,envelope_digest,domain_sequence FROM relay_checkpoint_fence_message_tombstones WHERE tenant_id=$1 AND domain_id=$2 AND message_id=$3`, credential.TenantID, credential.DomainID, envelope.MessageID).Scan(&tombstoneMember, &tombstoneDigest, &tombstoneSequence)
+	if tombstoneErr == nil {
+		digest, digestErr := envelope.ReferenceDigest()
+		if digestErr != nil {
+			return relay.PublishResult{}, digestErr
+		}
+		if tombstoneMember == credential.MemberID && tombstoneDigest == digest {
+			return relay.PublishResult{Acceptance: relay.AcceptanceDuplicate, Sequence: uint64(tombstoneSequence)}, nil
+		}
+		return relay.PublishResult{}, relay.NewProtocolError(relay.CodeMessageCollision, "message ID was reused with different content")
+	}
+	if tombstoneErr != pgx.ErrNoRows {
+		return relay.PublishResult{}, tombstoneErr
+	}
+	if err := postgresFenceAllowsWrite(ctx, transaction, credential.TenantID, credential.DomainID, publisherSubscriptionID, nowMilliseconds); err != nil {
+		return relay.PublishResult{}, err
+	}
+	fenceID, err := postgresActiveFenceForSubscription(ctx, transaction, credential.TenantID, credential.DomainID, publisherSubscriptionID)
+	if err != nil {
+		return relay.PublishResult{}, err
+	}
 	if messageCount >= domain.MaximumMessageCount {
 		return relay.PublishResult{}, relay.NewProtocolError(
 			relay.CodeDomainFull,
@@ -738,6 +767,10 @@ func (s *RelayStore) Publish(
 		)
 	}
 	ciphertextByteCount, err := envelope.CiphertextByteCount()
+	if err != nil {
+		return relay.PublishResult{}, err
+	}
+	envelopeDigest, err := envelope.ReferenceDigest()
 	if err != nil {
 		return relay.PublishResult{}, err
 	}
@@ -762,13 +795,13 @@ func (s *RelayStore) Publish(
 			tenant_id, domain_id, domain_sequence, message_id,
 			publisher_member_id, publisher_subscription_id, version, algorithm, key_epoch,
 			created_at_milliseconds, nonce, ciphertext, authentication_tag,
-			ciphertext_byte_count
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			ciphertext_byte_count, checkpoint_fence_id, envelope_digest
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	`, envelope.TenantID, envelope.DomainID, sequence, envelope.MessageID,
 		envelope.PublisherMemberID, publisherSubscriptionID, envelope.Version, envelope.Algorithm,
 		int64(envelope.KeyEpoch), envelope.CreatedAtMilliseconds,
 		envelope.Nonce, envelope.Ciphertext, envelope.AuthenticationTag,
-		ciphertextByteCount); err != nil {
+		ciphertextByteCount, fenceID, envelopeDigest); err != nil {
 		return relay.PublishResult{}, fmt.Errorf("insert relay message: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `UPDATE relay_tenants SET message_count=message_count+1,aggregate_message_byte_count=aggregate_message_byte_count+$2,updated_at=now() WHERE tenant_id=$1`, credential.TenantID, ciphertextByteCount); err != nil {
@@ -824,13 +857,16 @@ func (s *RelayStore) Fetch(
 		return relay.FetchResult{}, fmt.Errorf("begin relay fetch: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	if _, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR SHARE"); err != nil {
+	if _, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR UPDATE"); err != nil {
 		return relay.FetchResult{}, err
 	}
 	_, _, _, _, _, highWatermark, err := loadRelayDomain(
-		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
+		ctx, transaction, credential.TenantID, credential.DomainID, "FOR UPDATE",
 	)
 	if err != nil {
+		return relay.FetchResult{}, err
+	}
+	if err := expirePostgresFence(ctx, transaction, credential.TenantID, credential.DomainID, nowMilliseconds); err != nil {
 		return relay.FetchResult{}, err
 	}
 	member, found, err := loadRelayMember(
@@ -869,6 +905,14 @@ func (s *RelayStore) Fetch(
 	if subscriptionStart != nil && uint64(*subscriptionStart) > afterSequence {
 		afterSequence = uint64(*subscriptionStart)
 	}
+	var activeFenceBoundary int64
+	if err := transaction.QueryRow(ctx, `SELECT boundary_sequence FROM relay_checkpoint_fences WHERE tenant_id=$1 AND domain_id=$2 AND status='active' LIMIT 1`, credential.TenantID, credential.DomainID).Scan(&activeFenceBoundary); err == nil {
+		if activeFenceBoundary < highWatermark {
+			highWatermark = activeFenceBoundary
+		}
+	} else if err != pgx.ErrNoRows {
+		return relay.FetchResult{}, err
+	}
 	rows, err := transaction.Query(ctx, `
 		SELECT domain_sequence, message_id, publisher_member_id,
 		       version, algorithm, key_epoch, created_at_milliseconds,
@@ -877,6 +921,10 @@ func (s *RelayStore) Fetch(
 		WHERE tenant_id = $1 AND domain_id = $2
 		  AND domain_sequence > $3 AND domain_sequence <= $4
 		  AND publisher_subscription_id <> $5
+		  AND (checkpoint_fence_id IS NULL OR EXISTS (
+		      SELECT 1 FROM relay_checkpoint_fences f
+		      WHERE f.tenant_id=relay_messages.tenant_id AND f.domain_id=relay_messages.domain_id
+		        AND f.fence_id=relay_messages.checkpoint_fence_id AND f.status='activated'))
 		ORDER BY domain_sequence
 		LIMIT $6
 	`, credential.TenantID, credential.DomainID, int64(afterSequence),
@@ -1274,6 +1322,17 @@ func (s *RelayStore) CommitBlobPublish(
 			"blob ID was reused with a different length",
 		)
 	}
+	subscriptionID, err := loadActiveMemberSubscription(ctx, transaction, credential.TenantID, credential.DomainID, credential.MemberID, "FOR SHARE")
+	if err != nil {
+		return relay.BlobPublishResult{}, err
+	}
+	if err := postgresFenceAllowsWrite(ctx, transaction, credential.TenantID, credential.DomainID, subscriptionID, nowMilliseconds); err != nil {
+		return relay.BlobPublishResult{}, err
+	}
+	fenceID, err := postgresActiveFenceForSubscription(ctx, transaction, credential.TenantID, credential.DomainID, subscriptionID)
+	if err != nil {
+		return relay.BlobPublishResult{}, err
+	}
 	if err := ensureRelayBlobCapacity(
 		domain, blobCount, blobByteCount, byteCount,
 	); err != nil {
@@ -1290,11 +1349,11 @@ func (s *RelayStore) CommitBlobPublish(
 	if _, err := transaction.Exec(ctx, `
 		INSERT INTO relay_blobs (
 			tenant_id, domain_id, blob_id, publisher_member_id,
-			byte_count, created_at_milliseconds
-		) VALUES ($1, $2, $3, $4, $5, $6)
+			byte_count, created_at_milliseconds, checkpoint_fence_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`, metadata.TenantID, metadata.DomainID, metadata.BlobID,
 		metadata.PublisherMemberID, metadata.ByteCount,
-		metadata.CreatedAtMilliseconds); err != nil {
+		metadata.CreatedAtMilliseconds, fenceID); err != nil {
 		return relay.BlobPublishResult{}, fmt.Errorf("insert relay blob: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `
@@ -1334,6 +1393,15 @@ func (s *RelayStore) GetBlobMetadata(
 		return relay.BlobMetadata{}, fmt.Errorf("begin relay blob fetch: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
+	if _, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR UPDATE"); err != nil {
+		return relay.BlobMetadata{}, err
+	}
+	if _, _, _, _, _, _, err := loadRelayDomain(ctx, transaction, credential.TenantID, credential.DomainID, "FOR UPDATE"); err != nil {
+		return relay.BlobMetadata{}, err
+	}
+	if err := expirePostgresFence(ctx, transaction, credential.TenantID, credential.DomainID, nowMilliseconds); err != nil {
+		return relay.BlobMetadata{}, err
+	}
 	member, found, err := loadRelayMember(
 		ctx,
 		transaction,
@@ -1372,6 +1440,13 @@ func (s *RelayStore) GetBlobMetadata(
 			relay.CodeBlobNotFound,
 			"blob was not found",
 		)
+	}
+	var fenceStatus *string
+	if err := transaction.QueryRow(ctx, `SELECT f.status FROM relay_blobs b LEFT JOIN relay_checkpoint_fences f ON f.tenant_id=b.tenant_id AND f.domain_id=b.domain_id AND f.fence_id=b.checkpoint_fence_id WHERE b.tenant_id=$1 AND b.domain_id=$2 AND b.blob_id=$3`, credential.TenantID, credential.DomainID, blobID).Scan(&fenceStatus); err != nil {
+		return relay.BlobMetadata{}, err
+	}
+	if fenceStatus != nil && *fenceStatus != string(relay.CheckpointFenceActivated) {
+		return relay.BlobMetadata{}, relay.NewProtocolError(relay.CodeBlobNotFound, "blob was not found")
 	}
 	if err := transaction.Commit(ctx); err != nil {
 		return relay.BlobMetadata{}, fmt.Errorf("commit relay blob fetch: %w", err)

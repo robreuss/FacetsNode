@@ -163,18 +163,55 @@ Periodic cursor fetch is authoritative; wake is only an acceleration hint.
 
 ## Checkpoints and bounded collection
 
-A member with `checkpoint_publish` may stage an opaque checkpoint candidate:
+A member with `checkpoint_publish` first acquires a server-timed write fence:
+
+```text
+POST .../checkpoint-fences
+GET  .../checkpoint-fences/{fenceID}
+POST .../checkpoint-fences/{fenceID}/abort
+```
+
+There is at most one active fence per domain. Its holder is the authenticated
+member's subscription, not an identity supplied in the body. While active,
+new message publications and blob upload create/chunk/finalize mutations from
+other subscriptions fail closed; reads, fetches, acknowledgments, and exact
+retries of writes already accepted before the fence continue. Every agent on
+the holder subscription may keep publishing the checkpoint suffix. Those
+post-boundary messages, and blobs first finalized while the fence is active,
+are quarantined from other subscriptions until activation. Fetch cursors stop
+at the boundary so a recipient cannot skip the suffix before it becomes
+visible. Activation reveals the complete revalidated suffix atomically and
+emits a wake hint. Acquisition and abort are exact-retry safe.
+
+The Node supplies the boundary cursor and expiry in the acquisition response.
+Expiry uses server receipt time. `FACETS_NODE_CHECKPOINT_FENCE_TTL` defaults to
+two hours and is operator-configurable from five minutes through 24 hours. A
+longer value gives large encrypted checkpoint uploads more time, but also
+extends the maximum foreign-writer pause after a crashed holder. Abort or
+expiry releases writes and invalidates any unactivated candidate. Failed-fence
+suffixes are never revealed. The Node reclaims up to 10,000 failed message and
+blob authorities per serialized fence touch, advances quota counters, and
+continues draining on later status/fetch/write operations. Compact message
+digest/sequence tombstones and finalization operation records preserve exact
+response-loss retries without retaining quarantined ciphertext. Newly finalized
+blob authority is queued for the existing grace-period physical reconciler;
+pre-fence authority with the same content address is never attributed to or
+removed with the fence.
+
+The holder may then stage an opaque checkpoint candidate:
 
 ```text
 POST .../checkpoints/candidates
 ```
 
-The candidate contains client-generated `retryID` and `checkpointID`, its
-publisher subscription, an opaque `coveredThroughCursor`, sorted complete
-retained-message and retained-blob ID sets, and a creation time. The Node
-validates only routing authority, cursor bounds, and the existence of retained
-objects. It does not interpret checkpoint ciphertext or application state.
-Staging is exact-retry safe.
+The candidate contains the fence ID, client-generated `retryID` and
+`checkpointID`, its publisher subscription, the exact fence boundary cursor,
+sorted complete retained-message and retained-blob ID sets, and a creation
+time. Retained messages must be exactly every holder-subscription publication
+after the boundary through staging; activation revalidates the same suffix
+under the domain lock. Retained blobs must exist but remain opaque and
+client-declared. The Node does not interpret checkpoint ciphertext or
+application state. Staging is exact-retry safe.
 
 Domain administration controls activation and collection:
 
@@ -184,7 +221,9 @@ POST .../checkpoints/{checkpointID}/collection-dry-run
 POST .../checkpoints/{checkpointID}/collection
 ```
 
-Activation is exact-retry safe and freezes all of the following in one
+Activation requires the still-active, unexpired fence, returns the boundary as
+the checkpoint start cursor, releases the fence atomically, and is exact-retry
+safe. It freezes all of the following in one
 tenant/domain-serialized PostgreSQL transaction:
 
 - the then-active subscriptions whose custody is required;
@@ -193,7 +232,8 @@ tenant/domain-serialized PostgreSQL transaction:
 - currently published blobs not retained by either of those checkpoints; and
 - the checkpoint start cursor used for later subscription bootstrap.
 
-Publication after that transaction is not part of its deletion set. Sequence
+Publication after that transaction is not part of its deletion set. The exact
+holder suffix above the boundary is also outside the covered deletion set. Sequence
 allocation remains monotonic after collection. The latest two activated
 checkpoints remain retained; older checkpoints are marked retired. Only the
 latest activated checkpoint can be collected. When a checkpoint retires, its

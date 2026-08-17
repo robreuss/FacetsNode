@@ -11,11 +11,87 @@ import (
 )
 
 const MaximumCheckpointCollectionCount = int64(10_000)
+const MinimumCheckpointFenceLifetimeMilliseconds = int64(5 * 60 * 1_000)
+const DefaultCheckpointFenceLifetimeMilliseconds = int64(2 * 60 * 60 * 1_000)
+const MaximumCheckpointFenceLifetimeMilliseconds = int64(24 * 60 * 60 * 1_000)
+
+type CheckpointFenceStatus string
+
+const (
+	CheckpointFenceActive    CheckpointFenceStatus = "active"
+	CheckpointFenceActivated CheckpointFenceStatus = "activated"
+	CheckpointFenceExpired   CheckpointFenceStatus = "expired"
+	CheckpointFenceAborted   CheckpointFenceStatus = "aborted"
+)
+
+type CheckpointFenceRequest struct {
+	RetryID                 uuid.UUID `json:"retryID"`
+	FenceID                 uuid.UUID `json:"fenceID"`
+	RequestedAtMilliseconds int64     `json:"requestedAtMilliseconds"`
+}
+
+func (r CheckpointFenceRequest) Validate() error {
+	if r.RetryID == uuid.Nil || r.FenceID == uuid.Nil || r.RequestedAtMilliseconds < 0 {
+		return protocolError(CodeInvalidCheckpointFence, "checkpoint fence request is invalid")
+	}
+	return nil
+}
+
+type CheckpointFenceState struct {
+	FenceID                uuid.UUID             `json:"fenceID"`
+	Status                 CheckpointFenceStatus `json:"status"`
+	BoundaryCursor         string                `json:"boundaryCursor"`
+	AcquiredAtMilliseconds int64                 `json:"acquiredAtMilliseconds"`
+	ExpiresAtMilliseconds  int64                 `json:"expiresAtMilliseconds"`
+}
+
+func (s CheckpointFenceState) Validate() error {
+	if s.FenceID == uuid.Nil || s.AcquiredAtMilliseconds < 0 ||
+		s.ExpiresAtMilliseconds <= s.AcquiredAtMilliseconds || ValidateOpaqueCursor(s.BoundaryCursor) != nil {
+		return protocolError(CodeInvalidCheckpointFence, "checkpoint fence state is invalid")
+	}
+	switch s.Status {
+	case CheckpointFenceActive, CheckpointFenceActivated, CheckpointFenceExpired, CheckpointFenceAborted:
+		return nil
+	default:
+		return protocolError(CodeInvalidCheckpointFence, "checkpoint fence status is invalid")
+	}
+}
+
+type CheckpointFenceResponse struct {
+	Acceptance             Acceptance `json:"acceptance"`
+	RetryID                uuid.UUID  `json:"retryID"`
+	FenceID                uuid.UUID  `json:"fenceID"`
+	BoundaryCursor         string     `json:"boundaryCursor"`
+	AcquiredAtMilliseconds int64      `json:"acquiredAtMilliseconds"`
+	ExpiresAtMilliseconds  int64      `json:"expiresAtMilliseconds"`
+}
+
+type CheckpointFenceAbortRequest struct {
+	RetryID               uuid.UUID `json:"retryID"`
+	FenceID               uuid.UUID `json:"fenceID"`
+	AbortedAtMilliseconds int64     `json:"abortedAtMilliseconds"`
+}
+
+func (r CheckpointFenceAbortRequest) Validate() error {
+	if r.RetryID == uuid.Nil || r.FenceID == uuid.Nil || r.AbortedAtMilliseconds < 0 {
+		return protocolError(CodeInvalidCheckpointFence, "checkpoint fence abort is invalid")
+	}
+	return nil
+}
+
+type CheckpointFenceAbortResponse struct {
+	Acceptance Acceptance            `json:"acceptance"`
+	RetryID    uuid.UUID             `json:"retryID"`
+	FenceID    uuid.UUID             `json:"fenceID"`
+	Status     CheckpointFenceStatus `json:"status"`
+}
 
 type CheckpointCandidate struct {
 	Version                 int         `json:"version"`
 	RetryID                 uuid.UUID   `json:"retryID"`
 	CheckpointID            uuid.UUID   `json:"checkpointID"`
+	FenceID                 uuid.UUID   `json:"fenceID"`
 	TenantID                uuid.UUID   `json:"tenantID"`
 	DomainID                uuid.UUID   `json:"domainID"`
 	PublisherSubscriptionID uuid.UUID   `json:"publisherSubscriptionID"`
@@ -27,7 +103,7 @@ type CheckpointCandidate struct {
 
 func (c CheckpointCandidate) Validate() error {
 	if c.Version != SchemaVersion || c.RetryID == uuid.Nil ||
-		c.CheckpointID == uuid.Nil || c.TenantID == uuid.Nil ||
+		c.CheckpointID == uuid.Nil || c.FenceID == uuid.Nil || c.TenantID == uuid.Nil ||
 		c.DomainID == uuid.Nil || c.PublisherSubscriptionID == uuid.Nil ||
 		c.CreatedAtMilliseconds < 0 || ValidateOpaqueCursor(c.CoveredThroughCursor) != nil {
 		return protocolError(CodeInvalidCheckpoint, "checkpoint candidate fields are invalid")
@@ -53,6 +129,7 @@ func CheckpointCandidateDigest(candidate CheckpointCandidate) string {
 	_, _ = hash.Write(number[:])
 	_, _ = hash.Write(candidate.RetryID[:])
 	_, _ = hash.Write(candidate.CheckpointID[:])
+	_, _ = hash.Write(candidate.FenceID[:])
 	_, _ = hash.Write(candidate.TenantID[:])
 	_, _ = hash.Write(candidate.DomainID[:])
 	_, _ = hash.Write(candidate.PublisherSubscriptionID[:])

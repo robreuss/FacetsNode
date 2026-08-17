@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"os"
+	"sort"
 	"testing"
 	"time"
 
@@ -73,7 +74,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID,
 		MemberID: recipient.MemberID, AuthorizationDigest: recipientDigest,
 		Capabilities: []relay.Capability{
-			relay.CapabilityAcknowledgeMessage, relay.CapabilityFetchMessage,
+			relay.CapabilityAcknowledgeMessage, relay.CapabilityFetchMessage, relay.CapabilityPublishMessage,
 		},
 		CreatedAtMilliseconds: 1_050,
 	}
@@ -110,12 +111,65 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
+	exactBlobBytes := []byte("pre-fence-exact")
+	exactBlobID := relay.BlobID(exactBlobBytes)
+	if err := store.PrepareBlobPublish(ctx, recipient, exactBlobID, int64(len(exactBlobBytes)), 1_160); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitBlobPublish(ctx, recipient, exactBlobID, int64(len(exactBlobBytes)), 1_160); err != nil {
+		t.Fatal(err)
+	}
+	blockedBlobBytes := []byte("prepared-before-fence")
+	blockedBlobID := relay.BlobID(blockedBlobBytes)
+	if err := store.PrepareBlobPublish(ctx, recipient, blockedBlobID, int64(len(blockedBlobBytes)), 1_170); err != nil {
+		t.Fatal(err)
+	}
+	fenceRequest := relay.CheckpointFenceRequest{RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: 1_175}
+	fence, err := store.CreateCheckpointFence(ctx, publisher, fenceRequest, 1_175)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, err := store.CreateCheckpointFence(ctx, publisher, fenceRequest, 1_176); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("fence exact retry=%+v err=%v", duplicate, err)
+	}
+	collision := fenceRequest
+	collision.FenceID = uuid.New()
+	if _, err := store.CreateCheckpointFence(ctx, publisher, collision, 1_176); !relay.ErrorHasCode(err, relay.CodeCheckpointFenceCollision) {
+		t.Fatalf("fence retry collision err=%v", err)
+	}
+	secondFence := relay.CheckpointFenceRequest{RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: 1_176}
+	if _, err := store.CreateCheckpointFence(ctx, publisher, secondFence, 1_176); !relay.ErrorHasCode(err, relay.CodeCheckpointFenceActive) {
+		t.Fatalf("second active fence err=%v", err)
+	}
+	blocked := first
+	blocked.MessageID, blocked.PublisherMemberID, blocked.CreatedAtMilliseconds = uuid.New(), recipient.MemberID, 1_176
+	if _, err := store.Publish(ctx, recipient, blocked, 1_176); !relay.ErrorHasCode(err, relay.CodeCheckpointFenceActive) {
+		t.Fatalf("foreign publish under fence err=%v", err)
+	}
+	if duplicate, err := store.CommitBlobPublish(ctx, recipient, exactBlobID, int64(len(exactBlobBytes)), 1_176); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("pre-fence blob exact retry=%+v err=%v", duplicate, err)
+	}
+	if _, err := store.CommitBlobPublish(ctx, recipient, blockedBlobID, int64(len(blockedBlobBytes)), 1_176); !relay.ErrorHasCode(err, relay.CodeCheckpointFenceActive) {
+		t.Fatalf("prepared blob commit under fence err=%v", err)
+	}
+	retainedSuffix := first
+	retainedSuffix.MessageID = uuid.New()
+	retainedSuffix.CreatedAtMilliseconds = 1_176
+	if _, err := store.Publish(ctx, publisher, retainedSuffix, 1_176); err != nil {
+		t.Fatal(err)
+	}
+	if fetched, err := store.Fetch(ctx, recipient, 2, 10, 1_176); err != nil || len(fetched.Messages) != 0 || fetched.NextSequence != 2 {
+		t.Fatalf("postgres quarantined suffix fetch=%+v err=%v", fetched, err)
+	}
 
+	retainedBlobIDs := []string{blobTwoID, exactBlobID}
+	sort.Strings(retainedBlobIDs)
 	candidate := relay.CheckpointCandidate{
 		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID:  fence.FenceID,
 		TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID,
-		CoveredThroughCursor: relay.EncodeCursor(2), RetainedMessageIDs: []uuid.UUID{second.MessageID},
-		RetainedBlobIDs: []string{blobTwoID}, CreatedAtMilliseconds: 1_200,
+		CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{retainedSuffix.MessageID},
+		RetainedBlobIDs: retainedBlobIDs, CreatedAtMilliseconds: 1_200,
 	}
 	staged, err := store.StageCheckpoint(ctx, publisher, candidate, 1_200)
 	if err != nil || staged.Acceptance != relay.AcceptanceAccepted {
@@ -129,45 +183,30 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	third := first
 	third.MessageID = uuid.New()
 	third.CreatedAtMilliseconds = 1_251
-	type activationOutcome struct {
-		response relay.CheckpointActivationResponse
-		err      error
+	activatedResponse, activateErr := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_250)
+	if activateErr != nil || activatedResponse.StartCursor != relay.EncodeCursor(2) {
+		t.Fatalf("activation=%+v err=%v", activatedResponse, activateErr)
 	}
-	activationResult := make(chan activationOutcome, 1)
-	publishResult := make(chan error, 1)
-	start := make(chan struct{})
-	go func() {
-		<-start
-		response, activateErr := store.ActivateCheckpoint(ctx, admin, activationRequest)
-		activationResult <- activationOutcome{response: response, err: activateErr}
-	}()
-	go func() {
-		<-start
-		_, publishErr := store.Publish(ctx, publisher, third, 1_251)
-		publishResult <- publishErr
-	}()
-	close(start)
-	activated := <-activationResult
-	if activated.err != nil || activated.response.StartCursor != relay.EncodeCursor(1) {
-		t.Fatalf("activation=%+v err=%v", activated.response, activated.err)
+	if fetched, err := store.Fetch(ctx, recipient, 2, 10, 1_250); err != nil || len(fetched.Messages) != 1 || fetched.Messages[0].Envelope.MessageID != retainedSuffix.MessageID {
+		t.Fatalf("postgres activated suffix fetch=%+v err=%v", fetched, err)
 	}
-	if err := <-publishResult; err != nil {
+	if _, err := store.Publish(ctx, publisher, third, 1_251); err != nil {
 		t.Fatalf("concurrent publish: %v", err)
 	}
-	if retry, err := store.ActivateCheckpoint(ctx, admin, activationRequest); err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+	if retry, err := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_250); err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("activation retry=%+v err=%v", retry, err)
 	}
 
 	plan, err := store.DryRunCheckpointCollection(ctx, admin, relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID})
-	if err != nil || !plan.Eligible || plan.MessageCount != 1 || plan.BlobCount != 1 {
+	if err != nil || !plan.Eligible || plan.MessageCount != 2 || plan.BlobCount != 1 {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
 	firstCollection := relay.CheckpointCollectionRequest{
 		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, PlanDigest: plan.PlanDigest,
-		MaximumMessageCount: 1, RequestedAtMilliseconds: 1_300,
+		MaximumMessageCount: 2, RequestedAtMilliseconds: 1_300,
 	}
 	partial, err := store.CollectCheckpoint(ctx, admin, firstCollection)
-	if err != nil || partial.Completed || partial.DeletedMessageCount != 1 || partial.DeletedBlobCount != 0 {
+	if err != nil || partial.Completed || partial.DeletedMessageCount != 2 || partial.DeletedBlobCount != 0 {
 		t.Fatalf("partial collection=%+v err=%v", partial, err)
 	}
 	stale := firstCollection
@@ -201,11 +240,11 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	}
 
 	newSubscription, err := store.CreateSubscription(ctx, admin, relay.SubscriptionCreateRequest{RetryID: uuid.New(), SubscriptionID: uuid.New(), CreatedAtMilliseconds: 1_400})
-	if err != nil || newSubscription.Subscription.StartCursor == nil || *newSubscription.Subscription.StartCursor != activated.response.StartCursor {
+	if err != nil || newSubscription.Subscription.StartCursor == nil || *newSubscription.Subscription.StartCursor != activatedResponse.StartCursor {
 		t.Fatalf("new subscription=%+v err=%v", newSubscription, err)
 	}
 	status, err := store.GetDomainStatus(ctx, admin)
-	if err != nil || status.MessageCount != 2 || status.BlobCount != 2 || status.LatestActivatedCheckpointID == nil || *status.LatestActivatedCheckpointID != candidate.CheckpointID {
+	if err != nil || status.MessageCount != 2 || status.BlobCount != 3 || status.LatestActivatedCheckpointID == nil || *status.LatestActivatedCheckpointID != candidate.CheckpointID {
 		t.Fatalf("domain status=%+v err=%v", status, err)
 	}
 	var lastSequence, queuedBlobDeletions, republishedBlobAuthority int64
@@ -218,20 +257,32 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM relay_blobs WHERE tenant_id=$1 AND domain_id=$2 AND blob_id=$3`, tenantID, domainID, blobOneID).Scan(&republishedBlobAuthority); err != nil {
 		t.Fatal(err)
 	}
-	if lastSequence != 3 || queuedBlobDeletions != 1 || republishedBlobAuthority != 1 {
+	if lastSequence != 4 || queuedBlobDeletions != 1 || republishedBlobAuthority != 1 {
 		t.Fatalf("last_sequence=%d queued_blob_deletions=%d republished_blob_authority=%d", lastSequence, queuedBlobDeletions, republishedBlobAuthority)
 	}
 	for index := 0; index < 2; index++ {
+		fenceRequest := relay.CheckpointFenceRequest{RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: int64(1_440 + index*100)}
+		fence, err := store.CreateCheckpointFence(ctx, publisher, fenceRequest, fenceRequest.RequestedAtMilliseconds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		suffix := first
+		suffix.MessageID = uuid.New()
+		suffix.CreatedAtMilliseconds = fenceRequest.RequestedAtMilliseconds + 1
+		if _, err := store.Publish(ctx, publisher, suffix, suffix.CreatedAtMilliseconds); err != nil {
+			t.Fatal(err)
+		}
 		next := relay.CheckpointCandidate{
 			Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+			FenceID:  fence.FenceID,
 			TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID,
-			CoveredThroughCursor: relay.EncodeCursor(3), RetainedMessageIDs: []uuid.UUID{second.MessageID},
+			CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID},
 			RetainedBlobIDs: []string{blobTwoID}, CreatedAtMilliseconds: int64(1_450 + index*100),
 		}
 		if _, err := store.StageCheckpoint(ctx, publisher, next, next.CreatedAtMilliseconds); err != nil {
 			t.Fatalf("stage retention checkpoint %d: %v", index, err)
 		}
-		if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{RetryID: uuid.New(), CheckpointID: next.CheckpointID, ActivatedAtMilliseconds: next.CreatedAtMilliseconds + 1}); err != nil {
+		if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{RetryID: uuid.New(), CheckpointID: next.CheckpointID, ActivatedAtMilliseconds: next.CreatedAtMilliseconds + 1}, next.CreatedAtMilliseconds+1); err != nil {
 			t.Fatalf("activate retention checkpoint %d: %v", index, err)
 		}
 	}
@@ -258,6 +309,71 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	if activatedCheckpointCount != 2 || retiredChildRows != 0 {
 		t.Fatalf("activated checkpoints=%d retired child rows=%d", activatedCheckpointCount, retiredChildRows)
 	}
+	finalizedUpload := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID(nil), ByteCount: 0, CreatedAtMilliseconds: 2_000}
+	if _, err := store.CreateBlobUpload(ctx, publisher, finalizedUpload, 2_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeBlobUpload(ctx, publisher, relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: finalizedUpload.UploadID, RelayBlobID: finalizedUpload.RelayBlobID, ByteCount: 0, FinalizedAtMilliseconds: 2_001}, 2_001, func(relay.BlobUploadStatus) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	makeFailedFence := func(at int64, expire bool) {
+		t.Helper()
+		before, err := store.GetDomainStatus(ctx, admin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := relay.CheckpointFenceRequest{RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: at}
+		fence, err := store.CreateCheckpointFence(ctx, publisher, request, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		suffix := first
+		suffix.MessageID, suffix.CreatedAtMilliseconds = uuid.New(), at+1
+		if _, err := store.Publish(ctx, publisher, suffix, at+1); err != nil {
+			t.Fatal(err)
+		}
+		candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID}, RetainedBlobIDs: []string{}, CreatedAtMilliseconds: at + 2}
+		if _, err := store.StageCheckpoint(ctx, publisher, candidate, at+2); err != nil {
+			t.Fatal(err)
+		}
+		if expire {
+			if state, err := store.GetCheckpointFence(ctx, publisher, fence.FenceID, fence.ExpiresAtMilliseconds); err != nil || state.Status != relay.CheckpointFenceExpired {
+				t.Fatalf("expired fence=%+v err=%v", state, err)
+			}
+		} else {
+			abort := relay.CheckpointFenceAbortRequest{RetryID: uuid.New(), FenceID: fence.FenceID, AbortedAtMilliseconds: at + 3}
+			if _, err := store.AbortCheckpointFence(ctx, publisher, abort, at+3); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if retry, err := store.Publish(ctx, publisher, suffix, fence.ExpiresAtMilliseconds+1); err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+			t.Fatalf("failed-fence message retry=%+v err=%v", retry, err)
+		}
+		after, err := store.GetDomainStatus(ctx, admin)
+		if err != nil || after.MessageCount != before.MessageCount || after.MessageByteCount != before.MessageByteCount {
+			t.Fatalf("failed-fence counters before=%+v after=%+v err=%v", before, after, err)
+		}
+	}
+	makeFailedFence(2_100, false)
+	makeFailedFence(2_200, true)
+	activeFenceRequest := relay.CheckpointFenceRequest{RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: 10_000_000}
+	activeFence, err := store.CreateCheckpointFence(ctx, publisher, activeFenceRequest, activeFenceRequest.RequestedAtMilliseconds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeSuffix := first
+	activeSuffix.MessageID, activeSuffix.CreatedAtMilliseconds = uuid.New(), activeFenceRequest.RequestedAtMilliseconds+1
+	if _, err := store.Publish(ctx, publisher, activeSuffix, activeSuffix.CreatedAtMilliseconds); err != nil {
+		t.Fatal(err)
+	}
+	activeCandidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: activeFence.FenceID, TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID, CoveredThroughCursor: activeFence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{activeSuffix.MessageID}, RetainedBlobIDs: []string{}, CreatedAtMilliseconds: activeFenceRequest.RequestedAtMilliseconds + 2}
+	if _, err := store.StageCheckpoint(ctx, publisher, activeCandidate, activeCandidate.CreatedAtMilliseconds); err != nil {
+		t.Fatal(err)
+	}
+	activeUpload := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID([]byte("active-upload")), ByteCount: int64(len("active-upload")), CreatedAtMilliseconds: activeFenceRequest.RequestedAtMilliseconds + 3}
+	if _, err := store.CreateBlobUpload(ctx, publisher, activeUpload, activeUpload.CreatedAtMilliseconds); err != nil {
+		t.Fatal(err)
+	}
 	if result, err := pool.Exec(ctx, `DELETE FROM relay_domains WHERE tenant_id=$1 AND domain_id=$2`, tenantID, domainID); err != nil || result.RowsAffected() != 1 {
 		t.Fatalf("delete checkpoint domain rows=%d err=%v", result.RowsAffected(), err)
 	}
@@ -271,7 +387,11 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 			(SELECT count(*) FROM relay_checkpoint_deletion_messages WHERE tenant_id=$1 AND domain_id=$2) +
 			(SELECT count(*) FROM relay_checkpoint_deletion_blobs WHERE tenant_id=$1 AND domain_id=$2) +
 			(SELECT count(*) FROM relay_checkpoint_collections WHERE tenant_id=$1 AND domain_id=$2) +
-			(SELECT count(*) FROM relay_collected_blob_deletions WHERE tenant_id=$1 AND domain_id=$2)
+			(SELECT count(*) FROM relay_collected_blob_deletions WHERE tenant_id=$1 AND domain_id=$2) +
+			(SELECT count(*) FROM relay_checkpoint_fences WHERE tenant_id=$1 AND domain_id=$2) +
+			(SELECT count(*) FROM relay_checkpoint_fence_message_tombstones WHERE tenant_id=$1 AND domain_id=$2) +
+			(SELECT count(*) FROM relay_blob_uploads WHERE tenant_id=$1 AND domain_id=$2) +
+			(SELECT count(*) FROM relay_blob_upload_finalizations WHERE tenant_id=$1 AND domain_id=$2)
 	`, tenantID, domainID).Scan(&checkpointRows); err != nil {
 		t.Fatal(err)
 	}

@@ -9,30 +9,32 @@ import (
 )
 
 type Config struct {
-	ListenAddress   string
-	DatabaseURL     string
-	ShutdownPeriod  time.Duration
-	CleanupPeriod   time.Duration
-	TransferPeriod  time.Duration
-	DatabaseConns   int32
-	OperatorToken   string
-	BlobRoot        string
-	BlobUploadTTL   time.Duration
-	BlobOrphanGrace time.Duration
+	ListenAddress      string
+	DatabaseURL        string
+	ShutdownPeriod     time.Duration
+	CleanupPeriod      time.Duration
+	TransferPeriod     time.Duration
+	DatabaseConns      int32
+	OperatorToken      string
+	BlobRoot           string
+	BlobUploadTTL      time.Duration
+	BlobOrphanGrace    time.Duration
+	CheckpointFenceTTL time.Duration
 }
 
 func Load() (Config, error) {
 	configuration := Config{
-		ListenAddress:   environment("FACETS_NODE_LISTEN_ADDR", ":8080"),
-		DatabaseURL:     os.Getenv("FACETS_NODE_DATABASE_URL"),
-		ShutdownPeriod:  10 * time.Second,
-		CleanupPeriod:   time.Minute,
-		TransferPeriod:  10 * time.Minute,
-		DatabaseConns:   10,
-		OperatorToken:   os.Getenv("FACETS_NODE_OPERATOR_TOKEN"),
-		BlobRoot:        environment("FACETS_NODE_BLOB_ROOT", "/var/lib/facets-node/blobs"),
-		BlobUploadTTL:   7 * 24 * time.Hour,
-		BlobOrphanGrace: 24 * time.Hour,
+		ListenAddress:      environment("FACETS_NODE_LISTEN_ADDR", ":8080"),
+		DatabaseURL:        os.Getenv("FACETS_NODE_DATABASE_URL"),
+		ShutdownPeriod:     10 * time.Second,
+		CleanupPeriod:      time.Minute,
+		TransferPeriod:     10 * time.Minute,
+		DatabaseConns:      10,
+		OperatorToken:      os.Getenv("FACETS_NODE_OPERATOR_TOKEN"),
+		BlobRoot:           environment("FACETS_NODE_BLOB_ROOT", "/var/lib/facets-node/blobs"),
+		BlobUploadTTL:      7 * 24 * time.Hour,
+		BlobOrphanGrace:    24 * time.Hour,
+		CheckpointFenceTTL: 2 * time.Hour,
 	}
 	if configuration.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("FACETS_NODE_DATABASE_URL is required")
@@ -84,6 +86,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("FACETS_NODE_BLOB_ORPHAN_GRACE must be a positive duration")
 		}
 		configuration.BlobOrphanGrace = period
+	}
+	if value := os.Getenv("FACETS_NODE_CHECKPOINT_FENCE_TTL"); value != "" {
+		period, err := time.ParseDuration(value)
+		if err != nil || period < 5*time.Minute || period > 24*time.Hour {
+			return Config{}, fmt.Errorf("FACETS_NODE_CHECKPOINT_FENCE_TTL must be between 5 minutes and 24 hours")
+		}
+		configuration.CheckpointFenceTTL = period
 	}
 	if value := os.Getenv("FACETS_NODE_DATABASE_CONNS"); value != "" {
 		count, err := strconv.ParseInt(value, 10, 32)

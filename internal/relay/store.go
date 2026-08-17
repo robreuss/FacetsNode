@@ -41,8 +41,11 @@ type Store interface {
 		SubscriptionStatusChangeRequest,
 	) (SubscriptionStatusChangeResponse, error)
 	GetDomainStatus(context.Context, AdministrationCredential) (DomainStatus, error)
+	CreateCheckpointFence(context.Context, Credential, CheckpointFenceRequest, int64) (CheckpointFenceResponse, error)
+	GetCheckpointFence(context.Context, Credential, uuid.UUID, int64) (CheckpointFenceState, error)
+	AbortCheckpointFence(context.Context, Credential, CheckpointFenceAbortRequest, int64) (CheckpointFenceAbortResponse, error)
 	StageCheckpoint(context.Context, Credential, CheckpointCandidate, int64) (CheckpointStageResponse, error)
-	ActivateCheckpoint(context.Context, AdministrationCredential, CheckpointActivationRequest) (CheckpointActivationResponse, error)
+	ActivateCheckpoint(context.Context, AdministrationCredential, CheckpointActivationRequest, int64) (CheckpointActivationResponse, error)
 	DryRunCheckpointCollection(context.Context, AdministrationCredential, CheckpointDryRunRequest) (CheckpointDryRunResponse, error)
 	CollectCheckpoint(context.Context, AdministrationCredential, CheckpointCollectionRequest) (CheckpointCollectionResponse, error)
 	CreateSubscriptionMember(

@@ -61,7 +61,7 @@ func main() {
 		os.Exit(1)
 	}
 	store := postgres.NewStore(pool)
-	relayStore := postgres.NewRelayStore(pool, configuration.BlobUploadTTL)
+	relayStore := postgres.NewRelayStore(pool, configuration.BlobUploadTTL, configuration.CheckpointFenceTTL)
 	blobContentStore, err := relay.NewFileBlobContentStore(configuration.BlobRoot)
 	if err != nil {
 		logger.Error("blob store configuration rejected", "error", err)

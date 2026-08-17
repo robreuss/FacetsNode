@@ -26,10 +26,10 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 		return relay.CheckpointStageResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
+	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR UPDATE"); err != nil {
 		return relay.CheckpointStageResponse{}, err
 	}
-	_, _, _, _, _, lastSequence, err := loadRelayDomain(ctx, tx, credential.TenantID, credential.DomainID, "FOR SHARE")
+	_, _, _, _, _, lastSequence, err := loadRelayDomain(ctx, tx, credential.TenantID, credential.DomainID, "FOR UPDATE")
 	if err != nil {
 		return relay.CheckpointStageResponse{}, err
 	}
@@ -56,7 +56,7 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 		if existingID != candidate.CheckpointID {
 			return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeCheckpointCollision, "checkpoint retry ID was reused")
 		}
-		equal, compareErr := postgresCheckpointCandidateEqual(ctx, tx, candidate, credential.MemberID)
+		equal, compareErr := postgresCheckpointCandidateEqual(ctx, tx, candidate, subscriptionID)
 		if compareErr != nil {
 			return relay.CheckpointStageResponse{}, compareErr
 		}
@@ -68,6 +68,18 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 	if err != pgx.ErrNoRows {
 		return relay.CheckpointStageResponse{}, err
 	}
+	if err := expirePostgresFence(ctx, tx, credential.TenantID, credential.DomainID, nowMilliseconds); err != nil {
+		return relay.CheckpointStageResponse{}, err
+	}
+	fence, found, err := loadFence(ctx, tx, credential.TenantID, credential.DomainID, candidate.FenceID, "FOR UPDATE")
+	if err != nil {
+		return relay.CheckpointStageResponse{}, err
+	}
+	boundary, boundaryErr := relay.DecodeCursor(fence.state.BoundaryCursor)
+	if !found || boundaryErr != nil || fence.state.Status != relay.CheckpointFenceActive ||
+		fence.holderSubscriptionID != subscriptionID || boundary != covered {
+		return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpointFence, "checkpoint candidate does not match an active fence")
+	}
 	var collision bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3)`, credential.TenantID, credential.DomainID, candidate.CheckpointID).Scan(&collision); err != nil {
 		return relay.CheckpointStageResponse{}, err
@@ -75,15 +87,10 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 	if collision {
 		return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeCheckpointCollision, "checkpoint ID was reused")
 	}
-	for _, id := range candidate.RetainedMessageIDs {
-		var sequence int64
-		err := tx.QueryRow(ctx, `SELECT domain_sequence FROM relay_messages WHERE tenant_id=$1 AND domain_id=$2 AND message_id=$3`, credential.TenantID, credential.DomainID, id).Scan(&sequence)
-		if err == pgx.ErrNoRows || sequence > int64(covered) {
-			return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "retained message is missing or beyond coverage")
-		}
-		if err != nil {
-			return relay.CheckpointStageResponse{}, err
-		}
+	if matches, err := postgresFenceSuffixMatches(ctx, tx, credential.TenantID, credential.DomainID, subscriptionID, int64(boundary), candidate.RetainedMessageIDs); err != nil {
+		return relay.CheckpointStageResponse{}, err
+	} else if !matches {
+		return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "retained messages are not the exact fenced holder suffix")
 	}
 	for _, id := range candidate.RetainedBlobIDs {
 		var exists bool
@@ -94,7 +101,7 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 			return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "retained blob is missing")
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO relay_checkpoints (tenant_id,domain_id,checkpoint_id,stage_retry_id,candidate_digest,version,publisher_subscription_id,publisher_member_id,covered_through_sequence,created_at_milliseconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, candidate.TenantID, candidate.DomainID, candidate.CheckpointID, candidate.RetryID, relay.CheckpointCandidateDigest(candidate), candidate.Version, candidate.PublisherSubscriptionID, credential.MemberID, int64(covered), candidate.CreatedAtMilliseconds)
+	_, err = tx.Exec(ctx, `INSERT INTO relay_checkpoints (tenant_id,domain_id,checkpoint_id,stage_retry_id,candidate_digest,version,publisher_subscription_id,publisher_member_id,covered_through_sequence,created_at_milliseconds,fence_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, candidate.TenantID, candidate.DomainID, candidate.CheckpointID, candidate.RetryID, relay.CheckpointCandidateDigest(candidate), candidate.Version, candidate.PublisherSubscriptionID, credential.MemberID, int64(covered), candidate.CreatedAtMilliseconds, candidate.FenceID)
 	if err != nil {
 		return relay.CheckpointStageResponse{}, fmt.Errorf("insert checkpoint: %w", err)
 	}
@@ -117,7 +124,7 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 	return relay.CheckpointStageResponse{Acceptance: relay.AcceptanceAccepted, RetryID: candidate.RetryID, CheckpointID: candidate.CheckpointID}, nil
 }
 
-func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.AdministrationCredential, request relay.CheckpointActivationRequest) (relay.CheckpointActivationResponse, error) {
+func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.AdministrationCredential, request relay.CheckpointActivationRequest, nowMilliseconds int64) (relay.CheckpointActivationResponse, error) {
 	if err := request.Validate(); err != nil {
 		return relay.CheckpointActivationResponse{}, err
 	}
@@ -150,24 +157,56 @@ func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.Ad
 	}
 	var state string
 	var covered, created int64
-	err = tx.QueryRow(ctx, `SELECT state,covered_through_sequence,created_at_milliseconds FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3 FOR UPDATE`, credential.TenantID, credential.DomainID, request.CheckpointID).Scan(&state, &covered, &created)
+	var fenceID uuid.UUID
+	var publisherSubscriptionID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT state,covered_through_sequence,created_at_milliseconds,fence_id,publisher_subscription_id FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3 FOR UPDATE`, credential.TenantID, credential.DomainID, request.CheckpointID).Scan(&state, &covered, &created, &fenceID, &publisherSubscriptionID)
 	if err == pgx.ErrNoRows {
 		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeCheckpointNotFound, "checkpoint was not found")
 	}
 	if err != nil {
 		return relay.CheckpointActivationResponse{}, err
 	}
-	if state != "staged" || request.ActivatedAtMilliseconds < created {
-		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeCheckpointCollision, "checkpoint was already activated or activation time is invalid")
-	}
-	startSequence := covered
-	var earliest *int64
-	if err := tx.QueryRow(ctx, `SELECT min(m.domain_sequence) FROM relay_checkpoint_retained_messages r JOIN relay_messages m USING (tenant_id,domain_id,message_id) WHERE r.tenant_id=$1 AND r.domain_id=$2 AND r.checkpoint_id=$3`, credential.TenantID, credential.DomainID, request.CheckpointID).Scan(&earliest); err != nil {
+	if err := expirePostgresFence(ctx, tx, credential.TenantID, credential.DomainID, nowMilliseconds); err != nil {
 		return relay.CheckpointActivationResponse{}, err
 	}
-	if earliest != nil {
-		startSequence = *earliest - 1
+	fence, found, err := loadFence(ctx, tx, credential.TenantID, credential.DomainID, fenceID, "FOR UPDATE")
+	if err != nil {
+		return relay.CheckpointActivationResponse{}, err
 	}
+	if state != "staged" || request.ActivatedAtMilliseconds < created {
+		if found && (fence.state.Status == relay.CheckpointFenceExpired || fence.state.Status == relay.CheckpointFenceAborted) {
+			return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpointFence, "checkpoint fence is no longer activatable")
+		}
+		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeCheckpointCollision, "checkpoint was already activated or activation time is invalid")
+	}
+	boundary, boundaryErr := relay.DecodeCursor(fence.state.BoundaryCursor)
+	if !found || boundaryErr != nil || fence.state.Status != relay.CheckpointFenceActive ||
+		fence.holderSubscriptionID != publisherSubscriptionID || int64(boundary) != covered {
+		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpointFence, "checkpoint fence is no longer activatable")
+	}
+	var retained []uuid.UUID
+	rows, err := tx.Query(ctx, `SELECT message_id FROM relay_checkpoint_retained_messages WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3 ORDER BY message_id`, credential.TenantID, credential.DomainID, request.CheckpointID)
+	if err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return relay.CheckpointActivationResponse{}, err
+		}
+		retained = append(retained, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	if matches, err := postgresFenceSuffixMatches(ctx, tx, credential.TenantID, credential.DomainID, publisherSubscriptionID, covered, retained); err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	} else if !matches {
+		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpointFence, "checkpoint holder suffix changed")
+	}
+	startSequence := covered
 	var previousID uuid.UUID
 	var previousArgument any
 	err = tx.QueryRow(ctx, `SELECT checkpoint_id FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' ORDER BY activation_ordinal DESC LIMIT 1`, credential.TenantID, credential.DomainID).Scan(&previousID)
@@ -190,6 +229,9 @@ func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.Ad
 		return relay.CheckpointActivationResponse{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE relay_checkpoints SET state='activated',activation_retry_id=$4,activation_ordinal=$5,activated_at_milliseconds=$6,start_sequence=$7,updated_at=now() WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3`, credential.TenantID, credential.DomainID, request.CheckpointID, request.RetryID, ordinal, request.ActivatedAtMilliseconds, startSequence); err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE relay_checkpoint_fences SET status='activated',updated_at=now() WHERE tenant_id=$1 AND domain_id=$2 AND fence_id=$3 AND status='active'`, credential.TenantID, credential.DomainID, fenceID); err != nil {
 		return relay.CheckpointActivationResponse{}, err
 	}
 	retiredRows, err := tx.Query(ctx, `UPDATE relay_checkpoints SET state='retired',updated_at=now() WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' AND checkpoint_id<>$3 AND ($4::uuid IS NULL OR checkpoint_id<>$4) RETURNING checkpoint_id`, credential.TenantID, credential.DomainID, request.CheckpointID, previousArgument)
@@ -460,12 +502,40 @@ func loadCheckpointPlanEntries(ctx context.Context, q relayQuerier, tenantID, do
 	return messages, blobs, ordinal, nil
 }
 
-func postgresCheckpointCandidateEqual(ctx context.Context, q relayQuerier, candidate relay.CheckpointCandidate, memberID uuid.UUID) (bool, error) {
+func postgresCheckpointCandidateEqual(ctx context.Context, q relayQuerier, candidate relay.CheckpointCandidate, subscriptionID uuid.UUID) (bool, error) {
 	var candidateDigest string
-	var publisherMember uuid.UUID
-	err := q.QueryRow(ctx, `SELECT candidate_digest,publisher_member_id FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3`, candidate.TenantID, candidate.DomainID, candidate.CheckpointID).Scan(&candidateDigest, &publisherMember)
+	var publisherSubscription uuid.UUID
+	err := q.QueryRow(ctx, `SELECT candidate_digest,publisher_subscription_id FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3`, candidate.TenantID, candidate.DomainID, candidate.CheckpointID).Scan(&candidateDigest, &publisherSubscription)
 	if err != nil {
 		return false, err
 	}
-	return publisherMember == memberID && candidateDigest == relay.CheckpointCandidateDigest(candidate), nil
+	return publisherSubscription == subscriptionID && candidateDigest == relay.CheckpointCandidateDigest(candidate), nil
+}
+
+func postgresFenceSuffixMatches(ctx context.Context, q relayQuerier, tenantID, domainID, subscriptionID uuid.UUID, boundary int64, retained []uuid.UUID) (bool, error) {
+	rows, err := q.Query(ctx, `SELECT message_id FROM relay_messages WHERE tenant_id=$1 AND domain_id=$2 AND publisher_subscription_id=$3 AND domain_sequence>$4 ORDER BY message_id`, tenantID, domainID, subscriptionID, boundary)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	expected := make([]uuid.UUID, 0, len(retained))
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+		expected = append(expected, id)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if len(expected) != len(retained) {
+		return false, nil
+	}
+	for index := range expected {
+		if expected[index] != retained[index] {
+			return false, nil
+		}
+	}
+	return true, nil
 }

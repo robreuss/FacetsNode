@@ -38,7 +38,7 @@ Facets core codebase.
   monotonic accepted/applied facts
 - Disposable domain change hints that accelerate, but never replace, cursor polling
 - Separate per-domain and tenant-wide message/blob count and byte quotas
-- Opaque checkpoint staging, administrator activation, custody-gated dry-run,
+- Server-timed checkpoint write fences, opaque staging, administrator activation, custody-gated dry-run,
   and exact-retry bounded message/blob collection with latest-two retention
 - PostgreSQL-backed concurrent publication with restart-safe ordering
 - Live delivery-matrix proof for cursor replay, delayed and concurrent traffic,

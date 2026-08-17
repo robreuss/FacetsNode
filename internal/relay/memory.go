@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -19,6 +20,13 @@ type memoryMessage struct {
 	publisherMember       uuid.UUID
 	publisherSubscription uuid.UUID
 	acknowledgments       map[uuid.UUID]AcknowledgmentStage
+	checkpointFenceID     *uuid.UUID
+}
+
+type memoryFenceMessageTombstone struct {
+	publisherMember uuid.UUID
+	digest          string
+	sequence        uint64
 }
 
 type memoryDomain struct {
@@ -44,6 +52,11 @@ type memoryDomain struct {
 	checkpointCollections   map[uuid.UUID]memoryCheckpointCollection
 	activatedCheckpoints    []uuid.UUID
 	checkpointOrdinal       uint64
+	checkpointFences        map[uuid.UUID]*memoryCheckpointFence
+	checkpointFenceRetries  map[uuid.UUID]uuid.UUID
+	checkpointFenceAborts   map[uuid.UUID]memoryFenceAbort
+	fenceMessageTombstones  map[uuid.UUID]memoryFenceMessageTombstone
+	blobFenceIDs            map[string]uuid.UUID
 	blobUploads             map[uuid.UUID]*memoryBlobUpload
 	blobUploadCreates       map[uuid.UUID]uuid.UUID
 	blobUploadFinalizations map[uuid.UUID]memoryBlobUploadFinalization
@@ -82,15 +95,21 @@ const (
 )
 
 type MemoryStore struct {
-	mu      sync.RWMutex
-	tenants map[uuid.UUID]*memoryTenant
-	domains map[domainKey]*memoryDomain
+	mu              sync.RWMutex
+	tenants         map[uuid.UUID]*memoryTenant
+	domains         map[domainKey]*memoryDomain
+	checkpointFence time.Duration
 }
 
-func NewMemoryStore() *MemoryStore {
+func NewMemoryStore(checkpointFenceTTL ...time.Duration) *MemoryStore {
+	ttl := time.Duration(DefaultCheckpointFenceLifetimeMilliseconds) * time.Millisecond
+	if len(checkpointFenceTTL) > 0 && checkpointFenceTTL[0] >= time.Duration(MinimumCheckpointFenceLifetimeMilliseconds)*time.Millisecond && checkpointFenceTTL[0] <= time.Duration(MaximumCheckpointFenceLifetimeMilliseconds)*time.Millisecond {
+		ttl = checkpointFenceTTL[0]
+	}
 	return &MemoryStore{
-		tenants: make(map[uuid.UUID]*memoryTenant),
-		domains: make(map[domainKey]*memoryDomain),
+		tenants:         make(map[uuid.UUID]*memoryTenant),
+		domains:         make(map[domainKey]*memoryDomain),
+		checkpointFence: ttl,
 	}
 }
 
@@ -257,6 +276,11 @@ func (s *MemoryStore) createDomainLocked(
 		checkpointStageRetries:  make(map[uuid.UUID]uuid.UUID),
 		checkpointActivations:   make(map[uuid.UUID]memoryCheckpointActivation),
 		checkpointCollections:   make(map[uuid.UUID]memoryCheckpointCollection),
+		checkpointFences:        make(map[uuid.UUID]*memoryCheckpointFence),
+		checkpointFenceRetries:  make(map[uuid.UUID]uuid.UUID),
+		checkpointFenceAborts:   make(map[uuid.UUID]memoryFenceAbort),
+		fenceMessageTombstones:  make(map[uuid.UUID]memoryFenceMessageTombstone),
+		blobFenceIDs:            make(map[string]uuid.UUID),
 		blobUploads:             make(map[uuid.UUID]*memoryBlobUpload),
 		blobUploadCreates:       make(map[uuid.UUID]uuid.UUID),
 		blobUploadFinalizations: make(map[uuid.UUID]memoryBlobUploadFinalization),
@@ -1224,6 +1248,19 @@ func (s *MemoryStore) Publish(
 			"message ID was reused with different content",
 		)
 	}
+	if tombstone, ok := domain.fenceMessageTombstones[envelope.MessageID]; ok {
+		digest, digestErr := envelope.ReferenceDigest()
+		if digestErr != nil {
+			return PublishResult{}, digestErr
+		}
+		if tombstone.publisherMember == credential.MemberID && tombstone.digest == digest {
+			return PublishResult{Acceptance: AcceptanceDuplicate, Sequence: tombstone.sequence}, nil
+		}
+		return PublishResult{}, protocolError(CodeMessageCollision, "message ID was reused with different content")
+	}
+	if err := memoryFenceAllowsWrite(domain, publisherSubscription.SubscriptionID, nowMilliseconds); err != nil {
+		return PublishResult{}, err
+	}
 	if len(domain.messages) >= domain.registration.MaximumMessageCount {
 		return PublishResult{}, protocolError(CodeDomainFull, "domain reached its message limit")
 	}
@@ -1250,6 +1287,10 @@ func (s *MemoryStore) Publish(
 		publisherSubscription: publisherSubscription.SubscriptionID,
 		acknowledgments:       make(map[uuid.UUID]AcknowledgmentStage),
 	}
+	if fence := memoryActiveFenceForSubscription(domain, publisherSubscription.SubscriptionID); fence != nil {
+		fenceID := fence.state.FenceID
+		stored.checkpointFenceID = &fenceID
+	}
 	domain.messages = append(domain.messages, stored)
 	domain.messageByID[envelope.MessageID] = stored
 	domain.messageBytes += ciphertextByteCount
@@ -1269,8 +1310,8 @@ func (s *MemoryStore) Fetch(
 	if limit <= 0 || limit > MaximumPageSize || afterSequence > MaximumSequence {
 		return FetchResult{}, protocolError(CodeInvalidCursor, "page limit is invalid")
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	domain, err := s.authorizedMember(
 		credential,
 		CapabilityFetchMessage,
@@ -1279,6 +1320,7 @@ func (s *MemoryStore) Fetch(
 	if err != nil {
 		return FetchResult{}, err
 	}
+	refreshMemoryFence(domain, nowMilliseconds)
 	subscription, err := activeMemberSubscription(domain, credential.MemberID)
 	if err != nil {
 		return FetchResult{}, err
@@ -1293,10 +1335,24 @@ func (s *MemoryStore) Fetch(
 		}
 	}
 	result := FetchResult{Messages: make([]Message, 0, limit)}
+	visibleHighWatermark := domain.nextSequence
+	for _, fence := range domain.checkpointFences {
+		if fence.state.Status == CheckpointFenceActive {
+			if boundary, cursorErr := DecodeCursor(fence.state.BoundaryCursor); cursorErr == nil && boundary < visibleHighWatermark {
+				visibleHighWatermark = boundary
+			}
+		}
+	}
 	for _, stored := range domain.messages {
 		if stored.message.Sequence <= afterSequence ||
 			stored.publisherSubscription == subscription.SubscriptionID {
 			continue
+		}
+		if stored.checkpointFenceID != nil {
+			fence := domain.checkpointFences[*stored.checkpointFenceID]
+			if fence == nil || fence.state.Status != CheckpointFenceActivated {
+				continue
+			}
 		}
 		result.Messages = append(result.Messages, stored.message)
 		result.NextSequence = stored.message.Sequence
@@ -1304,7 +1360,7 @@ func (s *MemoryStore) Fetch(
 			return result, nil
 		}
 	}
-	result.NextSequence = domain.nextSequence
+	result.NextSequence = visibleHighWatermark
 	if afterSequence > result.NextSequence {
 		result.NextSequence = afterSequence
 	}
@@ -1429,6 +1485,13 @@ func (s *MemoryStore) CommitBlobPublish(
 			"blob ID was reused with a different length",
 		)
 	}
+	subscription, err := activeMemberSubscription(domain, credential.MemberID)
+	if err != nil {
+		return BlobPublishResult{}, err
+	}
+	if err := memoryFenceAllowsWrite(domain, subscription.SubscriptionID, nowMilliseconds); err != nil {
+		return BlobPublishResult{}, err
+	}
 	if err := ensureBlobCapacity(domain, byteCount); err != nil {
 		return BlobPublishResult{}, err
 	}
@@ -1447,6 +1510,9 @@ func (s *MemoryStore) CommitBlobPublish(
 		return BlobPublishResult{}, err
 	}
 	domain.blobs[blobID] = metadata
+	if fence := memoryActiveFenceForSubscription(domain, subscription.SubscriptionID); fence != nil {
+		domain.blobFenceIDs[blobID] = fence.state.FenceID
+	}
 	domain.blobBytes += byteCount
 	return BlobPublishResult{
 		Acceptance: AcceptanceAccepted,
@@ -1476,6 +1542,12 @@ func (s *MemoryStore) GetBlobMetadata(
 	metadata, ok := domain.blobs[blobID]
 	if !ok {
 		return BlobMetadata{}, protocolError(CodeBlobNotFound, "blob was not found")
+	}
+	if fenceID, fenced := domain.blobFenceIDs[blobID]; fenced {
+		fence := domain.checkpointFences[fenceID]
+		if fence == nil || fence.state.Status != CheckpointFenceActivated {
+			return BlobMetadata{}, protocolError(CodeBlobNotFound, "blob was not found")
+		}
 	}
 	return metadata, nil
 }

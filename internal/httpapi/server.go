@@ -116,6 +116,18 @@ func (s *Server) Handler() http.Handler {
 			s.handleRelayDomainStatus,
 		)
 		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences",
+			s.handleCreateRelayCheckpointFence,
+		)
+		mux.HandleFunc(
+			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences/{fenceID}",
+			s.handleGetRelayCheckpointFence,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences/{fenceID}/abort",
+			s.handleAbortRelayCheckpointFence,
+		)
+		mux.HandleFunc(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/candidates",
 			s.handleStageRelayCheckpoint,
 		)
@@ -387,7 +399,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeInvalidAdmission,
 				relay.CodeInvalidCredentialRotation,
 				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob, relay.CodeInvalidBlobUpload,
-				relay.CodeInvalidCursor, relay.CodeInvalidCheckpoint,
+				relay.CodeInvalidCursor, relay.CodeInvalidCheckpoint, relay.CodeInvalidCheckpointFence,
 				relay.CodeWrongScope:
 				status = http.StatusBadRequest
 			case relay.CodeUnauthorized, relay.CodeTenantNotFound, relay.CodeDomainNotFound,
@@ -398,7 +410,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeMissingCapability:
 				status = http.StatusForbidden
 			case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound, relay.CodeBlobUploadNotFound,
-				relay.CodeCheckpointNotFound:
+				relay.CodeCheckpointNotFound, relay.CodeCheckpointFenceNotFound:
 				status = http.StatusNotFound
 			case relay.CodeTenantCollision, relay.CodeDomainCollision,
 				relay.CodeSubscriptionCollision, relay.CodeMemberCollision,
@@ -406,7 +418,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeCredentialRotationCollision,
 				relay.CodeCredentialReuse,
 				relay.CodeMessageCollision, relay.CodeBlobCollision, relay.CodeBlobUploadCollision,
-				relay.CodeInvalidAcknowledgment, relay.CodeCheckpointCollision,
+				relay.CodeInvalidAcknowledgment, relay.CodeCheckpointCollision, relay.CodeCheckpointFenceCollision,
+				relay.CodeCheckpointFenceActive,
 				relay.CodeCheckpointNotEligible, relay.CodeCollectionPlanStale:
 				status = http.StatusConflict
 			case relay.CodeTenantFull, relay.CodeDomainFull:

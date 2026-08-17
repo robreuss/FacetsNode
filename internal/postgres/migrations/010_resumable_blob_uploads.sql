@@ -30,8 +30,8 @@ CREATE TABLE relay_blob_uploads (
     PRIMARY KEY (tenant_id, domain_id, upload_id),
     UNIQUE (tenant_id, domain_id, create_retry_id),
     FOREIGN KEY (tenant_id, domain_id) REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE,
-    FOREIGN KEY (tenant_id, domain_id, subscription_id) REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id),
-    FOREIGN KEY (tenant_id, domain_id, publisher_member_id) REFERENCES relay_members(tenant_id, domain_id, member_id),
+    FOREIGN KEY (tenant_id, domain_id, subscription_id) REFERENCES relay_subscriptions(tenant_id, domain_id, subscription_id) DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (tenant_id, domain_id, publisher_member_id) REFERENCES relay_members(tenant_id, domain_id, member_id) DEFERRABLE INITIALLY DEFERRED,
     CHECK ((state = 'finalized') = (finalized_at_milliseconds IS NOT NULL)),
     CHECK (state <> 'finalized' OR committed_offset = byte_count)
 );
@@ -46,7 +46,7 @@ CREATE TABLE relay_blob_upload_chunks (
     committed_at_milliseconds bigint NOT NULL CHECK (committed_at_milliseconds >= 0),
     PRIMARY KEY (tenant_id, domain_id, upload_id, chunk_offset),
     FOREIGN KEY (tenant_id, domain_id, upload_id)
-        REFERENCES relay_blob_uploads(tenant_id, domain_id, upload_id) ON DELETE CASCADE
+        REFERENCES relay_blob_uploads(tenant_id, domain_id, upload_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE relay_blob_upload_finalizations (
@@ -60,7 +60,7 @@ CREATE TABLE relay_blob_upload_finalizations (
     stored_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, domain_id, retry_id),
     FOREIGN KEY (tenant_id, domain_id, upload_id)
-        REFERENCES relay_blob_uploads(tenant_id, domain_id, upload_id) ON DELETE CASCADE
+        REFERENCES relay_blob_uploads(tenant_id, domain_id, upload_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE relay_blob_upload_deletions (
