@@ -18,11 +18,21 @@ from the server operator.
 
 Supported production deployments must:
 
-- terminate modern TLS before the Node API and keep the container port private;
+- terminate modern TLS before application routes, validate the configured
+  public certificate, and keep the plaintext Node port private;
+- expose only `/v1/pairing/*` and authenticated `/v1/relay/tenants/*` through
+  public application ingress; keep `/livez`, `/readyz`, `/metrics`, operator
+  `POST /v1/relay/domains`, and future operator routes on a loopback or private
+  management network;
 - use a unique PostgreSQL role and a database unavailable from the public net;
 - store database credentials in an operator-managed secret, not an image;
+- keep `.env`, TLS material, and live-test access credentials out of both Git
+  and the Docker build context;
 - isolate and rotate the operator provisioning credential, and do not expose
   the provisioning route through public application ingress;
+- treat current domain-to-domain delegation as tenant-wide routing authority:
+  any domain-administration token can create another domain under that opaque
+  tenant ID, so issue and store it as a high-value control-plane secret;
 - deliver newly issued domain-administration and member credentials exactly
   once into an approved client secret store;
 - rotate a domain-administration or member credential by generating its
@@ -58,3 +68,9 @@ incident procedures remain required before public exposure. The checked-in
 operations bundle proves an encrypted same-host restore into isolated fresh
 volumes, but that is a recovery primitive rather than a production backup
 policy.
+
+The checked-in Caddy policy is a boundary test, not an authentication layer: it
+returns `404` for private management paths and forwards the two versioned
+application families. Tenant-scoped relay endpoints still enforce their bearer
+capabilities in the Node. The loopback management listener contains both route
+families and must not be published to a LAN or the internet.

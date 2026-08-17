@@ -87,8 +87,34 @@ lost response without creating a second routing authority or requiring the Node
 to retain plaintext credentials.
 
 The operator endpoint is a deployment control-plane seam, not hosted account
-admission. Keep it off public application ingress. A later hosted layer will
-authorize this operation from account, plan, and billing state.
+admission. It is available on the loopback/private management ingress and
+receives `404` from the checked-in public Caddy ingress. A later hosted layer
+will authorize this operation from account, plan, and billing state.
+
+## Create a delegated domain in an existing tenant
+
+```http
+POST /v1/relay/tenants/{tenantID}/domains/{authorizingDomainID}/delegated-domains
+Authorization: Bearer <authorizing domain-administration token>
+Content-Type: application/json
+
+<the same retry-stable provisioning body as POST /v1/relay/domains>
+```
+
+The new domain must use the path tenant ID, a different domain ID, independent
+administration and initial-member credentials, and a stable creation time. The
+authorizing administration credential is checked against the path domain. The
+new domain receives the same fixed default quotas as an operator-provisioned
+domain. Exact retry and collision behavior are identical to initial
+provisioning, including across a PostgreSQL pool or service restart.
+
+This endpoint delegates routing authority only. The source domain does not
+become a parent in stored data, and the Node does not infer an account,
+principal, Persona, device, Space, billing owner, or content-key relationship.
+In the current checkpoint, every domain-administration credential can create
+additional domains beneath its tenant ID. That authority is intentionally
+documented as broader than the planned tenant provisioning credential; callers
+must not treat possession as proof of tenant ownership.
 
 ## Create a member
 
@@ -427,15 +453,24 @@ HTTP matrix does not control or assume a particular service supervisor.
 ## Operations and remaining boundaries
 
 `/livez`, `/readyz`, and `/metrics` have the same private-operations semantics
-as the pairing API. The database records domain/admission/member/message/blob
+as the pairing API. The checked-in Caddy ingress exposes only
+`/v1/pairing/*` and `/v1/relay/tenants/*`; it returns `404` for those operations
+endpoints and operator `POST /v1/relay/domains`. The private loopback Node
+listener remains the management ingress. The database records
+domain/admission/member/message/blob
 scope, monotonic sequence, current and prior credential digests, rotation
 idempotency facts, opaque envelope fields, byte counts, acknowledgments, and
 bounded audit event types. It does not record a content
 key, decrypted FEF, plaintext package contents, email address, Persona, or
 payment identity.
 
+Wake notification is process-local in this checkpoint. The wake handler always
+checks PostgreSQL after subscribing and therefore detects a message that was
+committed before the request even when no signal survived; periodic cursor
+fetch remains the authoritative cross-process and connection-loss fallback.
+
 This checkpoint does not yet provide operator-token rotation, account-wide
 quotas, message/blob retention or orphan garbage collection, resumable upload,
 checkpoints, hosted object storage,
-multi-region replication, online schema rollback, public ingress, or hosted
-service-level guarantees.
+multi-instance wake signaling, multi-region replication, online schema
+rollback, public-internet readiness, or hosted service-level guarantees.

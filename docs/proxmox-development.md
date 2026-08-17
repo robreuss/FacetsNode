@@ -16,23 +16,31 @@ openssl rand -hex 32
 # Put that output after FACETS_NODE_POSTGRES_PASSWORD= in .env.
 openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 # Put this separate value after FACETS_NODE_OPERATOR_TOKEN= in .env.
+install -d -m 700 deploy/tls
+# Install the certificate and private key for the public DNS name as
+# deploy/tls/server.crt and deploy/tls/server.key.
 chmod 600 .env
 docker compose up --build -d
 docker compose ps
 curl --fail http://127.0.0.1:8080/readyz
 ```
 
-The API binds only to the VM's loopback interface. For development from another
-machine, use an SSH tunnel rather than opening a LAN or public firewall rule:
+The plaintext Node API binds only to the VM's loopback interface. It is the
+private management ingress, including readiness, metrics, and operator domain
+provisioning. For development from another machine, use an SSH tunnel rather
+than opening a LAN or public firewall rule:
 
 ```sh
 ssh -L 18080:127.0.0.1:8080 <vm-user>@<vm-address>
 ```
 
 The tunneled endpoint is then `http://127.0.0.1:18080`. This is a development
-transport only. A hosted or remotely accessed Node requires a reviewed TLS
-reverse proxy, admission and distributed rate limits, restricted operations
-endpoints, monitoring, and incident procedures.
+transport only. Caddy separately publishes HTTPS on port 8443. It forwards
+only `/v1/pairing/*` and `/v1/relay/tenants/*`; operations and operator
+provisioning return `404`. The certificate must validate the client-visible
+host name. This route separation is necessary but does not by itself prove
+public-internet readiness; account admission, distributed rate limits,
+monitoring, independent review, and incident procedures remain open gates.
 
 ## Verification
 
@@ -44,11 +52,20 @@ docker compose exec postgres createdb -U facets facets_test
 
 FACETS_NODE_TEST_DATABASE_URL='postgres://facets:<password>@postgres:5432/facets_test?sslmode=disable' \
   go test ./internal/postgres \
-    -run 'TestPostgres(StorePersistsOpaqueMailbox|Relay(PersistsSequences|SerializesOutstandingAdmissionLimit))' -v
+    -run 'TestPostgres(StorePersistsOpaqueMailbox|Relay(PersistsSequences|DelegatedDomain|SerializesOutstandingAdmissionLimit))' -v
 
 FACETS_NODE_TEST_BASE_URL='http://node:8080' \
 FACETS_NODE_TEST_OPERATOR_TOKEN='<same operator value from .env>' \
   go test ./integration -run 'TestLive(Pairing|ReplicaRelay)' -v
+
+# Use the CA required by the installed certificate; never use curl -k.
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --cacert <ca-file> https://<node-name>:8443/v1/pairing/routes \
+  -X POST -H 'Content-Type: application/json' -d '{}')" = 400
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --cacert <ca-file> https://<node-name>:8443/readyz)" = 404
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --cacert <ca-file> https://<node-name>:8443/v1/relay/domains -X POST)" = 404
 ```
 
 Run these from an ephemeral Go container attached to the corresponding Compose
@@ -79,6 +96,14 @@ and exercises admission collection. The PostgreSQL gate additionally proves
 rotation records across a pool restart and serializes concurrent admission
 issuance at the domain limit.
 
+The delegated-domain PostgreSQL gate closes and recreates its pool between
+parent and child creation, proves exact retry after another restart, and rejects
+the wrong administration secret. The live delegation/wake gate creates a child
+domain through HTTP, retries it, publishes before starting the wake request,
+and requires the wake endpoint to find the already-durable PostgreSQL message
+without relying on a process-local signal. These tests are skipped when their
+explicit disposable-database or live-service environment is absent.
+
 PostgreSQL metadata and the blob volume are one recovery unit. A backup or host
 migration that captures only one is incomplete. Direct SQL domain deletion is
 not an operational deletion workflow: filesystem orphan collection and a
@@ -100,7 +125,8 @@ recovery stack and test repository were removed afterward.
 
 ## What this checkpoint does not prove
 
-- public internet safety or production TLS;
+- public internet safety or independent production TLS review (the checked-in
+  HTTPS route-separation policy is tested, but is only one boundary);
 - multi-tenant account admission and distributed abuse controls;
 - restore to a fresh VM, periodic off-host recovery drills, or point-in-time
   recovery;

@@ -466,6 +466,131 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	}
 }
 
+func TestPostgresRelayDelegatedDomainPersistsAcrossPoolRestart(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_NODE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_NODE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool := openPool(t, ctx, databaseURL)
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+
+	tenantID := uuid.New()
+	parentAdmin, parent, parentMember := postgresRelayDomainAuthority(
+		t, tenantID, uuid.New(), uuid.New(), 16, 48, 1_000,
+	)
+	store := postgresstore.NewRelayStore(pool)
+	acceptance, err := store.CreateDomain(ctx, parent, parentMember)
+	if err != nil || acceptance != relay.AcceptanceAccepted {
+		pool.Close()
+		t.Fatalf("create parent domain acceptance=%q err=%v", acceptance, err)
+	}
+	pool.Close()
+
+	_, child, childMember := postgresRelayDomainAuthority(
+		t, tenantID, uuid.New(), uuid.New(), 80, 112, 1_500,
+	)
+	pool = openPool(t, ctx, databaseURL)
+	store = postgresstore.NewRelayStore(pool)
+	acceptance, err = store.CreateDelegatedDomain(
+		ctx, parentAdmin, child, childMember, 2_000,
+	)
+	if err != nil || acceptance != relay.AcceptanceAccepted {
+		pool.Close()
+		t.Fatalf("create delegated domain acceptance=%q err=%v", acceptance, err)
+	}
+	pool.Close()
+
+	pool = openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	store = postgresstore.NewRelayStore(pool)
+	acceptance, err = store.CreateDelegatedDomain(
+		ctx, parentAdmin, child, childMember, 2_000,
+	)
+	if err != nil || acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("retry delegated domain acceptance=%q err=%v", acceptance, err)
+	}
+	var domainCount int
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT count(*) FROM relay_domains WHERE tenant_id = $1",
+		tenantID,
+	).Scan(&domainCount); err != nil {
+		t.Fatal(err)
+	}
+	if domainCount != 2 {
+		t.Fatalf("tenant domain count=%d; want=2", domainCount)
+	}
+
+	unauthorized := parentAdmin
+	unauthorized.Token = postgresRelayToken(144)
+	_, third, thirdMember := postgresRelayDomainAuthority(
+		t, tenantID, uuid.New(), uuid.New(), 176, 208, 2_000,
+	)
+	if _, err := store.CreateDelegatedDomain(
+		ctx, unauthorized, third, thirdMember, 2_000,
+	); !relay.ErrorHasCode(err, relay.CodeUnauthorized) {
+		t.Fatalf("unauthorized delegated domain err=%v", err)
+	}
+}
+
+func postgresRelayDomainAuthority(
+	t *testing.T,
+	tenantID uuid.UUID,
+	domainID uuid.UUID,
+	memberID uuid.UUID,
+	administrationTokenSeed byte,
+	memberTokenSeed byte,
+	createdAtMilliseconds int64,
+) (
+	relay.AdministrationCredential,
+	relay.DomainRegistration,
+	relay.MemberRegistration,
+) {
+	t.Helper()
+	administration := relay.AdministrationCredential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		Token:    postgresRelayToken(administrationTokenSeed),
+	}
+	administrationDigest, err := relay.AdministrationDigest(administration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberCredential := relay.Credential{
+		TenantID: tenantID,
+		DomainID: domainID,
+		MemberID: memberID,
+		Token:    postgresRelayToken(memberTokenSeed),
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return administration, relay.DomainRegistration{
+			Version:                relay.SchemaVersion,
+			TenantID:               tenantID,
+			DomainID:               domainID,
+			AdministrationDigest:   administrationDigest,
+			CreatedAtMilliseconds:  createdAtMilliseconds,
+			MaximumMessageCount:    relay.DefaultMaximumMessageCount,
+			MaximumBlobCount:       relay.DefaultMaximumBlobCount,
+			MaximumStoredByteCount: relay.DefaultMaximumStoredByteCount,
+		}, relay.MemberRegistration{
+			Version:               relay.SchemaVersion,
+			TenantID:              tenantID,
+			DomainID:              domainID,
+			MemberID:              memberID,
+			AuthorizationDigest:   memberDigest,
+			Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+			CreatedAtMilliseconds: createdAtMilliseconds,
+		}
+}
+
 func TestPostgresRelaySerializesOutstandingAdmissionLimit(t *testing.T) {
 	databaseURL := os.Getenv("FACETS_NODE_TEST_DATABASE_URL")
 	if databaseURL == "" {

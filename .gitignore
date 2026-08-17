@@ -1,5 +1,6 @@
 .DS_Store
 .env
+.swift-relay-test-access.json
 deploy/tls/
 .idea/
 .vscode/
