@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
 type Config struct {
@@ -20,6 +22,7 @@ type Config struct {
 	BlobUploadTTL      time.Duration
 	BlobOrphanGrace    time.Duration
 	CheckpointFenceTTL time.Duration
+	TrafficLimits      traffic.Limits
 }
 
 func Load() (Config, error) {
@@ -35,6 +38,7 @@ func Load() (Config, error) {
 		BlobUploadTTL:      7 * 24 * time.Hour,
 		BlobOrphanGrace:    24 * time.Hour,
 		CheckpointFenceTTL: 2 * time.Hour,
+		TrafficLimits:      traffic.DefaultLimits(),
 	}
 	if configuration.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("FACETS_NODE_DATABASE_URL is required")
@@ -101,7 +105,51 @@ func Load() (Config, error) {
 		}
 		configuration.DatabaseConns = int32(count)
 	}
+	if err := loadTrafficLimits(&configuration); err != nil {
+		return Config{}, err
+	}
 	return configuration, nil
+}
+
+var trafficSurfaceEnvironmentNames = map[traffic.Surface]string{
+	traffic.SurfaceRendezvous:      "RENDEZVOUS",
+	traffic.SurfaceRelayMessage:    "RELAY_MESSAGE",
+	traffic.SurfaceStorage:         "STORAGE",
+	traffic.SurfaceCheckpointAdmin: "CHECKPOINT_ADMIN",
+	traffic.SurfaceManagement:      "MANAGEMENT",
+}
+
+func loadTrafficLimits(configuration *Config) error {
+	for _, surface := range traffic.Surfaces() {
+		prefix := "FACETS_NODE_TRAFFIC_" + trafficSurfaceEnvironmentNames[surface]
+		limit := configuration.TrafficLimits[surface]
+		values := []struct {
+			name        string
+			destination *int
+		}{
+			{name: prefix + "_RATE_PER_MINUTE", destination: &limit.RequestsPerMinute},
+			{name: prefix + "_BURST", destination: &limit.Burst},
+			{name: prefix + "_CONNECTION_RATE_PER_MINUTE", destination: &limit.ConnectionRequestsPerMinute},
+			{name: prefix + "_CONNECTION_BURST", destination: &limit.ConnectionBurst},
+			{name: prefix + "_CONCURRENCY", destination: &limit.Concurrency},
+		}
+		for _, value := range values {
+			raw := os.Getenv(value.name)
+			if raw == "" {
+				continue
+			}
+			parsed, err := strconv.Atoi(raw)
+			if err != nil {
+				return fmt.Errorf("%s must be an integer", value.name)
+			}
+			*value.destination = parsed
+		}
+		configuration.TrafficLimits[surface] = limit
+	}
+	if err := traffic.ValidateLimits(configuration.TrafficLimits); err != nil {
+		return fmt.Errorf("traffic limits are invalid: %w", err)
+	}
+	return nil
 }
 
 func environment(name, fallback string) string {

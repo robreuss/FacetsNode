@@ -22,6 +22,8 @@ Facets core codebase.
 - Exact-retry idempotence and message-ID collision rejection
 - Role-separated fetch, receiver acknowledgement, expiry, and sponsor close
 - Request limits, timeouts, structured redacted logs, health, and metrics
+- Fixed-surface per-process identity, connection-aggregate, and concurrency
+  limits with bounded private metrics
 - Local Compose profile, a single production OCI image, and HTTPS application
   ingress separated from loopback-only management ingress
 - Cross-language tests against the public Swift rendezvous fixture
@@ -74,6 +76,32 @@ have a 30-day exact-retry window and are collected in batches of at most 256.
 Open uploads reserve their final blob count and byte count, expire after seven
 days without progress by default, and are physically reconciled only after the
 configured orphan grace period.
+
+### Traffic controls
+
+Every registered route belongs to one of five fixed surfaces. Limits are
+process-local; a hosted multi-instance edge still needs coordinated distributed
+abuse controls. The defaults are:
+
+| Surface suffix | Identity rate/burst | Connection rate/burst | Concurrency |
+| --- | ---: | ---: | ---: |
+| `RENDEZVOUS` | 300/min, 100 | 2,400/min, 400 | 32 |
+| `RELAY_MESSAGE` | 3,000/min, 500 | 24,000/min, 2,000 | 128 |
+| `STORAGE` | 1,200/min, 200 | 4,800/min, 800 | 32 |
+| `CHECKPOINT_ADMIN` | 600/min, 200 | 4,800/min, 800 | 32 |
+| `MANAGEMENT` | 300/min, 100 | 600/min, 200 | 8 |
+
+Override a value with
+`FACETS_NODE_TRAFFIC_<SURFACE>_RATE_PER_MINUTE`, `_BURST`,
+`_CONNECTION_RATE_PER_MINUTE`, `_CONNECTION_BURST`, or `_CONCURRENCY`.
+Rates are capped at 60,000/min, bursts at 10,000, and concurrency at 1,024.
+Each surface has separate fixed-capacity identity and connection-address LRU
+tables of at most 2,048 SHA-256 keys; idle entries expire after 15 minutes.
+Bearer credentials are hashed before lookup and never retained. Requests with
+no bearer use a canonical route scope plus the direct connection address, and
+an additional connection-address bucket bounds churn from random credentials
+or route IDs. Forwarding headers are not trusted. A bounded request returns
+`429` with an integer `Retry-After`; an exact retry remains valid after refill.
 
 ## Development
 
@@ -163,7 +191,8 @@ request bodies, ciphertext, or client IP addresses. See
 ## Verification status
 
 The ordinary Go suite covers in-memory protocol behavior, cross-language
-fixtures, HTTP authorization, and the checked-in Caddy exposure policy. Tests
+fixtures, HTTP authorization, bounded traffic/metric surfaces, and the
+checked-in Caddy exposure policy. Tests
 that set `FACETS_NODE_TEST_DATABASE_URL` exercise a real disposable PostgreSQL
 store, including tenant/domain provisioning, subscription exact retries,
 subscription-level delivery, split quota counters across pool restarts,

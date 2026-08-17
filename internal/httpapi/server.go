@@ -15,6 +15,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
+	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
 const maximumRequestByteCount = ((rendezvous.MaximumCiphertextByteCount + 2) / 3 * 4) + 16_384
@@ -30,16 +31,22 @@ type Server struct {
 	operatorProvisioningOn bool
 	logger                 *slog.Logger
 	metrics                *Metrics
+	traffic                *trafficController
 	now                    func() time.Time
 }
 
 func New(store rendezvous.Store, logger *slog.Logger) *Server {
+	controller, err := newTrafficController(traffic.DefaultLimits())
+	if err != nil {
+		panic(err)
+	}
 	return &Server{
 		store:           store,
 		logger:          logger,
 		metrics:         &Metrics{},
 		now:             time.Now,
 		relayWakeBroker: newRelayWakeBroker(),
+		traffic:         controller,
 	}
 }
 
@@ -70,141 +77,174 @@ func NewWithRelay(
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /livez", s.handleLive)
-	mux.HandleFunc("GET /readyz", s.handleReady)
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	mux.HandleFunc("POST /v1/pairing/routes", s.handleCreateRoute)
-	mux.HandleFunc(
+	register := func(pattern string, surface traffic.Surface, handler http.HandlerFunc) {
+		mux.Handle(pattern, s.trafficHandler(surface, handler))
+	}
+	register("GET /livez", traffic.SurfaceManagement, s.handleLive)
+	register("GET /readyz", traffic.SurfaceManagement, s.handleReady)
+	register("GET /metrics", traffic.SurfaceManagement, s.handleMetrics)
+	register("POST /v1/pairing/routes", traffic.SurfaceRendezvous, s.handleCreateRoute)
+	register(
 		"PUT /v1/pairing/routes/{routeID}/messages/{messageID}",
+		traffic.SurfaceRendezvous,
 		s.handlePublish,
 	)
-	mux.HandleFunc("GET /v1/pairing/routes/{routeID}/messages", s.handleFetch)
-	mux.HandleFunc(
+	register("GET /v1/pairing/routes/{routeID}/messages", traffic.SurfaceRendezvous, s.handleFetch)
+	register(
 		"POST /v1/pairing/routes/{routeID}/messages/{messageID}/acknowledgement",
+		traffic.SurfaceRendezvous,
 		s.handleAcknowledge,
 	)
-	mux.HandleFunc("POST /v1/pairing/routes/{routeID}/close", s.handleClose)
+	register("POST /v1/pairing/routes/{routeID}/close", traffic.SurfaceRendezvous, s.handleClose)
 	if s.relayStore != nil {
 		if s.operatorProvisioningOn {
-			mux.HandleFunc("POST /v1/relay/tenants", s.handleProvisionRelayTenant)
+			register("POST /v1/relay/tenants", traffic.SurfaceManagement, s.handleProvisionRelayTenant)
 		}
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleProvisionRelayDomain,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/credential-rotations/{rotationID}",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleRotateRelayTenantCredential,
 		)
-		mux.HandleFunc(
+		register(
 			"GET /v1/relay/tenants/{tenantID}/status",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleRelayTenantStatus,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleCreateRelaySubscription,
 		)
-		mux.HandleFunc(
+		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions/{subscriptionID}",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleGetRelaySubscription,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions/{subscriptionID}/status",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleChangeRelaySubscriptionStatus,
 		)
-		mux.HandleFunc(
+		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/status",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleRelayDomainStatus,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleCreateRelayCheckpointFence,
 		)
-		mux.HandleFunc(
+		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences/{fenceID}",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleGetRelayCheckpointFence,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences/{fenceID}/abort",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleAbortRelayCheckpointFence,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/candidates",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleStageRelayCheckpoint,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/activation",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleActivateRelayCheckpoint,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/collection-dry-run",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleDryRunRelayCheckpointCollection,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/collection",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleCollectRelayCheckpoint,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleCreateRelayMember,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/administration/credential-rotations/{rotationID}",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleRotateRelayAdministrationCredential,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members/{memberID}/credential-rotations/{rotationID}",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleRotateRelayMemberCredential,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleCreateRelayAdmission,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/collection",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleCollectRelayAdmissions,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/claim",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleClaimRelayAdmission,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/revocation",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleRevokeRelayAdmission,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members/{memberID}/revocation",
+			traffic.SurfaceCheckpointAdmin,
 			s.handleRevokeRelayMember,
 		)
-		mux.HandleFunc(
+		register(
 			"PUT /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}",
+			traffic.SurfaceRelayMessage,
 			s.handlePublishRelayMessage,
 		)
-		mux.HandleFunc(
+		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages",
+			traffic.SurfaceRelayMessage,
 			s.handleFetchRelayMessages,
 		)
-		mux.HandleFunc(
+		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/wake",
+			traffic.SurfaceRelayMessage,
 			s.handleWaitForRelayMessages,
 		)
-		mux.HandleFunc(
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}/acknowledgments",
+			traffic.SurfaceRelayMessage,
 			s.handleAcknowledgeRelayMessage,
 		)
 		if s.blobContentStore != nil {
-			mux.HandleFunc(
+			register(
 				"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
+				traffic.SurfaceStorage,
 				s.handleFetchRelayBlob,
 			)
 			if s.blobUploadContentStore != nil {
-				mux.HandleFunc("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads", s.handleCreateRelayBlobUpload)
-				mux.HandleFunc("GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", s.handleGetRelayBlobUpload)
-				mux.HandleFunc("PATCH /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", s.handleAppendRelayBlobUpload)
-				mux.HandleFunc("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}/finalization", s.handleFinalizeRelayBlobUpload)
+				register("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads", traffic.SurfaceStorage, s.handleCreateRelayBlobUpload)
+				register("GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", traffic.SurfaceStorage, s.handleGetRelayBlobUpload)
+				register("PATCH /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", traffic.SurfaceStorage, s.handleAppendRelayBlobUpload)
+				register("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}/finalization", traffic.SurfaceStorage, s.handleFinalizeRelayBlobUpload)
 			}
-			mux.HandleFunc(
+			register(
 				"HEAD /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
+				traffic.SurfaceStorage,
 				s.handleFetchRelayBlob,
 			)
 		}
@@ -259,7 +299,7 @@ func (s *Server) handleCreateRoute(writer http.ResponseWriter, request *http.Req
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceRendezvous, string(acceptance))
 	status := http.StatusCreated
 	if acceptance == rendezvous.AcceptanceDuplicate {
 		status = http.StatusOK
@@ -297,7 +337,7 @@ func (s *Server) handlePublish(writer http.ResponseWriter, request *http.Request
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceRendezvous, string(acceptance))
 	status := http.StatusCreated
 	if acceptance == rendezvous.AcceptanceDuplicate {
 		status = http.StatusOK
@@ -548,7 +588,6 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 		writer.Header().Set("X-Request-ID", requestID)
 		recorder := &statusRecorder{ResponseWriter: writer, status: http.StatusOK}
 		next.ServeHTTP(recorder, request)
-		s.metrics.ObserveStatus(recorder.status)
 		s.logger.Info(
 			"http request",
 			"request_id", requestID,

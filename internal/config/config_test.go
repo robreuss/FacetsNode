@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/robreuss/FacetsNode/internal/config"
+	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
 func TestBlobMaintenanceDefaultsAndOverrides(t *testing.T) {
@@ -31,6 +32,42 @@ func TestBlobMaintenanceDefaultsAndOverrides(t *testing.T) {
 	}
 	if configuration.CheckpointFenceTTL != 6*time.Hour {
 		t.Fatalf("checkpoint fence override=%s", configuration.CheckpointFenceTTL)
+	}
+}
+
+func TestTrafficLimitDefaultsOverridesAndHardCaps(t *testing.T) {
+	t.Setenv("FACETS_NODE_DATABASE_URL", "postgres://example.invalid/facets")
+	configuration, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.TrafficLimits != traffic.DefaultLimits() {
+		t.Fatalf("traffic defaults=%+v", configuration.TrafficLimits)
+	}
+	t.Setenv("FACETS_NODE_TRAFFIC_RELAY_MESSAGE_RATE_PER_MINUTE", "42")
+	t.Setenv("FACETS_NODE_TRAFFIC_RELAY_MESSAGE_BURST", "7")
+	t.Setenv("FACETS_NODE_TRAFFIC_RELAY_MESSAGE_CONNECTION_RATE_PER_MINUTE", "84")
+	t.Setenv("FACETS_NODE_TRAFFIC_RELAY_MESSAGE_CONNECTION_BURST", "14")
+	t.Setenv("FACETS_NODE_TRAFFIC_RELAY_MESSAGE_CONCURRENCY", "3")
+	configuration, err = config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configuration.TrafficLimits[traffic.SurfaceRelayMessage]; got != (traffic.Limit{RequestsPerMinute: 42, Burst: 7, ConnectionRequestsPerMinute: 84, ConnectionBurst: 14, Concurrency: 3}) {
+		t.Fatalf("relay message limits=%+v", got)
+	}
+	for name, value := range map[string]string{
+		"FACETS_NODE_TRAFFIC_RENDEZVOUS_RATE_PER_MINUTE":   "0",
+		"FACETS_NODE_TRAFFIC_STORAGE_BURST":                "10001",
+		"FACETS_NODE_TRAFFIC_MANAGEMENT_CONCURRENCY":       "1025",
+		"FACETS_NODE_TRAFFIC_CHECKPOINT_ADMIN_CONCURRENCY": "invalid",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, value)
+			if _, err := config.Load(); err == nil {
+				t.Fatalf("invalid %s=%q accepted", name, value)
+			}
+		})
 	}
 }
 

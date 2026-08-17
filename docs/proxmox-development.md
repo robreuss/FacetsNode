@@ -70,7 +70,7 @@ transport only. Caddy separately publishes HTTPS on port 8443. It forwards
 only `/v1/pairing/*` and `/v1/relay/tenants/*`; operations and operator
 provisioning return `404`. The certificate must validate the client-visible
 host name. This route separation is necessary but does not by itself prove
-public-internet readiness; account admission, distributed rate limits,
+public-internet readiness; account admission, cross-instance distributed rate limits,
 monitoring, independent review, and incident procedures remain open gates.
 
 ## Verification

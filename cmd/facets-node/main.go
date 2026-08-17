@@ -84,6 +84,10 @@ func main() {
 		logger.Error("relay API configuration rejected", "error", err)
 		os.Exit(1)
 	}
+	if err := api.SetTrafficLimits(configuration.TrafficLimits); err != nil {
+		logger.Error("traffic limits rejected", "error", err)
+		os.Exit(1)
+	}
 	relayWakeNotifier := postgres.NewRelayWakeNotifier(pool)
 	relayWakeListener := postgres.NewRelayWakeListener(pool)
 	api.SetRelayWakeNotifier(relayWakeNotifier)

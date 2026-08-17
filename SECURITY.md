@@ -47,7 +47,8 @@ Supported production deployments must:
 - retain encrypted backups and prove restore regularly;
 - checkpoint PostgreSQL and the opaque-blob volume together so metadata cannot
   point at missing content or retained files lose their authority records;
-- set host-level request limits and rate limits in addition to Node limits;
+- retain host/edge-level request and distributed rate limits in addition to
+  the Node's bounded per-process fixed-surface controls;
 - collect logs without authorization headers, request bodies, ciphertext, or
   client IP addresses;
 - run the container as an unprivileged user with a read-only root filesystem;
@@ -64,8 +65,9 @@ address before an atomic filesystem commit, but failed post-write metadata
 commits can leave unreferenced files until orphan collection is implemented.
 An administrator can collect terminal admissions only after their 30-day
 response-recovery window; message/blob retention and audit-history policy are
-not yet implemented. The service does not apply distributed/account-level rate
-limits. Compromised member authorization can
+not yet implemented. The service applies bounded per-process credential/route,
+direct-connection, and concurrency limits, but not coordinated
+distributed/account-level rate limits. Compromised member authorization can
 read or publish opaque envelopes within its capabilities even though it cannot
 decrypt them without the content key. Account admission, operator-credential
 rotation, abuse resistance, distributed rate limiting, retention policy, independent

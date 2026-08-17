@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
 const maximumRelayRequestByteCount = ((relay.MaximumCiphertextByteCount + 2) / 3 * 4) + 32_768
@@ -117,7 +118,7 @@ func (s *Server) handleProvisionRelayTenant(writer http.ResponseWriter, request 
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -150,7 +151,7 @@ func (s *Server) handleProvisionRelayDomain(writer http.ResponseWriter, request 
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -255,7 +256,7 @@ func (s *Server) handleRotateRelayTenantCredential(writer http.ResponseWriter, r
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -305,7 +306,7 @@ func (s *Server) handleCreateRelaySubscription(writer http.ResponseWriter, reque
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -363,7 +364,7 @@ func (s *Server) handleChangeRelaySubscriptionStatus(writer http.ResponseWriter,
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -407,7 +408,7 @@ func (s *Server) handleCreateRelayCheckpointFence(writer http.ResponseWriter, re
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -465,7 +466,7 @@ func (s *Server) handleAbortRelayCheckpointFence(writer http.ResponseWriter, req
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, http.StatusOK, result)
 }
 
@@ -494,7 +495,7 @@ func (s *Server) handleStageRelayCheckpoint(writer http.ResponseWriter, request 
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -518,7 +519,7 @@ func (s *Server) handleActivateRelayCheckpoint(writer http.ResponseWriter, reque
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	if result.Acceptance == relay.AcceptanceAccepted {
 		s.notifyRelayWake(request.Context(), tenantID, domainID)
 	}
@@ -646,7 +647,7 @@ func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *ht
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(acceptance))
 	writeJSON(writer, http.StatusCreated, struct {
 		Member     relay.SubscriptionMemberRegistration `json:"member"`
 		Credential relayMemberCredential                `json:"credential"`
@@ -700,7 +701,7 @@ func (s *Server) handleRotateRelayAdministrationCredential(
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -750,7 +751,7 @@ func (s *Server) handleRotateRelayMemberCredential(
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
@@ -834,7 +835,7 @@ func (s *Server) handleCreateRelayAdmission(
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	status := http.StatusCreated
 	if result.Acceptance == relay.AcceptanceDuplicate {
 		status = http.StatusOK
@@ -976,7 +977,7 @@ func (s *Server) handleClaimRelayAdmission(
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(result.Acceptance))
 	status := http.StatusCreated
 	if result.Acceptance == relay.AcceptanceDuplicate {
 		status = http.StatusOK
@@ -1012,7 +1013,7 @@ func (s *Server) handleRevokeRelayAdmission(
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(acceptance))
 	writeJSON(writer, http.StatusOK, map[string]string{
 		"acceptance": string(acceptance),
 	})
@@ -1043,7 +1044,7 @@ func (s *Server) handleRevokeRelayMember(writer http.ResponseWriter, request *ht
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceCheckpointAdmin, string(acceptance))
 	writeJSON(writer, http.StatusOK, map[string]string{
 		"acceptance": string(acceptance),
 	})
@@ -1087,7 +1088,7 @@ func (s *Server) handlePublishRelayMessage(writer http.ResponseWriter, request *
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceRelayMessage, string(result.Acceptance))
 	status := http.StatusCreated
 	if result.Acceptance == relay.AcceptanceDuplicate {
 		status = http.StatusOK
@@ -1170,7 +1171,7 @@ func (s *Server) handleAcknowledgeRelayMessage(writer http.ResponseWriter, reque
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceRelayMessage, string(result.Acceptance))
 	writeJSON(writer, http.StatusOK, result)
 }
 
@@ -1202,7 +1203,7 @@ func (s *Server) handleCreateRelayBlobUpload(writer http.ResponseWriter, request
 			return
 		}
 	}
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceStorage, string(result.Acceptance))
 	status := http.StatusCreated
 	if result.Acceptance == relay.AcceptanceDuplicate {
 		status = http.StatusOK
@@ -1317,7 +1318,7 @@ func (s *Server) handleFinalizeRelayBlobUpload(writer http.ResponseWriter, reque
 		return
 	}
 	_ = s.blobUploadContentStore.Delete(request.Context(), relay.BlobScope{TenantID: tenantID, DomainID: domainID}, uploadID)
-	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	s.metrics.ObserveAcceptance(traffic.SurfaceStorage, string(result.Acceptance))
 	statusCode := http.StatusCreated
 	if result.Acceptance == relay.AcceptanceDuplicate {
 		statusCode = http.StatusOK

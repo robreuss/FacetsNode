@@ -170,6 +170,14 @@ not fail the committed publication, reconnect uses bounded backoff, duplicate
 publication retries do not emit another hint, and the wake handler subscribes
 before its first durable fetch so there is no check-to-wait gap.
 
+Relay messages, blob storage/uploads, and checkpoint/administration use three
+separate fixed traffic surfaces. Each applies bounded SHA-256 identity and
+direct-connection token buckets plus a surface concurrency bound. Limits are
+process-local and configurable by operators. A rejected request returns `429`
+with an integer `Retry-After`; exact operation retries remain valid after the
+bound refills. Metrics use only fixed surface/outcome/rejection labels and
+never routing, credential, message, blob, address, or ciphertext values.
+
 ## Checkpoints and bounded collection
 
 A member with `checkpoint_publish` first acquires a server-timed write fence:

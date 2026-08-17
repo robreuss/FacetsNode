@@ -21,6 +21,13 @@ The response includes `Cache-Control: no-store` and a random `X-Request-ID`.
 Error bodies contain a stable code but no supplied credential, ciphertext, or
 database detail.
 
+Pairing routes share a fixed rendezvous traffic surface. The Node hashes the
+bearer credential for identity fairness. If no bearer is available, it hashes
+the canonical route ID and direct connection address; forwarding headers are
+not trusted. A second per-connection bucket prevents random credentials or
+route IDs from bypassing aggregate protection. `429` includes an integer
+`Retry-After`, after which an exact retry remains valid.
+
 ## Create a route
 
 ```http
@@ -101,8 +108,9 @@ expiry.
 
 - `GET /livez` proves the process can serve HTTP.
 - `GET /readyz` proves PostgreSQL is reachable.
-- `GET /metrics` emits bounded, label-free OpenMetrics counters. It contains no
-  route, message, tenant, credential, or client identifiers.
+- `GET /metrics` emits fixed-cardinality OpenMetrics counters using only
+  server-defined surface, outcome, status, and rejection labels. It contains
+  no route, message, tenant, credential, address, or client identifiers.
 
 These endpoints are intended for a private operations network. A public reverse
 proxy should expose only the versioned application routes.
