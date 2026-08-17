@@ -52,60 +52,119 @@ type relayAdmissionCredential struct {
 }
 
 type relayDomainProvisioningInput struct {
+	Version                  int                           `json:"version"`
+	RetryID                  uuid.UUID                     `json:"retryID"`
 	AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
+	SubscriptionID           uuid.UUID                     `json:"subscriptionID"`
 	MemberCredential         relayMemberCredential         `json:"memberCredential"`
 	MemberCapabilities       []relay.Capability            `json:"memberCapabilities"`
 	CreatedAtMilliseconds    int64                         `json:"createdAtMilliseconds"`
 }
 
-func (s *Server) handleCreateRelayDomain(writer http.ResponseWriter, request *http.Request) {
+type relayTenantCredential struct {
+	TenantID           uuid.UUID `json:"tenantID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+type relayTenantProvisioningInput struct {
+	Version                      int                          `json:"version"`
+	RetryID                      uuid.UUID                    `json:"retryID"`
+	TenantProvisioningCredential relayTenantCredential        `json:"tenantProvisioningCredential"`
+	InitialDomain                relayDomainProvisioningInput `json:"initialDomain"`
+}
+
+func (s *Server) handleProvisionRelayTenant(writer http.ResponseWriter, request *http.Request) {
 	if err := s.authorizeOperator(request); err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	s.createRelayDomainFromRequest(writer, request, nil)
-}
-
-func (s *Server) handleCreateDelegatedRelayDomain(writer http.ResponseWriter, request *http.Request) {
-	tenantID, domainID, err := relayScopeFromPath(request)
+	var input relayTenantProvisioningInput
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	tenantCredential := relay.TenantCredential{
+		TenantID: input.TenantProvisioningCredential.TenantID,
+		Token:    input.TenantProvisioningCredential.AuthorizationToken,
+	}
+	tenantDigest, err := relay.TenantAuthorizationDigest(tenantCredential)
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	credential, err := relayAdministrationCredentialFromRequest(
-		request,
-		tenantID,
-		domainID,
-	)
+	provisioning, err := relayDomainProvisioning(input.InitialDomain)
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	s.createRelayDomainFromRequest(writer, request, &credential)
+	if input.Version != relay.SchemaVersion || input.RetryID == uuid.Nil ||
+		tenantCredential.TenantID != provisioning.Registration.TenantID {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidTenant, "tenant provisioning request is invalid"))
+		return
+	}
+	tenant := relay.TenantRegistration{
+		Version: relay.SchemaVersion, RetryID: input.RetryID,
+		TenantID: tenantCredential.TenantID, AuthorizationDigest: tenantDigest,
+		CreatedAtMilliseconds:            provisioning.Registration.CreatedAtMilliseconds,
+		MaximumDomainCount:               relay.DefaultMaximumDomainCountPerTenant,
+		MaximumAggregateMessageCount:     relay.DefaultMaximumMessageCountPerTenant,
+		MaximumAggregateMessageByteCount: relay.DefaultMaximumMessageBytesPerTenant,
+		MaximumAggregateBlobCount:        relay.DefaultMaximumBlobCountPerTenant,
+		MaximumAggregateBlobByteCount:    relay.DefaultMaximumBlobBytesPerTenant,
+	}
+	result, err := s.relayStore.ProvisionTenant(request.Context(), tenant, provisioning)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
-func (s *Server) createRelayDomainFromRequest(
-	writer http.ResponseWriter,
-	request *http.Request,
-	authorizingCredential *relay.AdministrationCredential,
-) {
+func (s *Server) handleProvisionRelayDomain(writer http.ResponseWriter, request *http.Request) {
+	tenantID, err := parseUUID(request.PathValue("tenantID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
 	var input relayDomainProvisioningInput
 	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	if input.AdministrationCredential.TenantID != input.MemberCredential.TenantID ||
-		input.AdministrationCredential.DomainID != input.MemberCredential.DomainID {
-		s.writeError(writer, relay.NewProtocolError(
-			relay.CodeWrongScope,
-			"initial member belongs to another domain",
-		))
-		return
-	}
-	capabilities, err := normalizedCapabilities(input.MemberCapabilities)
+	provisioning, err := relayDomainProvisioning(input)
 	if err != nil {
 		s.writeError(writer, err)
 		return
+	}
+	result, err := s.relayStore.ProvisionDomain(
+		request.Context(), relay.TenantCredential{TenantID: tenantID, Token: token},
+		provisioning, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func relayDomainProvisioning(input relayDomainProvisioningInput) (relay.DomainProvisioning, error) {
+	if input.AdministrationCredential.TenantID != input.MemberCredential.TenantID ||
+		input.AdministrationCredential.DomainID != input.MemberCredential.DomainID {
+		return relay.DomainProvisioning{}, relay.NewProtocolError(
+			relay.CodeWrongScope,
+			"initial member belongs to another domain",
+		)
+	}
+	capabilities, err := normalizedCapabilities(input.MemberCapabilities)
+	if err != nil {
+		return relay.DomainProvisioning{}, err
 	}
 	administrationCredential := relay.AdministrationCredential{
 		TenantID: input.AdministrationCredential.TenantID,
@@ -114,8 +173,7 @@ func (s *Server) createRelayDomainFromRequest(
 	}
 	administrationDigest, err := relay.AdministrationDigest(administrationCredential)
 	if err != nil {
-		s.writeError(writer, err)
-		return
+		return relay.DomainProvisioning{}, err
 	}
 	memberCredential := relay.Credential{
 		TenantID: input.MemberCredential.TenantID,
@@ -125,18 +183,18 @@ func (s *Server) createRelayDomainFromRequest(
 	}
 	memberDigest, err := relay.AuthorizationDigest(memberCredential)
 	if err != nil {
-		s.writeError(writer, err)
-		return
+		return relay.DomainProvisioning{}, err
 	}
 	domain := relay.DomainRegistration{
-		Version:                relay.SchemaVersion,
-		TenantID:               administrationCredential.TenantID,
-		DomainID:               administrationCredential.DomainID,
-		AdministrationDigest:   administrationDigest,
-		CreatedAtMilliseconds:  input.CreatedAtMilliseconds,
-		MaximumMessageCount:    relay.DefaultMaximumMessageCount,
-		MaximumBlobCount:       relay.DefaultMaximumBlobCount,
-		MaximumStoredByteCount: relay.DefaultMaximumStoredByteCount,
+		Version:                 relay.SchemaVersion,
+		TenantID:                administrationCredential.TenantID,
+		DomainID:                administrationCredential.DomainID,
+		AdministrationDigest:    administrationDigest,
+		CreatedAtMilliseconds:   input.CreatedAtMilliseconds,
+		MaximumMessageCount:     relay.DefaultMaximumMessageCount,
+		MaximumMessageByteCount: relay.DefaultMaximumMessageByteCount,
+		MaximumBlobCount:        relay.DefaultMaximumBlobCount,
+		MaximumBlobByteCount:    relay.DefaultMaximumBlobByteCount,
 	}
 	member := relay.MemberRegistration{
 		Version:               relay.SchemaVersion,
@@ -147,36 +205,185 @@ func (s *Server) createRelayDomainFromRequest(
 		Capabilities:          capabilities,
 		CreatedAtMilliseconds: input.CreatedAtMilliseconds,
 	}
-	var acceptance relay.Acceptance
-	if authorizingCredential == nil {
-		acceptance, err = s.relayStore.CreateDomain(request.Context(), domain, member)
-	} else {
-		acceptance, err = s.relayStore.CreateDelegatedDomain(
-			request.Context(),
-			*authorizingCredential,
-			domain,
-			member,
-			s.nowMilliseconds(),
-		)
+	provisioning := relay.DomainProvisioning{
+		Version: input.Version, RetryID: input.RetryID,
+		Registration: domain,
+		Subscription: relay.Subscription{
+			Version: relay.SchemaVersion, TenantID: domain.TenantID,
+			DomainID: domain.DomainID, SubscriptionID: input.SubscriptionID,
+			Status:                relay.SubscriptionActive,
+			CreatedAtMilliseconds: input.CreatedAtMilliseconds,
+			UpdatedAtMilliseconds: input.CreatedAtMilliseconds,
+		},
+		InitialMember: member,
 	}
+	if err := provisioning.Validate(); err != nil {
+		return relay.DomainProvisioning{}, err
+	}
+	return provisioning, nil
+}
+
+func (s *Server) handleRotateRelayTenantCredential(writer http.ResponseWriter, request *http.Request) {
+	tenantID, err := parseUUID(request.PathValue("tenantID"))
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	s.metrics.ObserveAcceptance(string(acceptance))
-	writeJSON(writer, relayAcceptanceStatus(acceptance), struct {
-		Acceptance               relay.Acceptance              `json:"acceptance"`
-		Domain                   relay.DomainRegistration      `json:"domain"`
-		AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
-		Member                   relay.MemberRegistration      `json:"member"`
-		MemberCredential         relayMemberCredential         `json:"memberCredential"`
-	}{
-		Acceptance:               acceptance,
-		Domain:                   domain,
-		AdministrationCredential: input.AdministrationCredential,
-		Member:                   member,
-		MemberCredential:         input.MemberCredential,
-	})
+	rotationID, err := parseUUID(request.PathValue("rotationID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var rotation relay.TenantCredentialRotation
+	if err := readRelayJSON(writer, request, &rotation, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if rotation.TenantID != tenantID || rotation.RotationID != rotationID {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeWrongScope, "tenant rotation path and body differ"))
+		return
+	}
+	result, err := s.relayStore.RotateTenantCredential(
+		request.Context(), relay.TenantCredential{TenantID: tenantID, Token: token}, rotation,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleRelayTenantStatus(writer http.ResponseWriter, request *http.Request) {
+	tenantID, err := parseUUID(request.PathValue("tenantID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	status, err := s.relayStore.GetTenantStatus(
+		request.Context(), relay.TenantCredential{TenantID: tenantID, Token: token},
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) handleCreateRelaySubscription(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.SubscriptionCreateRequest
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.CreatedAtMilliseconds > s.nowMilliseconds() {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription creation is in the future"))
+		return
+	}
+	result, err := s.relayStore.CreateSubscription(request.Context(), credential, input)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleGetRelaySubscription(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	subscriptionID, err := parseRelayUUID(request.PathValue("subscriptionID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	subscription, err := s.relayStore.GetSubscription(request.Context(), credential, subscriptionID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, subscription)
+}
+
+func (s *Server) handleChangeRelaySubscriptionStatus(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	subscriptionID, err := parseRelayUUID(request.PathValue("subscriptionID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.SubscriptionStatusChangeRequest
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.ChangedAtMilliseconds > s.nowMilliseconds() {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription status change is in the future"))
+		return
+	}
+	result, err := s.relayStore.ChangeSubscriptionStatus(request.Context(), credential, subscriptionID, input)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleRelayDomainStatus(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	status, err := s.relayStore.GetDomainStatus(request.Context(), credential)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
 }
 
 func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *http.Request) {
@@ -193,6 +400,7 @@ func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *ht
 		return
 	}
 	var input struct {
+		SubscriptionID        uuid.UUID          `json:"subscriptionID"`
 		Capabilities          []relay.Capability `json:"capabilities"`
 		ExpiresAtMilliseconds *int64             `json:"expiresAtMilliseconds,omitempty"`
 	}
@@ -233,8 +441,8 @@ func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *ht
 		CreatedAtMilliseconds: now,
 		ExpiresAtMilliseconds: input.ExpiresAtMilliseconds,
 	}
-	acceptance, err := s.relayStore.CreateMember(
-		request.Context(), credential, registration, now,
+	acceptance, err := s.relayStore.CreateSubscriptionMember(
+		request.Context(), credential, input.SubscriptionID, registration, now,
 	)
 	if err != nil {
 		s.writeError(writer, err)
@@ -242,10 +450,13 @@ func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *ht
 	}
 	s.metrics.ObserveAcceptance(string(acceptance))
 	writeJSON(writer, http.StatusCreated, struct {
-		Member     relay.MemberRegistration `json:"member"`
-		Credential relayMemberCredential    `json:"credential"`
+		Member     relay.SubscriptionMemberRegistration `json:"member"`
+		Credential relayMemberCredential                `json:"credential"`
 	}{
-		Member: registration,
+		Member: relay.SubscriptionMemberRegistration{
+			SubscriptionID:     input.SubscriptionID,
+			MemberRegistration: registration,
+		},
 		Credential: relayMemberCredential{
 			TenantID:           tenantID,
 			DomainID:           domainID,
@@ -390,6 +601,7 @@ func (s *Server) handleCreateRelayAdmission(
 		return
 	}
 	var input struct {
+		SubscriptionID              uuid.UUID          `json:"subscriptionID"`
 		AdmissionID                 uuid.UUID          `json:"admissionID"`
 		AuthorizationDigest         string             `json:"authorizationDigest"`
 		Capabilities                []relay.Capability `json:"capabilities"`
@@ -417,8 +629,8 @@ func (s *Server) handleCreateRelayAdmission(
 		ExpiresAtMilliseconds:       input.ExpiresAtMilliseconds,
 		MemberExpiresAtMilliseconds: input.MemberExpiresAtMilliseconds,
 	}
-	result, err := s.relayStore.CreateAdmission(
-		request.Context(), credential, registration, now,
+	result, err := s.relayStore.CreateSubscriptionAdmission(
+		request.Context(), credential, input.SubscriptionID, registration, now,
 	)
 	if err != nil {
 		s.writeError(writer, err)
@@ -559,7 +771,7 @@ func (s *Server) handleClaimRelayAdmission(
 		s.writeError(writer, err)
 		return
 	}
-	result, err := s.relayStore.ClaimAdmission(
+	result, err := s.relayStore.ClaimSubscriptionAdmission(
 		request.Context(), credential, claim, s.nowMilliseconds(),
 	)
 	if err != nil {

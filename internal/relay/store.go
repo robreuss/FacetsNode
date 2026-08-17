@@ -7,21 +7,44 @@ import (
 )
 
 type Store interface {
-	CreateDomain(
+	ProvisionTenant(
 		ctx context.Context,
-		registration DomainRegistration,
-		initialMember MemberRegistration,
-	) (Acceptance, error)
-	CreateDelegatedDomain(
+		tenant TenantRegistration,
+		initialDomain DomainProvisioning,
+	) (TenantProvisioningResult, error)
+	ProvisionDomain(
 		ctx context.Context,
-		authorizingCredential AdministrationCredential,
-		registration DomainRegistration,
-		initialMember MemberRegistration,
+		credential TenantCredential,
+		domain DomainProvisioning,
 		nowMilliseconds int64,
-	) (Acceptance, error)
-	CreateMember(
+	) (DomainProvisioningResult, error)
+	RotateTenantCredential(
+		ctx context.Context,
+		credential TenantCredential,
+		rotation TenantCredentialRotation,
+	) (TenantCredentialRotationResult, error)
+	GetTenantStatus(context.Context, TenantCredential) (TenantStatus, error)
+	CreateSubscription(
+		context.Context,
+		AdministrationCredential,
+		SubscriptionCreateRequest,
+	) (SubscriptionCreateResponse, error)
+	GetSubscription(
+		context.Context,
+		AdministrationCredential,
+		uuid.UUID,
+	) (Subscription, error)
+	ChangeSubscriptionStatus(
+		context.Context,
+		AdministrationCredential,
+		uuid.UUID,
+		SubscriptionStatusChangeRequest,
+	) (SubscriptionStatusChangeResponse, error)
+	GetDomainStatus(context.Context, AdministrationCredential) (DomainStatus, error)
+	CreateSubscriptionMember(
 		ctx context.Context,
 		credential AdministrationCredential,
+		subscriptionID uuid.UUID,
 		registration MemberRegistration,
 		nowMilliseconds int64,
 	) (Acceptance, error)
@@ -37,18 +60,19 @@ type Store interface {
 		rotation CredentialRotation,
 		nowMilliseconds int64,
 	) (CredentialRotationResult, error)
-	CreateAdmission(
+	CreateSubscriptionAdmission(
 		ctx context.Context,
 		credential AdministrationCredential,
+		subscriptionID uuid.UUID,
 		registration MemberAdmission,
 		nowMilliseconds int64,
-	) (AdmissionCreateResult, error)
-	ClaimAdmission(
+	) (SubscriptionAdmissionCreateResult, error)
+	ClaimSubscriptionAdmission(
 		ctx context.Context,
 		credential AdmissionCredential,
 		claim MemberAdmissionClaim,
 		nowMilliseconds int64,
-	) (AdmissionClaimResult, error)
+	) (SubscriptionAdmissionClaimResult, error)
 	RevokeAdmission(
 		ctx context.Context,
 		credential AdministrationCredential,

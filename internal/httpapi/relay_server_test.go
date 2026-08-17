@@ -38,13 +38,15 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 	server.now = func() time.Time { return time.UnixMilli(1_500) }
 	handler := server.Handler()
 	provisioning := newRelayDomainProvisioningRequest(1_500, 16, 64)
+	tenantToken := relayTestToken(15)
+	tenantProvisioning := newRelayTenantProvisioningRequest(provisioning, tenantToken)
 
 	wrongOperator := performRelayJSON(
 		t,
 		handler,
 		http.MethodPost,
-		"/v1/relay/domains",
-		provisioning,
+		"/v1/relay/tenants",
+		tenantProvisioning,
 		relayTestToken(160),
 		uuid.Nil,
 	)
@@ -54,60 +56,57 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		t,
 		handler,
 		http.MethodPost,
-		"/v1/relay/domains",
-		provisioning,
+		"/v1/relay/tenants",
+		tenantProvisioning,
 		operatorToken,
 		uuid.Nil,
 	)
 	requireStatus(t, create, http.StatusCreated)
-	var created struct {
-		Acceptance               relay.Acceptance         `json:"acceptance"`
-		Domain                   relay.DomainRegistration `json:"domain"`
-		AdministrationCredential struct {
-			AuthorizationToken string `json:"authorizationToken"`
-		} `json:"administrationCredential"`
-		Member           relay.MemberRegistration `json:"member"`
-		MemberCredential relayMemberCredential    `json:"memberCredential"`
-	}
-	if err := json.NewDecoder(create.Body).Decode(&created); err != nil {
+	var provisioned relay.TenantProvisioningResult
+	if err := json.NewDecoder(create.Body).Decode(&provisioned); err != nil {
 		t.Fatal(err)
 	}
 	_ = create.Body.Close()
-	if created.Domain.TenantID == uuid.Nil || created.Domain.DomainID == uuid.Nil ||
-		created.Member.MemberID == uuid.Nil ||
-		created.AdministrationCredential.AuthorizationToken == "" ||
-		created.MemberCredential.AuthorizationToken == "" {
-		t.Fatalf("incomplete domain creation response: %+v", created)
+	if provisioned.Acceptance != relay.AcceptanceAccepted ||
+		provisioned.InitialDomain.SubscriptionID != provisioning.SubscriptionID ||
+		provisioned.InitialDomain.AdministrationAuthorizationDigest == "" ||
+		provisioned.InitialDomain.MemberAuthorizationDigest == "" {
+		t.Fatalf("incomplete tenant creation response: %+v", provisioned)
 	}
-	if created.Acceptance != relay.AcceptanceAccepted {
-		t.Fatalf("unexpected domain acceptance: %q", created.Acceptance)
+	created := struct {
+		Domain                   relay.DomainRegistration
+		AdministrationCredential relayAdministrationCredential
+		Member                   relay.MemberRegistration
+		MemberCredential         relayMemberCredential
+	}{
+		Domain:                   relay.DomainRegistration{TenantID: provisioning.AdministrationCredential.TenantID, DomainID: provisioning.AdministrationCredential.DomainID},
+		AdministrationCredential: provisioning.AdministrationCredential,
+		Member:                   relay.MemberRegistration{TenantID: provisioning.MemberCredential.TenantID, DomainID: provisioning.MemberCredential.DomainID, MemberID: provisioning.MemberCredential.MemberID},
+		MemberCredential:         provisioning.MemberCredential,
 	}
 	provisionRetry := performRelayJSON(
 		t,
 		handler,
 		http.MethodPost,
-		"/v1/relay/domains",
-		provisioning,
+		"/v1/relay/tenants",
+		tenantProvisioning,
 		operatorToken,
 		uuid.Nil,
 	)
 	requireStatus(t, provisionRetry, http.StatusOK)
-	var retried struct {
-		Acceptance               relay.Acceptance              `json:"acceptance"`
-		Domain                   relay.DomainRegistration      `json:"domain"`
-		AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
-		Member                   relay.MemberRegistration      `json:"member"`
-		MemberCredential         relayMemberCredential         `json:"memberCredential"`
-	}
+	var retried relay.TenantProvisioningResult
 	if err := json.NewDecoder(provisionRetry.Body).Decode(&retried); err != nil {
 		t.Fatal(err)
 	}
 	_ = provisionRetry.Body.Close()
 	if retried.Acceptance != relay.AcceptanceDuplicate ||
-		retried.Domain != created.Domain ||
-		retried.MemberCredential != created.MemberCredential ||
-		retried.AdministrationCredential.AuthorizationToken !=
-			created.AdministrationCredential.AuthorizationToken {
+		retried.InitialDomain.RetryID != provisioned.InitialDomain.RetryID ||
+		retried.InitialDomain.TenantID != provisioned.InitialDomain.TenantID ||
+		retried.InitialDomain.DomainID != provisioned.InitialDomain.DomainID ||
+		retried.InitialDomain.SubscriptionID != provisioned.InitialDomain.SubscriptionID ||
+		retried.InitialDomain.MemberID != provisioned.InitialDomain.MemberID ||
+		retried.InitialDomain.AdministrationAuthorizationDigest != provisioned.InitialDomain.AdministrationAuthorizationDigest ||
+		retried.InitialDomain.MemberAuthorizationDigest != provisioned.InitialDomain.MemberAuthorizationDigest {
 		t.Fatalf("provisioning retry changed authority: %+v", retried)
 	}
 	collision := provisioning
@@ -118,20 +117,29 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		t,
 		handler,
 		http.MethodPost,
-		"/v1/relay/domains",
-		collision,
+		"/v1/relay/tenants",
+		newRelayTenantProvisioningRequest(collision, tenantToken),
 		operatorToken,
 		uuid.Nil,
 	), http.StatusConflict)
 
 	basePath := "/v1/relay/tenants/" + created.Domain.TenantID.String() +
 		"/domains/" + created.Domain.DomainID.String()
+	recipientSubscriptionID := uuid.New()
+	createSubscription := performRelayJSON(
+		t, handler, http.MethodPost, basePath+"/subscriptions",
+		relay.SubscriptionCreateRequest{RetryID: uuid.New(), SubscriptionID: recipientSubscriptionID, CreatedAtMilliseconds: 1_500},
+		created.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, createSubscription, http.StatusCreated)
+	_ = createSubscription.Body.Close()
 	createMember := performRelayJSON(
 		t,
 		handler,
 		http.MethodPost,
 		basePath+"/members",
 		map[string]any{
+			"subscriptionID": recipientSubscriptionID,
 			"capabilities": []string{
 				"blob_fetch",
 				"message_fetch",
@@ -143,18 +151,18 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 	)
 	requireStatus(t, createMember, http.StatusCreated)
 	var recipient struct {
-		Member     relay.MemberRegistration `json:"member"`
-		Credential relayMemberCredential    `json:"credential"`
+		Member     relay.SubscriptionMemberRegistration `json:"member"`
+		Credential relayMemberCredential                `json:"credential"`
 	}
 	if err := json.NewDecoder(createMember.Body).Decode(&recipient); err != nil {
 		t.Fatal(err)
 	}
 	_ = createMember.Body.Close()
-	if len(recipient.Member.Capabilities) != 3 ||
-		recipient.Member.Capabilities[0] != relay.CapabilityFetchBlob ||
-		recipient.Member.Capabilities[1] != relay.CapabilityAcknowledgeMessage ||
-		recipient.Member.Capabilities[2] != relay.CapabilityFetchMessage {
-		t.Fatalf("capabilities were not normalized: %v", recipient.Member.Capabilities)
+	if len(recipient.Member.MemberRegistration.Capabilities) != 3 ||
+		recipient.Member.MemberRegistration.Capabilities[0] != relay.CapabilityFetchBlob ||
+		recipient.Member.MemberRegistration.Capabilities[1] != relay.CapabilityAcknowledgeMessage ||
+		recipient.Member.MemberRegistration.Capabilities[2] != relay.CapabilityFetchMessage {
+		t.Fatalf("capabilities were not normalized: %v", recipient.Member.MemberRegistration.Capabilities)
 	}
 
 	envelope := relay.Envelope{
@@ -216,7 +224,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		basePath+"/messages/wake?waitMilliseconds=10",
 		nil,
 		recipient.Credential.AuthorizationToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 	)
 	requireStatus(t, wake, http.StatusOK)
 	var wakeResponse struct {
@@ -237,7 +245,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		basePath+"/messages?limit=10",
 		nil,
 		recipient.Credential.AuthorizationToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 	)
 	requireStatus(t, fetch, http.StatusOK)
 	var fetched struct {
@@ -260,7 +268,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 			"&waitMilliseconds=1",
 		nil,
 		recipient.Credential.AuthorizationToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 	)
 	requireStatus(t, quietWake, http.StatusNoContent)
 	_ = quietWake.Body.Close()
@@ -272,7 +280,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		publishPath+"/acknowledgments",
 		map[string]string{"stage": "applied"},
 		recipient.Credential.AuthorizationToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 	)
 	requireStatus(t, appliedFirst, http.StatusConflict)
 	for _, stage := range []string{"accepted", "applied"} {
@@ -283,7 +291,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 			publishPath+"/acknowledgments",
 			map[string]string{"stage": stage},
 			recipient.Credential.AuthorizationToken,
-			recipient.Member.MemberID,
+			recipient.Member.MemberRegistration.MemberID,
 		)
 		requireStatus(t, response, http.StatusOK)
 	}
@@ -320,7 +328,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		blobPath,
 		nil,
 		recipient.Credential.AuthorizationToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 		"",
 	)
 	requireStatus(t, download, http.StatusOK)
@@ -339,7 +347,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		blobPath,
 		nil,
 		recipient.Credential.AuthorizationToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 		"bytes=7-19",
 	)
 	requireStatus(t, partial, http.StatusPartialContent)
@@ -358,7 +366,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		blobPath,
 		nil,
 		recipient.Credential.AuthorizationToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 		"",
 	)
 	requireStatus(t, head, http.StatusOK)
@@ -382,7 +390,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		t,
 		handler,
 		http.MethodPost,
-		basePath+"/members/"+recipient.Member.MemberID.String()+"/revocation",
+		basePath+"/members/"+recipient.Member.MemberRegistration.MemberID.String()+"/revocation",
 		nil,
 		created.AdministrationCredential.AuthorizationToken,
 		uuid.Nil,
@@ -395,7 +403,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		basePath+"/messages",
 		nil,
 		recipient.Credential.AuthorizationToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 	)
 	requireStatus(t, blocked, http.StatusForbidden)
 
@@ -472,7 +480,7 @@ func TestRelayDomainProvisioningEndpointIsAbsentWithoutOperatorToken(t *testing.
 	requireStatus(t, response, http.StatusNotFound)
 }
 
-func TestRelayDelegatedDomainProvisioningUsesExistingTenantAuthority(t *testing.T) {
+func TestRelayTenantCredentialProvisionsAdditionalDomains(t *testing.T) {
 	operatorToken := relayTestToken(192)
 	server, err := NewWithRelay(
 		rendezvous.NewMemoryStore(),
@@ -486,45 +494,41 @@ func TestRelayDelegatedDomainProvisioningUsesExistingTenantAuthority(t *testing.
 	}
 	server.now = func() time.Time { return time.UnixMilli(1_500) }
 	handler := server.Handler()
-	parentRequest := newRelayDomainProvisioningRequest(1_000, 32, 64)
-	parentResponse := performRelayJSON(
-		t,
-		handler,
-		http.MethodPost,
-		"/v1/relay/domains",
-		parentRequest,
-		operatorToken,
-		uuid.Nil,
-	)
-	requireStatus(t, parentResponse, http.StatusCreated)
-	_ = parentResponse.Body.Close()
-	basePath := "/v1/relay/tenants/" +
-		parentRequest.AdministrationCredential.TenantID.String() +
-		"/domains/" + parentRequest.AdministrationCredential.DomainID.String()
+	parent := provisionRelayTestAuthority(t, handler, operatorToken, 1_000, 32, 64)
+	tenantPath := "/v1/relay/tenants/" + parent.Domain.TenantID.String() + "/domains"
+	requireStatus(t, performRelayJSON(
+		t, handler, http.MethodPost, "/v1/relay/domains", nil,
+		operatorToken, uuid.Nil,
+	), http.StatusNotFound)
+	requireStatus(t, performRelayJSON(
+		t, handler, http.MethodPost,
+		tenantPath+"/"+parent.Domain.DomainID.String()+"/delegated-domains", nil,
+		parent.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusNotFound)
 
 	childRequest := newRelayDomainProvisioningRequest(1_500, 96, 128)
 	childRequest.AdministrationCredential.TenantID =
-		parentRequest.AdministrationCredential.TenantID
+		parent.Domain.TenantID
 	childRequest.MemberCredential.TenantID =
-		parentRequest.AdministrationCredential.TenantID
-	delegated := performRelayJSON(
+		parent.Domain.TenantID
+	created := performRelayJSON(
 		t,
 		handler,
 		http.MethodPost,
-		basePath+"/delegated-domains",
+		tenantPath,
 		childRequest,
-		parentRequest.AdministrationCredential.AuthorizationToken,
+		parent.TenantCredential.AuthorizationToken,
 		uuid.Nil,
 	)
-	requireStatus(t, delegated, http.StatusCreated)
-	_ = delegated.Body.Close()
+	requireStatus(t, created, http.StatusCreated)
+	_ = created.Body.Close()
 	retry := performRelayJSON(
 		t,
 		handler,
 		http.MethodPost,
-		basePath+"/delegated-domains",
+		tenantPath,
 		childRequest,
-		parentRequest.AdministrationCredential.AuthorizationToken,
+		parent.TenantCredential.AuthorizationToken,
 		uuid.Nil,
 	)
 	requireStatus(t, retry, http.StatusOK)
@@ -535,16 +539,16 @@ func TestRelayDelegatedDomainProvisioningUsesExistingTenantAuthority(t *testing.
 		t,
 		handler,
 		http.MethodPost,
-		basePath+"/delegated-domains",
+		tenantPath,
 		wrongTenant,
-		parentRequest.AdministrationCredential.AuthorizationToken,
+		parent.TenantCredential.AuthorizationToken,
 		uuid.Nil,
 	), http.StatusBadRequest)
 	requireStatus(t, performRelayJSON(
 		t,
 		handler,
 		http.MethodPost,
-		basePath+"/delegated-domains",
+		tenantPath,
 		childRequest,
 		relayTestToken(208),
 		uuid.Nil,
@@ -568,26 +572,9 @@ func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
 	handler := server.Handler()
 
-	createDomain := performRelayJSON(
-		t,
-		handler,
-		http.MethodPost,
-		"/v1/relay/domains",
-		newRelayDomainProvisioningRequest(nowMilliseconds, 32, 96),
-		operatorToken,
-		uuid.Nil,
+	created := provisionRelayTestAuthority(
+		t, handler, operatorToken, nowMilliseconds, 32, 96,
 	)
-	requireStatus(t, createDomain, http.StatusCreated)
-	var created struct {
-		Domain                   relay.DomainRegistration `json:"domain"`
-		AdministrationCredential struct {
-			AuthorizationToken string `json:"authorizationToken"`
-		} `json:"administrationCredential"`
-	}
-	if err := json.NewDecoder(createDomain.Body).Decode(&created); err != nil {
-		t.Fatal(err)
-	}
-	_ = createDomain.Body.Close()
 	basePath := "/v1/relay/tenants/" + created.Domain.TenantID.String() +
 		"/domains/" + created.Domain.DomainID.String()
 
@@ -603,6 +590,7 @@ func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 		t.Fatal(err)
 	}
 	createAdmissionBody := map[string]any{
+		"subscriptionID":        created.SubscriptionID,
 		"admissionID":           admissionCredential.AdmissionID,
 		"authorizationDigest":   admissionDigest,
 		"capabilities":          []string{"message_fetch"},
@@ -619,16 +607,17 @@ func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 	)
 	requireStatus(t, createAdmission, http.StatusCreated)
 	var admissionResponse struct {
-		Acceptance relay.Acceptance      `json:"acceptance"`
-		Admission  relay.MemberAdmission `json:"admission"`
+		Acceptance relay.Acceptance                  `json:"acceptance"`
+		Admission  relay.SubscriptionMemberAdmission `json:"admission"`
 	}
 	if err := json.NewDecoder(createAdmission.Body).Decode(&admissionResponse); err != nil {
 		t.Fatal(err)
 	}
 	_ = createAdmission.Body.Close()
 	if admissionResponse.Acceptance != relay.AcceptanceAccepted ||
-		admissionResponse.Admission.AdmissionID != admissionCredential.AdmissionID ||
-		admissionResponse.Admission.AuthorizationDigest != admissionDigest {
+		admissionResponse.Admission.SubscriptionID != created.SubscriptionID ||
+		admissionResponse.Admission.Admission.AdmissionID != admissionCredential.AdmissionID ||
+		admissionResponse.Admission.Admission.AuthorizationDigest != admissionDigest {
 		t.Fatalf("unexpected admission response: %+v", admissionResponse)
 	}
 
@@ -669,15 +658,16 @@ func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 		uuid.Nil,
 	)
 	requireStatus(t, claim, http.StatusCreated)
-	var claimed relay.AdmissionClaimResult
+	var claimed relay.SubscriptionAdmissionClaimResult
 	if err := json.NewDecoder(claim.Body).Decode(&claimed); err != nil {
 		t.Fatal(err)
 	}
 	_ = claim.Body.Close()
 	if claimed.Acceptance != relay.AcceptanceAccepted ||
-		claimed.Member.MemberID != memberCredential.MemberID ||
-		len(claimed.Member.Capabilities) != 1 ||
-		claimed.Member.Capabilities[0] != relay.CapabilityFetchMessage {
+		claimed.Member.SubscriptionID != created.SubscriptionID ||
+		claimed.Member.MemberRegistration.MemberID != memberCredential.MemberID ||
+		len(claimed.Member.MemberRegistration.Capabilities) != 1 ||
+		claimed.Member.MemberRegistration.Capabilities[0] != relay.CapabilityFetchMessage {
 		t.Fatalf("unexpected claim response: %+v", claimed)
 	}
 
@@ -734,6 +724,7 @@ func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 		http.MethodPost,
 		basePath+"/admissions",
 		map[string]any{
+			"subscriptionID":        created.SubscriptionID,
 			"admissionID":           revokedCredential.AdmissionID,
 			"authorizationDigest":   revokedDigest,
 			"capabilities":          []string{"message_fetch"},
@@ -817,6 +808,115 @@ func performRelayJSON(
 	return recorder.Result()
 }
 
+func TestRelaySubscriptionLifecycleStatusAndTenantRotationAreExactRetrySafe(t *testing.T) {
+	operatorToken := relayTestToken(230)
+	server, err := NewWithRelay(
+		rendezvous.NewMemoryStore(), relay.NewMemoryStore(), nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), operatorToken,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowMilliseconds := int64(1_000)
+	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
+	handler := server.Handler()
+	authority := provisionRelayTestAuthority(t, handler, operatorToken, nowMilliseconds, 231, 232)
+	tenantRoot := "/v1/relay/tenants/" + authority.Domain.TenantID.String()
+	domainRoot := tenantRoot + "/domains/" + authority.Domain.DomainID.String()
+
+	tenantStatus := performRelayJSON(t, handler, http.MethodGet, tenantRoot+"/status", nil, authority.TenantCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, tenantStatus, http.StatusOK)
+	var initialTenantStatus relay.TenantStatus
+	if err := json.NewDecoder(tenantStatus.Body).Decode(&initialTenantStatus); err != nil {
+		t.Fatal(err)
+	}
+	_ = tenantStatus.Body.Close()
+	if initialTenantStatus.DomainCount != 1 || initialTenantStatus.ReservedBlobCount != 0 || initialTenantStatus.Quota.MaximumAggregateMessageByteCount <= 0 {
+		t.Fatalf("unexpected tenant status: %+v", initialTenantStatus)
+	}
+
+	nowMilliseconds = 1_100
+	createRequest := relay.SubscriptionCreateRequest{
+		RetryID: uuid.New(), SubscriptionID: uuid.New(), CreatedAtMilliseconds: nowMilliseconds,
+	}
+	create := performRelayJSON(t, handler, http.MethodPost, domainRoot+"/subscriptions", createRequest, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, create, http.StatusCreated)
+	var created relay.SubscriptionCreateResponse
+	if err := json.NewDecoder(create.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	_ = create.Body.Close()
+	if created.Acceptance != relay.AcceptanceAccepted || created.RetryID != createRequest.RetryID || created.Subscription.SubscriptionID != createRequest.SubscriptionID {
+		t.Fatalf("unexpected subscription creation: %+v", created)
+	}
+	retry := performRelayJSON(t, handler, http.MethodPost, domainRoot+"/subscriptions", createRequest, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, retry, http.StatusOK)
+	var retried relay.SubscriptionCreateResponse
+	if err := json.NewDecoder(retry.Body).Decode(&retried); err != nil {
+		t.Fatal(err)
+	}
+	_ = retry.Body.Close()
+	if retried.Acceptance != relay.AcceptanceDuplicate || retried.Subscription != created.Subscription {
+		t.Fatalf("unexpected subscription retry: %+v", retried)
+	}
+	collision := createRequest
+	collision.SubscriptionID = uuid.New()
+	requireStatus(t, performRelayJSON(t, handler, http.MethodPost, domainRoot+"/subscriptions", collision, authority.AdministrationCredential.AuthorizationToken, uuid.Nil), http.StatusConflict)
+
+	get := performRelayJSON(t, handler, http.MethodGet, domainRoot+"/subscriptions/"+createRequest.SubscriptionID.String(), nil, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, get, http.StatusOK)
+	_ = get.Body.Close()
+	nowMilliseconds = 1_200
+	statusRequest := relay.SubscriptionStatusChangeRequest{RetryID: uuid.New(), Status: relay.SubscriptionRebootstrapRequired, ChangedAtMilliseconds: nowMilliseconds}
+	statusPath := domainRoot + "/subscriptions/" + createRequest.SubscriptionID.String() + "/status"
+	change := performRelayJSON(t, handler, http.MethodPost, statusPath, statusRequest, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, change, http.StatusCreated)
+	_ = change.Body.Close()
+	changeRetry := performRelayJSON(t, handler, http.MethodPost, statusPath, statusRequest, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, changeRetry, http.StatusOK)
+	var statusRetry relay.SubscriptionStatusChangeResponse
+	if err := json.NewDecoder(changeRetry.Body).Decode(&statusRetry); err != nil {
+		t.Fatal(err)
+	}
+	_ = changeRetry.Body.Close()
+	if statusRetry.Acceptance != relay.AcceptanceDuplicate || statusRetry.Subscription.Status != relay.SubscriptionRebootstrapRequired {
+		t.Fatalf("unexpected status retry: %+v", statusRetry)
+	}
+
+	domainStatus := performRelayJSON(t, handler, http.MethodGet, domainRoot+"/status", nil, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, domainStatus, http.StatusOK)
+	var status relay.DomainStatus
+	if err := json.NewDecoder(domainStatus.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	_ = domainStatus.Body.Close()
+	if status.ActiveSubscriptionCount != 1 || status.ReservedBlobCount != 0 || status.Quota.MaximumBlobByteCount <= 0 {
+		t.Fatalf("unexpected domain status: %+v", status)
+	}
+
+	replacementToken := relayTestToken(233)
+	replacementDigest, err := relay.TenantAuthorizationDigest(relay.TenantCredential{TenantID: authority.Domain.TenantID, Token: replacementToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowMilliseconds = 1_300
+	rotation := relay.TenantCredentialRotation{
+		Version: relay.SchemaVersion, RotationID: uuid.New(), TenantID: authority.Domain.TenantID,
+		ReplacementAuthorizationDigest: replacementDigest, RotatedAtMilliseconds: nowMilliseconds,
+	}
+	rotationPath := tenantRoot + "/credential-rotations/" + rotation.RotationID.String()
+	rotate := performRelayJSON(t, handler, http.MethodPost, rotationPath, rotation, authority.TenantCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, rotate, http.StatusCreated)
+	_ = rotate.Body.Close()
+	rotationRetry := performRelayJSON(t, handler, http.MethodPost, rotationPath, rotation, authority.TenantCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, rotationRetry, http.StatusOK)
+	_ = rotationRetry.Body.Close()
+	requireStatus(t, performRelayJSON(t, handler, http.MethodGet, tenantRoot+"/status", nil, authority.TenantCredential.AuthorizationToken, uuid.Nil), http.StatusUnauthorized)
+	newStatus := performRelayJSON(t, handler, http.MethodGet, tenantRoot+"/status", nil, replacementToken, uuid.Nil)
+	requireStatus(t, newStatus, http.StatusOK)
+	_ = newStatus.Body.Close()
+}
+
 func relayTestToken(seed byte) string {
 	value := make([]byte, 32)
 	for index := range value {
@@ -826,7 +926,10 @@ func relayTestToken(seed byte) string {
 }
 
 type relayDomainProvisioningRequest struct {
+	Version                  int                           `json:"version"`
+	RetryID                  uuid.UUID                     `json:"retryID"`
 	AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
+	SubscriptionID           uuid.UUID                     `json:"subscriptionID"`
 	MemberCredential         relayMemberCredential         `json:"memberCredential"`
 	MemberCapabilities       []relay.Capability            `json:"memberCapabilities"`
 	CreatedAtMilliseconds    int64                         `json:"createdAtMilliseconds"`
@@ -840,6 +943,8 @@ func newRelayDomainProvisioningRequest(
 	tenantID := uuid.New()
 	domainID := uuid.New()
 	return relayDomainProvisioningRequest{
+		Version: relay.SchemaVersion,
+		RetryID: uuid.New(),
 		AdministrationCredential: relayAdministrationCredential{
 			TenantID:           tenantID,
 			DomainID:           domainID,
@@ -851,7 +956,85 @@ func newRelayDomainProvisioningRequest(
 			MemberID:           uuid.New(),
 			AuthorizationToken: relayTestToken(memberTokenSeed),
 		},
+		SubscriptionID:        uuid.New(),
 		MemberCapabilities:    append([]relay.Capability(nil), allRelayCapabilities...),
 		CreatedAtMilliseconds: createdAtMilliseconds,
+	}
+}
+
+func newRelayTenantProvisioningRequest(
+	domain relayDomainProvisioningRequest,
+	tenantToken string,
+) relayTenantProvisioningInput {
+	return relayTenantProvisioningInput{
+		Version: relay.SchemaVersion,
+		RetryID: uuid.New(),
+		TenantProvisioningCredential: relayTenantCredential{
+			TenantID:           domain.AdministrationCredential.TenantID,
+			AuthorizationToken: tenantToken,
+		},
+		InitialDomain: relayDomainProvisioningInput{
+			Version:                  domain.Version,
+			RetryID:                  domain.RetryID,
+			AdministrationCredential: domain.AdministrationCredential,
+			SubscriptionID:           domain.SubscriptionID,
+			MemberCredential:         domain.MemberCredential,
+			MemberCapabilities:       domain.MemberCapabilities,
+			CreatedAtMilliseconds:    domain.CreatedAtMilliseconds,
+		},
+	}
+}
+
+type relayTestAuthority struct {
+	Domain                   relay.DomainRegistration
+	AdministrationCredential relayAdministrationCredential
+	SubscriptionID           uuid.UUID
+	Member                   relay.MemberRegistration
+	MemberCredential         relayMemberCredential
+	TenantCredential         relayTenantCredential
+}
+
+func provisionRelayTestAuthority(
+	t *testing.T,
+	handler http.Handler,
+	operatorToken string,
+	createdAtMilliseconds int64,
+	administrationTokenSeed byte,
+	memberTokenSeed byte,
+) relayTestAuthority {
+	t.Helper()
+	domain := newRelayDomainProvisioningRequest(
+		createdAtMilliseconds, administrationTokenSeed, memberTokenSeed,
+	)
+	tenantToken := relayTestToken(administrationTokenSeed - 1)
+	input := newRelayTenantProvisioningRequest(domain, tenantToken)
+	response := performRelayJSON(
+		t, handler, http.MethodPost, "/v1/relay/tenants", input,
+		operatorToken, uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusCreated)
+	var result relay.TenantProvisioningResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if result.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("unexpected tenant provisioning result: %+v", result)
+	}
+	return relayTestAuthority{
+		Domain: relay.DomainRegistration{
+			TenantID: domain.AdministrationCredential.TenantID,
+			DomainID: domain.AdministrationCredential.DomainID,
+		},
+		AdministrationCredential: domain.AdministrationCredential,
+		SubscriptionID:           domain.SubscriptionID,
+		Member: relay.MemberRegistration{
+			TenantID:     domain.MemberCredential.TenantID,
+			DomainID:     domain.MemberCredential.DomainID,
+			MemberID:     domain.MemberCredential.MemberID,
+			Capabilities: append([]relay.Capability(nil), domain.MemberCapabilities...),
+		},
+		MemberCredential: domain.MemberCredential,
+		TenantCredential: input.TenantProvisioningCredential,
 	}
 }

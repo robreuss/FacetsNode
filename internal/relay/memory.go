@@ -14,21 +14,46 @@ type domainKey struct {
 }
 
 type memoryMessage struct {
-	message         Message
-	publisherMember uuid.UUID
-	acknowledgments map[uuid.UUID]AcknowledgmentStage
+	message               Message
+	publisherMember       uuid.UUID
+	publisherSubscription uuid.UUID
+	acknowledgments       map[uuid.UUID]AcknowledgmentStage
 }
 
 type memoryDomain struct {
-	registration DomainRegistration
-	members      map[uuid.UUID]MemberRegistration
-	admissions   map[uuid.UUID]MemberAdmission
-	messages     []*memoryMessage
-	messageByID  map[uuid.UUID]*memoryMessage
-	blobs        map[string]BlobMetadata
-	rotations    map[uuid.UUID]memoryCredentialRotation
-	nextSequence uint64
-	storedBytes  int64
+	provisioningRetryID    uuid.UUID
+	registration           DomainRegistration
+	subscriptions          map[uuid.UUID]Subscription
+	subscriptionCreates    map[uuid.UUID]SubscriptionCreateRequest
+	subscriptionChanges    map[uuid.UUID]memorySubscriptionChange
+	memberSubscriptions    map[uuid.UUID]uuid.UUID
+	admissionSubscriptions map[uuid.UUID]uuid.UUID
+	members                map[uuid.UUID]MemberRegistration
+	admissions             map[uuid.UUID]MemberAdmission
+	messages               []*memoryMessage
+	messageByID            map[uuid.UUID]*memoryMessage
+	blobs                  map[string]BlobMetadata
+	rotations              map[uuid.UUID]memoryCredentialRotation
+	nextSequence           uint64
+	messageBytes           int64
+	blobBytes              int64
+}
+
+type memorySubscriptionChange struct {
+	subscriptionID uuid.UUID
+	request        SubscriptionStatusChangeRequest
+	result         Subscription
+}
+
+type memoryTenant struct {
+	registration TenantRegistration
+	rotations    map[uuid.UUID]memoryTenantRotation
+}
+
+type memoryTenantRotation struct {
+	previousAuthorizationDigest string
+	newAuthorizationDigest      string
+	rotatedAtMilliseconds       int64
 }
 
 type memoryCredentialRotation struct {
@@ -46,88 +71,169 @@ const (
 
 type MemoryStore struct {
 	mu      sync.RWMutex
+	tenants map[uuid.UUID]*memoryTenant
 	domains map[domainKey]*memoryDomain
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{domains: make(map[domainKey]*memoryDomain)}
+	return &MemoryStore{
+		tenants: make(map[uuid.UUID]*memoryTenant),
+		domains: make(map[domainKey]*memoryDomain),
+	}
 }
 
+// CreateDomain is retained only for focused legacy store tests. Production
+// provisioning uses ProvisionTenant or ProvisionDomain and always authenticates
+// the client-generated tenant credential.
 func (s *MemoryStore) CreateDomain(
 	_ context.Context,
 	registration DomainRegistration,
 	initialMember MemberRegistration,
 ) (Acceptance, error) {
-	if err := registration.Validate(); err != nil {
+	subscription := Subscription{
+		Version: SchemaVersion, TenantID: registration.TenantID,
+		DomainID: registration.DomainID, SubscriptionID: initialMember.MemberID,
+		Status: SubscriptionActive, CreatedAtMilliseconds: registration.CreatedAtMilliseconds,
+		UpdatedAtMilliseconds: registration.CreatedAtMilliseconds,
+	}
+	provisioning := DomainProvisioning{
+		Version: SchemaVersion, RetryID: initialMember.MemberID,
+		Registration: registration, Subscription: subscription, InitialMember: initialMember,
+	}
+	if err := provisioning.Validate(); err != nil {
 		return "", err
-	}
-	if err := initialMember.Validate(); err != nil {
-		return "", err
-	}
-	if initialMember.TenantID != registration.TenantID ||
-		initialMember.DomainID != registration.DomainID ||
-		initialMember.CreatedAtMilliseconds < registration.CreatedAtMilliseconds {
-		return "", protocolError(CodeWrongScope, "initial member belongs to another domain")
-	}
-	key := domainKey{registration.TenantID, registration.DomainID}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.createDomainLocked(key, registration, initialMember)
-}
-
-func (s *MemoryStore) CreateDelegatedDomain(
-	_ context.Context,
-	authorizingCredential AdministrationCredential,
-	registration DomainRegistration,
-	initialMember MemberRegistration,
-	nowMilliseconds int64,
-) (Acceptance, error) {
-	if err := registration.Validate(); err != nil {
-		return "", err
-	}
-	if err := initialMember.Validate(); err != nil {
-		return "", err
-	}
-	if registration.TenantID != authorizingCredential.TenantID ||
-		registration.DomainID == authorizingCredential.DomainID ||
-		initialMember.TenantID != registration.TenantID ||
-		initialMember.DomainID != registration.DomainID {
-		return "", protocolError(CodeWrongScope, "delegated domain has an invalid scope")
-	}
-	if registration.CreatedAtMilliseconds > nowMilliseconds ||
-		initialMember.CreatedAtMilliseconds < registration.CreatedAtMilliseconds {
-		return "", protocolError(CodeInvalidDomain, "delegated domain has an invalid creation time")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	authorizingDomain, ok := s.domains[domainKey{
-		authorizingCredential.TenantID,
-		authorizingCredential.DomainID,
-	}]
-	if !ok {
-		return "", protocolError(CodeDomainNotFound, "authorizing domain was not found")
-	}
-	if err := authorizingDomain.registration.Authorize(authorizingCredential); err != nil {
-		return "", err
-	}
 	key := domainKey{registration.TenantID, registration.DomainID}
-	return s.createDomainLocked(key, registration, initialMember)
-}
-
-func (s *MemoryStore) createDomainLocked(
-	key domainKey,
-	registration DomainRegistration,
-	initialMember MemberRegistration,
-) (Acceptance, error) {
-	if existing, ok := s.domains[key]; ok {
-		member := existing.members[initialMember.MemberID]
-		if existing.registration == registration && memberEqual(member, initialMember) {
+	if existing := s.domains[key]; existing != nil {
+		if domainProvisioningEqual(existing, provisioning) {
 			return AcceptanceDuplicate, nil
 		}
 		return "", protocolError(CodeDomainCollision, "domain ID was reused")
 	}
+	if s.tenants[registration.TenantID] == nil {
+		s.tenants[registration.TenantID] = &memoryTenant{
+			registration: TenantRegistration{
+				Version: SchemaVersion, RetryID: registration.DomainID,
+				TenantID:                         registration.TenantID,
+				AuthorizationDigest:              registration.AdministrationDigest,
+				CreatedAtMilliseconds:            registration.CreatedAtMilliseconds,
+				MaximumDomainCount:               DefaultMaximumDomainCountPerTenant,
+				MaximumAggregateMessageCount:     DefaultMaximumMessageCountPerTenant,
+				MaximumAggregateMessageByteCount: DefaultMaximumMessageBytesPerTenant,
+				MaximumAggregateBlobCount:        DefaultMaximumBlobCountPerTenant,
+				MaximumAggregateBlobByteCount:    DefaultMaximumBlobBytesPerTenant,
+			},
+			rotations: make(map[uuid.UUID]memoryTenantRotation),
+		}
+	}
+	s.createDomainLocked(provisioning)
+	return AcceptanceAccepted, nil
+}
+
+func (s *MemoryStore) ProvisionTenant(
+	_ context.Context,
+	tenant TenantRegistration,
+	initialDomain DomainProvisioning,
+) (TenantProvisioningResult, error) {
+	if err := tenant.Validate(); err != nil {
+		return TenantProvisioningResult{}, err
+	}
+	if err := initialDomain.Validate(); err != nil {
+		return TenantProvisioningResult{}, err
+	}
+	if tenant.TenantID != initialDomain.Registration.TenantID ||
+		tenant.CreatedAtMilliseconds != initialDomain.Registration.CreatedAtMilliseconds {
+		return TenantProvisioningResult{}, protocolError(CodeWrongScope, "initial domain belongs to another tenant")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for tenantID, existing := range s.tenants {
+		if tenantID != tenant.TenantID && existing.registration.RetryID == tenant.RetryID {
+			return TenantProvisioningResult{}, protocolError(CodeTenantCollision, "tenant retry ID was reused")
+		}
+	}
+	if existing, ok := s.tenants[tenant.TenantID]; ok {
+		domain := s.domains[domainKey{tenant.TenantID, initialDomain.Registration.DomainID}]
+		if existing.registration == tenant && domainProvisioningEqual(domain, initialDomain) {
+			return tenantProvisioningResult(tenant, initialDomain, AcceptanceDuplicate), nil
+		}
+		return TenantProvisioningResult{}, protocolError(CodeTenantCollision, "tenant ID or retry ID was reused")
+	}
+	s.tenants[tenant.TenantID] = &memoryTenant{
+		registration: tenant,
+		rotations:    make(map[uuid.UUID]memoryTenantRotation),
+	}
+	s.createDomainLocked(initialDomain)
+	return tenantProvisioningResult(tenant, initialDomain, AcceptanceAccepted), nil
+}
+
+func (s *MemoryStore) ProvisionDomain(
+	_ context.Context,
+	credential TenantCredential,
+	provisioning DomainProvisioning,
+	nowMilliseconds int64,
+) (DomainProvisioningResult, error) {
+	if err := provisioning.Validate(); err != nil {
+		return DomainProvisioningResult{}, err
+	}
+	if provisioning.Registration.TenantID != credential.TenantID ||
+		provisioning.Registration.CreatedAtMilliseconds > nowMilliseconds {
+		return DomainProvisioningResult{}, protocolError(CodeWrongScope, "domain belongs to another tenant")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tenant, ok := s.tenants[credential.TenantID]
+	if !ok {
+		return DomainProvisioningResult{}, protocolError(CodeTenantNotFound, "tenant was not found")
+	}
+	if err := tenant.registration.Authorize(credential); err != nil {
+		return DomainProvisioningResult{}, err
+	}
+	key := domainKey{credential.TenantID, provisioning.Registration.DomainID}
+	if existing := s.domains[key]; existing != nil {
+		if domainProvisioningEqual(existing, provisioning) {
+			return domainProvisioningResult(provisioning, AcceptanceDuplicate), nil
+		}
+		return DomainProvisioningResult{}, protocolError(CodeDomainCollision, "domain ID was reused")
+	}
+	for key, existing := range s.domains {
+		if key.tenantID == credential.TenantID && existing.provisioningRetryID == provisioning.RetryID {
+			return DomainProvisioningResult{}, protocolError(CodeDomainCollision, "domain retry ID was reused")
+		}
+	}
+	domainCount := 0
+	for domainKey := range s.domains {
+		if domainKey.tenantID == credential.TenantID {
+			domainCount++
+		}
+	}
+	if domainCount >= tenant.registration.MaximumDomainCount {
+		return DomainProvisioningResult{}, protocolError(CodeTenantFull, "tenant reached its domain limit")
+	}
+	s.createDomainLocked(provisioning)
+	return domainProvisioningResult(provisioning, AcceptanceAccepted), nil
+}
+
+func (s *MemoryStore) createDomainLocked(
+	provisioning DomainProvisioning,
+) {
+	registration := provisioning.Registration
+	initialMember := provisioning.InitialMember
+	key := domainKey{registration.TenantID, registration.DomainID}
 	s.domains[key] = &memoryDomain{
-		registration: registration,
+		provisioningRetryID: provisioning.RetryID,
+		registration:        registration,
+		subscriptions: map[uuid.UUID]Subscription{
+			provisioning.Subscription.SubscriptionID: provisioning.Subscription,
+		},
+		subscriptionCreates: make(map[uuid.UUID]SubscriptionCreateRequest),
+		subscriptionChanges: make(map[uuid.UUID]memorySubscriptionChange),
+		memberSubscriptions: map[uuid.UUID]uuid.UUID{
+			initialMember.MemberID: provisioning.Subscription.SubscriptionID,
+		},
+		admissionSubscriptions: make(map[uuid.UUID]uuid.UUID),
 		members: map[uuid.UUID]MemberRegistration{
 			initialMember.MemberID: initialMember,
 		},
@@ -136,7 +242,96 @@ func (s *MemoryStore) createDomainLocked(
 		blobs:       make(map[string]BlobMetadata),
 		rotations:   make(map[uuid.UUID]memoryCredentialRotation),
 	}
-	return AcceptanceAccepted, nil
+}
+
+func domainProvisioningEqual(domain *memoryDomain, provisioning DomainProvisioning) bool {
+	if domain == nil || domain.provisioningRetryID != provisioning.RetryID ||
+		domain.registration != provisioning.Registration {
+		return false
+	}
+	return subscriptionEqual(domain.subscriptions[provisioning.Subscription.SubscriptionID], provisioning.Subscription) &&
+		memberEqual(domain.members[provisioning.InitialMember.MemberID], provisioning.InitialMember) &&
+		domain.memberSubscriptions[provisioning.InitialMember.MemberID] == provisioning.Subscription.SubscriptionID
+}
+
+func subscriptionEqual(left, right Subscription) bool {
+	return left.Version == right.Version && left.TenantID == right.TenantID &&
+		left.DomainID == right.DomainID && left.SubscriptionID == right.SubscriptionID &&
+		left.Status == right.Status && left.CreatedAtMilliseconds == right.CreatedAtMilliseconds &&
+		left.UpdatedAtMilliseconds == right.UpdatedAtMilliseconds &&
+		((left.StartCursor == nil && right.StartCursor == nil) ||
+			(left.StartCursor != nil && right.StartCursor != nil && *left.StartCursor == *right.StartCursor))
+}
+
+func domainProvisioningResult(p DomainProvisioning, acceptance Acceptance) DomainProvisioningResult {
+	return DomainProvisioningResult{
+		Acceptance:                        acceptance,
+		RetryID:                           p.RetryID,
+		TenantID:                          p.Registration.TenantID,
+		DomainID:                          p.Registration.DomainID,
+		SubscriptionID:                    p.Subscription.SubscriptionID,
+		MemberID:                          p.InitialMember.MemberID,
+		AdministrationAuthorizationDigest: p.Registration.AdministrationDigest,
+		MemberAuthorizationDigest:         p.InitialMember.AuthorizationDigest,
+	}
+}
+
+func tenantProvisioningResult(t TenantRegistration, p DomainProvisioning, acceptance Acceptance) TenantProvisioningResult {
+	return TenantProvisioningResult{
+		Acceptance:                            acceptance,
+		RetryID:                               t.RetryID,
+		TenantProvisioningAuthorizationDigest: t.AuthorizationDigest,
+		InitialDomain:                         domainProvisioningResult(p, acceptance),
+	}
+}
+
+func (s *MemoryStore) RotateTenantCredential(
+	_ context.Context,
+	credential TenantCredential,
+	rotation TenantCredentialRotation,
+) (TenantCredentialRotationResult, error) {
+	if err := rotation.Validate(); err != nil {
+		return TenantCredentialRotationResult{}, err
+	}
+	actualDigest, err := TenantAuthorizationDigest(credential)
+	if err != nil {
+		return TenantCredentialRotationResult{}, protocolError(CodeUnauthorized, "tenant credential is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tenant := s.tenants[credential.TenantID]
+	if tenant == nil {
+		return TenantCredentialRotationResult{}, protocolError(CodeTenantNotFound, "tenant was not found")
+	}
+	if existing, ok := tenant.rotations[rotation.RotationID]; ok {
+		if (digestEqual(actualDigest, existing.previousAuthorizationDigest) ||
+			digestEqual(actualDigest, existing.newAuthorizationDigest)) &&
+			rotation.TenantID == credential.TenantID &&
+			rotation.ReplacementAuthorizationDigest == existing.newAuthorizationDigest &&
+			rotation.RotatedAtMilliseconds == existing.rotatedAtMilliseconds {
+			return TenantCredentialRotationResult{Acceptance: AcceptanceDuplicate, RotationID: rotation.RotationID, TenantID: credential.TenantID, AuthorizationDigest: existing.newAuthorizationDigest, RotatedAtMilliseconds: existing.rotatedAtMilliseconds}, nil
+		}
+		return TenantCredentialRotationResult{}, protocolError(CodeCredentialRotationCollision, "tenant rotation ID was reused")
+	}
+	if rotation.TenantID != credential.TenantID {
+		return TenantCredentialRotationResult{}, protocolError(CodeWrongScope, "rotation belongs to another tenant")
+	}
+	if err := tenant.registration.Authorize(credential); err != nil {
+		return TenantCredentialRotationResult{}, err
+	}
+	if rotation.RotatedAtMilliseconds < tenant.registration.CreatedAtMilliseconds ||
+		digestEqual(rotation.ReplacementAuthorizationDigest, tenant.registration.AuthorizationDigest) {
+		return TenantCredentialRotationResult{}, protocolError(CodeInvalidCredentialRotation, "tenant credential rotation is invalid")
+	}
+	for _, used := range tenant.rotations {
+		if digestEqual(rotation.ReplacementAuthorizationDigest, used.previousAuthorizationDigest) ||
+			digestEqual(rotation.ReplacementAuthorizationDigest, used.newAuthorizationDigest) {
+			return TenantCredentialRotationResult{}, protocolError(CodeCredentialReuse, "tenant credential digest was already used")
+		}
+	}
+	tenant.rotations[rotation.RotationID] = memoryTenantRotation{previousAuthorizationDigest: tenant.registration.AuthorizationDigest, newAuthorizationDigest: rotation.ReplacementAuthorizationDigest, rotatedAtMilliseconds: rotation.RotatedAtMilliseconds}
+	tenant.registration.AuthorizationDigest = rotation.ReplacementAuthorizationDigest
+	return TenantCredentialRotationResult{Acceptance: AcceptanceAccepted, RotationID: rotation.RotationID, TenantID: credential.TenantID, AuthorizationDigest: rotation.ReplacementAuthorizationDigest, RotatedAtMilliseconds: rotation.RotatedAtMilliseconds}, nil
 }
 
 func (s *MemoryStore) RotateAdministrationCredential(
@@ -286,107 +481,151 @@ func (s *MemoryStore) RotateMemberCredential(
 	}, nil
 }
 
-func (s *MemoryStore) CreateAdmission(
+func (s *MemoryStore) CreateSubscriptionAdmission(
 	_ context.Context,
 	credential AdministrationCredential,
+	subscriptionID uuid.UUID,
 	registration MemberAdmission,
 	nowMilliseconds int64,
-) (AdmissionCreateResult, error) {
+) (SubscriptionAdmissionCreateResult, error) {
 	if err := registration.Validate(); err != nil {
-		return AdmissionCreateResult{}, err
+		return SubscriptionAdmissionCreateResult{}, err
 	}
 	if registration.RevokedAtMilliseconds != nil ||
 		registration.ClaimedAtMilliseconds != nil ||
 		registration.ClaimedMemberID != nil {
-		return AdmissionCreateResult{}, protocolError(
+		return SubscriptionAdmissionCreateResult{}, protocolError(
 			CodeInvalidAdmission,
 			"new admission already has terminal state",
 		)
 	}
+	if subscriptionID == uuid.Nil {
+		return SubscriptionAdmissionCreateResult{}, protocolError(CodeInvalidSubscription, "admission subscription is invalid")
+	}
 	if registration.CreatedAtMilliseconds > nowMilliseconds ||
 		registration.ExpiresAtMilliseconds <= nowMilliseconds {
-		return AdmissionCreateResult{}, protocolError(CodeInvalidAdmission, "admission is not currently issuable")
+		return SubscriptionAdmissionCreateResult{}, protocolError(CodeInvalidAdmission, "admission is not currently issuable")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	domain, err := s.authorizedDomain(credential)
 	if err != nil {
-		return AdmissionCreateResult{}, err
+		return SubscriptionAdmissionCreateResult{}, err
 	}
 	if registration.TenantID != credential.TenantID ||
 		registration.DomainID != credential.DomainID {
-		return AdmissionCreateResult{}, protocolError(CodeWrongScope, "admission belongs to another domain")
+		return SubscriptionAdmissionCreateResult{}, protocolError(CodeWrongScope, "admission belongs to another domain")
 	}
 	if existing, ok := domain.admissions[registration.AdmissionID]; ok {
-		if admissionCreationEqual(existing, registration) {
-			return AdmissionCreateResult{
+		if admissionCreationEqual(existing, registration) &&
+			domain.admissionSubscriptions[registration.AdmissionID] == subscriptionID {
+			return SubscriptionAdmissionCreateResult{
 				Acceptance: AcceptanceDuplicate,
-				Admission:  existing,
+				Admission: SubscriptionMemberAdmission{
+					SubscriptionID: subscriptionID,
+					Admission:      existing,
+				},
 			}, nil
 		}
-		return AdmissionCreateResult{}, protocolError(CodeAdmissionCollision, "admission ID was reused")
+		return SubscriptionAdmissionCreateResult{}, protocolError(CodeAdmissionCollision, "admission ID was reused")
 	}
 	if len(domain.admissions) >= MaximumRetainedAdmissionCount {
-		return AdmissionCreateResult{}, protocolError(
+		return SubscriptionAdmissionCreateResult{}, protocolError(
 			CodeDomainFull,
 			"domain reached its retained admission limit",
 		)
 	}
 	if countOutstandingAdmissions(domain.admissions, nowMilliseconds) >=
 		MaximumOutstandingAdmissionCount {
-		return AdmissionCreateResult{}, protocolError(
+		return SubscriptionAdmissionCreateResult{}, protocolError(
 			CodeDomainFull,
 			"domain reached its outstanding admission limit",
 		)
 	}
+	if subscription, ok := domain.subscriptions[subscriptionID]; !ok ||
+		subscription.Status != SubscriptionActive {
+		return SubscriptionAdmissionCreateResult{}, protocolError(CodeSubscriptionNotFound, "active subscription was not found")
+	}
 	domain.admissions[registration.AdmissionID] = registration
-	return AdmissionCreateResult{
+	domain.admissionSubscriptions[registration.AdmissionID] = subscriptionID
+	return SubscriptionAdmissionCreateResult{
 		Acceptance: AcceptanceAccepted,
-		Admission:  registration,
+		Admission: SubscriptionMemberAdmission{
+			SubscriptionID: subscriptionID,
+			Admission:      registration,
+		},
 	}, nil
 }
 
-func (s *MemoryStore) ClaimAdmission(
+// CreateAdmission remains an internal test helper. Public HTTP uses the
+// subscription-aware wrapper and never infers a subscription from admission ID.
+func (s *MemoryStore) CreateAdmission(
+	ctx context.Context,
+	credential AdministrationCredential,
+	registration MemberAdmission,
+	nowMilliseconds int64,
+) (AdmissionCreateResult, error) {
+	if err := s.ensureTestSubscription(
+		credential, registration.AdmissionID, registration.CreatedAtMilliseconds,
+	); err != nil {
+		return AdmissionCreateResult{}, err
+	}
+	result, err := s.CreateSubscriptionAdmission(
+		ctx, credential, registration.AdmissionID, registration, nowMilliseconds,
+	)
+	if err != nil {
+		return AdmissionCreateResult{}, err
+	}
+	return AdmissionCreateResult{
+		Acceptance: result.Acceptance,
+		Admission:  result.Admission.Admission,
+	}, nil
+}
+
+func (s *MemoryStore) ClaimSubscriptionAdmission(
 	_ context.Context,
 	credential AdmissionCredential,
 	claim MemberAdmissionClaim,
 	nowMilliseconds int64,
-) (AdmissionClaimResult, error) {
+) (SubscriptionAdmissionClaimResult, error) {
 	if err := claim.Validate(); err != nil {
-		return AdmissionClaimResult{}, err
+		return SubscriptionAdmissionClaimResult{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	domain, ok := s.domains[domainKey{credential.TenantID, credential.DomainID}]
 	if !ok {
-		return AdmissionClaimResult{}, protocolError(CodeDomainNotFound, "domain was not found")
+		return SubscriptionAdmissionClaimResult{}, protocolError(CodeDomainNotFound, "domain was not found")
 	}
 	admission, ok := domain.admissions[credential.AdmissionID]
 	if !ok {
-		return AdmissionClaimResult{}, protocolError(CodeAdmissionNotFound, "admission was not found")
+		return SubscriptionAdmissionClaimResult{}, protocolError(CodeAdmissionNotFound, "admission was not found")
 	}
 	if err := admission.VerifyCredential(credential); err != nil {
-		return AdmissionClaimResult{}, err
+		return SubscriptionAdmissionClaimResult{}, err
 	}
 	if admission.ClaimedMemberID != nil {
 		member := domain.members[*admission.ClaimedMemberID]
 		if *admission.ClaimedMemberID == claim.MemberID &&
 			member.AuthorizationDigest == claim.AuthorizationDigest {
-			return AdmissionClaimResult{
+			return SubscriptionAdmissionClaimResult{
 				Acceptance: AcceptanceDuplicate,
-				Member:     member,
+				Member: SubscriptionMemberRegistration{
+					SubscriptionID:     domain.memberSubscriptions[member.MemberID],
+					MemberRegistration: member,
+				},
 			}, nil
 		}
-		return AdmissionClaimResult{}, protocolError(CodeAdmissionClaimed, "admission was already claimed")
+		return SubscriptionAdmissionClaimResult{}, protocolError(CodeAdmissionClaimed, "admission was already claimed")
 	}
 	if err := admission.RequireActive(nowMilliseconds); err != nil {
-		return AdmissionClaimResult{}, err
+		return SubscriptionAdmissionClaimResult{}, err
 	}
 	if _, exists := domain.members[claim.MemberID]; exists {
-		return AdmissionClaimResult{}, protocolError(CodeMemberCollision, "member ID was reused")
+		return SubscriptionAdmissionClaimResult{}, protocolError(CodeMemberCollision, "member ID was reused")
 	}
 	if err := ensureMemberCapacity(domain.members, nowMilliseconds); err != nil {
-		return AdmissionClaimResult{}, err
+		return SubscriptionAdmissionClaimResult{}, err
 	}
 	member := MemberRegistration{
 		Version:               SchemaVersion,
@@ -399,17 +638,38 @@ func (s *MemoryStore) ClaimAdmission(
 		ExpiresAtMilliseconds: admission.MemberExpiresAtMilliseconds,
 	}
 	if err := member.Validate(); err != nil {
-		return AdmissionClaimResult{}, err
+		return SubscriptionAdmissionClaimResult{}, err
 	}
 	claimedAt := nowMilliseconds
 	claimedMemberID := claim.MemberID
 	admission.ClaimedAtMilliseconds = &claimedAt
 	admission.ClaimedMemberID = &claimedMemberID
 	domain.members[member.MemberID] = member
+	subscriptionID := domain.admissionSubscriptions[admission.AdmissionID]
+	domain.memberSubscriptions[member.MemberID] = subscriptionID
 	domain.admissions[admission.AdmissionID] = admission
-	return AdmissionClaimResult{
+	return SubscriptionAdmissionClaimResult{
 		Acceptance: AcceptanceAccepted,
-		Member:     member,
+		Member: SubscriptionMemberRegistration{
+			SubscriptionID:     subscriptionID,
+			MemberRegistration: member,
+		},
+	}, nil
+}
+
+func (s *MemoryStore) ClaimAdmission(
+	ctx context.Context,
+	credential AdmissionCredential,
+	claim MemberAdmissionClaim,
+	nowMilliseconds int64,
+) (AdmissionClaimResult, error) {
+	result, err := s.ClaimSubscriptionAdmission(ctx, credential, claim, nowMilliseconds)
+	if err != nil {
+		return AdmissionClaimResult{}, err
+	}
+	return AdmissionClaimResult{
+		Acceptance: result.Acceptance,
+		Member:     result.Member.MemberRegistration,
 	}, nil
 }
 
@@ -480,9 +740,10 @@ func (s *MemoryStore) RevokeAdmission(
 	return AcceptanceAccepted, nil
 }
 
-func (s *MemoryStore) CreateMember(
+func (s *MemoryStore) CreateSubscriptionMember(
 	_ context.Context,
 	credential AdministrationCredential,
+	subscriptionID uuid.UUID,
 	registration MemberRegistration,
 	nowMilliseconds int64,
 ) (Acceptance, error) {
@@ -491,6 +752,9 @@ func (s *MemoryStore) CreateMember(
 	}
 	if registration.CreatedAtMilliseconds > nowMilliseconds {
 		return "", protocolError(CodeInvalidMember, "member starts in the future")
+	}
+	if subscriptionID == uuid.Nil {
+		return "", protocolError(CodeInvalidSubscription, "member subscription is invalid")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -503,7 +767,8 @@ func (s *MemoryStore) CreateMember(
 		return "", protocolError(CodeWrongScope, "member belongs to another domain")
 	}
 	if existing, ok := domain.members[registration.MemberID]; ok {
-		if memberEqual(existing, registration) {
+		if memberEqual(existing, registration) &&
+			domain.memberSubscriptions[registration.MemberID] == subscriptionID {
 			return AcceptanceDuplicate, nil
 		}
 		return "", protocolError(CodeMemberCollision, "member ID was reused")
@@ -515,8 +780,51 @@ func (s *MemoryStore) CreateMember(
 	if err := ensureMemberCapacity(domain.members, nowMilliseconds); err != nil {
 		return "", err
 	}
+	if subscription, ok := domain.subscriptions[subscriptionID]; !ok ||
+		subscription.Status != SubscriptionActive {
+		return "", protocolError(CodeSubscriptionNotFound, "active subscription was not found")
+	}
 	domain.members[registration.MemberID] = registration
+	domain.memberSubscriptions[registration.MemberID] = subscriptionID
 	return AcceptanceAccepted, nil
+}
+
+func (s *MemoryStore) CreateMember(
+	ctx context.Context,
+	credential AdministrationCredential,
+	registration MemberRegistration,
+	nowMilliseconds int64,
+) (Acceptance, error) {
+	if err := s.ensureTestSubscription(
+		credential, registration.MemberID, registration.CreatedAtMilliseconds,
+	); err != nil {
+		return "", err
+	}
+	return s.CreateSubscriptionMember(
+		ctx, credential, registration.MemberID, registration, nowMilliseconds,
+	)
+}
+
+func (s *MemoryStore) ensureTestSubscription(
+	credential AdministrationCredential,
+	subscriptionID uuid.UUID,
+	createdAtMilliseconds int64,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return err
+	}
+	if domain.subscriptions[subscriptionID].SubscriptionID == uuid.Nil {
+		domain.subscriptions[subscriptionID] = Subscription{
+			Version: SchemaVersion, TenantID: credential.TenantID,
+			DomainID: credential.DomainID, SubscriptionID: subscriptionID,
+			Status: SubscriptionActive, CreatedAtMilliseconds: createdAtMilliseconds,
+			UpdatedAtMilliseconds: createdAtMilliseconds,
+		}
+	}
+	return nil
 }
 
 func memoryRotationRetryResult(
@@ -670,6 +978,181 @@ func (s *MemoryStore) RevokeMember(
 	return AcceptanceAccepted, nil
 }
 
+func (s *MemoryStore) CreateSubscription(
+	_ context.Context,
+	credential AdministrationCredential,
+	request SubscriptionCreateRequest,
+) (SubscriptionCreateResponse, error) {
+	if err := request.Validate(); err != nil {
+		return SubscriptionCreateResponse{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return SubscriptionCreateResponse{}, err
+	}
+	if existingRequest, ok := domain.subscriptionCreates[request.RetryID]; ok {
+		if existingRequest == request {
+			return SubscriptionCreateResponse{
+				Acceptance: AcceptanceDuplicate, RetryID: request.RetryID,
+				Subscription: domain.subscriptions[request.SubscriptionID],
+			}, nil
+		}
+		return SubscriptionCreateResponse{}, protocolError(CodeSubscriptionCollision, "subscription retry ID was reused")
+	}
+	if _, ok := domain.subscriptions[request.SubscriptionID]; ok {
+		return SubscriptionCreateResponse{}, protocolError(CodeSubscriptionCollision, "subscription ID was reused")
+	}
+	if request.CreatedAtMilliseconds < domain.registration.CreatedAtMilliseconds {
+		return SubscriptionCreateResponse{}, protocolError(CodeInvalidSubscription, "subscription predates its domain")
+	}
+	subscription := Subscription{
+		Version: SchemaVersion, TenantID: credential.TenantID, DomainID: credential.DomainID,
+		SubscriptionID: request.SubscriptionID, Status: SubscriptionActive,
+		CreatedAtMilliseconds: request.CreatedAtMilliseconds,
+		UpdatedAtMilliseconds: request.CreatedAtMilliseconds,
+	}
+	domain.subscriptions[request.SubscriptionID] = subscription
+	domain.subscriptionCreates[request.RetryID] = request
+	return SubscriptionCreateResponse{
+		Acceptance: AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription,
+	}, nil
+}
+
+func (s *MemoryStore) GetSubscription(
+	_ context.Context,
+	credential AdministrationCredential,
+	subscriptionID uuid.UUID,
+) (Subscription, error) {
+	if subscriptionID == uuid.Nil {
+		return Subscription{}, protocolError(CodeInvalidSubscription, "subscription ID is invalid")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return Subscription{}, err
+	}
+	subscription, ok := domain.subscriptions[subscriptionID]
+	if !ok {
+		return Subscription{}, protocolError(CodeSubscriptionNotFound, "subscription was not found")
+	}
+	return subscription, nil
+}
+
+func (s *MemoryStore) ChangeSubscriptionStatus(
+	_ context.Context,
+	credential AdministrationCredential,
+	subscriptionID uuid.UUID,
+	request SubscriptionStatusChangeRequest,
+) (SubscriptionStatusChangeResponse, error) {
+	if subscriptionID == uuid.Nil {
+		return SubscriptionStatusChangeResponse{}, protocolError(CodeInvalidSubscription, "subscription ID is invalid")
+	}
+	if err := request.Validate(); err != nil {
+		return SubscriptionStatusChangeResponse{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return SubscriptionStatusChangeResponse{}, err
+	}
+	if existing, ok := domain.subscriptionChanges[request.RetryID]; ok {
+		if existing.subscriptionID == subscriptionID && existing.request == request {
+			return SubscriptionStatusChangeResponse{
+				Acceptance: AcceptanceDuplicate, RetryID: request.RetryID,
+				Subscription: existing.result,
+			}, nil
+		}
+		return SubscriptionStatusChangeResponse{}, protocolError(CodeSubscriptionCollision, "subscription status retry ID was reused")
+	}
+	subscription, ok := domain.subscriptions[subscriptionID]
+	if !ok {
+		return SubscriptionStatusChangeResponse{}, protocolError(CodeSubscriptionNotFound, "subscription was not found")
+	}
+	if subscription.Status == SubscriptionRevoked {
+		return SubscriptionStatusChangeResponse{}, protocolError(CodeSubscriptionNotFound, "revoked subscription cannot be changed")
+	}
+	if request.ChangedAtMilliseconds < subscription.CreatedAtMilliseconds ||
+		request.ChangedAtMilliseconds < subscription.UpdatedAtMilliseconds {
+		return SubscriptionStatusChangeResponse{}, protocolError(CodeInvalidSubscription, "subscription update is out of order")
+	}
+	subscription.Status = request.Status
+	subscription.UpdatedAtMilliseconds = request.ChangedAtMilliseconds
+	domain.subscriptions[subscriptionID] = subscription
+	domain.subscriptionChanges[request.RetryID] = memorySubscriptionChange{
+		subscriptionID: subscriptionID, request: request, result: subscription,
+	}
+	return SubscriptionStatusChangeResponse{
+		Acceptance: AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription,
+	}, nil
+}
+
+func (s *MemoryStore) GetTenantStatus(_ context.Context, credential TenantCredential) (TenantStatus, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tenant := s.tenants[credential.TenantID]
+	if tenant == nil {
+		return TenantStatus{}, protocolError(CodeTenantNotFound, "tenant was not found")
+	}
+	if err := tenant.registration.Authorize(credential); err != nil {
+		return TenantStatus{}, err
+	}
+	messages, messageBytes, blobs, blobBytes := s.tenantUsageLocked(credential.TenantID)
+	domains := 0
+	for key := range s.domains {
+		if key.tenantID == credential.TenantID {
+			domains++
+		}
+	}
+	return TenantStatus{
+		TenantID: credential.TenantID, DomainCount: int64(domains),
+		AggregateMessageCount: int64(messages), AggregateMessageByteCount: messageBytes,
+		AggregateBlobCount: int64(blobs), AggregateBlobByteCount: blobBytes,
+		Quota: TenantQuota{
+			MaximumDomainCount:               tenant.registration.MaximumDomainCount,
+			MaximumAggregateMessageCount:     tenant.registration.MaximumAggregateMessageCount,
+			MaximumAggregateMessageByteCount: tenant.registration.MaximumAggregateMessageByteCount,
+			MaximumAggregateBlobCount:        tenant.registration.MaximumAggregateBlobCount,
+			MaximumAggregateBlobByteCount:    tenant.registration.MaximumAggregateBlobByteCount,
+		},
+	}, nil
+}
+
+func (s *MemoryStore) GetDomainStatus(_ context.Context, credential AdministrationCredential) (DomainStatus, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return DomainStatus{}, err
+	}
+	active := int64(0)
+	for _, subscription := range domain.subscriptions {
+		if subscription.Status == SubscriptionActive {
+			active++
+		}
+	}
+	var oldest *string
+	if len(domain.messages) > 0 {
+		cursor := EncodeCursor(domain.messages[0].message.Sequence - 1)
+		oldest = &cursor
+	}
+	return DomainStatus{
+		TenantID: credential.TenantID, DomainID: credential.DomainID,
+		MessageCount: int64(len(domain.messages)), MessageByteCount: domain.messageBytes,
+		BlobCount: int64(len(domain.blobs)), BlobByteCount: domain.blobBytes,
+		ActiveSubscriptionCount: active, OldestUncollectedCursor: oldest,
+		Quota: DomainQuota{
+			MaximumMessageCount:     domain.registration.MaximumMessageCount,
+			MaximumMessageByteCount: domain.registration.MaximumMessageByteCount,
+			MaximumBlobCount:        domain.registration.MaximumBlobCount,
+			MaximumBlobByteCount:    domain.registration.MaximumBlobByteCount,
+		},
+	}, nil
+}
+
 func (s *MemoryStore) Publish(
 	_ context.Context,
 	credential Credential,
@@ -687,6 +1170,10 @@ func (s *MemoryStore) Publish(
 		return PublishResult{}, err
 	}
 	if err := envelope.ValidateForPublish(credential); err != nil {
+		return PublishResult{}, err
+	}
+	publisherSubscription, err := activeMemberSubscription(domain, credential.MemberID)
+	if err != nil {
 		return PublishResult{}, err
 	}
 	if existing, ok := domain.messageByID[envelope.MessageID]; ok {
@@ -709,8 +1196,13 @@ func (s *MemoryStore) Publish(
 	if err != nil {
 		return PublishResult{}, err
 	}
-	if ciphertextByteCount > domain.registration.MaximumStoredByteCount-domain.storedBytes {
-		return PublishResult{}, protocolError(CodeDomainFull, "domain reached its stored-byte limit")
+	if ciphertextByteCount > domain.registration.MaximumMessageByteCount-domain.messageBytes {
+		return PublishResult{}, protocolError(CodeDomainFull, "domain reached its message-byte limit")
+	}
+	if err := s.ensureTenantMessageCapacityLocked(
+		credential.TenantID, ciphertextByteCount,
+	); err != nil {
+		return PublishResult{}, err
 	}
 	domain.nextSequence++
 	stored := &memoryMessage{
@@ -718,12 +1210,13 @@ func (s *MemoryStore) Publish(
 			Sequence: domain.nextSequence,
 			Envelope: envelope,
 		},
-		publisherMember: credential.MemberID,
-		acknowledgments: make(map[uuid.UUID]AcknowledgmentStage),
+		publisherMember:       credential.MemberID,
+		publisherSubscription: publisherSubscription.SubscriptionID,
+		acknowledgments:       make(map[uuid.UUID]AcknowledgmentStage),
 	}
 	domain.messages = append(domain.messages, stored)
 	domain.messageByID[envelope.MessageID] = stored
-	domain.storedBytes += ciphertextByteCount
+	domain.messageBytes += ciphertextByteCount
 	return PublishResult{
 		Acceptance: AcceptanceAccepted,
 		Sequence:   stored.message.Sequence,
@@ -750,10 +1243,14 @@ func (s *MemoryStore) Fetch(
 	if err != nil {
 		return FetchResult{}, err
 	}
+	subscription, err := activeMemberSubscription(domain, credential.MemberID)
+	if err != nil {
+		return FetchResult{}, err
+	}
 	result := FetchResult{Messages: make([]Message, 0, limit)}
 	for _, stored := range domain.messages {
 		if stored.message.Sequence <= afterSequence ||
-			stored.publisherMember == credential.MemberID {
+			stored.publisherSubscription == subscription.SubscriptionID {
 			continue
 		}
 		result.Messages = append(result.Messages, stored.message)
@@ -792,17 +1289,21 @@ func (s *MemoryStore) Acknowledge(
 	if err != nil {
 		return AcknowledgmentResult{}, err
 	}
+	subscription, err := activeMemberSubscription(domain, credential.MemberID)
+	if err != nil {
+		return AcknowledgmentResult{}, err
+	}
 	message, ok := domain.messageByID[messageID]
 	if !ok {
 		return AcknowledgmentResult{}, protocolError(CodeMessageNotFound, "message was not found")
 	}
-	if message.publisherMember == credential.MemberID {
+	if message.publisherSubscription == subscription.SubscriptionID {
 		return AcknowledgmentResult{}, protocolError(
 			CodeInvalidAcknowledgment,
 			"publisher cannot acknowledge its message",
 		)
 	}
-	existing, hasExisting := message.acknowledgments[credential.MemberID]
+	existing, hasExisting := message.acknowledgments[subscription.SubscriptionID]
 	if hasExisting && (existing == stage || existing == AcknowledgmentApplied) {
 		return AcknowledgmentResult{
 			Acceptance: AcceptanceDuplicate,
@@ -815,7 +1316,7 @@ func (s *MemoryStore) Acknowledge(
 			"applied requires a durable accepted acknowledgment",
 		)
 	}
-	message.acknowledgments[credential.MemberID] = stage
+	message.acknowledgments[subscription.SubscriptionID] = stage
 	return AcknowledgmentResult{
 		Acceptance: AcceptanceAccepted,
 		Stage:      stage,
@@ -886,6 +1387,9 @@ func (s *MemoryStore) CommitBlobPublish(
 	if err := ensureBlobCapacity(domain, byteCount); err != nil {
 		return BlobPublishResult{}, err
 	}
+	if err := s.ensureTenantBlobCapacityLocked(credential.TenantID, byteCount); err != nil {
+		return BlobPublishResult{}, err
+	}
 	metadata := BlobMetadata{
 		TenantID:              credential.TenantID,
 		DomainID:              credential.DomainID,
@@ -898,7 +1402,7 @@ func (s *MemoryStore) CommitBlobPublish(
 		return BlobPublishResult{}, err
 	}
 	domain.blobs[blobID] = metadata
-	domain.storedBytes += byteCount
+	domain.blobBytes += byteCount
 	return BlobPublishResult{
 		Acceptance: AcceptanceAccepted,
 		ByteCount:  byteCount,
@@ -945,8 +1449,72 @@ func ensureBlobCapacity(domain *memoryDomain, byteCount int64) error {
 	if len(domain.blobs) >= domain.registration.MaximumBlobCount {
 		return protocolError(CodeDomainFull, "domain reached its blob limit")
 	}
-	if byteCount > domain.registration.MaximumStoredByteCount-domain.storedBytes {
-		return protocolError(CodeDomainFull, "domain reached its stored-byte limit")
+	if byteCount > domain.registration.MaximumBlobByteCount-domain.blobBytes {
+		return protocolError(CodeDomainFull, "domain reached its blob-byte limit")
+	}
+	return nil
+}
+
+func activeMemberSubscription(domain *memoryDomain, memberID uuid.UUID) (Subscription, error) {
+	subscriptionID, ok := domain.memberSubscriptions[memberID]
+	if !ok || subscriptionID == uuid.Nil {
+		return Subscription{}, protocolError(CodeInvalidSubscription, "member has no subscription")
+	}
+	subscription, ok := domain.subscriptions[subscriptionID]
+	if !ok {
+		return Subscription{}, protocolError(CodeSubscriptionNotFound, "subscription was not found")
+	}
+	if subscription.Status != SubscriptionActive {
+		return Subscription{}, protocolError(CodeInvalidSubscription, "subscription is not active")
+	}
+	return subscription, nil
+}
+
+func (s *MemoryStore) tenantUsageLocked(tenantID uuid.UUID) (int, int64, int, int64) {
+	messageCount := 0
+	messageBytes := int64(0)
+	blobCount := 0
+	blobBytes := int64(0)
+	for key, domain := range s.domains {
+		if key.tenantID != tenantID {
+			continue
+		}
+		messageCount += len(domain.messages)
+		messageBytes += domain.messageBytes
+		blobCount += len(domain.blobs)
+		blobBytes += domain.blobBytes
+	}
+	return messageCount, messageBytes, blobCount, blobBytes
+}
+
+func (s *MemoryStore) ensureTenantMessageCapacityLocked(
+	tenantID uuid.UUID,
+	additionalBytes int64,
+) error {
+	tenant := s.tenants[tenantID]
+	if tenant == nil {
+		return protocolError(CodeTenantNotFound, "tenant was not found")
+	}
+	messages, messageBytes, _, _ := s.tenantUsageLocked(tenantID)
+	if messages >= tenant.registration.MaximumAggregateMessageCount ||
+		additionalBytes > tenant.registration.MaximumAggregateMessageByteCount-messageBytes {
+		return protocolError(CodeTenantFull, "tenant reached its message or byte limit")
+	}
+	return nil
+}
+
+func (s *MemoryStore) ensureTenantBlobCapacityLocked(
+	tenantID uuid.UUID,
+	additionalBytes int64,
+) error {
+	tenant := s.tenants[tenantID]
+	if tenant == nil {
+		return protocolError(CodeTenantNotFound, "tenant was not found")
+	}
+	_, _, blobs, blobBytes := s.tenantUsageLocked(tenantID)
+	if blobs >= tenant.registration.MaximumAggregateBlobCount ||
+		additionalBytes > tenant.registration.MaximumAggregateBlobByteCount-blobBytes {
+		return protocolError(CodeTenantFull, "tenant reached its blob or byte limit")
 	}
 	return nil
 }

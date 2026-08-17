@@ -57,66 +57,6 @@ func (s *RelayStore) CreateDomain(
 	return acceptance, nil
 }
 
-func (s *RelayStore) CreateDelegatedDomain(
-	ctx context.Context,
-	authorizingCredential relay.AdministrationCredential,
-	registration relay.DomainRegistration,
-	initialMember relay.MemberRegistration,
-	nowMilliseconds int64,
-) (relay.Acceptance, error) {
-	if err := registration.Validate(); err != nil {
-		return "", err
-	}
-	if err := initialMember.Validate(); err != nil {
-		return "", err
-	}
-	if registration.TenantID != authorizingCredential.TenantID ||
-		registration.DomainID == authorizingCredential.DomainID ||
-		initialMember.TenantID != registration.TenantID ||
-		initialMember.DomainID != registration.DomainID {
-		return "", relay.NewProtocolError(
-			relay.CodeWrongScope,
-			"delegated domain has an invalid scope",
-		)
-	}
-	if registration.CreatedAtMilliseconds > nowMilliseconds ||
-		initialMember.CreatedAtMilliseconds < registration.CreatedAtMilliseconds {
-		return "", relay.NewProtocolError(
-			relay.CodeInvalidDomain,
-			"delegated domain has an invalid creation time",
-		)
-	}
-	transaction, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return "", fmt.Errorf("begin delegated relay domain creation: %w", err)
-	}
-	defer func() { _ = transaction.Rollback(ctx) }()
-	authorizingDomain, _, _, _, _, err := loadRelayDomain(
-		ctx,
-		transaction,
-		authorizingCredential.TenantID,
-		authorizingCredential.DomainID,
-		"FOR UPDATE",
-	)
-	if err != nil {
-		return "", err
-	}
-	if err := authorizingDomain.Authorize(authorizingCredential); err != nil {
-		return "", err
-	}
-	acceptance, err := createRelayDomain(ctx, transaction, registration, initialMember)
-	if err != nil {
-		return "", err
-	}
-	if acceptance == relay.AcceptanceDuplicate {
-		return acceptance, nil
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit delegated relay domain creation: %w", err)
-	}
-	return acceptance, nil
-}
-
 func createRelayDomain(
 	ctx context.Context,
 	transaction pgx.Tx,
@@ -127,18 +67,19 @@ func createRelayDomain(
 		INSERT INTO relay_domains (
 			tenant_id, domain_id, version, administration_digest,
 			created_at_milliseconds, maximum_message_count,
-			maximum_blob_count, maximum_stored_byte_count
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			maximum_message_byte_count, maximum_blob_count,
+			maximum_blob_byte_count
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (tenant_id, domain_id) DO NOTHING
 	`, registration.TenantID, registration.DomainID, registration.Version,
 		registration.AdministrationDigest, registration.CreatedAtMilliseconds,
-		registration.MaximumMessageCount, registration.MaximumBlobCount,
-		registration.MaximumStoredByteCount)
+		registration.MaximumMessageCount, registration.MaximumMessageByteCount,
+		registration.MaximumBlobCount, registration.MaximumBlobByteCount)
 	if err != nil {
 		return "", fmt.Errorf("insert relay domain: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		existing, _, _, _, _, err := loadRelayDomain(
+		existing, _, _, _, _, _, err := loadRelayDomain(
 			ctx,
 			transaction,
 			registration.TenantID,
@@ -214,7 +155,7 @@ func (s *RelayStore) CreateMember(
 		return "", fmt.Errorf("begin relay member creation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, _, _, _, _, err := loadRelayDomain(
+	domain, _, _, _, _, _, err := loadRelayDomain(
 		ctx, transaction, credential.TenantID, credential.DomainID, "FOR UPDATE",
 	)
 	if err != nil {
@@ -310,7 +251,7 @@ func (s *RelayStore) CreateAdmission(
 		return relay.AdmissionCreateResult{}, fmt.Errorf("begin relay admission creation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, _, _, _, _, err := loadRelayDomain(
+	domain, _, _, _, _, _, err := loadRelayDomain(
 		ctx, transaction, credential.TenantID, credential.DomainID, "FOR UPDATE",
 	)
 	if err != nil {
@@ -416,7 +357,7 @@ func (s *RelayStore) ClaimAdmission(
 		)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	if _, _, _, _, _, err := loadRelayDomain(
+	if _, _, _, _, _, _, err := loadRelayDomain(
 		ctx,
 		transaction,
 		credential.TenantID,
@@ -571,7 +512,7 @@ func (s *RelayStore) RevokeAdmission(
 		return "", fmt.Errorf("begin relay admission revocation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, _, _, _, _, err := loadRelayDomain(
+	domain, _, _, _, _, _, err := loadRelayDomain(
 		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
 	)
 	if err != nil {
@@ -649,7 +590,7 @@ func (s *RelayStore) RevokeMember(
 		return "", fmt.Errorf("begin relay member revocation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, _, _, _, _, err := loadRelayDomain(
+	domain, _, _, _, _, _, err := loadRelayDomain(
 		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
 	)
 	if err != nil {
@@ -714,7 +655,11 @@ func (s *RelayStore) Publish(
 		return relay.PublishResult{}, fmt.Errorf("begin relay publish: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, messageCount, _, storedByteCount, lastSequence, err := loadRelayDomain(
+	tenant, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR UPDATE")
+	if err != nil {
+		return relay.PublishResult{}, err
+	}
+	domain, messageCount, messageByteCount, _, _, lastSequence, err := loadRelayDomain(
 		ctx,
 		transaction,
 		credential.TenantID,
@@ -744,6 +689,13 @@ func (s *RelayStore) Publish(
 	if err := member.Authorize(
 		credential, relay.CapabilityPublishMessage, nowMilliseconds,
 	); err != nil {
+		return relay.PublishResult{}, err
+	}
+	publisherSubscriptionID, err := loadActiveMemberSubscription(
+		ctx, transaction, credential.TenantID, credential.DomainID,
+		credential.MemberID, "FOR SHARE",
+	)
+	if err != nil {
 		return relay.PublishResult{}, err
 	}
 	if err := envelope.ValidateForPublish(credential); err != nil {
@@ -783,31 +735,43 @@ func (s *RelayStore) Publish(
 	if err != nil {
 		return relay.PublishResult{}, err
 	}
-	if ciphertextByteCount > domain.MaximumStoredByteCount-storedByteCount {
+	if ciphertextByteCount > domain.MaximumMessageByteCount-messageByteCount {
 		return relay.PublishResult{}, relay.NewProtocolError(
 			relay.CodeDomainFull,
-			"domain reached its stored-byte limit",
+			"domain reached its message-byte limit",
 		)
+	}
+	var tenantMessageCount int
+	var tenantMessageByteCount int64
+	if err := transaction.QueryRow(ctx, `SELECT message_count,aggregate_message_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&tenantMessageCount, &tenantMessageByteCount); err != nil {
+		return relay.PublishResult{}, fmt.Errorf("load tenant message counters: %w", err)
+	}
+	if tenantMessageCount >= tenant.MaximumAggregateMessageCount ||
+		ciphertextByteCount > tenant.MaximumAggregateMessageByteCount-tenantMessageByteCount {
+		return relay.PublishResult{}, relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate message quota")
 	}
 	sequence := lastSequence + 1
 	if _, err := transaction.Exec(ctx, `
 		INSERT INTO relay_messages (
 			tenant_id, domain_id, domain_sequence, message_id,
-			publisher_member_id, version, algorithm, key_epoch,
+			publisher_member_id, publisher_subscription_id, version, algorithm, key_epoch,
 			created_at_milliseconds, nonce, ciphertext, authentication_tag,
 			ciphertext_byte_count
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	`, envelope.TenantID, envelope.DomainID, sequence, envelope.MessageID,
-		envelope.PublisherMemberID, envelope.Version, envelope.Algorithm,
+		envelope.PublisherMemberID, publisherSubscriptionID, envelope.Version, envelope.Algorithm,
 		int64(envelope.KeyEpoch), envelope.CreatedAtMilliseconds,
 		envelope.Nonce, envelope.Ciphertext, envelope.AuthenticationTag,
 		ciphertextByteCount); err != nil {
 		return relay.PublishResult{}, fmt.Errorf("insert relay message: %w", err)
 	}
+	if _, err := transaction.Exec(ctx, `UPDATE relay_tenants SET message_count=message_count+1,aggregate_message_byte_count=aggregate_message_byte_count+$2,updated_at=now() WHERE tenant_id=$1`, credential.TenantID, ciphertextByteCount); err != nil {
+		return relay.PublishResult{}, fmt.Errorf("advance tenant message counters: %w", err)
+	}
 	if _, err := transaction.Exec(ctx, `
 		UPDATE relay_domains
 		SET message_count = message_count + 1,
-		    stored_byte_count = stored_byte_count + $4,
+		    message_byte_count = message_byte_count + $4,
 		    last_sequence = $3
 		WHERE tenant_id = $1 AND domain_id = $2
 	`, credential.TenantID, credential.DomainID, sequence,
@@ -854,6 +818,15 @@ func (s *RelayStore) Fetch(
 		return relay.FetchResult{}, fmt.Errorf("begin relay fetch: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
+	if _, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR SHARE"); err != nil {
+		return relay.FetchResult{}, err
+	}
+	_, _, _, _, _, highWatermark, err := loadRelayDomain(
+		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
+	)
+	if err != nil {
+		return relay.FetchResult{}, err
+	}
 	member, found, err := loadRelayMember(
 		ctx,
 		transaction,
@@ -876,12 +849,9 @@ func (s *RelayStore) Fetch(
 	); err != nil {
 		return relay.FetchResult{}, err
 	}
-	_, _, _, _, highWatermark, err := loadRelayDomain(
-		ctx,
-		transaction,
-		credential.TenantID,
-		credential.DomainID,
-		"FOR SHARE",
+	subscriptionID, err := loadActiveMemberSubscription(
+		ctx, transaction, credential.TenantID, credential.DomainID,
+		credential.MemberID, "FOR SHARE",
 	)
 	if err != nil {
 		return relay.FetchResult{}, err
@@ -893,11 +863,11 @@ func (s *RelayStore) Fetch(
 		FROM relay_messages
 		WHERE tenant_id = $1 AND domain_id = $2
 		  AND domain_sequence > $3 AND domain_sequence <= $4
-		  AND publisher_member_id <> $5
+		  AND publisher_subscription_id <> $5
 		ORDER BY domain_sequence
 		LIMIT $6
 	`, credential.TenantID, credential.DomainID, int64(afterSequence),
-		highWatermark, credential.MemberID, limit)
+		highWatermark, subscriptionID, limit)
 	if err != nil {
 		return relay.FetchResult{}, fmt.Errorf("fetch relay messages: %w", err)
 	}
@@ -966,6 +936,12 @@ func (s *RelayStore) Acknowledge(
 		return relay.AcknowledgmentResult{}, fmt.Errorf("begin relay acknowledgment: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
+	if _, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR SHARE"); err != nil {
+		return relay.AcknowledgmentResult{}, err
+	}
+	if _, _, _, _, _, _, err := loadRelayDomain(ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE"); err != nil {
+		return relay.AcknowledgmentResult{}, err
+	}
 	member, found, err := loadRelayMember(
 		ctx,
 		transaction,
@@ -988,7 +964,14 @@ func (s *RelayStore) Acknowledge(
 	); err != nil {
 		return relay.AcknowledgmentResult{}, err
 	}
-	message, found, err := loadRelayMessage(
+	subscriptionID, err := loadActiveMemberSubscription(
+		ctx, transaction, credential.TenantID, credential.DomainID,
+		credential.MemberID, "FOR SHARE",
+	)
+	if err != nil {
+		return relay.AcknowledgmentResult{}, err
+	}
+	_, found, err = loadRelayMessage(
 		ctx,
 		transaction,
 		credential.TenantID,
@@ -1005,7 +988,11 @@ func (s *RelayStore) Acknowledge(
 			"message was not found",
 		)
 	}
-	if message.Envelope.PublisherMemberID == credential.MemberID {
+	var publisherSubscriptionID uuid.UUID
+	if err := transaction.QueryRow(ctx, `SELECT publisher_subscription_id FROM relay_messages WHERE tenant_id=$1 AND domain_id=$2 AND message_id=$3`, credential.TenantID, credential.DomainID, messageID).Scan(&publisherSubscriptionID); err != nil {
+		return relay.AcknowledgmentResult{}, fmt.Errorf("load message publisher subscription: %w", err)
+	}
+	if publisherSubscriptionID == subscriptionID {
 		return relay.AcknowledgmentResult{}, relay.NewProtocolError(
 			relay.CodeInvalidAcknowledgment,
 			"publisher cannot acknowledge its message",
@@ -1016,9 +1003,9 @@ func (s *RelayStore) Acknowledge(
 		SELECT stage
 		FROM relay_acknowledgments
 		WHERE tenant_id = $1 AND domain_id = $2
-		  AND message_id = $3 AND member_id = $4
+		  AND message_id = $3 AND subscription_id = $4
 		FOR UPDATE
-	`, credential.TenantID, credential.DomainID, messageID, credential.MemberID).Scan(&existing)
+	`, credential.TenantID, credential.DomainID, messageID, subscriptionID).Scan(&existing)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return relay.AcknowledgmentResult{}, fmt.Errorf("load relay acknowledgment: %w", err)
 	}
@@ -1038,12 +1025,12 @@ func (s *RelayStore) Acknowledge(
 	if !hasExisting {
 		result, err := transaction.Exec(ctx, `
 			INSERT INTO relay_acknowledgments (
-				tenant_id, domain_id, message_id, member_id, stage,
+				tenant_id, domain_id, message_id, subscription_id, stage,
 				accepted_at_milliseconds
 			) VALUES ($1, $2, $3, $4, 'accepted', $5)
-			ON CONFLICT (tenant_id, domain_id, message_id, member_id) DO NOTHING
+			ON CONFLICT (tenant_id, domain_id, message_id, subscription_id) DO NOTHING
 		`, credential.TenantID, credential.DomainID, messageID,
-			credential.MemberID, nowMilliseconds)
+			subscriptionID, nowMilliseconds)
 		if err != nil {
 			return relay.AcknowledgmentResult{}, fmt.Errorf("insert relay acknowledgment: %w", err)
 		}
@@ -1052,10 +1039,10 @@ func (s *RelayStore) Acknowledge(
 				SELECT stage
 				FROM relay_acknowledgments
 				WHERE tenant_id = $1 AND domain_id = $2
-				  AND message_id = $3 AND member_id = $4
+				  AND message_id = $3 AND subscription_id = $4
 				FOR UPDATE
 			`, credential.TenantID, credential.DomainID, messageID,
-				credential.MemberID).Scan(&existing); err != nil {
+				subscriptionID).Scan(&existing); err != nil {
 				return relay.AcknowledgmentResult{}, fmt.Errorf(
 					"reload relay acknowledgment: %w",
 					err,
@@ -1071,9 +1058,9 @@ func (s *RelayStore) Acknowledge(
 			UPDATE relay_acknowledgments
 			SET stage = 'applied', applied_at_milliseconds = $5, updated_at = now()
 			WHERE tenant_id = $1 AND domain_id = $2
-			  AND message_id = $3 AND member_id = $4
+			  AND message_id = $3 AND subscription_id = $4
 		`, credential.TenantID, credential.DomainID, messageID,
-			credential.MemberID, nowMilliseconds); err != nil {
+			subscriptionID, nowMilliseconds); err != nil {
 			return relay.AcknowledgmentResult{}, fmt.Errorf("apply relay acknowledgment: %w", err)
 		}
 	}
@@ -1125,7 +1112,11 @@ func (s *RelayStore) PrepareBlobPublish(
 		return fmt.Errorf("begin relay blob preparation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, _, blobCount, storedByteCount, _, err := loadRelayDomain(
+	tenant, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR SHARE")
+	if err != nil {
+		return err
+	}
+	domain, _, _, blobCount, blobByteCount, _, err := loadRelayDomain(
 		ctx,
 		transaction,
 		credential.TenantID,
@@ -1174,7 +1165,18 @@ func (s *RelayStore) PrepareBlobPublish(
 			"blob ID was reused with a different length",
 		)
 	}
-	return ensureRelayBlobCapacity(domain, blobCount, storedByteCount, byteCount)
+	if err := ensureRelayBlobCapacity(domain, blobCount, blobByteCount, byteCount); err != nil {
+		return err
+	}
+	var tenantBlobCount int
+	var tenantBlobByteCount int64
+	if err := transaction.QueryRow(ctx, `SELECT blob_count,aggregate_blob_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&tenantBlobCount, &tenantBlobByteCount); err != nil {
+		return err
+	}
+	if tenantBlobCount >= tenant.MaximumAggregateBlobCount || byteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobByteCount {
+		return relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate blob quota")
+	}
+	return nil
 }
 
 func (s *RelayStore) CommitBlobPublish(
@@ -1200,7 +1202,11 @@ func (s *RelayStore) CommitBlobPublish(
 		return relay.BlobPublishResult{}, fmt.Errorf("begin relay blob commit: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, _, blobCount, storedByteCount, _, err := loadRelayDomain(
+	tenant, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR UPDATE")
+	if err != nil {
+		return relay.BlobPublishResult{}, err
+	}
+	domain, _, _, blobCount, blobByteCount, _, err := loadRelayDomain(
 		ctx,
 		transaction,
 		credential.TenantID,
@@ -1256,9 +1262,17 @@ func (s *RelayStore) CommitBlobPublish(
 		)
 	}
 	if err := ensureRelayBlobCapacity(
-		domain, blobCount, storedByteCount, byteCount,
+		domain, blobCount, blobByteCount, byteCount,
 	); err != nil {
 		return relay.BlobPublishResult{}, err
+	}
+	var tenantBlobCount int
+	var tenantBlobByteCount int64
+	if err := transaction.QueryRow(ctx, `SELECT blob_count,aggregate_blob_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&tenantBlobCount, &tenantBlobByteCount); err != nil {
+		return relay.BlobPublishResult{}, err
+	}
+	if tenantBlobCount >= tenant.MaximumAggregateBlobCount || byteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobByteCount {
+		return relay.BlobPublishResult{}, relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate blob quota")
 	}
 	if _, err := transaction.Exec(ctx, `
 		INSERT INTO relay_blobs (
@@ -1273,10 +1287,13 @@ func (s *RelayStore) CommitBlobPublish(
 	if _, err := transaction.Exec(ctx, `
 		UPDATE relay_domains
 		SET blob_count = blob_count + 1,
-		    stored_byte_count = stored_byte_count + $3
+		    blob_byte_count = blob_byte_count + $3
 		WHERE tenant_id = $1 AND domain_id = $2
 	`, credential.TenantID, credential.DomainID, byteCount); err != nil {
 		return relay.BlobPublishResult{}, fmt.Errorf("advance relay blob counters: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `UPDATE relay_tenants SET blob_count=blob_count+1,aggregate_blob_byte_count=aggregate_blob_byte_count+$2,updated_at=now() WHERE tenant_id=$1`, credential.TenantID, byteCount); err != nil {
+		return relay.BlobPublishResult{}, fmt.Errorf("advance tenant blob counters: %w", err)
 	}
 	if err := insertRelayBlobAudit(ctx, transaction, metadata); err != nil {
 		return relay.BlobPublishResult{}, err
@@ -1359,12 +1376,13 @@ func loadRelayDomain(
 	tenantID uuid.UUID,
 	domainID uuid.UUID,
 	lockClause string,
-) (relay.DomainRegistration, int, int, int64, int64, error) {
+) (relay.DomainRegistration, int, int64, int, int64, int64, error) {
 	query := `
 		SELECT version, administration_digest, created_at_milliseconds,
-		       maximum_message_count, maximum_blob_count,
-		       maximum_stored_byte_count, message_count, blob_count,
-		       stored_byte_count, last_sequence
+		       maximum_message_count, maximum_message_byte_count,
+		       maximum_blob_count, maximum_blob_byte_count,
+		       message_count, message_byte_count, blob_count,
+		       blob_byte_count, last_sequence
 		FROM relay_domains
 		WHERE tenant_id = $1 AND domain_id = $2
 	`
@@ -1373,38 +1391,41 @@ func loadRelayDomain(
 	}
 	registration := relay.DomainRegistration{TenantID: tenantID, DomainID: domainID}
 	var messageCount, blobCount int
-	var storedByteCount, lastSequence int64
+	var messageByteCount, blobByteCount, lastSequence int64
 	err := querier.QueryRow(ctx, query, tenantID, domainID).Scan(
 		&registration.Version,
 		&registration.AdministrationDigest,
 		&registration.CreatedAtMilliseconds,
 		&registration.MaximumMessageCount,
+		&registration.MaximumMessageByteCount,
 		&registration.MaximumBlobCount,
-		&registration.MaximumStoredByteCount,
+		&registration.MaximumBlobByteCount,
 		&messageCount,
+		&messageByteCount,
 		&blobCount,
-		&storedByteCount,
+		&blobByteCount,
 		&lastSequence,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return relay.DomainRegistration{}, 0, 0, 0, 0, relay.NewProtocolError(
+		return relay.DomainRegistration{}, 0, 0, 0, 0, 0, relay.NewProtocolError(
 			relay.CodeDomainNotFound,
 			"domain was not found",
 		)
 	}
 	if err != nil {
-		return relay.DomainRegistration{}, 0, 0, 0, 0, fmt.Errorf("load relay domain: %w", err)
+		return relay.DomainRegistration{}, 0, 0, 0, 0, 0, fmt.Errorf("load relay domain: %w", err)
 	}
 	if err := registration.Validate(); err != nil {
-		return relay.DomainRegistration{}, 0, 0, 0, 0, fmt.Errorf("stored relay domain failed validation: %v", err)
+		return relay.DomainRegistration{}, 0, 0, 0, 0, 0, fmt.Errorf("stored relay domain failed validation: %v", err)
 	}
 	if messageCount < 0 || messageCount > registration.MaximumMessageCount ||
+		messageByteCount < 0 || messageByteCount > registration.MaximumMessageByteCount ||
 		blobCount < 0 || blobCount > registration.MaximumBlobCount ||
-		storedByteCount < 0 || storedByteCount > registration.MaximumStoredByteCount ||
+		blobByteCount < 0 || blobByteCount > registration.MaximumBlobByteCount ||
 		lastSequence < int64(messageCount) {
-		return relay.DomainRegistration{}, 0, 0, 0, 0, fmt.Errorf("stored relay domain counters are invalid")
+		return relay.DomainRegistration{}, 0, 0, 0, 0, 0, fmt.Errorf("stored relay domain counters are invalid")
 	}
-	return registration, messageCount, blobCount, storedByteCount, lastSequence, nil
+	return registration, messageCount, messageByteCount, blobCount, blobByteCount, lastSequence, nil
 }
 
 func loadRelayMember(
@@ -1611,10 +1632,10 @@ func ensureRelayBlobCapacity(
 	if blobCount >= domain.MaximumBlobCount {
 		return relay.NewProtocolError(relay.CodeDomainFull, "domain reached its blob limit")
 	}
-	if byteCount > domain.MaximumStoredByteCount-storedByteCount {
+	if byteCount > domain.MaximumBlobByteCount-storedByteCount {
 		return relay.NewProtocolError(
 			relay.CodeDomainFull,
-			"domain reached its stored-byte limit",
+			"domain reached its blob-byte limit",
 		)
 	}
 	return nil

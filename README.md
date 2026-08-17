@@ -29,14 +29,15 @@ Facets core codebase.
 - Capability-scoped relay membership with immediate expiry and revocation
 - One-time, expiry-bound member admissions that never expose domain
   administration credentials to joining clients
-- Atomic, response-loss-safe domain/member credential rotation with old-secret
+- Atomic, response-loss-safe tenant/domain/member credential rotation with old-secret
   reuse rejection and bounded history
-- Administration-authorized creation of additional domains in the same tenant
+- Client-generated tenant provisioning authority for additional domains
 - Bounded active/retained members and admissions, plus administrator-driven
   collection after a 30-day admission retry window
-- Opaque, monotonic catch-up cursors and per-member accepted/applied facts
+- Opaque subscriptions with multiple delivery agents and subscription-level
+  monotonic accepted/applied facts
 - Disposable domain change hints that accelerate, but never replace, cursor polling
-- Per-domain message/blob counts and total stored-byte quotas
+- Separate per-domain and tenant-wide message/blob count and byte quotas
 - PostgreSQL-backed concurrent publication with restart-safe ordering
 - Live delivery-matrix proof for cursor replay, delayed and concurrent traffic,
   independent recipients, acknowledgment progression, and interrupted uploads
@@ -52,18 +53,19 @@ capability name is reserved but its endpoint is not yet implemented. No valid
 FEF, device grant, payment record, or Shared Space membership will implicitly
 grant compute execution.
 
-The current delegation endpoint allows any domain-administration credential to
-create another domain under the same opaque tenant ID. That is a deliberately
-content-blind bootstrap seam, not tenant ownership, account authorization, or
-Shared Space membership. Its tenant-wide authority is broader than the desired
-hosted control plane and is scheduled to be replaced by an independent tenant
-provisioning credential.
+Operator provisioning atomically creates a tenant, a client-generated private
+tenant provisioning credential, its first domain, first subscription, and
+first member. The tenant credential creates additional domains and can rotate
+without exposing its replacement secret. Domain-administration credentials
+cannot create domains. These IDs remain opaque routing scopes, not account or
+Shared Space membership.
 
 Current relay limits are 16 MiB of decoded ciphertext per message, 256 MiB per
 encrypted blob, 100 messages per fetch page, and a 25-second maximum wake wait.
-Operator-created and delegated domains receive limits of 10,000 messages,
-10,000 blobs, and 1 GiB shared stored bytes. Authority limits are 256 active and
-4,096 retained members; 64 outstanding and 4,096 retained admissions; 256
+Domains receive 10,000 messages/1 GiB message bytes and 10,000 blobs/1 GiB
+blob bytes. Tenants receive 256 domains, 1,000,000 messages/1 TiB message
+bytes, and 1,000,000 blobs/1 TiB blob bytes. Authority limits are 256 active
+and 4,096 retained members; 64 outstanding and 4,096 retained admissions; 256
 credential rotations per subject and 4,096 per domain. Terminal admissions
 have a 30-day exact-retry window and are collected in batches of at most 256.
 
@@ -114,7 +116,7 @@ are labeled `unknown`; such an image is not a revision-attested deployment.
 
 The Node listener is published only on `127.0.0.1:8080`. It is the private
 management ingress for `/livez`, `/readyz`, `/metrics`, and operator
-`POST /v1/relay/domains`, as well as a local diagnostic path to application
+`POST /v1/relay/tenants`, as well as a local diagnostic path to application
 routes. Reach it remotely only through an authenticated management tunnel.
 
 Caddy publishes HTTPS on port 8443 and forwards only `/v1/pairing/*` and
@@ -143,8 +145,8 @@ revision.
 
 ## Security boundary
 
-Pairing, relay-member-admission, relay-member, relay-administration, and
-operator bearer tokens are independent high-entropy secrets. Send bearer
+Pairing, tenant-provisioning, relay-member-admission, relay-member,
+relay-administration, and operator bearer tokens are independent high-entropy secrets. Send bearer
 credentials only in the `Authorization` header over TLS; the one exception is
 the client-generated relay credentials inside the retry-safe, TLS-protected
 operator provisioning request. Facets Node does not log authorization headers,
@@ -157,7 +159,9 @@ request bodies, ciphertext, or client IP addresses. See
 The ordinary Go suite covers in-memory protocol behavior, cross-language
 fixtures, HTTP authorization, and the checked-in Caddy exposure policy. Tests
 that set `FACETS_NODE_TEST_DATABASE_URL` exercise a real disposable PostgreSQL
-store, including delegated provisioning across pool restarts. Tests that set
+store, including tenant/domain provisioning, subscription exact retries,
+subscription-level delivery, and split quota counters across pool restarts.
+Tests that set
 `FACETS_NODE_TEST_BASE_URL` and `FACETS_NODE_TEST_OPERATOR_TOKEN` exercise the
 running HTTP/PostgreSQL/filesystem stack, including a pre-existing-message wake
 fallback that does not depend on an in-process notification. These opt-in gates

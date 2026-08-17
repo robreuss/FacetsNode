@@ -9,6 +9,8 @@ type ErrorCode string
 
 const (
 	CodeInvalidDomain               ErrorCode = "invalid_domain"
+	CodeInvalidTenant               ErrorCode = "invalid_tenant"
+	CodeInvalidSubscription         ErrorCode = "invalid_subscription"
 	CodeInvalidMember               ErrorCode = "invalid_member"
 	CodeInvalidAdmission            ErrorCode = "invalid_admission"
 	CodeInvalidEnvelope             ErrorCode = "invalid_envelope"
@@ -19,6 +21,8 @@ const (
 	CodeUnauthorized                ErrorCode = "unauthorized"
 	CodeWrongScope                  ErrorCode = "wrong_scope"
 	CodeDomainNotFound              ErrorCode = "domain_not_found"
+	CodeTenantNotFound              ErrorCode = "tenant_not_found"
+	CodeSubscriptionNotFound        ErrorCode = "subscription_not_found"
 	CodeMemberNotFound              ErrorCode = "member_not_found"
 	CodeAdmissionNotFound           ErrorCode = "admission_not_found"
 	CodeMemberExpired               ErrorCode = "member_expired"
@@ -27,6 +31,8 @@ const (
 	CodeAdmissionRevoked            ErrorCode = "admission_revoked"
 	CodeMissingCapability           ErrorCode = "missing_capability"
 	CodeDomainCollision             ErrorCode = "domain_collision"
+	CodeTenantCollision             ErrorCode = "tenant_collision"
+	CodeSubscriptionCollision       ErrorCode = "subscription_collision"
 	CodeMemberCollision             ErrorCode = "member_collision"
 	CodeAdmissionCollision          ErrorCode = "admission_collision"
 	CodeAdmissionClaimed            ErrorCode = "admission_claimed"
@@ -37,6 +43,7 @@ const (
 	CodeMessageNotFound             ErrorCode = "message_not_found"
 	CodeBlobNotFound                ErrorCode = "blob_not_found"
 	CodeDomainFull                  ErrorCode = "domain_full"
+	CodeTenantFull                  ErrorCode = "tenant_full"
 )
 
 type ProtocolError struct {

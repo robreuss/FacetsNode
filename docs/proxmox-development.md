@@ -83,7 +83,7 @@ docker compose exec postgres createdb -U facets facets_test
 
 FACETS_NODE_TEST_DATABASE_URL='postgres://facets:<password>@postgres:5432/facets_test?sslmode=disable' \
   go test ./internal/postgres \
-    -run 'TestPostgres(StorePersistsOpaqueMailbox|Relay(PersistsSequences|DelegatedDomain|SerializesOutstandingAdmissionLimit))' -v
+    -run 'TestPostgres(StorePersistsOpaqueMailbox|Relay(PersistsSequences|TenantProvisioning|SerializesOutstandingAdmissionLimit)|SubscriptionExactRetry)' -v
 
 FACETS_NODE_TEST_BASE_URL='http://node:8080' \
 FACETS_NODE_TEST_OPERATOR_TOKEN='<same operator value from .env>' \
@@ -96,7 +96,7 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   --cacert <ca-file> https://<node-name>:8443/readyz)" = 404
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  --cacert <ca-file> https://<node-name>:8443/v1/relay/domains -X POST)" = 404
+  --cacert <ca-file> https://<node-name>:8443/v1/relay/tenants -X POST)" = 404
 ```
 
 Run these from an ephemeral Go container attached to the corresponding Compose
@@ -127,10 +127,10 @@ and exercises admission collection. The PostgreSQL gate additionally proves
 rotation records across a pool restart and serializes concurrent admission
 issuance at the domain limit.
 
-The delegated-domain PostgreSQL gate closes and recreates its pool between
-parent and child creation, proves exact retry after another restart, and rejects
-the wrong administration secret. The live delegation/wake gate creates a child
-domain through HTTP, retries it, publishes before starting the wake request,
+The tenant-provisioning PostgreSQL gate closes and recreates its pool between
+initial and additional domain creation, proves exact retry after another
+restart, and rejects the wrong tenant secret. The live provisioning/wake gate
+creates a child domain through HTTP, retries it, publishes before starting the wake request,
 and requires the wake endpoint to find the already-durable PostgreSQL message
 without relying on a process-local signal. These tests are skipped when their
 explicit disposable-database or live-service environment is absent.

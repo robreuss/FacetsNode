@@ -80,11 +80,35 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/pairing/routes/{routeID}/close", s.handleClose)
 	if s.relayStore != nil {
 		if s.operatorProvisioningOn {
-			mux.HandleFunc("POST /v1/relay/domains", s.handleCreateRelayDomain)
+			mux.HandleFunc("POST /v1/relay/tenants", s.handleProvisionRelayTenant)
 		}
 		mux.HandleFunc(
-			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/delegated-domains",
-			s.handleCreateDelegatedRelayDomain,
+			"POST /v1/relay/tenants/{tenantID}/domains",
+			s.handleProvisionRelayDomain,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/credential-rotations/{rotationID}",
+			s.handleRotateRelayTenantCredential,
+		)
+		mux.HandleFunc(
+			"GET /v1/relay/tenants/{tenantID}/status",
+			s.handleRelayTenantStatus,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions",
+			s.handleCreateRelaySubscription,
+		)
+		mux.HandleFunc(
+			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions/{subscriptionID}",
+			s.handleGetRelaySubscription,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions/{subscriptionID}/status",
+			s.handleChangeRelaySubscriptionStatus,
+		)
+		mux.HandleFunc(
+			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/status",
+			s.handleRelayDomainStatus,
 		)
 		mux.HandleFunc(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members",
@@ -335,30 +359,32 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			code = string(relayProtocol.Code)
 			message = "The relay request was rejected."
 			switch relayProtocol.Code {
-			case relay.CodeInvalidDomain, relay.CodeInvalidMember,
+			case relay.CodeInvalidTenant, relay.CodeInvalidDomain,
+				relay.CodeInvalidSubscription, relay.CodeInvalidMember,
 				relay.CodeInvalidAdmission,
 				relay.CodeInvalidCredentialRotation,
 				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob,
 				relay.CodeInvalidCursor,
 				relay.CodeWrongScope:
 				status = http.StatusBadRequest
-			case relay.CodeUnauthorized, relay.CodeDomainNotFound,
+			case relay.CodeUnauthorized, relay.CodeTenantNotFound, relay.CodeDomainNotFound,
 				relay.CodeMemberNotFound, relay.CodeAdmissionNotFound:
 				status = http.StatusUnauthorized
 			case relay.CodeMemberExpired, relay.CodeMemberRevoked,
 				relay.CodeAdmissionExpired, relay.CodeAdmissionRevoked,
 				relay.CodeMissingCapability:
 				status = http.StatusForbidden
-			case relay.CodeMessageNotFound, relay.CodeBlobNotFound:
+			case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound:
 				status = http.StatusNotFound
-			case relay.CodeDomainCollision, relay.CodeMemberCollision,
+			case relay.CodeTenantCollision, relay.CodeDomainCollision,
+				relay.CodeSubscriptionCollision, relay.CodeMemberCollision,
 				relay.CodeAdmissionCollision, relay.CodeAdmissionClaimed,
 				relay.CodeCredentialRotationCollision,
 				relay.CodeCredentialReuse,
 				relay.CodeMessageCollision, relay.CodeBlobCollision,
 				relay.CodeInvalidAcknowledgment:
 				status = http.StatusConflict
-			case relay.CodeDomainFull:
+			case relay.CodeTenantFull, relay.CodeDomainFull:
 				status = http.StatusTooManyRequests
 			}
 		} else {

@@ -21,14 +21,16 @@ import (
 )
 
 type liveRelayDomain struct {
-	Domain                   relay.DomainRegistration `json:"domain"`
+	Domain                   relay.DomainRegistration
 	AdministrationCredential struct {
 		AuthorizationToken string `json:"authorizationToken"`
-	} `json:"administrationCredential"`
-	Member           relay.MemberRegistration `json:"member"`
+	}
+	SubscriptionID   uuid.UUID
+	Member           relay.MemberRegistration
 	MemberCredential struct {
 		AuthorizationToken string `json:"authorizationToken"`
-	} `json:"memberCredential"`
+	}
+	TenantCredential liveRelayTenantCredential
 }
 
 type liveRelayMember struct {
@@ -271,17 +273,38 @@ func provisionLiveRelayDomain(
 	operatorToken string,
 ) liveRelayDomain {
 	t.Helper()
+	domainRequest := newLiveRelayDomainProvisioningRequest(time.Now().UnixMilli())
+	tenantCredential := liveRelayTenantCredential{
+		TenantID:           domainRequest.AdministrationCredential.TenantID,
+		AuthorizationToken: encodedBytes(160),
+	}
+	provisioning := liveRelayTenantProvisioningRequest{
+		Version: relay.SchemaVersion, RetryID: uuid.New(),
+		TenantProvisioningCredential: tenantCredential,
+		InitialDomain:                domainRequest,
+	}
 	response := requestRelayJSON(
-		t, client, http.MethodPost, baseURL+"/v1/relay/domains",
-		newLiveRelayDomainProvisioningRequest(time.Now().UnixMilli()),
+		t, client, http.MethodPost, baseURL+"/v1/relay/tenants",
+		provisioning,
 		operatorToken, uuid.Nil,
 	)
 	requireStatus(t, response, http.StatusCreated)
-	var domain liveRelayDomain
-	if err := json.NewDecoder(response.Body).Decode(&domain); err != nil {
+	var result relay.TenantProvisioningResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
+	if result.InitialDomain.SubscriptionID != domainRequest.SubscriptionID {
+		t.Fatalf("provisioned subscription=%s; want=%s", result.InitialDomain.SubscriptionID, domainRequest.SubscriptionID)
+	}
+	domain := liveRelayDomain{
+		Domain:           relay.DomainRegistration{TenantID: tenantCredential.TenantID, DomainID: domainRequest.AdministrationCredential.DomainID},
+		SubscriptionID:   domainRequest.SubscriptionID,
+		Member:           relay.MemberRegistration{TenantID: tenantCredential.TenantID, DomainID: domainRequest.AdministrationCredential.DomainID, MemberID: domainRequest.MemberCredential.MemberID},
+		TenantCredential: tenantCredential,
+	}
+	domain.AdministrationCredential.AuthorizationToken = domainRequest.AdministrationCredential.AuthorizationToken
+	domain.MemberCredential.AuthorizationToken = domainRequest.MemberCredential.AuthorizationToken
 	return domain
 }
 
@@ -294,6 +317,14 @@ func admitLiveRelayRecipient(
 	memberTokenSeed byte,
 ) liveRelayMember {
 	t.Helper()
+	subscriptionID := uuid.New()
+	now := time.Now().UnixMilli()
+	createSubscription := requestRelayJSON(
+		t, client, http.MethodPost, basePath+"/subscriptions",
+		relay.SubscriptionCreateRequest{RetryID: uuid.New(), SubscriptionID: subscriptionID, CreatedAtMilliseconds: now},
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatusAndClose(t, createSubscription, http.StatusCreated)
 	admission := relay.AdmissionCredential{
 		TenantID:    domain.Domain.TenantID,
 		DomainID:    domain.Domain.DomainID,
@@ -310,6 +341,7 @@ func admitLiveRelayRecipient(
 		http.MethodPost,
 		basePath+"/admissions",
 		map[string]any{
+			"subscriptionID":      subscriptionID,
 			"admissionID":         admission.AdmissionID,
 			"authorizationDigest": admissionDigest,
 			"capabilities": []relay.Capability{
@@ -346,12 +378,12 @@ func admitLiveRelayRecipient(
 		uuid.Nil,
 	)
 	requireStatus(t, response, http.StatusCreated)
-	var claim relay.AdmissionClaimResult
+	var claim relay.SubscriptionAdmissionClaimResult
 	if err := json.NewDecoder(response.Body).Decode(&claim); err != nil {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	return liveRelayMember{Registration: claim.Member, Credential: credential}
+	return liveRelayMember{Registration: claim.Member.MemberRegistration, Credential: credential}
 }
 
 func liveRelayEnvelope(

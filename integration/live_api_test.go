@@ -131,33 +131,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		t.Skip("FACETS_NODE_TEST_BASE_URL and FACETS_NODE_TEST_OPERATOR_TOKEN are required")
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	provisioning := newLiveRelayDomainProvisioningRequest(
-		time.Now().UnixMilli(),
-	)
-	create := requestRelayJSON(
-		t, client, http.MethodPost, baseURL+"/v1/relay/domains", provisioning,
-		operatorToken, uuid.Nil,
-	)
-	requireStatus(t, create, http.StatusCreated)
-	var domain struct {
-		Domain                   relay.DomainRegistration `json:"domain"`
-		AdministrationCredential struct {
-			AuthorizationToken string `json:"authorizationToken"`
-		} `json:"administrationCredential"`
-		Member           relay.MemberRegistration `json:"member"`
-		MemberCredential struct {
-			AuthorizationToken string `json:"authorizationToken"`
-		} `json:"memberCredential"`
-	}
-	if err := json.NewDecoder(create.Body).Decode(&domain); err != nil {
-		t.Fatal(err)
-	}
-	_ = create.Body.Close()
-	retry := requestRelayJSON(
-		t, client, http.MethodPost, baseURL+"/v1/relay/domains", provisioning,
-		operatorToken, uuid.Nil,
-	)
-	requireStatusAndClose(t, retry, http.StatusOK)
+	domain := provisionLiveRelayDomain(t, client, baseURL, operatorToken)
 	basePath := fmt.Sprintf(
 		"%s/v1/relay/tenants/%s/domains/%s",
 		baseURL,
@@ -165,6 +139,12 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		domain.Domain.DomainID,
 	)
 	now := time.Now().UnixMilli()
+	recipientSubscriptionID := uuid.New()
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, basePath+"/subscriptions",
+		relay.SubscriptionCreateRequest{RetryID: uuid.New(), SubscriptionID: recipientSubscriptionID, CreatedAtMilliseconds: now},
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusCreated)
 	admissionToken := encodedBytes(64)
 	admissionCredential := relay.AdmissionCredential{
 		TenantID:    domain.Domain.TenantID,
@@ -182,6 +162,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		http.MethodPost,
 		basePath+"/admissions",
 		map[string]any{
+			"subscriptionID":      recipientSubscriptionID,
 			"admissionID":         admissionCredential.AdmissionID,
 			"authorizationDigest": admissionDigest,
 			"capabilities": []string{
@@ -220,7 +201,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 	)
 	requireStatus(t, claim, http.StatusCreated)
 	var recipient struct {
-		Member relay.MemberRegistration `json:"member"`
+		Member relay.SubscriptionMemberRegistration `json:"member"`
 	}
 	if err := json.NewDecoder(claim.Body).Decode(&recipient); err != nil {
 		t.Fatal(err)
@@ -256,7 +237,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		basePath+"/messages",
 		nil,
 		memberToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 	)
 	requireStatus(t, fetch, http.StatusOK)
 	var fetched struct {
@@ -279,7 +260,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 			publishURL+"/acknowledgments",
 			map[string]string{"stage": stage},
 			memberToken,
-			recipient.Member.MemberID,
+			recipient.Member.MemberRegistration.MemberID,
 		), http.StatusOK)
 	}
 	blobBytes := []byte("opaque-live-encrypted-blob")
@@ -301,7 +282,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		blobURL,
 		nil,
 		memberToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 		"bytes=7-10",
 	)
 	requireStatus(t, blobDownload, http.StatusPartialContent)
@@ -317,7 +298,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		t,
 		client,
 		http.MethodPost,
-		basePath+"/members/"+recipient.Member.MemberID.String()+"/revocation",
+		basePath+"/members/"+recipient.Member.MemberRegistration.MemberID.String()+"/revocation",
 		nil,
 		domain.AdministrationCredential.AuthorizationToken,
 		uuid.Nil,
@@ -329,7 +310,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 		basePath+"/messages",
 		nil,
 		memberToken,
-		recipient.Member.MemberID,
+		recipient.Member.MemberRegistration.MemberID,
 	), http.StatusForbidden)
 }
 
@@ -475,7 +456,10 @@ type liveRelayMemberCredential struct {
 }
 
 type liveRelayDomainProvisioningRequest struct {
+	Version                  int                               `json:"version"`
+	RetryID                  uuid.UUID                         `json:"retryID"`
 	AdministrationCredential liveRelayAdministrationCredential `json:"administrationCredential"`
+	SubscriptionID           uuid.UUID                         `json:"subscriptionID"`
 	MemberCredential         liveRelayMemberCredential         `json:"memberCredential"`
 	MemberCapabilities       []relay.Capability                `json:"memberCapabilities"`
 	CreatedAtMilliseconds    int64                             `json:"createdAtMilliseconds"`
@@ -487,6 +471,8 @@ func newLiveRelayDomainProvisioningRequest(
 	tenantID := uuid.New()
 	domainID := uuid.New()
 	return liveRelayDomainProvisioningRequest{
+		Version: relay.SchemaVersion,
+		RetryID: uuid.New(),
 		AdministrationCredential: liveRelayAdministrationCredential{
 			TenantID:           tenantID,
 			DomainID:           domainID,
@@ -498,6 +484,7 @@ func newLiveRelayDomainProvisioningRequest(
 			MemberID:           uuid.New(),
 			AuthorizationToken: encodedBytes(224),
 		},
+		SubscriptionID: uuid.New(),
 		MemberCapabilities: []relay.Capability{
 			relay.CapabilityFetchBlob,
 			relay.CapabilityPublishBlob,
@@ -508,4 +495,16 @@ func newLiveRelayDomainProvisioningRequest(
 		},
 		CreatedAtMilliseconds: createdAtMilliseconds,
 	}
+}
+
+type liveRelayTenantCredential struct {
+	TenantID           uuid.UUID `json:"tenantID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+type liveRelayTenantProvisioningRequest struct {
+	Version                      int                                `json:"version"`
+	RetryID                      uuid.UUID                          `json:"retryID"`
+	TenantProvisioningCredential liveRelayTenantCredential          `json:"tenantProvisioningCredential"`
+	InitialDomain                liveRelayDomainProvisioningRequest `json:"initialDomain"`
 }

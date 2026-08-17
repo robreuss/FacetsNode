@@ -30,26 +30,9 @@ func TestRelayAuthorityRotationAndAdmissionCollection(t *testing.T) {
 	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
 	handler := server.Handler()
 
-	createDomain := performRelayJSON(
-		t,
-		handler,
-		http.MethodPost,
-		"/v1/relay/domains",
-		newRelayDomainProvisioningRequest(nowMilliseconds, 40, 80),
-		operatorToken,
-		uuid.Nil,
+	created := provisionRelayTestAuthority(
+		t, handler, operatorToken, nowMilliseconds, 40, 80,
 	)
-	requireStatus(t, createDomain, http.StatusCreated)
-	var created struct {
-		Domain                   relay.DomainRegistration      `json:"domain"`
-		AdministrationCredential relayAdministrationCredential `json:"administrationCredential"`
-		Member                   relay.MemberRegistration      `json:"member"`
-		MemberCredential         relayMemberCredential         `json:"memberCredential"`
-	}
-	if err := json.NewDecoder(createDomain.Body).Decode(&created); err != nil {
-		t.Fatal(err)
-	}
-	_ = createDomain.Body.Close()
 	basePath := "/v1/relay/tenants/" + created.Domain.TenantID.String() +
 		"/domains/" + created.Domain.DomainID.String()
 
@@ -210,6 +193,7 @@ func TestRelayAuthorityRotationAndAdmissionCollection(t *testing.T) {
 		http.MethodPost,
 		basePath+"/admissions",
 		map[string]any{
+			"subscriptionID":        created.SubscriptionID,
 			"admissionID":           admissionCredential.AdmissionID,
 			"authorizationDigest":   admissionDigest,
 			"capabilities":          []string{string(relay.CapabilityFetchMessage)},

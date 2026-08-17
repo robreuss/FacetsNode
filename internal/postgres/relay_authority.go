@@ -49,7 +49,7 @@ func (s *RelayStore) RotateAdministrationCredential(
 		)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, _, _, _, _, err := loadRelayDomain(
+	domain, _, _, _, _, _, err := loadRelayDomain(
 		ctx, transaction, credential.TenantID, credential.DomainID, "FOR UPDATE",
 	)
 	if err != nil {
@@ -196,7 +196,7 @@ func (s *RelayStore) RotateMemberCredential(
 		)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	if _, _, _, _, _, err := loadRelayDomain(
+	if _, _, _, _, _, _, err := loadRelayDomain(
 		ctx,
 		transaction,
 		credential.TenantID,
@@ -346,7 +346,7 @@ func (s *RelayStore) CollectAdmissions(
 		)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
-	domain, _, _, _, _, err := loadRelayDomain(
+	domain, _, _, _, _, _, err := loadRelayDomain(
 		ctx, transaction, credential.TenantID, credential.DomainID, "FOR UPDATE",
 	)
 	if err != nil {

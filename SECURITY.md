@@ -7,10 +7,10 @@ through the repository hosting account.
 
 The Node is an opaque transport, not a key server. Clients encrypt replica
 messages with a separate domain content key. The operator, domain
-administration, member-admission, and member bearer credentials authorize
-routing operations but must never be reused as content-encryption keys. The
-Node stores only their domain-separated digests and cannot recover the content
-key from them.
+tenant provisioning, domain administration, member admission, and member
+bearer credentials authorize distinct routing operations and must never be
+reused as content-encryption keys. The Node stores only their domain-separated
+digests and cannot recover the content key from them.
 Relay blob IDs are hashes of encrypted bytes, so clients must use randomized,
 domain-bound authenticated encryption and must not reuse identical blob
 ciphertext across domains; domain-scoped storage does not hide identical IDs
@@ -22,7 +22,7 @@ Supported production deployments must:
   public certificate, and keep the plaintext Node port private;
 - expose only `/v1/pairing/*` and authenticated `/v1/relay/tenants/*` through
   public application ingress; keep `/livez`, `/readyz`, `/metrics`, operator
-  `POST /v1/relay/domains`, and future operator routes on a loopback or private
+  `POST /v1/relay/tenants`, and future operator routes on a loopback or private
   management network;
 - use a unique PostgreSQL role and a database unavailable from the public net;
 - store database credentials in an operator-managed secret, not an image;
@@ -30,9 +30,9 @@ Supported production deployments must:
   and the Docker build context;
 - isolate and rotate the operator provisioning credential, and do not expose
   the provisioning route through public application ingress;
-- treat current domain-to-domain delegation as tenant-wide routing authority:
-  any domain-administration token can create another domain under that opaque
-  tenant ID, so issue and store it as a high-value control-plane secret;
+- keep each tenant-provisioning credential private and independent: it creates
+  additional domains and can rotate, while domain-administration credentials
+  cannot expand tenant scope;
 - deliver newly issued domain-administration and member credentials exactly
   once into an approved client secret store;
 - rotate a domain-administration or member credential by generating its
@@ -55,8 +55,8 @@ Supported production deployments must:
 
 The pairing, member-admission, replica-message, and encrypted-blob APIs are
 security checkpoints, not a production hosted-service declaration. The message
-relay has per-domain message, stored-ciphertext, member, admission, and
-credential-rotation bounds. Blob upload verifies the declared length and SHA-256 content
+relay has separate tenant/domain message/blob count and byte ceilings plus
+member, admission, and credential-rotation bounds. Blob upload verifies the declared length and SHA-256 content
 address before an atomic filesystem commit, but failed post-write metadata
 commits can leave unreferenced files until orphan collection is implemented.
 An administrator can collect terminal admissions only after their 30-day

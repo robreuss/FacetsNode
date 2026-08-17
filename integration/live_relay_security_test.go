@@ -14,11 +14,11 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
-// TestLiveRelayDelegationAndDurableWakeFallback crosses the HTTP and real
+// TestLiveRelayTenantProvisioningAndDurableWakeFallback crosses the HTTP and real
 // PostgreSQL boundaries. The message is published before the wake request, so
 // no process-local signal can wake the subscriber; the endpoint must discover
 // the durable message through its authoritative cursor check.
-func TestLiveRelayDelegationAndDurableWakeFallback(t *testing.T) {
+func TestLiveRelayTenantProvisioningAndDurableWakeFallback(t *testing.T) {
 	baseURL := strings.TrimRight(os.Getenv("FACETS_NODE_TEST_BASE_URL"), "/")
 	operatorToken := os.Getenv("FACETS_NODE_TEST_OPERATOR_TOKEN")
 	if baseURL == "" || operatorToken == "" {
@@ -26,45 +26,45 @@ func TestLiveRelayDelegationAndDurableWakeFallback(t *testing.T) {
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	parent := provisionLiveRelayDomain(t, client, baseURL, operatorToken)
-	parentPath := fmt.Sprintf(
-		"%s/v1/relay/tenants/%s/domains/%s",
-		baseURL,
-		parent.Domain.TenantID,
-		parent.Domain.DomainID,
-	)
-
 	childRequest := newLiveRelayDomainProvisioningRequest(time.Now().UnixMilli())
 	childRequest.AdministrationCredential.TenantID = parent.Domain.TenantID
 	childRequest.AdministrationCredential.AuthorizationToken = encodedBytes(33)
 	childRequest.MemberCredential.TenantID = parent.Domain.TenantID
 	childRequest.MemberCredential.AuthorizationToken = encodedBytes(65)
-	delegatedURL := parentPath + "/delegated-domains"
-	delegated := requestRelayJSON(
+	domainProvisioningURL := fmt.Sprintf("%s/v1/relay/tenants/%s/domains", baseURL, parent.Domain.TenantID)
+	created := requestRelayJSON(
 		t,
 		client,
 		http.MethodPost,
-		delegatedURL,
+		domainProvisioningURL,
 		childRequest,
-		parent.AdministrationCredential.AuthorizationToken,
+		parent.TenantCredential.AuthorizationToken,
 		uuid.Nil,
 	)
-	requireStatus(t, delegated, http.StatusCreated)
-	var child liveRelayDomain
-	if err := json.NewDecoder(delegated.Body).Decode(&child); err != nil {
+	requireStatus(t, created, http.StatusCreated)
+	var result relay.DomainProvisioningResult
+	if err := json.NewDecoder(created.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	_ = delegated.Body.Close()
-	if child.Domain.TenantID != parent.Domain.TenantID ||
-		child.Domain.DomainID != childRequest.AdministrationCredential.DomainID {
-		t.Fatalf("delegated domain scope=%s/%s", child.Domain.TenantID, child.Domain.DomainID)
+	_ = created.Body.Close()
+	child := liveRelayDomain{
+		Domain:           relay.DomainRegistration{TenantID: parent.Domain.TenantID, DomainID: childRequest.AdministrationCredential.DomainID},
+		SubscriptionID:   childRequest.SubscriptionID,
+		Member:           relay.MemberRegistration{TenantID: parent.Domain.TenantID, DomainID: childRequest.AdministrationCredential.DomainID, MemberID: childRequest.MemberCredential.MemberID},
+		TenantCredential: parent.TenantCredential,
+	}
+	child.AdministrationCredential.AuthorizationToken = childRequest.AdministrationCredential.AuthorizationToken
+	child.MemberCredential.AuthorizationToken = childRequest.MemberCredential.AuthorizationToken
+	if result.TenantID != parent.Domain.TenantID || result.DomainID != child.Domain.DomainID {
+		t.Fatalf("provisioned domain scope=%s/%s", result.TenantID, result.DomainID)
 	}
 	requireStatusAndClose(t, requestRelayJSON(
 		t,
 		client,
 		http.MethodPost,
-		delegatedURL,
+		domainProvisioningURL,
 		childRequest,
-		parent.AdministrationCredential.AuthorizationToken,
+		parent.TenantCredential.AuthorizationToken,
 		uuid.Nil,
 	), http.StatusOK)
 

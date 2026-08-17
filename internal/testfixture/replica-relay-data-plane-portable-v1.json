@@ -1,0 +1,325 @@
+{
+  "format": "facets.replica-relay-data-plane-fixture.v1",
+  "warning": "TEST FIXTURE ONLY. Bearer secrets must never be used outside interoperability tests.",
+  "tenantCredential": {
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "authorizationToken": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  },
+  "expectedTenantAuthorizationDigest": "bf227afcb605dc533dc69193eb7d9c829ffe90a6dabf48f399ef03ee698b8dac",
+  "tenantProvisioningRequest": {
+    "version": 1,
+    "retryID": "55555555-5555-4555-8555-555555555555",
+    "tenantProvisioningCredential": {
+      "tenantID": "11111111-1111-4111-8111-111111111111",
+      "authorizationToken": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+    },
+    "initialDomain": {
+      "version": 1,
+      "retryID": "66666666-6666-4666-8666-666666666666",
+      "administrationCredential": {
+        "tenantID": "11111111-1111-4111-8111-111111111111",
+        "domainID": "22222222-2222-4222-8222-222222222222",
+        "authorizationToken": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8"
+      },
+      "subscriptionID": "33333333-3333-4333-8333-333333333333",
+      "memberCredential": {
+        "tenantID": "11111111-1111-4111-8111-111111111111",
+        "domainID": "22222222-2222-4222-8222-222222222222",
+        "memberID": "44444444-4444-4444-8444-444444444444",
+        "authorizationToken": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8"
+      },
+      "memberCapabilities": [
+        "blob_fetch",
+        "message_acknowledge",
+        "message_fetch"
+      ],
+      "createdAtMilliseconds": 1710000000000
+    }
+  },
+  "tenantProvisioningResponse": {
+    "acceptance": "accepted",
+    "retryID": "55555555-5555-4555-8555-555555555555",
+    "tenantProvisioningAuthorizationDigest": "bf227afcb605dc533dc69193eb7d9c829ffe90a6dabf48f399ef03ee698b8dac",
+    "initialDomain": {
+      "acceptance": "accepted",
+      "retryID": "66666666-6666-4666-8666-666666666666",
+      "tenantID": "11111111-1111-4111-8111-111111111111",
+      "domainID": "22222222-2222-4222-8222-222222222222",
+      "subscriptionID": "33333333-3333-4333-8333-333333333333",
+      "memberID": "44444444-4444-4444-8444-444444444444",
+      "administrationAuthorizationDigest": "e79447c4cdbbb1f2bbcf943430c465c2ce28773f66e8b2020f891a0e0a46a387",
+      "memberAuthorizationDigest": "59dfc59254e26a1bb83a47ee06291a2176157cce1eef91a81675306d4c5df92e"
+    }
+  },
+  "admissionCreateResponse": {
+    "acceptance": "accepted",
+    "admission": {
+      "subscriptionID": "33333333-3333-4333-8333-333333333333",
+      "admission": {
+        "version": 1,
+        "tenantID": "11111111-1111-4111-8111-111111111111",
+        "domainID": "22222222-2222-4222-8222-222222222222",
+        "admissionID": "77777777-7777-4777-8777-777777777777",
+        "authorizationDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "capabilities": [
+          "message_acknowledge",
+          "message_fetch"
+        ],
+        "createdAtMilliseconds": 1710000000000,
+        "expiresAtMilliseconds": 1710003600000
+      }
+    }
+  },
+  "admissionClaimResponse": {
+    "acceptance": "accepted",
+    "member": {
+      "subscriptionID": "33333333-3333-4333-8333-333333333333",
+      "memberRegistration": {
+        "version": 1,
+        "tenantID": "11111111-1111-4111-8111-111111111111",
+        "domainID": "22222222-2222-4222-8222-222222222222",
+        "memberID": "44444444-4444-4444-8444-444444444444",
+        "authorizationDigest": "59dfc59254e26a1bb83a47ee06291a2176157cce1eef91a81675306d4c5df92e",
+        "capabilities": [
+          "message_acknowledge",
+          "message_fetch"
+        ],
+        "createdAtMilliseconds": 1710000000000
+      }
+    }
+  },
+  "subscriptionStatuses": [
+    "active",
+    "rebootstrap_required",
+    "revoked"
+  ],
+  "rotationRequest": {
+    "version": 1,
+    "rotationID": "77777777-7777-4777-8777-777777777777",
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "replacementAuthorizationDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "rotatedAtMilliseconds": 1710000001000
+  },
+  "rotationResponse": {
+    "acceptance": "accepted",
+    "rotationID": "77777777-7777-4777-8777-777777777777",
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "authorizationDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "rotatedAtMilliseconds": 1710000001000
+  },
+  "subscription": {
+    "version": 1,
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "domainID": "22222222-2222-4222-8222-222222222222",
+    "subscriptionID": "33333333-3333-4333-8333-333333333333",
+    "status": "rebootstrap_required",
+    "startCursor": "opaque-checkpoint-cursor-v1",
+    "createdAtMilliseconds": 1710000000000,
+    "updatedAtMilliseconds": 1710000008000
+  },
+  "subscriptionCreateRequest": {
+    "retryID": "15151515-1515-4515-8515-151515151515",
+    "subscriptionID": "16161616-1616-4616-8616-161616161616",
+    "createdAtMilliseconds": 1710000007500
+  },
+  "subscriptionCreateResponse": {
+    "acceptance": "accepted",
+    "retryID": "15151515-1515-4515-8515-151515151515",
+    "subscription": {
+      "version": 1,
+      "tenantID": "11111111-1111-4111-8111-111111111111",
+      "domainID": "22222222-2222-4222-8222-222222222222",
+      "subscriptionID": "16161616-1616-4616-8616-161616161616",
+      "status": "active",
+      "startCursor": "opaque-position-before-bootstrap-v1",
+      "createdAtMilliseconds": 1710000007500,
+      "updatedAtMilliseconds": 1710000007500
+    }
+  },
+  "subscriptionStatusChangeRequest": {
+    "retryID": "13131313-1313-4313-8313-131313131313",
+    "status": "rebootstrap_required",
+    "changedAtMilliseconds": 1710000008000
+  },
+  "subscriptionStatusChangeResponse": {
+    "acceptance": "accepted",
+    "retryID": "13131313-1313-4313-8313-131313131313",
+    "subscription": {
+      "version": 1,
+      "tenantID": "11111111-1111-4111-8111-111111111111",
+      "domainID": "22222222-2222-4222-8222-222222222222",
+      "subscriptionID": "33333333-3333-4333-8333-333333333333",
+      "status": "rebootstrap_required",
+      "startCursor": "opaque-checkpoint-cursor-v1",
+      "createdAtMilliseconds": 1710000000000,
+      "updatedAtMilliseconds": 1710000008000
+    }
+  },
+  "checkpointCandidate": {
+    "version": 1,
+    "retryID": "88888888-8888-4888-8888-888888888888",
+    "checkpointID": "99999999-9999-4999-8999-999999999999",
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "domainID": "22222222-2222-4222-8222-222222222222",
+    "publisherSubscriptionID": "33333333-3333-4333-8333-333333333333",
+    "coveredThroughCursor": "opaque-checkpoint-cursor-v1",
+    "retainedMessageIDs": [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    ],
+    "retainedBlobIDs": [
+      "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8"
+    ],
+    "createdAtMilliseconds": 1710000002000
+  },
+  "activationRequest": {
+    "retryID": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "checkpointID": "99999999-9999-4999-8999-999999999999",
+    "activatedAtMilliseconds": 1710000003000
+  },
+  "checkpointStageResponse": {
+    "acceptance": "accepted",
+    "retryID": "88888888-8888-4888-8888-888888888888",
+    "checkpointID": "99999999-9999-4999-8999-999999999999"
+  },
+  "checkpointActivationResponse": {
+    "acceptance": "accepted",
+    "retryID": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "checkpointID": "99999999-9999-4999-8999-999999999999",
+    "activatedAtMilliseconds": 1710000003000,
+    "startCursor": "opaque-position-before-bootstrap-v1"
+  },
+  "dryRunResponse": {
+    "checkpointID": "99999999-9999-4999-8999-999999999999",
+    "eligible": true,
+    "messageCount": 12,
+    "messageByteCount": 4096,
+    "blobCount": 2,
+    "blobByteCount": 8192,
+    "missingCustodySubscriptionIDs": [],
+    "planDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "collectionRequest": {
+    "retryID": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "checkpointID": "99999999-9999-4999-8999-999999999999",
+    "planDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "maximumMessageCount": 12,
+    "maximumBlobCount": 2,
+    "requestedAtMilliseconds": 1710000004000
+  },
+  "collectionResponse": {
+    "duplicate": false,
+    "retryID": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "checkpointID": "99999999-9999-4999-8999-999999999999",
+    "planDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "deletedMessageCount": 12,
+    "deletedMessageByteCount": 4096,
+    "deletedBlobCount": 2,
+    "deletedBlobByteCount": 8192,
+    "completed": true
+  },
+  "domainStatus": {
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "domainID": "22222222-2222-4222-8222-222222222222",
+    "messageCount": 25,
+    "messageByteCount": 16384,
+    "blobCount": 4,
+    "blobByteCount": 32768,
+    "reservedBlobCount": 2,
+    "reservedBlobByteCount": 12288,
+    "activeSubscriptionCount": 3,
+    "oldestUncollectedCursor": "opaque-position-before-oldest-uncollected-v1",
+    "latestActivatedCheckpointID": "99999999-9999-4999-8999-999999999999",
+    "quota": {
+      "maximumMessageCount": 1000000,
+      "maximumMessageByteCount": 1073741824,
+      "maximumBlobCount": 100000,
+      "maximumBlobByteCount": 10737418240
+    }
+  },
+  "tenantStatus": {
+    "tenantID": "11111111-1111-4111-8111-111111111111",
+    "domainCount": 2,
+    "aggregateMessageCount": 50,
+    "aggregateMessageByteCount": 32768,
+    "aggregateBlobCount": 8,
+    "aggregateBlobByteCount": 65536,
+    "reservedBlobCount": 3,
+    "reservedBlobByteCount": 16384,
+    "quota": {
+      "maximumDomainCount": 100,
+      "maximumAggregateMessageCount": 10000000,
+      "maximumAggregateMessageByteCount": 10737418240,
+      "maximumAggregateBlobCount": 1000000,
+      "maximumAggregateBlobByteCount": 107374182400
+    }
+  },
+  "uploadRequest": {
+    "retryID": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "uploadID": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "relayBlobID": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8",
+    "byteCount": 8192,
+    "createdAtMilliseconds": 1710000005000
+  },
+  "uploadChunkRequest": {
+    "uploadID": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "offset": 4096,
+    "byteCount": 4096,
+    "chunkSHA256": "6c87f68371b28954707ebb92afee7ccffb74c6f71ec8fea8a98cf6104289585b"
+  },
+  "uploadStatus": {
+    "uploadID": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "relayBlobID": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8",
+    "byteCount": 8192,
+    "committedOffset": 4096,
+    "finalized": false,
+    "createdAtMilliseconds": 1710000005000,
+    "updatedAtMilliseconds": 1710000006000
+  },
+  "uploadCreateResponse": {
+    "acceptance": "accepted",
+    "retryID": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    "status": {
+      "uploadID": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "relayBlobID": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8",
+      "byteCount": 8192,
+      "committedOffset": 0,
+      "finalized": false,
+      "createdAtMilliseconds": 1710000005000,
+      "updatedAtMilliseconds": 1710000005000
+    }
+  },
+  "fullUnfinalizedUploadStatus": {
+    "uploadID": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "relayBlobID": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8",
+    "byteCount": 8192,
+    "committedOffset": 8192,
+    "finalized": false,
+    "createdAtMilliseconds": 1710000005000,
+    "updatedAtMilliseconds": 1710000006500
+  },
+  "zeroByteUnfinalizedUploadStatus": {
+    "uploadID": "14141414-1414-4414-8414-141414141414",
+    "relayBlobID": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "byteCount": 0,
+    "committedOffset": 0,
+    "finalized": false,
+    "createdAtMilliseconds": 1710000005000,
+    "updatedAtMilliseconds": 1710000005000
+  },
+  "uploadFinalizationRequest": {
+    "retryID": "12121212-1212-4212-8212-121212121212",
+    "uploadID": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "relayBlobID": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8",
+    "byteCount": 8192,
+    "finalizedAtMilliseconds": 1710000007000
+  },
+  "uploadFinalizationResponse": {
+    "acceptance": "accepted",
+    "retryID": "12121212-1212-4212-8212-121212121212",
+    "uploadID": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    "relayBlobID": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8",
+    "byteCount": 8192
+  }
+}

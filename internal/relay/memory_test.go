@@ -12,7 +12,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
-func TestMemoryStoreDeliversOncePerDomainWithPerMemberFacts(t *testing.T) {
+func TestMemoryStoreDeliversOncePerDomainWithPerSubscriptionFacts(t *testing.T) {
 	ctx := context.Background()
 	fixture, err := testfixture.LoadRelayCarrier()
 	if err != nil {
@@ -28,14 +28,15 @@ func TestMemoryStoreDeliversOncePerDomainWithPerMemberFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	domain := relay.DomainRegistration{
-		Version:                relay.SchemaVersion,
-		TenantID:               admin.TenantID,
-		DomainID:               admin.DomainID,
-		AdministrationDigest:   adminDigest,
-		CreatedAtMilliseconds:  1_000,
-		MaximumMessageCount:    10,
-		MaximumBlobCount:       10,
-		MaximumStoredByteCount: 2_048,
+		Version:                 relay.SchemaVersion,
+		TenantID:                admin.TenantID,
+		DomainID:                admin.DomainID,
+		AdministrationDigest:    adminDigest,
+		CreatedAtMilliseconds:   1_000,
+		MaximumMessageCount:     10,
+		MaximumBlobCount:        10,
+		MaximumMessageByteCount: 2_048,
+		MaximumBlobByteCount:    2_048,
 	}
 	store := relay.NewMemoryStore()
 	acceptance, err := store.CreateDomain(ctx, domain, fixture.PublisherRegistration)
@@ -173,14 +174,15 @@ func TestMemoryStoreRejectsScopeCapabilityAndMessageCollisions(t *testing.T) {
 	digest, _ := relay.AdministrationDigest(admin)
 	store := relay.NewMemoryStore()
 	_, err = store.CreateDomain(ctx, relay.DomainRegistration{
-		Version:                relay.SchemaVersion,
-		TenantID:               admin.TenantID,
-		DomainID:               admin.DomainID,
-		AdministrationDigest:   digest,
-		CreatedAtMilliseconds:  1_000,
-		MaximumMessageCount:    10,
-		MaximumBlobCount:       10,
-		MaximumStoredByteCount: 2_048,
+		Version:                 relay.SchemaVersion,
+		TenantID:                admin.TenantID,
+		DomainID:                admin.DomainID,
+		AdministrationDigest:    digest,
+		CreatedAtMilliseconds:   1_000,
+		MaximumMessageCount:     10,
+		MaximumBlobCount:        10,
+		MaximumMessageByteCount: 2_048,
+		MaximumBlobByteCount:    2_048,
 	}, fixture.PublisherRegistration)
 	if err != nil {
 		t.Fatal(err)
@@ -304,14 +306,15 @@ func TestMemoryStoreEnforcesStoredByteQuotaWithoutChargingRetries(t *testing.T) 
 	}
 	store := relay.NewMemoryStore()
 	_, err = store.CreateDomain(ctx, relay.DomainRegistration{
-		Version:                relay.SchemaVersion,
-		TenantID:               admin.TenantID,
-		DomainID:               admin.DomainID,
-		AdministrationDigest:   adminDigest,
-		CreatedAtMilliseconds:  1_000,
-		MaximumMessageCount:    10,
-		MaximumBlobCount:       10,
-		MaximumStoredByteCount: ciphertextByteCount,
+		Version:                 relay.SchemaVersion,
+		TenantID:                admin.TenantID,
+		DomainID:                admin.DomainID,
+		AdministrationDigest:    adminDigest,
+		CreatedAtMilliseconds:   1_000,
+		MaximumMessageCount:     10,
+		MaximumBlobCount:        10,
+		MaximumMessageByteCount: ciphertextByteCount,
+		MaximumBlobByteCount:    ciphertextByteCount,
 	}, fixture.PublisherRegistration)
 	if err != nil {
 		t.Fatal(err)
@@ -357,14 +360,15 @@ func TestMemoryStoreAuthorizesAndAccountsForOpaqueBlobs(t *testing.T) {
 	}
 	store := relay.NewMemoryStore()
 	_, err = store.CreateDomain(ctx, relay.DomainRegistration{
-		Version:                relay.SchemaVersion,
-		TenantID:               tenantID,
-		DomainID:               domainID,
-		AdministrationDigest:   adminDigest,
-		CreatedAtMilliseconds:  1_000,
-		MaximumMessageCount:    1,
-		MaximumBlobCount:       1,
-		MaximumStoredByteCount: 4,
+		Version:                 relay.SchemaVersion,
+		TenantID:                tenantID,
+		DomainID:                domainID,
+		AdministrationDigest:    adminDigest,
+		CreatedAtMilliseconds:   1_000,
+		MaximumMessageCount:     1,
+		MaximumBlobCount:        1,
+		MaximumMessageByteCount: 4,
+		MaximumBlobByteCount:    4,
 	}, relay.MemberRegistration{
 		Version:               relay.SchemaVersion,
 		TenantID:              tenantID,
@@ -485,14 +489,15 @@ func TestMemoryStoreClaimsAdmissionOnceAndRevokesBeforeClaim(t *testing.T) {
 	}
 	store := relay.NewMemoryStore()
 	if _, err := store.CreateDomain(ctx, relay.DomainRegistration{
-		Version:                relay.SchemaVersion,
-		TenantID:               tenantID,
-		DomainID:               domainID,
-		AdministrationDigest:   adminDigest,
-		CreatedAtMilliseconds:  1_000,
-		MaximumMessageCount:    10,
-		MaximumBlobCount:       10,
-		MaximumStoredByteCount: 1_024,
+		Version:                 relay.SchemaVersion,
+		TenantID:                tenantID,
+		DomainID:                domainID,
+		AdministrationDigest:    adminDigest,
+		CreatedAtMilliseconds:   1_000,
+		MaximumMessageCount:     10,
+		MaximumBlobCount:        10,
+		MaximumMessageByteCount: 1_024,
+		MaximumBlobByteCount:    1_024,
 	}, relay.MemberRegistration{
 		Version:               relay.SchemaVersion,
 		TenantID:              tenantID,
@@ -678,14 +683,15 @@ func TestMemoryStoreRotatesCredentialsWithoutChangingAuthority(t *testing.T) {
 	}
 	store := relay.NewMemoryStore()
 	if _, err := store.CreateDomain(ctx, relay.DomainRegistration{
-		Version:                relay.SchemaVersion,
-		TenantID:               tenantID,
-		DomainID:               domainID,
-		AdministrationDigest:   adminDigest,
-		CreatedAtMilliseconds:  1_000,
-		MaximumMessageCount:    10,
-		MaximumBlobCount:       10,
-		MaximumStoredByteCount: 1_024,
+		Version:                 relay.SchemaVersion,
+		TenantID:                tenantID,
+		DomainID:                domainID,
+		AdministrationDigest:    adminDigest,
+		CreatedAtMilliseconds:   1_000,
+		MaximumMessageCount:     10,
+		MaximumBlobCount:        10,
+		MaximumMessageByteCount: 1_024,
+		MaximumBlobByteCount:    1_024,
 	}, relay.MemberRegistration{
 		Version:               relay.SchemaVersion,
 		TenantID:              tenantID,
@@ -803,14 +809,15 @@ func TestMemoryStoreBoundsActiveMembersAndOutstandingAdmissions(t *testing.T) {
 	}
 	store := relay.NewMemoryStore()
 	if _, err := store.CreateDomain(ctx, relay.DomainRegistration{
-		Version:                relay.SchemaVersion,
-		TenantID:               tenantID,
-		DomainID:               domainID,
-		AdministrationDigest:   adminDigest,
-		CreatedAtMilliseconds:  1_000,
-		MaximumMessageCount:    10,
-		MaximumBlobCount:       10,
-		MaximumStoredByteCount: 1_024,
+		Version:                 relay.SchemaVersion,
+		TenantID:                tenantID,
+		DomainID:                domainID,
+		AdministrationDigest:    adminDigest,
+		CreatedAtMilliseconds:   1_000,
+		MaximumMessageCount:     10,
+		MaximumBlobCount:        10,
+		MaximumMessageByteCount: 1_024,
+		MaximumBlobByteCount:    1_024,
 	}, relay.MemberRegistration{
 		Version:               relay.SchemaVersion,
 		TenantID:              tenantID,
@@ -912,6 +919,121 @@ func TestMemoryStoreBoundsActiveMembersAndOutstandingAdmissions(t *testing.T) {
 	}
 	if _, err := store.CreateAdmission(ctx, admin, overflowAdmission, 2_100); err != nil {
 		t.Fatalf("admission slot was not released after revocation: %v", err)
+	}
+}
+
+func TestMemoryStoreSharesDeliveryAndAcknowledgmentFactsAcrossSubscriptionAgents(t *testing.T) {
+	ctx := context.Background()
+	fixture, err := testfixture.LoadRelayCarrier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := relay.AdministrationCredential{
+		TenantID: fixture.Envelope.TenantID,
+		DomainID: fixture.Envelope.DomainID,
+		Token:    token(210),
+	}
+	adminDigest, err := relay.AdministrationDigest(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := relay.NewMemoryStore()
+	_, err = store.CreateDomain(ctx, relay.DomainRegistration{
+		Version: relay.SchemaVersion, TenantID: admin.TenantID, DomainID: admin.DomainID,
+		AdministrationDigest: adminDigest, CreatedAtMilliseconds: 1_000,
+		MaximumMessageCount: 10, MaximumMessageByteCount: 2_048,
+		MaximumBlobCount: 10, MaximumBlobByteCount: 2_048,
+	}, fixture.PublisherRegistration)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recipientSubscriptionID := uuid.New()
+	createRequest := relay.SubscriptionCreateRequest{
+		RetryID: uuid.New(), SubscriptionID: recipientSubscriptionID,
+		CreatedAtMilliseconds: 1_100,
+	}
+	created, err := store.CreateSubscription(ctx, admin, createRequest)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted ||
+		created.Subscription.Status != relay.SubscriptionActive {
+		t.Fatalf("create subscription=%+v err=%v", created, err)
+	}
+	retry, err := store.CreateSubscription(ctx, admin, createRequest)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate || retry.Subscription != created.Subscription {
+		t.Fatalf("subscription retry=%+v err=%v", retry, err)
+	}
+	collision := createRequest
+	collision.SubscriptionID = uuid.New()
+	if _, err := store.CreateSubscription(ctx, admin, collision); !relay.ErrorHasCode(err, relay.CodeSubscriptionCollision) {
+		t.Fatalf("subscription retry collision err=%v", err)
+	}
+
+	newAgent := func(seed byte, subscriptionID uuid.UUID) (relay.Credential, relay.MemberRegistration) {
+		credential := relay.Credential{
+			TenantID: admin.TenantID, DomainID: admin.DomainID,
+			MemberID: uuid.New(), Token: token(seed),
+		}
+		digest, digestErr := relay.AuthorizationDigest(credential)
+		if digestErr != nil {
+			t.Fatal(digestErr)
+		}
+		registration := relay.MemberRegistration{
+			Version: relay.SchemaVersion, TenantID: admin.TenantID, DomainID: admin.DomainID,
+			MemberID: credential.MemberID, AuthorizationDigest: digest,
+			Capabilities:          []relay.Capability{relay.CapabilityAcknowledgeMessage, relay.CapabilityFetchMessage},
+			CreatedAtMilliseconds: 1_200,
+		}
+		if acceptance, createErr := store.CreateSubscriptionMember(ctx, admin, subscriptionID, registration, 1_200); createErr != nil || acceptance != relay.AcceptanceAccepted {
+			t.Fatalf("create agent acceptance=%q err=%v", acceptance, createErr)
+		}
+		return credential, registration
+	}
+	agentA, agentARegistration := newAgent(211, recipientSubscriptionID)
+	agentB, _ := newAgent(212, recipientSubscriptionID)
+	publisherAgent, _ := newAgent(213, fixture.PublisherRegistration.MemberID)
+
+	published, err := store.Publish(ctx, fixture.PublisherAccess.Credential(), fixture.Envelope, 1_300)
+	if err != nil || published.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("publish=%+v err=%v", published, err)
+	}
+	for name, credential := range map[string]relay.Credential{"agent A": agentA, "agent B": agentB} {
+		fetched, fetchErr := store.Fetch(ctx, credential, 0, 10, 1_300)
+		if fetchErr != nil || len(fetched.Messages) != 1 {
+			t.Fatalf("%s fetch=%+v err=%v", name, fetched, fetchErr)
+		}
+	}
+	if fetched, fetchErr := store.Fetch(ctx, publisherAgent, 0, 10, 1_300); fetchErr != nil || len(fetched.Messages) != 0 {
+		t.Fatalf("same-subscription publisher agent fetch=%+v err=%v", fetched, fetchErr)
+	}
+	accepted, err := store.Acknowledge(ctx, agentA, fixture.Envelope.MessageID, relay.AcknowledgmentAccepted, 1_300)
+	if err != nil || accepted.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("accepted=%+v err=%v", accepted, err)
+	}
+	applied, err := store.Acknowledge(ctx, agentB, fixture.Envelope.MessageID, relay.AcknowledgmentApplied, 1_301)
+	if err != nil || applied.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("cross-agent applied=%+v err=%v", applied, err)
+	}
+	if _, err := store.RevokeMember(ctx, admin, agentARegistration.MemberID, 1_400); err != nil {
+		t.Fatal(err)
+	}
+	if fetched, fetchErr := store.Fetch(ctx, agentB, 0, 10, 1_400); fetchErr != nil || len(fetched.Messages) != 1 {
+		t.Fatalf("remaining subscription agent fetch=%+v err=%v", fetched, fetchErr)
+	}
+
+	statusRequest := relay.SubscriptionStatusChangeRequest{
+		RetryID: uuid.New(), Status: relay.SubscriptionRebootstrapRequired,
+		ChangedAtMilliseconds: 1_500,
+	}
+	changed, err := store.ChangeSubscriptionStatus(ctx, admin, recipientSubscriptionID, statusRequest)
+	if err != nil || changed.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("status change=%+v err=%v", changed, err)
+	}
+	statusRetry, err := store.ChangeSubscriptionStatus(ctx, admin, recipientSubscriptionID, statusRequest)
+	if err != nil || statusRetry.Acceptance != relay.AcceptanceDuplicate || statusRetry.Subscription != changed.Subscription {
+		t.Fatalf("status retry=%+v err=%v", statusRetry, err)
+	}
+	if _, err := store.Fetch(ctx, agentB, 0, 10, 1_500); !relay.ErrorHasCode(err, relay.CodeInvalidSubscription) {
+		t.Fatalf("inactive subscription fetch err=%v", err)
 	}
 }
 

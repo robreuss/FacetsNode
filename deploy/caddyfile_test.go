@@ -23,7 +23,7 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 		}
 	}
 	for _, requestPath := range []string{
-		"/v1/relay/domains",
+		"/v1/relay/tenants",
 		"/livez",
 		"/readyz",
 		"/metrics",

@@ -1,0 +1,12 @@
+{
+  "format": "facets.replica-relay-data-plane-contract-lock.v1",
+  "facetsInputCommit": "f4b860b08020261722a5379a1ea04a906ff5802c",
+  "fixture": "replica-relay-data-plane-portable-v1.json",
+  "fixtureSHA256": "d81b42bc95b1e7adda3ef2ff6c5dbaa471512787481c9fe8b42a563e4b07293f",
+  "hashSemantics": {
+    "algorithm": "SHA-256",
+    "input": "exact fixture file bytes including UTF-8 whitespace and final newline",
+    "encoding": "lowercase hexadecimal"
+  },
+  "relayEnvelopeSchemaVersion": 1
+}

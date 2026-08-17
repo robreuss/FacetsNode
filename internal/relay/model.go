@@ -24,8 +24,10 @@ const (
 	AbsoluteMaximumMessageCount          = 1_000_000
 	DefaultMaximumBlobCount              = 10_000
 	AbsoluteMaximumBlobCount             = 1_000_000
-	DefaultMaximumStoredByteCount        = int64(1 * 1_024 * 1_024 * 1_024)
-	AbsoluteMaximumStoredByteCount       = int64(1 * 1_024 * 1_024 * 1_024 * 1_024)
+	DefaultMaximumMessageByteCount       = int64(1 * 1_024 * 1_024 * 1_024)
+	DefaultMaximumBlobByteCount          = int64(1 * 1_024 * 1_024 * 1_024)
+	AbsoluteMaximumMessageByteCount      = int64(1 * 1_024 * 1_024 * 1_024 * 1_024)
+	AbsoluteMaximumBlobByteCount         = int64(1 * 1_024 * 1_024 * 1_024 * 1_024)
 	MaximumAdmissionLifetimeMilliseconds = int64(7 * 24 * 60 * 60 * 1_000)
 	MaximumActiveMemberCountPerDomain    = 256
 	MaximumRetainedMemberCountPerDomain  = 4_096
@@ -120,14 +122,15 @@ type AdmissionCredential struct {
 }
 
 type DomainRegistration struct {
-	Version                int       `json:"version"`
-	TenantID               uuid.UUID `json:"tenantID"`
-	DomainID               uuid.UUID `json:"domainID"`
-	AdministrationDigest   string    `json:"administrationDigest"`
-	CreatedAtMilliseconds  int64     `json:"createdAtMilliseconds"`
-	MaximumMessageCount    int       `json:"maximumMessageCount"`
-	MaximumBlobCount       int       `json:"maximumBlobCount"`
-	MaximumStoredByteCount int64     `json:"maximumStoredByteCount"`
+	Version                 int       `json:"version"`
+	TenantID                uuid.UUID `json:"tenantID"`
+	DomainID                uuid.UUID `json:"domainID"`
+	AdministrationDigest    string    `json:"administrationDigest"`
+	CreatedAtMilliseconds   int64     `json:"createdAtMilliseconds"`
+	MaximumMessageCount     int       `json:"maximumMessageCount"`
+	MaximumMessageByteCount int64     `json:"maximumMessageByteCount"`
+	MaximumBlobCount        int       `json:"maximumBlobCount"`
+	MaximumBlobByteCount    int64     `json:"maximumBlobByteCount"`
 }
 
 func (r DomainRegistration) Validate() error {
@@ -136,9 +139,11 @@ func (r DomainRegistration) Validate() error {
 		r.CreatedAtMilliseconds < 0 || r.MaximumMessageCount <= 0 ||
 		r.MaximumMessageCount > AbsoluteMaximumMessageCount ||
 		r.MaximumBlobCount <= 0 ||
+		r.MaximumMessageByteCount <= 0 ||
+		r.MaximumMessageByteCount > AbsoluteMaximumMessageByteCount ||
 		r.MaximumBlobCount > AbsoluteMaximumBlobCount ||
-		r.MaximumStoredByteCount <= 0 ||
-		r.MaximumStoredByteCount > AbsoluteMaximumStoredByteCount {
+		r.MaximumBlobByteCount <= 0 ||
+		r.MaximumBlobByteCount > AbsoluteMaximumBlobByteCount {
 		return protocolError(CodeInvalidDomain, "domain fields are invalid")
 	}
 	return nil
@@ -559,6 +564,15 @@ func DecodeCursor(cursor string) (uint64, error) {
 		return 0, protocolError(CodeInvalidCursor, "cursor is outside the supported range")
 	}
 	return sequence, nil
+}
+
+func ValidateOpaqueCursor(cursor string) error {
+	if cursor == "" || len([]byte(cursor)) > 4_096 || strings.IndexFunc(cursor, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == '\t' || r == ' '
+	}) >= 0 {
+		return protocolError(CodeInvalidCursor, "cursor is invalid")
+	}
+	return nil
 }
 
 func scopedDigest(domain []byte, fields ...string) string {
