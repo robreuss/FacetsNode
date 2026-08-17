@@ -132,8 +132,12 @@ initial and additional domain creation, proves exact retry after another
 restart, and rejects the wrong tenant secret. The live provisioning/wake gate
 creates a child domain through HTTP, retries it, publishes before starting the wake request,
 and requires the wake endpoint to find the already-durable PostgreSQL message
-without relying on a process-local signal. These tests are skipped when their
-explicit disposable-database or live-service environment is absent.
+without relying on a process-local signal. The disposable-PostgreSQL suite also
+starts two independent pools and Node server objects, proves that publication
+through one wakes a waiter on the other through `LISTEN`/`NOTIFY`, then stops
+the listener and proves a missed hint is recovered by the authoritative cursor
+fetch. These tests are skipped when their explicit disposable-database or
+live-service environment is absent.
 
 PostgreSQL metadata and the blob volume are one recovery unit. A backup or host
 migration that captures only one is incomplete. Resumable staging lives under

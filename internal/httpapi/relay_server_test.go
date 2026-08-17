@@ -44,6 +44,8 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		t.Fatal(err)
 	}
 	server.now = func() time.Time { return time.UnixMilli(1_500) }
+	wakeNotifier := &recordingRelayWakeNotifier{}
+	server.SetRelayWakeNotifier(wakeNotifier)
 	handler := server.Handler()
 	provisioning := newRelayDomainProvisioningRequest(1_500, 16, 64)
 	tenantToken := relayTestToken(15)
@@ -201,6 +203,13 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		created.Member.MemberID,
 	)
 	requireStatus(t, publish, http.StatusCreated)
+	wakeCalls := wakeNotifier.snapshot()
+	if len(wakeCalls) != 1 || wakeCalls[0] != (relayWakeDomain{
+		tenantID: created.Domain.TenantID,
+		domainID: created.Domain.DomainID,
+	}) {
+		t.Fatalf("accepted publish emitted unexpected cross-instance wake calls: %+v", wakeCalls)
+	}
 	select {
 	case <-publishedWake:
 	case <-time.After(time.Second):
@@ -220,6 +229,9 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		created.Member.MemberID,
 	)
 	requireStatus(t, retry, http.StatusOK)
+	if calls := wakeNotifier.snapshot(); len(calls) != 1 {
+		t.Fatalf("duplicate relay publish emitted another cross-instance wake hint: %+v", calls)
+	}
 	select {
 	case <-retryWake:
 		t.Fatal("duplicate relay publish emitted another wake hint")

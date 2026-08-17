@@ -25,6 +25,7 @@ type Server struct {
 	blobContentStore       relay.BlobContentStore
 	blobUploadContentStore relay.BlobUploadContentStore
 	relayWakeBroker        *relayWakeBroker
+	relayWakeNotifier      RelayWakeNotifier
 	operatorTokenDigest    [32]byte
 	operatorProvisioningOn bool
 	logger                 *slog.Logger

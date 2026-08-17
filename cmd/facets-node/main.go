@@ -84,6 +84,18 @@ func main() {
 		logger.Error("relay API configuration rejected", "error", err)
 		os.Exit(1)
 	}
+	relayWakeNotifier := postgres.NewRelayWakeNotifier(pool)
+	relayWakeListener := postgres.NewRelayWakeListener(pool)
+	api.SetRelayWakeNotifier(relayWakeNotifier)
+	relayWakeContext, cancelRelayWake := context.WithCancel(rootContext)
+	defer cancelRelayWake()
+	relayWakeDone := make(chan struct{})
+	go func() {
+		defer close(relayWakeDone)
+		relayWakeListener.Run(relayWakeContext, api.ReceiveRelayWake, func(err error) {
+			logger.Warn("cross-instance relay wake listener unavailable", "error", err)
+		})
+	}()
 	httpServer := &http.Server{
 		Addr:              configuration.ListenAddress,
 		Handler:           api.Handler(),
@@ -122,6 +134,12 @@ func main() {
 	if err := httpServer.Shutdown(shutdownContext); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 		os.Exit(1)
+	}
+	cancelRelayWake()
+	select {
+	case <-relayWakeDone:
+	case <-shutdownContext.Done():
+		logger.Warn("cross-instance relay wake listener shutdown timed out")
 	}
 	logger.Info("shutdown complete")
 }

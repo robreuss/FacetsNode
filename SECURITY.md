@@ -25,6 +25,9 @@ Supported production deployments must:
   `POST /v1/relay/tenants`, and future operator routes on a loopback or private
   management network;
 - use a unique PostgreSQL role and a database unavailable from the public net;
+- treat the fixed PostgreSQL relay-wake channel as an internal acceleration
+  path: its payload contains only tenant/domain routing UUIDs, and durable fetch
+  remains authoritative if a hint is forged, duplicated, or lost;
 - store database credentials in an operator-managed secret, not an image;
 - keep `.env`, TLS material, and live-test access credentials out of both Git
   and the Docker build context;

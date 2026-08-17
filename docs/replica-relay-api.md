@@ -160,6 +160,15 @@ recipient. Multiple agents serving one subscription may fetch idempotently.
 Any authorized agent may advance them. `applied` requires an existing
 `accepted`; an older retry after `applied` returns the higher durable fact.
 Periodic cursor fetch is authoritative; wake is only an acceleration hint.
+Each Node instance keeps the process-local broker used by connected waiters and
+also owns a dedicated PostgreSQL `LISTEN` connection on the fixed
+`facets_relay_wake_v1` channel. After an accepted publication commits, the
+serving instance wakes its local broker and best-effort publishes a hint whose
+entire payload is the canonical tenant UUID and domain UUID. Every listening
+instance feeds that hint into its own local broker. Notification failure does
+not fail the committed publication, reconnect uses bounded backoff, duplicate
+publication retries do not emit another hint, and the wake handler subscribes
+before its first durable fetch so there is no check-to-wait gap.
 
 ## Checkpoints and bounded collection
 
@@ -302,8 +311,8 @@ check.
 
 ## Current limits
 
-Cross-instance notifications, distributed rate limits, hosted account admission, and Shared
-Space membership/key policy are not implemented in this packet. Checkpoint
+Distributed rate limits, hosted account admission, and Shared Space
+membership/key policy are not implemented in this packet. Checkpoint
 collection remains explicitly administration-triggered. No long-absent
 subscription becomes stale automatically; revocation or explicit rebootstrap
 is required. PostgreSQL and the blob volume remain one coordinated

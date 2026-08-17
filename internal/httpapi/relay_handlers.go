@@ -520,7 +520,7 @@ func (s *Server) handleActivateRelayCheckpoint(writer http.ResponseWriter, reque
 	}
 	s.metrics.ObserveAcceptance(string(result.Acceptance))
 	if result.Acceptance == relay.AcceptanceAccepted {
-		s.relayWakeBroker.notify(tenantID, domainID)
+		s.notifyRelayWake(request.Context(), tenantID, domainID)
 	}
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
@@ -1091,8 +1091,8 @@ func (s *Server) handlePublishRelayMessage(writer http.ResponseWriter, request *
 	status := http.StatusCreated
 	if result.Acceptance == relay.AcceptanceDuplicate {
 		status = http.StatusOK
-	} else {
-		s.relayWakeBroker.notify(tenantID, domainID)
+	} else if result.Acceptance == relay.AcceptanceAccepted {
+		s.notifyRelayWake(request.Context(), tenantID, domainID)
 	}
 	writeJSON(writer, status, result)
 }

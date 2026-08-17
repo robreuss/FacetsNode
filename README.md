@@ -36,7 +36,8 @@ Facets core codebase.
   collection after a 30-day admission retry window
 - Opaque subscriptions with multiple delivery agents and subscription-level
   monotonic accepted/applied facts
-- Disposable domain change hints that accelerate, but never replace, cursor polling
+- Disposable PostgreSQL `LISTEN`/`NOTIFY` domain-change hints across Node
+  instances that accelerate, but never replace, cursor polling
 - Separate per-domain and tenant-wide message/blob count and byte quotas
 - Server-timed checkpoint write fences, opaque staging, administrator activation, custody-gated dry-run,
   and exact-retry bounded message/blob collection with latest-two retention
@@ -165,8 +166,9 @@ The ordinary Go suite covers in-memory protocol behavior, cross-language
 fixtures, HTTP authorization, and the checked-in Caddy exposure policy. Tests
 that set `FACETS_NODE_TEST_DATABASE_URL` exercise a real disposable PostgreSQL
 store, including tenant/domain provisioning, subscription exact retries,
-subscription-level delivery, split quota counters across pool restarts, and
-checkpoint activation/collection under concurrent publication.
+subscription-level delivery, split quota counters across pool restarts,
+checkpoint activation/collection under concurrent publication, and a
+two-instance wake listener with a missed-notification fetch fallback.
 Tests that set
 `FACETS_NODE_TEST_BASE_URL` and `FACETS_NODE_TEST_OPERATOR_TOKEN` exercise the
 running HTTP/PostgreSQL/filesystem stack, including a pre-existing-message wake

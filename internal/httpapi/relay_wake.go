@@ -1,10 +1,18 @@
 package httpapi
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+const relayWakeNotificationTimeout = time.Second
+
+type RelayWakeNotifier interface {
+	Notify(context.Context, uuid.UUID, uuid.UUID) error
+}
 
 type relayWakeDomain struct {
 	tenantID uuid.UUID
@@ -44,4 +52,39 @@ func (b *relayWakeBroker) notify(tenantID, domainID uuid.UUID) {
 		close(existing)
 	}
 	b.wakeByID[key] = make(chan struct{})
+}
+
+// SetRelayWakeNotifier installs a disposable cross-instance accelerator. It
+// does not change durable fetch authority or local wake behavior.
+func (s *Server) SetRelayWakeNotifier(notifier RelayWakeNotifier) {
+	s.relayWakeNotifier = notifier
+}
+
+// ReceiveRelayWake feeds a validated cross-instance hint into this instance's
+// local broker. The payload is routing scope only.
+func (s *Server) ReceiveRelayWake(tenantID, domainID uuid.UUID) {
+	if tenantID == uuid.Nil || domainID == uuid.Nil {
+		return
+	}
+	s.metrics.ObserveRelayWakeReceived()
+	s.relayWakeBroker.notify(tenantID, domainID)
+}
+
+func (s *Server) notifyRelayWake(ctx context.Context, tenantID, domainID uuid.UUID) {
+	s.relayWakeBroker.notify(tenantID, domainID)
+	if s.relayWakeNotifier == nil {
+		return
+	}
+	notifyContext, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), relayWakeNotificationTimeout,
+	)
+	defer cancel()
+	if err := s.relayWakeNotifier.Notify(notifyContext, tenantID, domainID); err != nil {
+		s.metrics.ObserveRelayWakeNotification(false)
+		if s.logger != nil {
+			s.logger.Warn("cross-instance relay wake notification failed", "error", err)
+		}
+		return
+	}
+	s.metrics.ObserveRelayWakeNotification(true)
 }
