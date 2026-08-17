@@ -504,6 +504,7 @@ type liveRelayDomainProvisioningRequest struct {
 	SubscriptionID           uuid.UUID                         `json:"subscriptionID"`
 	MemberCredential         liveRelayMemberCredential         `json:"memberCredential"`
 	MemberCapabilities       []relay.Capability                `json:"memberCapabilities"`
+	Quota                    *relay.DomainQuota                `json:"quota,omitempty"`
 	CreatedAtMilliseconds    int64                             `json:"createdAtMilliseconds"`
 }
 

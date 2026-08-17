@@ -660,6 +660,81 @@ func TestRelayTenantCredentialProvisionsAdditionalDomains(t *testing.T) {
 	), http.StatusUnauthorized)
 }
 
+func TestRelayProvisioningAcceptsBoundedDomainQuotaOverride(t *testing.T) {
+	operatorToken := relayTestToken(191)
+	server, err := NewWithRelay(
+		rendezvous.NewMemoryStore(), relay.NewMemoryStore(), nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), operatorToken,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return time.UnixMilli(1_000) }
+	handler := server.Handler()
+	domain := newRelayDomainProvisioningRequest(1_000, 31, 63)
+	domain.Quota = &relay.DomainQuota{
+		MaximumMessageCount:     20_000,
+		MaximumMessageByteCount: 2 * relay.DefaultMaximumMessageByteCount,
+		MaximumBlobCount:        20_000,
+		MaximumBlobByteCount:    2 * relay.DefaultMaximumBlobByteCount,
+	}
+	tenantToken := relayTestToken(30)
+	input := newRelayTenantProvisioningRequest(domain, tenantToken)
+	created := performRelayJSON(
+		t, handler, http.MethodPost, "/v1/relay/tenants", input,
+		operatorToken, uuid.Nil,
+	)
+	requireStatus(t, created, http.StatusCreated)
+	_ = created.Body.Close()
+	retry := performRelayJSON(
+		t, handler, http.MethodPost, "/v1/relay/tenants", input,
+		operatorToken, uuid.Nil,
+	)
+	requireStatus(t, retry, http.StatusOK)
+	_ = retry.Body.Close()
+	collision := input
+	collision.InitialDomain.Quota = &relay.DomainQuota{
+		MaximumMessageCount:     20_001,
+		MaximumMessageByteCount: 2 * relay.DefaultMaximumMessageByteCount,
+		MaximumBlobCount:        20_000,
+		MaximumBlobByteCount:    2 * relay.DefaultMaximumBlobByteCount,
+	}
+	requireStatus(t, performRelayJSON(
+		t, handler, http.MethodPost, "/v1/relay/tenants", collision,
+		operatorToken, uuid.Nil,
+	), http.StatusConflict)
+
+	statusPath := "/v1/relay/tenants/" + domain.AdministrationCredential.TenantID.String() +
+		"/domains/" + domain.AdministrationCredential.DomainID.String() + "/status"
+	statusResponse := performRelayJSON(
+		t, handler, http.MethodGet, statusPath, nil,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, statusResponse, http.StatusOK)
+	var status relay.DomainStatus
+	if err := json.NewDecoder(statusResponse.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	_ = statusResponse.Body.Close()
+	if status.Quota != *domain.Quota {
+		t.Fatalf("domain quota=%+v; want=%+v", status.Quota, *domain.Quota)
+	}
+
+	invalidDomain := newRelayDomainProvisioningRequest(1_000, 95, 127)
+	invalidDomain.Quota = &relay.DomainQuota{
+		MaximumMessageCount:     relay.AbsoluteMaximumMessageCount + 1,
+		MaximumMessageByteCount: relay.DefaultMaximumMessageByteCount,
+		MaximumBlobCount:        relay.DefaultMaximumBlobCount,
+		MaximumBlobByteCount:    relay.DefaultMaximumBlobByteCount,
+	}
+	invalid := performRelayJSON(
+		t, handler, http.MethodPost, "/v1/relay/tenants",
+		newRelayTenantProvisioningRequest(invalidDomain, relayTestToken(94)),
+		operatorToken, uuid.Nil,
+	)
+	requireStatus(t, invalid, http.StatusBadRequest)
+}
+
 func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 	operatorToken := relayTestToken(192)
 	var logs bytes.Buffer
@@ -1164,6 +1239,7 @@ type relayDomainProvisioningRequest struct {
 	SubscriptionID           uuid.UUID                     `json:"subscriptionID"`
 	MemberCredential         relayMemberCredential         `json:"memberCredential"`
 	MemberCapabilities       []relay.Capability            `json:"memberCapabilities"`
+	Quota                    *relay.DomainQuota            `json:"quota,omitempty"`
 	CreatedAtMilliseconds    int64                         `json:"createdAtMilliseconds"`
 }
 
@@ -1212,6 +1288,7 @@ func newRelayTenantProvisioningRequest(
 			SubscriptionID:           domain.SubscriptionID,
 			MemberCredential:         domain.MemberCredential,
 			MemberCapabilities:       domain.MemberCapabilities,
+			Quota:                    domain.Quota,
 			CreatedAtMilliseconds:    domain.CreatedAtMilliseconds,
 		},
 	}

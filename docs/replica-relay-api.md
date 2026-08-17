@@ -7,7 +7,7 @@ Persona, device, or Space semantics and never receives a domain content key.
 
 The canonical portable contract is
 `internal/testfixture/replica-relay-data-plane-portable-v1.json`. Its exact
-SHA-256 is `d81b42bc95b1e7adda3ef2ff6c5dbaa471512787481c9fe8b42a563e4b07293f`.
+SHA-256 is `e156cf31918a9a9b3a1c9ea156cb11cbb0c58fda036d29d6133807aa5be603e3`.
 The adjacent lock records the Swift contract input and Envelope schema V1.
 
 ## Authority and routing scopes
@@ -65,6 +65,12 @@ Content-Type: application/json
       "authorizationToken": "<member token>"
     },
     "memberCapabilities": ["message_fetch", "message_publish"],
+    "quota": {
+      "maximumMessageCount": 20000,
+      "maximumMessageByteCount": 2147483648,
+      "maximumBlobCount": 20000,
+      "maximumBlobByteCount": 2147483648
+    },
     "createdAtMilliseconds": 1710000000000
   }
 }
@@ -75,6 +81,13 @@ The response returns acceptance, retry IDs, scope IDs, and authorization
 digests; it never echoes bearer secrets. The exact first request returns `201
 accepted`; an exact response-loss retry returns `200 duplicate`. Reusing a
 tenant, domain, or retry ID with different content fails closed.
+
+`quota` is optional on both initial and additional domain provisioning. Its
+four exact integer fields are message count, message ciphertext bytes, blob
+count, and blob bytes. Omission selects the documented domain defaults. Values
+must be positive and may not exceed 1,000,000 messages, 1 TiB message bytes,
+1,000,000 blobs, or 1 TiB blob bytes. The independent tenant aggregate ceiling
+still bounds actual storage even when a domain requests a larger allowance.
 
 Additional domains use the same `initialDomain` body:
 

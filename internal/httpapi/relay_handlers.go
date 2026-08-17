@@ -59,6 +59,7 @@ type relayDomainProvisioningInput struct {
 	SubscriptionID           uuid.UUID                     `json:"subscriptionID"`
 	MemberCredential         relayMemberCredential         `json:"memberCredential"`
 	MemberCapabilities       []relay.Capability            `json:"memberCapabilities"`
+	Quota                    *relay.DomainQuota            `json:"quota,omitempty"`
 	CreatedAtMilliseconds    int64                         `json:"createdAtMilliseconds"`
 }
 
@@ -186,16 +187,25 @@ func relayDomainProvisioning(input relayDomainProvisioningInput) (relay.DomainPr
 	if err != nil {
 		return relay.DomainProvisioning{}, err
 	}
+	quota := relay.DomainQuota{
+		MaximumMessageCount:     relay.DefaultMaximumMessageCount,
+		MaximumMessageByteCount: relay.DefaultMaximumMessageByteCount,
+		MaximumBlobCount:        relay.DefaultMaximumBlobCount,
+		MaximumBlobByteCount:    relay.DefaultMaximumBlobByteCount,
+	}
+	if input.Quota != nil {
+		quota = *input.Quota
+	}
 	domain := relay.DomainRegistration{
 		Version:                 relay.SchemaVersion,
 		TenantID:                administrationCredential.TenantID,
 		DomainID:                administrationCredential.DomainID,
 		AdministrationDigest:    administrationDigest,
 		CreatedAtMilliseconds:   input.CreatedAtMilliseconds,
-		MaximumMessageCount:     relay.DefaultMaximumMessageCount,
-		MaximumMessageByteCount: relay.DefaultMaximumMessageByteCount,
-		MaximumBlobCount:        relay.DefaultMaximumBlobCount,
-		MaximumBlobByteCount:    relay.DefaultMaximumBlobByteCount,
+		MaximumMessageCount:     quota.MaximumMessageCount,
+		MaximumMessageByteCount: quota.MaximumMessageByteCount,
+		MaximumBlobCount:        quota.MaximumBlobCount,
+		MaximumBlobByteCount:    quota.MaximumBlobByteCount,
 	}
 	member := relay.MemberRegistration{
 		Version:               relay.SchemaVersion,

@@ -33,6 +33,12 @@
         "message_acknowledge",
         "message_fetch"
       ],
+      "quota": {
+        "maximumMessageCount": 20000,
+        "maximumMessageByteCount": 2147483648,
+        "maximumBlobCount": 20000,
+        "maximumBlobByteCount": 2147483648
+      },
       "createdAtMilliseconds": 1710000000000
     }
   },

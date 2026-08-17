@@ -13,7 +13,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
-const dataPlaneFixtureSHA256 = "15ed50e43d159f41b750d5f2a48afc20135d4c64be0f83266b577df22c802537"
+const dataPlaneFixtureSHA256 = "e156cf31918a9a9b3a1c9ea156cb11cbb0c58fda036d29d6133807aa5be603e3"
 
 func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 	path := filepath.Join("replica-relay-data-plane-portable-v1.json")
@@ -26,45 +26,60 @@ func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 		t.Fatalf("fixture SHA-256=%s; want %s", actual, dataPlaneFixtureSHA256)
 	}
 	var fixture struct {
-		Format                            string                                  `json:"format"`
-		TenantCredential                  tenantCredential                        `json:"tenantCredential"`
-		ExpectedTenantAuthorizationDigest string                                  `json:"expectedTenantAuthorizationDigest"`
-		TenantProvisioningResponse        relay.TenantProvisioningResult          `json:"tenantProvisioningResponse"`
-		AdmissionCreateResponse           relay.SubscriptionAdmissionCreateResult `json:"admissionCreateResponse"`
-		AdmissionClaimResponse            relay.SubscriptionAdmissionClaimResult  `json:"admissionClaimResponse"`
-		Subscription                      relay.Subscription                      `json:"subscription"`
-		SubscriptionCreateRequest         relay.SubscriptionCreateRequest         `json:"subscriptionCreateRequest"`
-		SubscriptionCreateResponse        relay.SubscriptionCreateResponse        `json:"subscriptionCreateResponse"`
-		SubscriptionStatusChangeRequest   relay.SubscriptionStatusChangeRequest   `json:"subscriptionStatusChangeRequest"`
-		SubscriptionStatusChangeResponse  relay.SubscriptionStatusChangeResponse  `json:"subscriptionStatusChangeResponse"`
-		CheckpointFenceRequest            relay.CheckpointFenceRequest            `json:"checkpointFenceRequest"`
-		CheckpointFenceResponse           relay.CheckpointFenceResponse           `json:"checkpointFenceResponse"`
-		CheckpointFenceState              relay.CheckpointFenceState              `json:"checkpointFenceState"`
-		CheckpointFenceAbortRequest       relay.CheckpointFenceAbortRequest       `json:"checkpointFenceAbortRequest"`
-		CheckpointFenceAbortResponse      relay.CheckpointFenceAbortResponse      `json:"checkpointFenceAbortResponse"`
-		CheckpointCandidate               relay.CheckpointCandidate               `json:"checkpointCandidate"`
-		ActivationRequest                 relay.CheckpointActivationRequest       `json:"activationRequest"`
-		CheckpointStageResponse           relay.CheckpointStageResponse           `json:"checkpointStageResponse"`
-		CheckpointActivationResponse      relay.CheckpointActivationResponse      `json:"checkpointActivationResponse"`
-		DryRunResponse                    relay.CheckpointDryRunResponse          `json:"dryRunResponse"`
-		CollectionRequest                 relay.CheckpointCollectionRequest       `json:"collectionRequest"`
-		CollectionResponse                relay.CheckpointCollectionResponse      `json:"collectionResponse"`
-		DomainStatus                      relay.DomainStatus                      `json:"domainStatus"`
-		TenantStatus                      relay.TenantStatus                      `json:"tenantStatus"`
-		UploadRequest                     relay.BlobUploadRequest                 `json:"uploadRequest"`
-		UploadCreateResponse              relay.BlobUploadCreateResponse          `json:"uploadCreateResponse"`
-		UploadChunkRequest                relay.BlobUploadChunkRequest            `json:"uploadChunkRequest"`
-		UploadStatus                      relay.BlobUploadStatus                  `json:"uploadStatus"`
-		FullUnfinalizedUploadStatus       relay.BlobUploadStatus                  `json:"fullUnfinalizedUploadStatus"`
-		ZeroByteUnfinalizedUploadStatus   relay.BlobUploadStatus                  `json:"zeroByteUnfinalizedUploadStatus"`
-		UploadFinalizationRequest         relay.BlobUploadFinalizationRequest     `json:"uploadFinalizationRequest"`
-		UploadFinalizationResponse        relay.BlobUploadFinalizationResponse    `json:"uploadFinalizationResponse"`
+		Format                            string           `json:"format"`
+		TenantCredential                  tenantCredential `json:"tenantCredential"`
+		ExpectedTenantAuthorizationDigest string           `json:"expectedTenantAuthorizationDigest"`
+		TenantProvisioningRequest         struct {
+			InitialDomain struct {
+				Quota *relay.DomainQuota `json:"quota,omitempty"`
+			} `json:"initialDomain"`
+		} `json:"tenantProvisioningRequest"`
+		TenantProvisioningResponse       relay.TenantProvisioningResult          `json:"tenantProvisioningResponse"`
+		AdmissionCreateResponse          relay.SubscriptionAdmissionCreateResult `json:"admissionCreateResponse"`
+		AdmissionClaimResponse           relay.SubscriptionAdmissionClaimResult  `json:"admissionClaimResponse"`
+		Subscription                     relay.Subscription                      `json:"subscription"`
+		SubscriptionCreateRequest        relay.SubscriptionCreateRequest         `json:"subscriptionCreateRequest"`
+		SubscriptionCreateResponse       relay.SubscriptionCreateResponse        `json:"subscriptionCreateResponse"`
+		SubscriptionStatusChangeRequest  relay.SubscriptionStatusChangeRequest   `json:"subscriptionStatusChangeRequest"`
+		SubscriptionStatusChangeResponse relay.SubscriptionStatusChangeResponse  `json:"subscriptionStatusChangeResponse"`
+		CheckpointFenceRequest           relay.CheckpointFenceRequest            `json:"checkpointFenceRequest"`
+		CheckpointFenceResponse          relay.CheckpointFenceResponse           `json:"checkpointFenceResponse"`
+		CheckpointFenceState             relay.CheckpointFenceState              `json:"checkpointFenceState"`
+		CheckpointFenceAbortRequest      relay.CheckpointFenceAbortRequest       `json:"checkpointFenceAbortRequest"`
+		CheckpointFenceAbortResponse     relay.CheckpointFenceAbortResponse      `json:"checkpointFenceAbortResponse"`
+		CheckpointCandidate              relay.CheckpointCandidate               `json:"checkpointCandidate"`
+		ActivationRequest                relay.CheckpointActivationRequest       `json:"activationRequest"`
+		CheckpointStageResponse          relay.CheckpointStageResponse           `json:"checkpointStageResponse"`
+		CheckpointActivationResponse     relay.CheckpointActivationResponse      `json:"checkpointActivationResponse"`
+		DryRunResponse                   relay.CheckpointDryRunResponse          `json:"dryRunResponse"`
+		CollectionRequest                relay.CheckpointCollectionRequest       `json:"collectionRequest"`
+		CollectionResponse               relay.CheckpointCollectionResponse      `json:"collectionResponse"`
+		DomainStatus                     relay.DomainStatus                      `json:"domainStatus"`
+		TenantStatus                     relay.TenantStatus                      `json:"tenantStatus"`
+		UploadRequest                    relay.BlobUploadRequest                 `json:"uploadRequest"`
+		UploadCreateResponse             relay.BlobUploadCreateResponse          `json:"uploadCreateResponse"`
+		UploadChunkRequest               relay.BlobUploadChunkRequest            `json:"uploadChunkRequest"`
+		UploadStatus                     relay.BlobUploadStatus                  `json:"uploadStatus"`
+		FullUnfinalizedUploadStatus      relay.BlobUploadStatus                  `json:"fullUnfinalizedUploadStatus"`
+		ZeroByteUnfinalizedUploadStatus  relay.BlobUploadStatus                  `json:"zeroByteUnfinalizedUploadStatus"`
+		UploadFinalizationRequest        relay.BlobUploadFinalizationRequest     `json:"uploadFinalizationRequest"`
+		UploadFinalizationResponse       relay.BlobUploadFinalizationResponse    `json:"uploadFinalizationResponse"`
 	}
 	if err := json.Unmarshal(contents, &fixture); err != nil {
 		t.Fatal(err)
 	}
 	if fixture.Format != "facets.replica-relay-data-plane-fixture.v1" {
 		t.Fatalf("format=%q", fixture.Format)
+	}
+	expectedProvisioningQuota := relay.DomainQuota{
+		MaximumMessageCount:     20_000,
+		MaximumMessageByteCount: 2_147_483_648,
+		MaximumBlobCount:        20_000,
+		MaximumBlobByteCount:    2_147_483_648,
+	}
+	if fixture.TenantProvisioningRequest.InitialDomain.Quota == nil ||
+		*fixture.TenantProvisioningRequest.InitialDomain.Quota != expectedProvisioningQuota {
+		t.Fatalf("domain provisioning quota=%v; want=%+v", fixture.TenantProvisioningRequest.InitialDomain.Quota, expectedProvisioningQuota)
 	}
 	tenantID, err := uuid.Parse(fixture.TenantCredential.TenantID)
 	if err != nil {

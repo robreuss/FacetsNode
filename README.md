@@ -207,6 +207,15 @@ restart, and backup/restore results document specific prior checkpoints; they
 must be rerun before claiming the current image has passed those deployment
 gates.
 
+The separate
+[high-volume checkpoint/restart gate](docs/high-volume-restart-acceptance.md)
+publishes and custody-acknowledges more than 10,000 messages, performs fenced
+multi-batch collection and replacement-subscription bootstrap, then verifies
+continued delivery after container recreation without reprovisioning. It is
+disabled unless `FACETS_NODE_TEST_HIGH_VOLUME=1` and an explicit external
+mode-0600 state path are supplied; no current deployment result is implied by
+its presence in the repository.
+
 ## License
 
 Apache License 2.0.
