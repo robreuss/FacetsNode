@@ -12,6 +12,10 @@ password_file=$2
 [[ $repository_path == /* ]] || usage
 [[ $password_file == /* && -f $password_file && -r $password_file ]] || usage
 
+script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=revision-attestation.sh
+source "$script_directory/revision-attestation.sh"
+
 mkdir -p -- "$repository_path"
 chmod 0700 -- "$repository_path"
 checkpoint_directory=$(mktemp -d "${TMPDIR:-/tmp}/facets-node-checkpoint.XXXXXX")
@@ -23,7 +27,7 @@ export FACETS_NODE_BACKUP_PASSWORD_FILE=$password_file
 export FACETS_NODE_CHECKPOINT_DIRECTORY=$checkpoint_directory
 export FACETS_NODE_RESTORE_DIRECTORY=$restore_placeholder
 export FACETS_NODE_CHECKPOINT_REVISION
-FACETS_NODE_CHECKPOINT_REVISION=$(git rev-parse --verify HEAD 2>/dev/null || printf unknown)
+FACETS_NODE_CHECKPOINT_REVISION=$(facets_node_resolve_checkpoint_revision)
 
 compose=(docker compose -f compose.yaml -f compose.backup.yaml)
 source_was_running=false

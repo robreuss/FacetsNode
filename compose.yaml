@@ -21,6 +21,9 @@ services:
   node:
     build:
       context: .
+      args:
+        FACETS_NODE_SOURCE_REVISION: ${FACETS_NODE_SOURCE_REVISION:-unknown}
+        FACETS_NODE_SOURCE_TREE: ${FACETS_NODE_SOURCE_TREE:-unknown}
     environment:
       FACETS_NODE_DATABASE_URL: postgres://facets:${FACETS_NODE_POSTGRES_PASSWORD:?Set FACETS_NODE_POSTGRES_PASSWORD in .env}@postgres:5432/facets?sslmode=disable
       FACETS_NODE_LISTEN_ADDR: :8080

@@ -20,10 +20,41 @@ install -d -m 700 deploy/tls
 # Install the certificate and private key for the public DNS name as
 # deploy/tls/server.crt and deploy/tls/server.key.
 chmod 600 .env
-docker compose up --build -d
+REV=<40-character-committed-revision>
+TREE=<40-character-committed-tree>
+FACETS_NODE_SOURCE_REVISION="$REV" \
+FACETS_NODE_SOURCE_TREE="$TREE" \
+  docker compose build
+docker compose up --no-build -d
 docker compose ps
 curl --fail http://127.0.0.1:8080/readyz
 ```
+
+Derive both source values in the canonical repository before copying its
+committed tree to this VM:
+
+```sh
+REV=$(git rev-parse --verify HEAD)
+TREE=$(git rev-parse --verify 'HEAD^{tree}')
+printf 'revision=%s tree=%s\n' "$REV" "$TREE"
+```
+
+The VM's deployment directory may intentionally be a source copy without
+`.git`; do not create a mutable revision marker that can drift from its bytes.
+Instead, checksum-compare the copied tree to a `git archive` of that commit,
+pass the two values to the build, and verify the immutable image labels plus
+the running container image ID:
+
+```sh
+test "$(docker image inspect facets-node-node:latest \
+  --format '{{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.source-tree"}}')" = \
+  "$REV $TREE"
+test "$(docker image inspect facets-node-node:latest --format '{{.Id}}')" = \
+  "$(docker inspect facets-node-node-1 --format '{{.Image}}')"
+```
+
+An `unknown` label is acceptable for local iteration but fails the persistent
+deployment gate.
 
 The plaintext Node API binds only to the VM's loopback interface. It is the
 private management ingress, including readiness, metrics, and operator domain
@@ -122,6 +153,20 @@ The authority-lifecycle deployment repeated that isolated restore after
 credential rotations were present. Source and recovery matched rotation,
 admission, and audit counts, both services became ready, and the temporary
 recovery stack and test repository were removed afterward.
+
+For a source-copy deployment, create the checkpoint with the same value shown
+by the running image label:
+
+```sh
+FACETS_NODE_CHECKPOINT_REVISION=<40-character-committed-revision> \
+  ./scripts/backup-checkpoint.sh \
+  /absolute/off-host-restic-repository \
+  /absolute/protected-restic-password-file
+```
+
+The script rejects empty, abbreviated, uppercase, `unknown`, or otherwise
+malformed caller-supplied revisions. When the variable is not supplied it uses
+the current Git commit when available, otherwise records `unknown`.
 
 ## What this checkpoint does not prove
 

@@ -90,8 +90,27 @@ cp .env.example .env
 install -d -m 700 deploy/tls
 # Install a certificate and key for the public hostname as:
 # deploy/tls/server.crt and deploy/tls/server.key
-docker compose up --build
+REV=$(git rev-parse --verify HEAD)
+TREE=$(git rev-parse --verify 'HEAD^{tree}')
+FACETS_NODE_SOURCE_REVISION="$REV" \
+FACETS_NODE_SOURCE_TREE="$TREE" \
+  docker compose build
+docker compose up --no-build
+test "$(docker image inspect facets-node-node:latest \
+  --format '{{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.source-tree"}}')" = \
+  "$REV $TREE"
+test "$(docker image inspect facets-node-node:latest --format '{{.Id}}')" = \
+  "$(docker inspect facets-node-node-1 --format '{{.Image}}')"
 ```
+
+The two source values are embedded as OCI labels on the final Node image. For a
+source-copy deployment without `.git`, derive them from the committed source
+repository and pass them explicitly to the remote build. Do not put them in
+`.env`, where they can silently become stale. Before accepting a deployment,
+inspect `org.opencontainers.image.revision` and
+`org.opencontainers.image.source-tree` on both the built image and the image ID
+used by the running Node container. Development builds may omit the values and
+are labeled `unknown`; such an image is not a revision-attested deployment.
 
 The Node listener is published only on `127.0.0.1:8080`. It is the private
 management ingress for `/livez`, `/readyz`, `/metrics`, and operator
@@ -117,6 +136,10 @@ The operations bundle can create an encrypted, coordinated Restic checkpoint
 and restore it only into a fresh Compose project. See
 [docs/backup-and-restore.md](docs/backup-and-restore.md). Keep the repository
 and its separate password off the Node host for actual disaster recovery.
+Source-copy deployments must pass the same committed revision to
+`backup-checkpoint.sh`; the script validates an explicit value and records it in
+the checkpoint manifest instead of replacing it with an unavailable local Git
+revision.
 
 ## Security boundary
 

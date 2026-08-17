@@ -33,7 +33,8 @@ install -d -m 0700 /srv/facets-node-backup
 openssl rand -base64 48 > /secure/location/facets-node-restic-password
 chmod 0600 /secure/location/facets-node-restic-password
 
-./scripts/backup-checkpoint.sh \
+FACETS_NODE_CHECKPOINT_REVISION=<40-character-committed-revision> \
+  ./scripts/backup-checkpoint.sh \
   /srv/facets-node-backup \
   /secure/location/facets-node-restic-password
 ```
@@ -49,6 +50,17 @@ Run the command from the repository root with the same `.env` used by the
 source stack. Expect a bounded service interruption whose duration depends on
 database and blob size. Retention pruning is deliberately not automated yet;
 adopt and test a retention policy before scheduling unattended backups.
+
+`FACETS_NODE_CHECKPOINT_REVISION` takes precedence over local Git state and
+must be a full 40-character lowercase commit ID when supplied. This is required
+for the source-copy deployment, whose directory intentionally may not contain
+`.git`. The script rejects malformed explicit values rather than recording a
+misleading revision. If the variable is absent, it uses the current Git commit
+when available and otherwise records `unknown`. Use the same revision embedded
+in the running image's `org.opencontainers.image.revision` label. Do not keep a
+mutable revision marker beside the deployment: the explicit manifest value,
+immutable image label, running image ID, and source-tree checksum are the
+attestation chain.
 
 ## Restore without overwriting the source
 

@@ -49,6 +49,9 @@ Supported production deployments must:
   client IP addresses;
 - run the container as an unprivileged user with a read-only root filesystem;
 - update the immutable image rather than modifying a running container.
+- label persistent images with the full committed revision and source-tree ID,
+  verify the running container uses that image, and record the same validated
+  revision in coordinated checkpoint manifests;
 
 The pairing, member-admission, replica-message, and encrypted-blob APIs are
 security checkpoints, not a production hosted-service declaration. The message
