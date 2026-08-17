@@ -242,15 +242,7 @@ func TestLiveReplicaRelayDeliveryMatrix(t *testing.T) {
 	blobBytes := bytes.Repeat([]byte("opaque-encrypted-relay-blob-matrix-"), 4_096)
 	blobID := relay.BlobID(blobBytes)
 	blobURL := basePath + "/blobs/" + blobID
-	assertInterruptedLiveRelayBlobUpload(t, client, blobURL, publisher, blobBytes)
-	requireStatusAndClose(t, requestRelayBlob(
-		t, client, http.MethodPut, blobURL, blobBytes,
-		publisher.Token, publisher.MemberID, "",
-	), http.StatusCreated)
-	requireStatusAndClose(t, requestRelayBlob(
-		t, client, http.MethodPut, blobURL, blobBytes,
-		publisher.Token, publisher.MemberID, "",
-	), http.StatusOK)
+	uploadLiveRelayBlob(t, client, basePath, publisher, blobBytes, true)
 	download := requestRelayBlob(
 		t, client, http.MethodGet, blobURL, nil,
 		recipientB.Credential.Token, recipientB.Registration.MemberID, "",
@@ -533,39 +525,6 @@ func acknowledgeLiveRelayMessage(
 	}
 	_ = response.Body.Close()
 	return result
-}
-
-func assertInterruptedLiveRelayBlobUpload(
-	t *testing.T,
-	client *http.Client,
-	blobURL string,
-	credential relay.Credential,
-	blobBytes []byte,
-) {
-	t.Helper()
-	request, err := http.NewRequest(
-		http.MethodPut,
-		blobURL,
-		io.NopCloser(bytes.NewReader(blobBytes[:len(blobBytes)/2])),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.ContentLength = int64(len(blobBytes))
-	request.Header.Set("Content-Type", "application/octet-stream")
-	request.Header.Set("Authorization", "Bearer "+credential.Token)
-	request.Header.Set("X-Facets-Member-ID", credential.MemberID.String())
-	response, requestErr := client.Do(request)
-	if response != nil {
-		_, _ = io.Copy(io.Discard, response.Body)
-		_ = response.Body.Close()
-		if response.StatusCode == http.StatusCreated || response.StatusCode == http.StatusOK {
-			t.Fatalf("interrupted upload unexpectedly succeeded with status=%d", response.StatusCode)
-		}
-	}
-	if requestErr == nil && response == nil {
-		t.Fatal("interrupted upload produced neither an error nor a response")
-	}
 }
 
 func relaySequences(messages []relay.Message) []uint64 {

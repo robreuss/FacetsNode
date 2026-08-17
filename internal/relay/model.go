@@ -39,6 +39,7 @@ const (
 	MaximumCredentialRotationsPerDomain  = 4_096
 	MinimumAuthorizationTokenSize        = 32
 	MaximumSequence                      = uint64(1<<63 - 1)
+	DefaultBlobUploadTTL                 = 7 * 24 * 60 * 60 * 1_000
 )
 
 var (
@@ -68,6 +69,98 @@ func (c Capability) Valid() bool {
 	default:
 		return false
 	}
+}
+
+type BlobUploadRequest struct {
+	RetryID               uuid.UUID `json:"retryID"`
+	UploadID              uuid.UUID `json:"uploadID"`
+	RelayBlobID           string    `json:"relayBlobID"`
+	ByteCount             int64     `json:"byteCount"`
+	CreatedAtMilliseconds int64     `json:"createdAtMilliseconds"`
+}
+
+func (r BlobUploadRequest) Validate() error {
+	if r.RetryID == uuid.Nil || r.UploadID == uuid.Nil ||
+		r.ByteCount < 0 || r.ByteCount > MaximumBlobByteCount ||
+		r.CreatedAtMilliseconds < 0 {
+		return protocolError(CodeInvalidBlobUpload, "blob upload fields are invalid")
+	}
+	if err := ValidateBlobID(r.RelayBlobID); err != nil {
+		return protocolError(CodeInvalidBlobUpload, "blob upload identifier is invalid")
+	}
+	return nil
+}
+
+type BlobUploadChunkRequest struct {
+	UploadID    uuid.UUID
+	Offset      int64
+	ByteCount   int64
+	ChunkSHA256 string
+}
+
+func (r BlobUploadChunkRequest) Validate() error {
+	if r.UploadID == uuid.Nil || r.Offset < 0 || r.ByteCount <= 0 ||
+		!validDigest(r.ChunkSHA256) {
+		return protocolError(CodeInvalidBlobUpload, "blob upload chunk is invalid")
+	}
+	return nil
+}
+
+type BlobUploadStatus struct {
+	UploadID              uuid.UUID `json:"uploadID"`
+	RelayBlobID           string    `json:"relayBlobID"`
+	ByteCount             int64     `json:"byteCount"`
+	CommittedOffset       int64     `json:"committedOffset"`
+	Finalized             bool      `json:"finalized"`
+	CreatedAtMilliseconds int64     `json:"createdAtMilliseconds"`
+	UpdatedAtMilliseconds int64     `json:"updatedAtMilliseconds"`
+}
+
+func (s BlobUploadStatus) Validate() error {
+	if s.UploadID == uuid.Nil || s.ByteCount < 0 ||
+		s.CommittedOffset < 0 || s.CommittedOffset > s.ByteCount ||
+		(s.Finalized && s.CommittedOffset != s.ByteCount) ||
+		s.CreatedAtMilliseconds < 0 ||
+		s.UpdatedAtMilliseconds < s.CreatedAtMilliseconds {
+		return protocolError(CodeInvalidBlobUpload, "blob upload status is invalid")
+	}
+	if err := ValidateBlobID(s.RelayBlobID); err != nil {
+		return protocolError(CodeInvalidBlobUpload, "blob upload status identifier is invalid")
+	}
+	return nil
+}
+
+type BlobUploadCreateResponse struct {
+	Acceptance Acceptance       `json:"acceptance"`
+	RetryID    uuid.UUID        `json:"retryID"`
+	Status     BlobUploadStatus `json:"status"`
+}
+
+type BlobUploadFinalizationRequest struct {
+	RetryID                 uuid.UUID `json:"retryID"`
+	UploadID                uuid.UUID `json:"uploadID"`
+	RelayBlobID             string    `json:"relayBlobID"`
+	ByteCount               int64     `json:"byteCount"`
+	FinalizedAtMilliseconds int64     `json:"finalizedAtMilliseconds"`
+}
+
+func (r BlobUploadFinalizationRequest) Validate() error {
+	if r.RetryID == uuid.Nil || r.UploadID == uuid.Nil || r.ByteCount < 0 ||
+		r.ByteCount > MaximumBlobByteCount || r.FinalizedAtMilliseconds < 0 {
+		return protocolError(CodeInvalidBlobUpload, "blob upload finalization is invalid")
+	}
+	if err := ValidateBlobID(r.RelayBlobID); err != nil {
+		return protocolError(CodeInvalidBlobUpload, "blob upload finalization identifier is invalid")
+	}
+	return nil
+}
+
+type BlobUploadFinalizationResponse struct {
+	Acceptance  Acceptance `json:"acceptance"`
+	RetryID     uuid.UUID  `json:"retryID"`
+	UploadID    uuid.UUID  `json:"uploadID"`
+	RelayBlobID string     `json:"relayBlobID"`
+	ByteCount   int64      `json:"byteCount"`
 }
 
 type Credential struct {

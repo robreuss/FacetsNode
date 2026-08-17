@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -470,6 +471,139 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	}
 	if remaining != 0 {
 		t.Fatalf("relay domain deletion left %d dependent rows", remaining)
+	}
+}
+
+func TestPostgresResumableBlobReservationsRetriesAndExpiry(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_NODE_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_NODE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool := openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `TRUNCATE relay_tenants CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	store := postgresstore.NewRelayStore(pool, time.Second)
+	tenantID, domainID := uuid.New(), uuid.New()
+	publisher := relay.Credential{TenantID: tenantID, DomainID: domainID, MemberID: uuid.New(), Token: postgresRelayToken(244)}
+	publisherDigest, _ := relay.AuthorizationDigest(publisher)
+	admin := relay.AdministrationCredential{TenantID: tenantID, DomainID: domainID, Token: postgresRelayToken(245)}
+	adminDigest, _ := relay.AdministrationDigest(admin)
+	domain := relay.DomainRegistration{Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID, AdministrationDigest: adminDigest, CreatedAtMilliseconds: 1_000, MaximumMessageCount: 1, MaximumMessageByteCount: 1, MaximumBlobCount: 2, MaximumBlobByteCount: 16}
+	tenantCredential, acceptance, err := postgresProvisionTenant(ctx, store, domain, relay.MemberRegistration{Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID, MemberID: publisher.MemberID, AuthorizationDigest: publisherDigest, Capabilities: []relay.Capability{relay.CapabilityPublishBlob}, CreatedAtMilliseconds: 1_000}, publisher.MemberID, 246)
+	if err != nil || acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("provision=%q err=%v", acceptance, err)
+	}
+	agent := relay.Credential{TenantID: tenantID, DomainID: domainID, MemberID: uuid.New(), Token: postgresRelayToken(247)}
+	agentDigest, _ := relay.AuthorizationDigest(agent)
+	if _, err := store.CreateSubscriptionMember(ctx, admin, publisher.MemberID, relay.MemberRegistration{Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID, MemberID: agent.MemberID, AuthorizationDigest: agentDigest, Capabilities: []relay.Capability{relay.CapabilityPublishBlob}, CreatedAtMilliseconds: 1_100}, 1_100); err != nil {
+		t.Fatal(err)
+	}
+	bytes := []byte("12345678")
+	request := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID(bytes), ByteCount: 8, CreatedAtMilliseconds: 1_200}
+	created, err := store.CreateBlobUpload(ctx, publisher, request, 1_200)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("create=%+v err=%v", created, err)
+	}
+	if retry, err := store.CreateBlobUpload(ctx, agent, request, 1_200); err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("retry=%+v err=%v", retry, err)
+	}
+	pool.Close()
+	pool = openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	store = postgresstore.NewRelayStore(pool, time.Second)
+	if restarted, err := store.GetBlobUpload(ctx, agent, request.UploadID, 1_250); err != nil || restarted.CommittedOffset != 0 || restarted.ByteCount != 8 {
+		t.Fatalf("restarted upload=%+v err=%v", restarted, err)
+	}
+	status, _ := store.GetDomainStatus(ctx, admin)
+	tenantStatus, _ := store.GetTenantStatus(ctx, tenantCredential)
+	if status.ReservedBlobCount != 1 || status.ReservedBlobByteCount != 8 || tenantStatus.ReservedBlobCount != 1 || tenantStatus.ReservedBlobByteCount != 8 {
+		t.Fatalf("reserved domain=%+v tenant=%+v", status, tenantStatus)
+	}
+	chunk := relay.BlobUploadChunkRequest{UploadID: request.UploadID, Offset: 0, ByteCount: 8, ChunkSHA256: strings.Repeat("b", 64)}
+	type appendResult struct {
+		status relay.BlobUploadStatus
+		err    error
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	firstResult, waitingResult := make(chan appendResult, 1), make(chan appendResult, 1)
+	go func() {
+		status, appendErr := store.AppendBlobUploadChunk(ctx, agent, chunk, 1_300, func(relay.BlobUploadStatus) error { close(entered); <-release; return nil })
+		firstResult <- appendResult{status: status, err: appendErr}
+	}()
+	<-entered
+	waitingCallback := make(chan struct{}, 1)
+	go func() {
+		status, appendErr := store.AppendBlobUploadChunk(ctx, publisher, chunk, 1_300, func(relay.BlobUploadStatus) error { waitingCallback <- struct{}{}; return nil })
+		waitingResult <- appendResult{status: status, err: appendErr}
+	}()
+	select {
+	case result := <-waitingResult:
+		t.Fatalf("second instance escaped upload row lock: %+v", result)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if result := <-firstResult; result.err != nil || result.status.CommittedOffset != 8 {
+		t.Fatalf("first append=%+v", result)
+	}
+	if result := <-waitingResult; result.err != nil || result.status.CommittedOffset != 8 {
+		t.Fatalf("waiting retry=%+v", result)
+	}
+	select {
+	case <-waitingCallback:
+		t.Fatal("waiting exact retry touched staged content")
+	default:
+	}
+	competing := chunk
+	competing.ChunkSHA256 = strings.Repeat("c", 64)
+	if _, err := store.AppendBlobUploadChunk(ctx, agent, competing, 1_300, func(relay.BlobUploadStatus) error { return nil }); !relay.ErrorHasCode(err, relay.CodeBlobUploadCollision) {
+		t.Fatalf("different chunk reused same offset err=%v", err)
+	}
+	finalRequest := relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: request.UploadID, RelayBlobID: request.RelayBlobID, ByteCount: 8, FinalizedAtMilliseconds: 1_400}
+	if finalized, err := store.FinalizeBlobUpload(ctx, publisher, finalRequest, 1_400, func(relay.BlobUploadStatus) error { return nil }); err != nil || finalized.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("finalize=%+v err=%v", finalized, err)
+	}
+	finalRetryCallback := false
+	if retried, err := store.FinalizeBlobUpload(ctx, agent, finalRequest, 1_400, func(relay.BlobUploadStatus) error { finalRetryCallback = true; return nil }); err != nil || retried.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("final retry=%+v err=%v", retried, err)
+	}
+	if finalRetryCallback {
+		t.Fatal("finalization retry republished content")
+	}
+	second := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID([]byte("abcdefgh")), ByteCount: 8, CreatedAtMilliseconds: 1_500}
+	if _, err := store.CreateBlobUpload(ctx, publisher, second, 1_500); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := store.ExpireBlobUploads(ctx, 2_501, 100)
+	if err != nil || len(expired) != 1 || expired[0].UploadID != second.UploadID {
+		t.Fatalf("expired=%+v err=%v", expired, err)
+	}
+	status, _ = store.GetDomainStatus(ctx, admin)
+	if status.BlobCount != 1 || status.BlobByteCount != 8 || status.ReservedBlobCount != 0 || status.ReservedBlobByteCount != 0 {
+		t.Fatalf("post-expiry=%+v", status)
+	}
+	removed := false
+	allowed, err := store.DeleteBlobUploadIfUnauthorized(ctx, relay.BlobUploadFileCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, UploadID: second.UploadID, ModifiedMilliseconds: 1_500}, 2_550, 100, func() error { removed = true; return nil })
+	if err != nil || allowed {
+		t.Fatalf("early deletion allowed=%v err=%v", allowed, err)
+	}
+	allowed, err = store.DeleteBlobUploadIfUnauthorized(ctx, relay.BlobUploadFileCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, UploadID: second.UploadID, ModifiedMilliseconds: 1_500}, 2_601, 100, func() error { removed = true; return nil })
+	if err != nil || !allowed || !removed {
+		t.Fatalf("eligible deletion allowed=%v err=%v", allowed, err)
+	}
+	removed = false
+	allowed, err = store.DeleteBlobIfUnauthorized(ctx, relay.BlobFileCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, BlobID: request.RelayBlobID, ModifiedMilliseconds: 0}, 9_999, 100, func() error { removed = true; return nil })
+	if err != nil || allowed {
+		t.Fatalf("authoritative blob deletion allowed=%v err=%v", allowed, err)
+	}
+	if removed {
+		t.Fatal("authoritative blob removal callback ran")
 	}
 }
 

@@ -136,9 +136,11 @@ without relying on a process-local signal. These tests are skipped when their
 explicit disposable-database or live-service environment is absent.
 
 PostgreSQL metadata and the blob volume are one recovery unit. A backup or host
-migration that captures only one is incomplete. Direct SQL domain deletion is
-not an operational deletion workflow: filesystem orphan collection and a
-coordinated deletion command are still pending.
+migration that captures only one is incomplete. Resumable staging lives under
+the blob volume's `.uploads` directory. The authority-aware reconciler applies
+the configured grace period and rechecks PostgreSQL immediately before removing
+collected final blobs or abandoned staging. Direct SQL domain deletion remains
+outside the supported operational workflow.
 
 The coordinated recovery gate uses the checked-in operations Compose file and
 scripts documented in [backup-and-restore.md](backup-and-restore.md). The first
@@ -176,8 +178,8 @@ the current Git commit when available, otherwise records `unknown`.
 - restore to a fresh VM, periodic off-host recovery drills, or point-in-time
   recovery;
 - rolling upgrade or schema downgrade behavior;
-- resumable blob upload, checkpoints, retention/orphan collection, or Shared
-  Space policy;
+- live interruption/restart and orphan-reconciliation proof on Proxmox, or
+  Shared Space policy;
 - hosted scaling, regional placement, billing, or service-level objectives.
 
 Those are explicit later gates, not properties inferred from a healthy local

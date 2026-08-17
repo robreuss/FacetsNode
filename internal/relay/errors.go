@@ -15,6 +15,7 @@ const (
 	CodeInvalidAdmission            ErrorCode = "invalid_admission"
 	CodeInvalidEnvelope             ErrorCode = "invalid_envelope"
 	CodeInvalidBlob                 ErrorCode = "invalid_blob"
+	CodeInvalidBlobUpload           ErrorCode = "invalid_blob_upload"
 	CodeInvalidCursor               ErrorCode = "invalid_cursor"
 	CodeInvalidAcknowledgment       ErrorCode = "invalid_acknowledgment"
 	CodeInvalidCheckpoint           ErrorCode = "invalid_checkpoint"
@@ -47,6 +48,8 @@ const (
 	CodeBlobCollision               ErrorCode = "blob_collision"
 	CodeMessageNotFound             ErrorCode = "message_not_found"
 	CodeBlobNotFound                ErrorCode = "blob_not_found"
+	CodeBlobUploadNotFound          ErrorCode = "blob_upload_not_found"
+	CodeBlobUploadCollision         ErrorCode = "blob_upload_collision"
 	CodeDomainFull                  ErrorCode = "domain_full"
 	CodeTenantFull                  ErrorCode = "tenant_full"
 )

@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -21,7 +23,12 @@ import (
 func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing.T) {
 	operatorToken := relayTestToken(192)
 	var logs bytes.Buffer
-	blobContentStore, err := relay.NewFileBlobContentStore(t.TempDir())
+	blobRoot := t.TempDir()
+	blobContentStore, err := relay.NewFileBlobContentStore(blobRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobUploadStore, err := relay.NewFileBlobUploadContentStore(blobRoot, blobContentStore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,6 +38,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		blobContentStore,
 		slog.New(slog.NewJSONHandler(&logs, nil)),
 		operatorToken,
+		blobUploadStore,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -299,7 +307,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 	blobBytes := []byte("opaque independently encrypted blob bytes")
 	blobID := relay.BlobID(blobBytes)
 	blobPath := basePath + "/blobs/" + blobID
-	upload := performRelayBlob(
+	legacyUpload := performRelayBlob(
 		t,
 		handler,
 		http.MethodPut,
@@ -309,18 +317,103 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		created.Member.MemberID,
 		"",
 	)
-	requireStatus(t, upload, http.StatusCreated)
-	uploadRetry := performRelayBlob(
-		t,
-		handler,
-		http.MethodPut,
-		blobPath,
-		blobBytes,
-		created.MemberCredential.AuthorizationToken,
-		created.Member.MemberID,
-		"",
-	)
-	requireStatus(t, uploadRetry, http.StatusOK)
+	requireStatus(t, legacyUpload, http.StatusMethodNotAllowed)
+	uploadID := uuid.New()
+	createRetryID := uuid.New()
+	uploadPath := basePath + "/blob-uploads/" + uploadID.String()
+	uploadCreate := performRelayJSON(t, handler, http.MethodPost, basePath+"/blob-uploads", relay.BlobUploadRequest{
+		RetryID: createRetryID, UploadID: uploadID, RelayBlobID: blobID,
+		ByteCount: int64(len(blobBytes)), CreatedAtMilliseconds: 1_500,
+	}, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, uploadCreate, http.StatusCreated)
+	uploadCreateRetry := performRelayJSON(t, handler, http.MethodPost, basePath+"/blob-uploads", relay.BlobUploadRequest{
+		RetryID: createRetryID, UploadID: uploadID, RelayBlobID: blobID,
+		ByteCount: int64(len(blobBytes)), CreatedAtMilliseconds: 1_500,
+	}, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, uploadCreateRetry, http.StatusOK)
+	uploadCreateCollision := performRelayJSON(t, handler, http.MethodPost, basePath+"/blob-uploads", relay.BlobUploadRequest{
+		RetryID: createRetryID, UploadID: uuid.New(), RelayBlobID: blobID,
+		ByteCount: int64(len(blobBytes)), CreatedAtMilliseconds: 1_500,
+	}, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, uploadCreateCollision, http.StatusConflict)
+	uploadStatus := performRelayJSON(t, handler, http.MethodGet, uploadPath, nil, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, uploadStatus, http.StatusOK)
+	chunkDigest := sha256.Sum256(blobBytes)
+	badChunkRequest := httptest.NewRequest(http.MethodPatch, uploadPath, bytes.NewReader(blobBytes))
+	badChunkRequest.Header.Set("Authorization", "Bearer "+created.MemberCredential.AuthorizationToken)
+	badChunkRequest.Header.Set("X-Facets-Member-ID", created.Member.MemberID.String())
+	badChunkRequest.Header.Set("Content-Type", "application/octet-stream")
+	badChunkRequest.Header.Set("Upload-Offset", "0")
+	badChunkRequest.Header.Set("X-Chunk-SHA256", strings.Repeat("0", 64))
+	badChunkResponse := httptest.NewRecorder()
+	handler.ServeHTTP(badChunkResponse, badChunkRequest)
+	if badChunkResponse.Code != http.StatusBadRequest {
+		t.Fatalf("bad chunk status=%d body=%s", badChunkResponse.Code, badChunkResponse.Body.String())
+	}
+	chunkRequest := httptest.NewRequest(http.MethodPatch, uploadPath, bytes.NewReader(blobBytes))
+	chunkRequest.Header.Set("Authorization", "Bearer "+created.MemberCredential.AuthorizationToken)
+	chunkRequest.Header.Set("X-Facets-Member-ID", created.Member.MemberID.String())
+	chunkRequest.Header.Set("Content-Type", "application/octet-stream")
+	chunkRequest.Header.Set("Upload-Offset", "0")
+	chunkRequest.Header.Set("X-Chunk-SHA256", hex.EncodeToString(chunkDigest[:]))
+	chunkResponse := httptest.NewRecorder()
+	handler.ServeHTTP(chunkResponse, chunkRequest)
+	if chunkResponse.Code != http.StatusOK {
+		t.Fatalf("chunk status=%d body=%s", chunkResponse.Code, chunkResponse.Body.String())
+	}
+	chunkRetryRequest := httptest.NewRequest(http.MethodPatch, uploadPath, bytes.NewReader(blobBytes))
+	chunkRetryRequest.Header = chunkRequest.Header.Clone()
+	chunkRetryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(chunkRetryResponse, chunkRetryRequest)
+	if chunkRetryResponse.Code != http.StatusOK {
+		t.Fatalf("chunk retry status=%d body=%s", chunkRetryResponse.Code, chunkRetryResponse.Body.String())
+	}
+	finalizeRequest := relay.BlobUploadFinalizationRequest{
+		RetryID: uuid.New(), UploadID: uploadID, RelayBlobID: blobID,
+		ByteCount: int64(len(blobBytes)), FinalizedAtMilliseconds: 1_500,
+	}
+	finalize := performRelayJSON(t, handler, http.MethodPost, uploadPath+"/finalization", finalizeRequest, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, finalize, http.StatusCreated)
+	finalizeRetry := performRelayJSON(t, handler, http.MethodPost, uploadPath+"/finalization", finalizeRequest, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, finalizeRetry, http.StatusOK)
+	emptyUploadID := uuid.New()
+	emptyBlobID := relay.BlobID(nil)
+	emptyCreate := performRelayJSON(t, handler, http.MethodPost, basePath+"/blob-uploads", relay.BlobUploadRequest{
+		RetryID: uuid.New(), UploadID: emptyUploadID, RelayBlobID: emptyBlobID,
+		ByteCount: 0, CreatedAtMilliseconds: 1_500,
+	}, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, emptyCreate, http.StatusCreated)
+	emptyFinalize := performRelayJSON(t, handler, http.MethodPost, basePath+"/blob-uploads/"+emptyUploadID.String()+"/finalization", relay.BlobUploadFinalizationRequest{
+		RetryID: uuid.New(), UploadID: emptyUploadID, RelayBlobID: emptyBlobID,
+		ByteCount: 0, FinalizedAtMilliseconds: 1_500,
+	}, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, emptyFinalize, http.StatusCreated)
+	mismatchBytes := []byte("digest mismatch")
+	mismatchUploadID := uuid.New()
+	mismatchBlobID := relay.BlobID([]byte("different final bytes"))
+	mismatchCreate := performRelayJSON(t, handler, http.MethodPost, basePath+"/blob-uploads", relay.BlobUploadRequest{
+		RetryID: uuid.New(), UploadID: mismatchUploadID, RelayBlobID: mismatchBlobID,
+		ByteCount: int64(len(mismatchBytes)), CreatedAtMilliseconds: 1_500,
+	}, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, mismatchCreate, http.StatusCreated)
+	mismatchDigest := sha256.Sum256(mismatchBytes)
+	mismatchPath := basePath + "/blob-uploads/" + mismatchUploadID.String()
+	mismatchChunk := httptest.NewRequest(http.MethodPatch, mismatchPath, bytes.NewReader(mismatchBytes))
+	mismatchChunk.Header.Set("Authorization", "Bearer "+created.MemberCredential.AuthorizationToken)
+	mismatchChunk.Header.Set("X-Facets-Member-ID", created.Member.MemberID.String())
+	mismatchChunk.Header.Set("Content-Type", "application/octet-stream")
+	mismatchChunk.Header.Set("Upload-Offset", "0")
+	mismatchChunk.Header.Set("X-Chunk-SHA256", hex.EncodeToString(mismatchDigest[:]))
+	mismatchChunkResponse := httptest.NewRecorder()
+	handler.ServeHTTP(mismatchChunkResponse, mismatchChunk)
+	if mismatchChunkResponse.Code != http.StatusOK {
+		t.Fatalf("mismatch chunk status=%d body=%s", mismatchChunkResponse.Code, mismatchChunkResponse.Body.String())
+	}
+	mismatchFinalize := performRelayJSON(t, handler, http.MethodPost, mismatchPath+"/finalization", relay.BlobUploadFinalizationRequest{
+		RetryID: uuid.New(), UploadID: mismatchUploadID, RelayBlobID: mismatchBlobID,
+		ByteCount: int64(len(mismatchBytes)), FinalizedAtMilliseconds: 1_500,
+	}, created.MemberCredential.AuthorizationToken, created.Member.MemberID)
+	requireStatus(t, mismatchFinalize, http.StatusBadRequest)
 	download := performRelayBlob(
 		t,
 		handler,
@@ -384,7 +477,7 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		created.Member.MemberID,
 		"",
 	)
-	requireStatus(t, digestMismatch, http.StatusBadRequest)
+	requireStatus(t, digestMismatch, http.StatusMethodNotAllowed)
 
 	revoke := performRelayJSON(
 		t,

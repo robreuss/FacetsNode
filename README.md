@@ -45,11 +45,11 @@ Facets core codebase.
   independent recipients, acknowledgment progression, and interrupted uploads
 - Cross-language tests against the public Swift replica-carrier fixture
 - Domain-scoped, content-addressed encrypted-blob storage on a separate volume
-- Streaming blob upload with digest verification and Range-capable GET/HEAD
+- Restart-safe contiguous blob uploads with chunk and final digest verification,
+  plus Range-capable GET/HEAD
 
-Resumable/multipart blob upload, automatic orphan reconciliation, hosted object
-storage/account admission, Shared Space membership, billing, and compute are
-later modules. Relay member admission grants routing authority only; it does
+Hosted object storage/account admission, Shared Space membership, billing, and
+compute are later modules. Relay member admission grants routing authority only; it does
 not verify identity or carry a domain content key. Checkpoint data remains
 opaque and collection requires explicit domain administration. No valid FEF,
 device grant, payment record, or Shared Space membership will implicitly grant
@@ -70,6 +70,9 @@ bytes, and 1,000,000 blobs/1 TiB blob bytes. Authority limits are 256 active
 and 4,096 retained members; 64 outstanding and 4,096 retained admissions; 256
 credential rotations per subject and 4,096 per domain. Terminal admissions
 have a 30-day exact-retry window and are collected in batches of at most 256.
+Open uploads reserve their final blob count and byte count, expire after seven
+days without progress by default, and are physically reconciled only after the
+configured orphan grace period.
 
 ## Development
 

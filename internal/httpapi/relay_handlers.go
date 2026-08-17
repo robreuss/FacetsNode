@@ -1088,14 +1088,9 @@ func (s *Server) handleAcknowledgeRelayMessage(writer http.ResponseWriter, reque
 	writeJSON(writer, http.StatusOK, result)
 }
 
-func (s *Server) handlePublishRelayBlob(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) handleCreateRelayBlobUpload(writer http.ResponseWriter, request *http.Request) {
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {
-		s.writeError(writer, err)
-		return
-	}
-	blobID := request.PathValue("blobID")
-	if err := relay.ValidateBlobID(blobID); err != nil {
 		s.writeError(writer, err)
 		return
 	}
@@ -1104,58 +1099,22 @@ func (s *Server) handlePublishRelayBlob(writer http.ResponseWriter, request *htt
 		s.writeError(writer, err)
 		return
 	}
-	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/octet-stream" {
-		s.writeError(writer, relay.NewProtocolError(
-			relay.CodeInvalidBlob,
-			"blob content type must be application/octet-stream",
-		))
-		return
-	}
-	if request.ContentLength < 0 || request.ContentLength > relay.MaximumBlobByteCount {
-		s.writeError(writer, relay.NewProtocolError(
-			relay.CodeInvalidBlob,
-			"blob Content-Length is required and outside the supported range",
-		))
-		return
-	}
-	now := s.nowMilliseconds()
-	if err := s.relayStore.PrepareBlobPublish(
-		request.Context(),
-		credential,
-		blobID,
-		request.ContentLength,
-		now,
-	); err != nil {
+	var input relay.BlobUploadRequest
+	if err := readRelayJSON(writer, request, &input, 8_192); err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	request.Body = http.MaxBytesReader(
-		writer,
-		request.Body,
-		relay.MaximumBlobByteCount+1,
-	)
-	stored, err := s.blobContentStore.Put(
-		request.Context(),
-		relay.BlobScope{TenantID: tenantID, DomainID: domainID},
-		blobID,
-		request.Body,
-		request.ContentLength,
-	)
+	result, err := s.relayStore.CreateBlobUpload(request.Context(), credential, input, s.nowMilliseconds())
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	result, err := s.relayStore.CommitBlobPublish(
-		request.Context(),
-		credential,
-		blobID,
-		stored.ByteCount,
-		s.nowMilliseconds(),
-	)
-	if err != nil {
-		s.writeError(writer, err)
-		return
+	if !result.Status.Finalized {
+		scope := relay.BlobScope{TenantID: tenantID, DomainID: domainID}
+		if err := s.blobUploadContentStore.Initialize(request.Context(), scope, input.UploadID, result.Status.CommittedOffset); err != nil {
+			s.writeError(writer, err)
+			return
+		}
 	}
 	s.metrics.ObserveAcceptance(string(result.Acceptance))
 	status := http.StatusCreated
@@ -1163,6 +1122,121 @@ func (s *Server) handlePublishRelayBlob(writer http.ResponseWriter, request *htt
 		status = http.StatusOK
 	}
 	writeJSON(writer, status, result)
+}
+
+func (s *Server) handleGetRelayBlobUpload(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	uploadID, err := parseRelayUUID(request.PathValue("uploadID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	status, err := s.relayStore.GetBlobUpload(request.Context(), credential, uploadID, s.nowMilliseconds())
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) handleAppendRelayBlobUpload(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	uploadID, err := parseRelayUUID(request.PathValue("uploadID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	mediaType, _, mediaErr := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	offset, offsetErr := strconv.ParseInt(request.Header.Get("Upload-Offset"), 10, 64)
+	if mediaErr != nil || mediaType != "application/octet-stream" || offsetErr != nil ||
+		request.ContentLength <= 0 || request.ContentLength > relay.MaximumBlobByteCount {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidBlobUpload, "chunk headers are invalid"))
+		return
+	}
+	chunk := relay.BlobUploadChunkRequest{
+		UploadID: uploadID, Offset: offset, ByteCount: request.ContentLength,
+		ChunkSHA256: request.Header.Get("X-Chunk-SHA256"),
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, request.ContentLength)
+	scope := relay.BlobScope{TenantID: tenantID, DomainID: domainID}
+	status, err := s.relayStore.AppendBlobUploadChunk(
+		request.Context(), credential, chunk, s.nowMilliseconds(),
+		func(durable relay.BlobUploadStatus) error {
+			if err := s.blobUploadContentStore.Initialize(request.Context(), scope, uploadID, durable.CommittedOffset); err != nil {
+				return err
+			}
+			return s.blobUploadContentStore.Append(request.Context(), scope, chunk, request.Body)
+		},
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) handleFinalizeRelayBlobUpload(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	uploadID, err := parseRelayUUID(request.PathValue("uploadID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.BlobUploadFinalizationRequest
+	if err := readRelayJSON(writer, request, &input, 8_192); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.UploadID != uploadID {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidBlobUpload, "finalization upload ID does not match path"))
+		return
+	}
+	scope := relay.BlobScope{TenantID: tenantID, DomainID: domainID}
+	result, err := s.relayStore.FinalizeBlobUpload(
+		request.Context(), credential, input, s.nowMilliseconds(),
+		func(relay.BlobUploadStatus) error {
+			_, publishErr := s.blobUploadContentStore.Publish(request.Context(), scope, uploadID, input.RelayBlobID, input.ByteCount)
+			return publishErr
+		},
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	_ = s.blobUploadContentStore.Delete(request.Context(), relay.BlobScope{TenantID: tenantID, DomainID: domainID}, uploadID)
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	statusCode := http.StatusCreated
+	if result.Acceptance == relay.AcceptanceDuplicate {
+		statusCode = http.StatusOK
+	}
+	writeJSON(writer, statusCode, result)
 }
 
 func (s *Server) handleFetchRelayBlob(writer http.ResponseWriter, request *http.Request) {

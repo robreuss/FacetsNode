@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -157,6 +159,121 @@ func TestMemoryStoreDeliversOncePerDomainWithPerSubscriptionFacts(t *testing.T) 
 	}
 	if _, err := store.Fetch(ctx, recipientCredential, 0, 10, 1_600); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("fetch after revocation err=%v", err)
+	}
+}
+
+func TestMemoryStoreResumableUploadReservesQuotaAndAllowsSameSubscriptionAgent(t *testing.T) {
+	ctx := context.Background()
+	tenantID, domainID := uuid.New(), uuid.New()
+	first := relay.Credential{TenantID: tenantID, DomainID: domainID, MemberID: uuid.New(), Token: token(41)}
+	firstDigest, _ := relay.AuthorizationDigest(first)
+	admin := relay.AdministrationCredential{TenantID: tenantID, DomainID: domainID, Token: token(42)}
+	adminDigest, _ := relay.AdministrationDigest(admin)
+	store := relay.NewMemoryStore()
+	_, err := store.CreateDomain(ctx, relay.DomainRegistration{
+		Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID,
+		AdministrationDigest: adminDigest, CreatedAtMilliseconds: 1_000,
+		MaximumMessageCount: 1, MaximumMessageByteCount: 1,
+		MaximumBlobCount: 1, MaximumBlobByteCount: 8,
+	}, relay.MemberRegistration{
+		Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID, MemberID: first.MemberID,
+		AuthorizationDigest: firstDigest, Capabilities: []relay.Capability{relay.CapabilityPublishBlob}, CreatedAtMilliseconds: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := relay.Credential{TenantID: tenantID, DomainID: domainID, MemberID: uuid.New(), Token: token(43)}
+	secondDigest, _ := relay.AuthorizationDigest(second)
+	if _, err := store.CreateSubscriptionMember(ctx, admin, first.MemberID, relay.MemberRegistration{
+		Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID, MemberID: second.MemberID,
+		AuthorizationDigest: secondDigest, Capabilities: []relay.Capability{relay.CapabilityPublishBlob}, CreatedAtMilliseconds: 1_100,
+	}, 1_100); err != nil {
+		t.Fatal(err)
+	}
+	bytes := []byte("12345678")
+	request := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID(bytes), ByteCount: 8, CreatedAtMilliseconds: 1_200}
+	created, err := store.CreateBlobUpload(ctx, first, request, 1_200)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("create=%+v err=%v", created, err)
+	}
+	retry, err := store.CreateBlobUpload(ctx, second, request, 1_200)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("same-sub retry=%+v err=%v", retry, err)
+	}
+	status, _ := store.GetDomainStatus(ctx, admin)
+	if status.ReservedBlobCount != 1 || status.ReservedBlobByteCount != 8 || status.BlobCount != 0 {
+		t.Fatalf("reserved status=%+v", status)
+	}
+	other := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID([]byte("x")), ByteCount: 1, CreatedAtMilliseconds: 1_200}
+	if _, err := store.CreateBlobUpload(ctx, first, other, 1_200); !relay.ErrorHasCode(err, relay.CodeDomainFull) {
+		t.Fatalf("oversubscription err=%v", err)
+	}
+	chunk := relay.BlobUploadChunkRequest{UploadID: request.UploadID, Offset: 0, ByteCount: 8, ChunkSHA256: strings.Repeat("a", 64)}
+	competingChunk := chunk
+	competingChunk.ChunkSHA256 = strings.Repeat("c", 64)
+	type appendResult struct {
+		status relay.BlobUploadStatus
+		err    error
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	firstResult, secondResult := make(chan appendResult, 1), make(chan appendResult, 1)
+	go func() {
+		status, appendErr := store.AppendBlobUploadChunk(ctx, second, chunk, 1_300, func(status relay.BlobUploadStatus) error {
+			close(entered)
+			<-release
+			return nil
+		})
+		firstResult <- appendResult{status: status, err: appendErr}
+	}()
+	<-entered
+	competingCallback := make(chan struct{}, 1)
+	go func() {
+		status, appendErr := store.AppendBlobUploadChunk(ctx, first, competingChunk, 1_300, func(relay.BlobUploadStatus) error {
+			competingCallback <- struct{}{}
+			return nil
+		})
+		secondResult <- appendResult{status: status, err: appendErr}
+	}()
+	select {
+	case result := <-secondResult:
+		t.Fatalf("competing append escaped serialization: %+v", result)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	committed := <-firstResult
+	if committed.err != nil || committed.status.CommittedOffset != 8 || committed.status.Finalized {
+		t.Fatalf("commit=%+v", committed)
+	}
+	competing := <-secondResult
+	if !relay.ErrorHasCode(competing.err, relay.CodeBlobUploadCollision) {
+		t.Fatalf("different concurrent content err=%v", competing.err)
+	}
+	select {
+	case <-competingCallback:
+		t.Fatal("losing concurrent request touched content")
+	default:
+	}
+	duplicateCalled := false
+	duplicate, err := store.AppendBlobUploadChunk(ctx, first, chunk, 1_300, func(relay.BlobUploadStatus) error { duplicateCalled = true; return nil })
+	if err != nil || duplicate.CommittedOffset != 8 || duplicateCalled {
+		t.Fatalf("duplicate status=%+v callback=%v err=%v", duplicate, duplicateCalled, err)
+	}
+	finalRequest := relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: request.UploadID, RelayBlobID: request.RelayBlobID, ByteCount: 8, FinalizedAtMilliseconds: 1_400}
+	finalized, err := store.FinalizeBlobUpload(ctx, first, finalRequest, 1_400, func(relay.BlobUploadStatus) error { return nil })
+	if err != nil || finalized.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("finalize=%+v err=%v", finalized, err)
+	}
+	finalRetryCallback := false
+	finalRetry, err := store.FinalizeBlobUpload(ctx, second, finalRequest, 1_400, func(relay.BlobUploadStatus) error { finalRetryCallback = true; return nil })
+	if err != nil || finalRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("finalize retry=%+v err=%v", finalRetry, err)
+	}
+	if finalRetryCallback {
+		t.Fatal("finalization retry republished content")
+	}
+	status, _ = store.GetDomainStatus(ctx, admin)
+	if status.ReservedBlobCount != 0 || status.ReservedBlobByteCount != 0 || status.BlobCount != 1 || status.BlobByteCount != 8 {
+		t.Fatalf("final status=%+v", status)
 	}
 }
 

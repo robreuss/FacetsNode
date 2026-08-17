@@ -23,6 +23,7 @@ type Server struct {
 	store                  rendezvous.Store
 	relayStore             relay.Store
 	blobContentStore       relay.BlobContentStore
+	blobUploadContentStore relay.BlobUploadContentStore
 	relayWakeBroker        *relayWakeBroker
 	operatorTokenDigest    [32]byte
 	operatorProvisioningOn bool
@@ -47,10 +48,14 @@ func NewWithRelay(
 	blobContentStore relay.BlobContentStore,
 	logger *slog.Logger,
 	operatorToken string,
+	blobUploadStores ...relay.BlobUploadContentStore,
 ) (*Server, error) {
 	server := New(store, logger)
 	server.relayStore = relayStore
 	server.blobContentStore = blobContentStore
+	if len(blobUploadStores) > 0 {
+		server.blobUploadContentStore = blobUploadStores[0]
+	}
 	if operatorToken != "" {
 		digest, err := operatorDigest(operatorToken)
 		if err != nil {
@@ -176,13 +181,15 @@ func (s *Server) Handler() http.Handler {
 		)
 		if s.blobContentStore != nil {
 			mux.HandleFunc(
-				"PUT /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
-				s.handlePublishRelayBlob,
-			)
-			mux.HandleFunc(
 				"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
 				s.handleFetchRelayBlob,
 			)
+			if s.blobUploadContentStore != nil {
+				mux.HandleFunc("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads", s.handleCreateRelayBlobUpload)
+				mux.HandleFunc("GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", s.handleGetRelayBlobUpload)
+				mux.HandleFunc("PATCH /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", s.handleAppendRelayBlobUpload)
+				mux.HandleFunc("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}/finalization", s.handleFinalizeRelayBlobUpload)
+			}
 			mux.HandleFunc(
 				"HEAD /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
 				s.handleFetchRelayBlob,
@@ -379,7 +386,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeInvalidSubscription, relay.CodeInvalidMember,
 				relay.CodeInvalidAdmission,
 				relay.CodeInvalidCredentialRotation,
-				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob,
+				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob, relay.CodeInvalidBlobUpload,
 				relay.CodeInvalidCursor, relay.CodeInvalidCheckpoint,
 				relay.CodeWrongScope:
 				status = http.StatusBadRequest
@@ -390,7 +397,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeAdmissionExpired, relay.CodeAdmissionRevoked,
 				relay.CodeMissingCapability:
 				status = http.StatusForbidden
-			case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound,
+			case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound, relay.CodeBlobUploadNotFound,
 				relay.CodeCheckpointNotFound:
 				status = http.StatusNotFound
 			case relay.CodeTenantCollision, relay.CodeDomainCollision,
@@ -398,7 +405,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeAdmissionCollision, relay.CodeAdmissionClaimed,
 				relay.CodeCredentialRotationCollision,
 				relay.CodeCredentialReuse,
-				relay.CodeMessageCollision, relay.CodeBlobCollision,
+				relay.CodeMessageCollision, relay.CodeBlobCollision, relay.CodeBlobUploadCollision,
 				relay.CodeInvalidAcknowledgment, relay.CodeCheckpointCollision,
 				relay.CodeCheckpointNotEligible, relay.CodeCollectionPlanStale:
 				status = http.StatusConflict

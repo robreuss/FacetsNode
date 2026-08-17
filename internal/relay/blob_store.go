@@ -50,6 +50,18 @@ type BlobContentStore interface {
 	) (BlobContent, error)
 }
 
+type BlobFileCandidate struct {
+	Scope                BlobScope
+	BlobID               string
+	ModifiedMilliseconds int64
+}
+
+type BlobUploadFileCandidate struct {
+	Scope                BlobScope
+	UploadID             uuid.UUID
+	ModifiedMilliseconds int64
+}
+
 type FileBlobContentStore struct {
 	root string
 }
@@ -165,6 +177,73 @@ func (s *FileBlobContentStore) Open(
 
 func (s *FileBlobContentStore) domainDirectory(scope BlobScope) string {
 	return filepath.Join(s.root, scope.TenantID.String(), scope.DomainID.String())
+}
+
+func (s *FileBlobContentStore) DeleteBlob(ctx context.Context, scope BlobScope, blobID string) error {
+	if err := scope.validate(); err != nil {
+		return err
+	}
+	if err := ValidateBlobID(blobID); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	err := os.Remove(filepath.Join(s.domainDirectory(scope), blobID))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete blob content: %w", err)
+	}
+	return nil
+}
+
+func (s *FileBlobContentStore) BlobCandidates(ctx context.Context) ([]BlobFileCandidate, error) {
+	var result []BlobFileCandidate
+	err := filepath.WalkDir(s.root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if path != s.root && (entry.Name() == ".staging" || entry.Name() == ".uploads") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relative, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return err
+		}
+		segments := splitCleanPath(relative)
+		if len(segments) != 3 {
+			return nil
+		}
+		tenantID, tenantErr := uuid.Parse(segments[0])
+		domainID, domainErr := uuid.Parse(segments[1])
+		if tenantErr != nil || domainErr != nil || ValidateBlobID(segments[2]) != nil {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		result = append(result, BlobFileCandidate{Scope: BlobScope{TenantID: tenantID, DomainID: domainID}, BlobID: segments[2], ModifiedMilliseconds: info.ModTime().UnixMilli()})
+		return nil
+	})
+	return result, err
+}
+
+func splitCleanPath(path string) []string {
+	var parts []string
+	for path != "." && path != string(filepath.Separator) && path != "" {
+		dir, file := filepath.Split(path)
+		if file != "" {
+			parts = append([]string{file}, parts...)
+		}
+		path = filepath.Clean(dir)
+	}
+	return parts
 }
 
 type contextReader struct {

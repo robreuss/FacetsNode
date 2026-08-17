@@ -9,26 +9,30 @@ import (
 )
 
 type Config struct {
-	ListenAddress  string
-	DatabaseURL    string
-	ShutdownPeriod time.Duration
-	CleanupPeriod  time.Duration
-	TransferPeriod time.Duration
-	DatabaseConns  int32
-	OperatorToken  string
-	BlobRoot       string
+	ListenAddress   string
+	DatabaseURL     string
+	ShutdownPeriod  time.Duration
+	CleanupPeriod   time.Duration
+	TransferPeriod  time.Duration
+	DatabaseConns   int32
+	OperatorToken   string
+	BlobRoot        string
+	BlobUploadTTL   time.Duration
+	BlobOrphanGrace time.Duration
 }
 
 func Load() (Config, error) {
 	configuration := Config{
-		ListenAddress:  environment("FACETS_NODE_LISTEN_ADDR", ":8080"),
-		DatabaseURL:    os.Getenv("FACETS_NODE_DATABASE_URL"),
-		ShutdownPeriod: 10 * time.Second,
-		CleanupPeriod:  time.Minute,
-		TransferPeriod: 10 * time.Minute,
-		DatabaseConns:  10,
-		OperatorToken:  os.Getenv("FACETS_NODE_OPERATOR_TOKEN"),
-		BlobRoot:       environment("FACETS_NODE_BLOB_ROOT", "/var/lib/facets-node/blobs"),
+		ListenAddress:   environment("FACETS_NODE_LISTEN_ADDR", ":8080"),
+		DatabaseURL:     os.Getenv("FACETS_NODE_DATABASE_URL"),
+		ShutdownPeriod:  10 * time.Second,
+		CleanupPeriod:   time.Minute,
+		TransferPeriod:  10 * time.Minute,
+		DatabaseConns:   10,
+		OperatorToken:   os.Getenv("FACETS_NODE_OPERATOR_TOKEN"),
+		BlobRoot:        environment("FACETS_NODE_BLOB_ROOT", "/var/lib/facets-node/blobs"),
+		BlobUploadTTL:   7 * 24 * time.Hour,
+		BlobOrphanGrace: 24 * time.Hour,
 	}
 	if configuration.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("FACETS_NODE_DATABASE_URL is required")
@@ -66,6 +70,20 @@ func Load() (Config, error) {
 			)
 		}
 		configuration.TransferPeriod = period
+	}
+	if value := os.Getenv("FACETS_NODE_BLOB_UPLOAD_TTL"); value != "" {
+		period, err := time.ParseDuration(value)
+		if err != nil || period <= 0 {
+			return Config{}, fmt.Errorf("FACETS_NODE_BLOB_UPLOAD_TTL must be a positive duration")
+		}
+		configuration.BlobUploadTTL = period
+	}
+	if value := os.Getenv("FACETS_NODE_BLOB_ORPHAN_GRACE"); value != "" {
+		period, err := time.ParseDuration(value)
+		if err != nil || period <= 0 {
+			return Config{}, fmt.Errorf("FACETS_NODE_BLOB_ORPHAN_GRACE must be a positive duration")
+		}
+		configuration.BlobOrphanGrace = period
 	}
 	if value := os.Getenv("FACETS_NODE_DATABASE_CONNS"); value != "" {
 		count, err := strconv.ParseInt(value, 10, 32)

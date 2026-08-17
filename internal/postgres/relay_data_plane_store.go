@@ -777,7 +777,7 @@ func (s *RelayStore) GetTenantStatus(ctx context.Context, credential relay.Tenan
 		MaximumAggregateBlobCount:        tenant.MaximumAggregateBlobCount,
 		MaximumAggregateBlobByteCount:    tenant.MaximumAggregateBlobByteCount,
 	}}
-	err = tx.QueryRow(ctx, `SELECT domain_count,message_count,aggregate_message_byte_count,blob_count,aggregate_blob_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&status.DomainCount, &status.AggregateMessageCount, &status.AggregateMessageByteCount, &status.AggregateBlobCount, &status.AggregateBlobByteCount)
+	err = tx.QueryRow(ctx, `SELECT domain_count,message_count,aggregate_message_byte_count,blob_count,aggregate_blob_byte_count,reserved_blob_count,reserved_blob_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&status.DomainCount, &status.AggregateMessageCount, &status.AggregateMessageByteCount, &status.AggregateBlobCount, &status.AggregateBlobByteCount, &status.ReservedBlobCount, &status.ReservedBlobByteCount)
 	if err != nil {
 		return relay.TenantStatus{}, err
 	}
@@ -810,6 +810,9 @@ func (s *RelayStore) GetDomainStatus(ctx context.Context, credential relay.Admin
 			MaximumBlobCount:        domain.MaximumBlobCount,
 			MaximumBlobByteCount:    domain.MaximumBlobByteCount,
 		},
+	}
+	if err := tx.QueryRow(ctx, `SELECT reserved_blob_count,reserved_blob_byte_count FROM relay_domains WHERE tenant_id=$1 AND domain_id=$2`, credential.TenantID, credential.DomainID).Scan(&status.ReservedBlobCount, &status.ReservedBlobByteCount); err != nil {
+		return relay.DomainStatus{}, err
 	}
 	err = tx.QueryRow(ctx, `SELECT count(*) FROM relay_subscriptions WHERE tenant_id=$1 AND domain_id=$2 AND status='active'`, credential.TenantID, credential.DomainID).Scan(&status.ActiveSubscriptionCount)
 	if err != nil {

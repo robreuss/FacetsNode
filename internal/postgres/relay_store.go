@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,11 +14,16 @@ import (
 )
 
 type RelayStore struct {
-	pool *pgxpool.Pool
+	pool          *pgxpool.Pool
+	blobUploadTTL time.Duration
 }
 
-func NewRelayStore(pool *pgxpool.Pool) *RelayStore {
-	return &RelayStore{pool: pool}
+func NewRelayStore(pool *pgxpool.Pool, uploadTTL ...time.Duration) *RelayStore {
+	ttl := 7 * 24 * time.Hour
+	if len(uploadTTL) > 0 && uploadTTL[0] > 0 {
+		ttl = uploadTTL[0]
+	}
+	return &RelayStore{pool: pool, blobUploadTTL: ttl}
 }
 
 func (s *RelayStore) CreateDomain(

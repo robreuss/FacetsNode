@@ -114,6 +114,10 @@ type Store interface {
 		stage AcknowledgmentStage,
 		nowMilliseconds int64,
 	) (AcknowledgmentResult, error)
+	CreateBlobUpload(context.Context, Credential, BlobUploadRequest, int64) (BlobUploadCreateResponse, error)
+	GetBlobUpload(context.Context, Credential, uuid.UUID, int64) (BlobUploadStatus, error)
+	AppendBlobUploadChunk(context.Context, Credential, BlobUploadChunkRequest, int64, func(BlobUploadStatus) error) (BlobUploadStatus, error)
+	FinalizeBlobUpload(context.Context, Credential, BlobUploadFinalizationRequest, int64, func(BlobUploadStatus) error) (BlobUploadFinalizationResponse, error)
 	PrepareBlobPublish(
 		ctx context.Context,
 		credential Credential,
@@ -134,4 +138,15 @@ type Store interface {
 		blobID string,
 		nowMilliseconds int64,
 	) (BlobMetadata, error)
+}
+
+type BlobUploadExpiry struct {
+	Scope    BlobScope
+	UploadID uuid.UUID
+}
+
+type BlobMaintenanceStore interface {
+	ExpireBlobUploads(context.Context, int64, int64) ([]BlobUploadExpiry, error)
+	DeleteBlobIfUnauthorized(context.Context, BlobFileCandidate, int64, int64, func() error) (bool, error)
+	DeleteBlobUploadIfUnauthorized(context.Context, BlobUploadFileCandidate, int64, int64, func() error) (bool, error)
 }

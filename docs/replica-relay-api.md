@@ -214,19 +214,34 @@ start with a fresh dry-run. Reusing the exact collection request returns the
 recorded result; reusing its retry ID for different input fails closed.
 
 PostgreSQL authority and quota counters commit first, and deleted blob IDs enter
-a durable collection queue. Packet 4A deliberately does not remove filesystem
-bytes: the separate grace-period orphan reconciler must re-check both published
-blob and active-upload authority immediately before physical deletion, making a
-same-ID re-publication safe. A new subscription, or one explicitly changed to
+a durable collection queue. The grace-period orphan reconciler re-checks both
+published-blob and active-upload authority immediately before physical deletion,
+making a same-ID re-publication safe. A new subscription, or one explicitly changed to
 `rebootstrap_required`, receives the latest checkpoint start cursor. Resetting
 a publisher requires a fresh subscription because a subscription never fetches
 its own publications.
 
 ## Blobs and quotas
 
-Existing content-addressed `PUT`, `GET`, and `HEAD .../blobs/{blobID}` routes
-remain. A blob ID is canonical base64url SHA-256 of the encrypted bytes. A
-complete upload verifies length and digest before atomic publication.
+The whole-blob `PUT .../blobs/{blobID}` route has been removed without a
+compatibility fallback. Members with `blob_publish` use:
+
+```text
+POST  .../blob-uploads
+GET   .../blob-uploads/{uploadID}
+PATCH .../blob-uploads/{uploadID}
+POST  .../blob-uploads/{uploadID}/finalization
+```
+
+Create and finalization use client-generated exact retry IDs. `PATCH` carries
+raw bytes as `application/octet-stream`, with `Upload-Offset`, `Content-Length`,
+and lowercase `X-Chunk-SHA256` headers. Chunks are contiguous. The server fsyncs
+staging before advancing the durable PostgreSQL offset; a restart truncates any
+uncommitted crash tail back to that offset. Any active member serving the same
+subscription may query or resume the upload. Finalization verifies the complete
+SHA-256 against the canonical base64url blob ID, publishes atomically, converts
+the reservation into published counters, and is exact-retry safe. Published
+content remains available through `GET` and `HEAD .../blobs/{blobID}`.
 
 Defaults are:
 
@@ -237,14 +252,17 @@ Defaults are:
 - per item/page: 16 MiB decoded ciphertext, 256 MiB blob, 100 messages, and a
   25-second wake wait.
 
-Tenant and domain message/blob counts and bytes advance atomically with
-publication. Reserved blob counts are zero for complete uploads; the
-resumable-upload packet will account for durable staging reservations.
+Tenant and domain reserved blob counts and bytes advance atomically at upload
+creation, preventing concurrent quota oversubscription. Finalization converts
+them to published counters. Inactive uploads expire after
+`FACETS_NODE_BLOB_UPLOAD_TTL` (seven days by default); physical upload staging
+and unreferenced final files are deleted only after
+`FACETS_NODE_BLOB_ORPHAN_GRACE` (24 hours by default) and a fresh authority
+check.
 
 ## Current limits
 
-Resumable uploads, automatic orphan reconciliation, cross-instance
-notifications, distributed rate limits, hosted account admission, and Shared
+Cross-instance notifications, distributed rate limits, hosted account admission, and Shared
 Space membership/key policy are not implemented in this packet. Checkpoint
 collection remains explicitly administration-triggered. No long-absent
 subscription becomes stale automatically; revocation or explicit rebootstrap

@@ -2,7 +2,9 @@ package integration_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -265,16 +267,7 @@ func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
 	}
 	blobBytes := []byte("opaque-live-encrypted-blob")
 	blobURL := basePath + "/blobs/" + relay.BlobID(blobBytes)
-	requireStatusAndClose(t, requestRelayBlob(
-		t,
-		client,
-		http.MethodPut,
-		blobURL,
-		blobBytes,
-		domain.MemberCredential.AuthorizationToken,
-		domain.Member.MemberID,
-		"",
-	), http.StatusCreated)
+	uploadLiveRelayBlob(t, client, basePath, relay.Credential{TenantID: domain.Domain.TenantID, DomainID: domain.Domain.DomainID, MemberID: domain.Member.MemberID, Token: domain.MemberCredential.AuthorizationToken}, blobBytes, true)
 	blobDownload := requestRelayBlob(
 		t,
 		client,
@@ -346,6 +339,55 @@ func requestRelayBlob(
 		t.Fatal(err)
 	}
 	return response
+}
+
+func uploadLiveRelayBlob(t *testing.T, client *http.Client, basePath string, credential relay.Credential, content []byte, split bool) {
+	t.Helper()
+	now := time.Now().UnixMilli()
+	uploadID, createRetryID := uuid.New(), uuid.New()
+	blobID := relay.BlobID(content)
+	uploadBase := basePath + "/blob-uploads"
+	create := relay.BlobUploadRequest{RetryID: createRetryID, UploadID: uploadID, RelayBlobID: blobID, ByteCount: int64(len(content)), CreatedAtMilliseconds: now}
+	requireStatusAndClose(t, requestRelayJSON(t, client, http.MethodPost, uploadBase, create, credential.Token, credential.MemberID), http.StatusCreated)
+	requireStatusAndClose(t, requestRelayJSON(t, client, http.MethodPost, uploadBase, create, credential.Token, credential.MemberID), http.StatusOK)
+	uploadURL := uploadBase + "/" + uploadID.String()
+	boundaries := []int{len(content)}
+	if split && len(content) > 1 {
+		boundaries = []int{len(content) / 2, len(content)}
+	}
+	offset := 0
+	for _, end := range boundaries {
+		chunk := content[offset:end]
+		digest := sha256.Sum256(chunk)
+		request, err := http.NewRequest(http.MethodPatch, uploadURL, bytes.NewReader(chunk))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/octet-stream")
+		request.Header.Set("Authorization", "Bearer "+credential.Token)
+		request.Header.Set("X-Facets-Member-ID", credential.MemberID.String())
+		request.Header.Set("Upload-Offset", fmt.Sprint(offset))
+		request.Header.Set("X-Chunk-SHA256", hex.EncodeToString(digest[:]))
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireStatusAndClose(t, response, http.StatusOK)
+		offset = end
+		statusResponse := requestRelayJSON(t, client, http.MethodGet, uploadURL, nil, credential.Token, credential.MemberID)
+		requireStatus(t, statusResponse, http.StatusOK)
+		var status relay.BlobUploadStatus
+		if err := json.NewDecoder(statusResponse.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+		_ = statusResponse.Body.Close()
+		if status.CommittedOffset != int64(offset) {
+			t.Fatalf("live upload offset=%d want=%d", status.CommittedOffset, offset)
+		}
+	}
+	finalization := relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: uploadID, RelayBlobID: blobID, ByteCount: int64(len(content)), FinalizedAtMilliseconds: time.Now().UnixMilli()}
+	requireStatusAndClose(t, requestRelayJSON(t, client, http.MethodPost, uploadURL+"/finalization", finalization, credential.Token, credential.MemberID), http.StatusCreated)
+	requireStatusAndClose(t, requestRelayJSON(t, client, http.MethodPost, uploadURL+"/finalization", finalization, credential.Token, credential.MemberID), http.StatusOK)
 }
 
 func requestJSON(

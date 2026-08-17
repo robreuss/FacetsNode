@@ -61,10 +61,15 @@ func main() {
 		os.Exit(1)
 	}
 	store := postgres.NewStore(pool)
-	relayStore := postgres.NewRelayStore(pool)
+	relayStore := postgres.NewRelayStore(pool, configuration.BlobUploadTTL)
 	blobContentStore, err := relay.NewFileBlobContentStore(configuration.BlobRoot)
 	if err != nil {
 		logger.Error("blob store configuration rejected", "error", err)
+		os.Exit(1)
+	}
+	blobUploadContentStore, err := relay.NewFileBlobUploadContentStore(configuration.BlobRoot, blobContentStore)
+	if err != nil {
+		logger.Error("blob upload store configuration rejected", "error", err)
 		os.Exit(1)
 	}
 	api, err := httpapi.NewWithRelay(
@@ -73,6 +78,7 @@ func main() {
 		blobContentStore,
 		logger,
 		configuration.OperatorToken,
+		blobUploadContentStore,
 	)
 	if err != nil {
 		logger.Error("relay API configuration rejected", "error", err)
@@ -89,6 +95,7 @@ func main() {
 	}
 
 	go cleanupLoop(rootContext, logger, store, configuration.CleanupPeriod)
+	go blobMaintenanceLoop(rootContext, logger, relayStore, blobContentStore, blobUploadContentStore, configuration.CleanupPeriod, configuration.BlobOrphanGrace)
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info(
@@ -117,6 +124,70 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("shutdown complete")
+}
+
+func blobMaintenanceLoop(
+	ctx context.Context,
+	logger *slog.Logger,
+	store relay.BlobMaintenanceStore,
+	blobs *relay.FileBlobContentStore,
+	uploads *relay.FileBlobUploadContentStore,
+	period time.Duration,
+	grace time.Duration,
+) {
+	ticker := time.NewTicker(period)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			maintenanceContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+			err := reconcileBlobFiles(maintenanceContext, store, blobs, uploads, now.UnixMilli(), grace.Milliseconds())
+			cancel()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("blob maintenance failed", "error", err)
+			}
+		}
+	}
+}
+
+func reconcileBlobFiles(
+	ctx context.Context,
+	store relay.BlobMaintenanceStore,
+	blobs *relay.FileBlobContentStore,
+	uploads *relay.FileBlobUploadContentStore,
+	nowMilliseconds int64,
+	graceMilliseconds int64,
+) error {
+	if _, err := store.ExpireBlobUploads(ctx, nowMilliseconds, graceMilliseconds); err != nil {
+		return err
+	}
+	finalCandidates, err := blobs.BlobCandidates(ctx)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range finalCandidates {
+		_, err := store.DeleteBlobIfUnauthorized(ctx, candidate, nowMilliseconds, graceMilliseconds, func() error {
+			return blobs.DeleteBlob(ctx, candidate.Scope, candidate.BlobID)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	uploadCandidates, err := uploads.UploadCandidates(ctx)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range uploadCandidates {
+		_, err := store.DeleteBlobUploadIfUnauthorized(ctx, candidate, nowMilliseconds, graceMilliseconds, func() error {
+			return uploads.DeleteUpload(ctx, candidate.Scope, candidate.UploadID)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type expiryStore interface {

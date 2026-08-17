@@ -22,28 +22,33 @@ type memoryMessage struct {
 }
 
 type memoryDomain struct {
-	provisioningRetryID    uuid.UUID
-	registration           DomainRegistration
-	subscriptions          map[uuid.UUID]Subscription
-	subscriptionCreates    map[uuid.UUID]SubscriptionCreateRequest
-	subscriptionChanges    map[uuid.UUID]memorySubscriptionChange
-	memberSubscriptions    map[uuid.UUID]uuid.UUID
-	admissionSubscriptions map[uuid.UUID]uuid.UUID
-	members                map[uuid.UUID]MemberRegistration
-	admissions             map[uuid.UUID]MemberAdmission
-	messages               []*memoryMessage
-	messageByID            map[uuid.UUID]*memoryMessage
-	blobs                  map[string]BlobMetadata
-	rotations              map[uuid.UUID]memoryCredentialRotation
-	nextSequence           uint64
-	messageBytes           int64
-	blobBytes              int64
-	checkpoints            map[uuid.UUID]*memoryCheckpoint
-	checkpointStageRetries map[uuid.UUID]uuid.UUID
-	checkpointActivations  map[uuid.UUID]memoryCheckpointActivation
-	checkpointCollections  map[uuid.UUID]memoryCheckpointCollection
-	activatedCheckpoints   []uuid.UUID
-	checkpointOrdinal      uint64
+	provisioningRetryID     uuid.UUID
+	registration            DomainRegistration
+	subscriptions           map[uuid.UUID]Subscription
+	subscriptionCreates     map[uuid.UUID]SubscriptionCreateRequest
+	subscriptionChanges     map[uuid.UUID]memorySubscriptionChange
+	memberSubscriptions     map[uuid.UUID]uuid.UUID
+	admissionSubscriptions  map[uuid.UUID]uuid.UUID
+	members                 map[uuid.UUID]MemberRegistration
+	admissions              map[uuid.UUID]MemberAdmission
+	messages                []*memoryMessage
+	messageByID             map[uuid.UUID]*memoryMessage
+	blobs                   map[string]BlobMetadata
+	rotations               map[uuid.UUID]memoryCredentialRotation
+	nextSequence            uint64
+	messageBytes            int64
+	blobBytes               int64
+	checkpoints             map[uuid.UUID]*memoryCheckpoint
+	checkpointStageRetries  map[uuid.UUID]uuid.UUID
+	checkpointActivations   map[uuid.UUID]memoryCheckpointActivation
+	checkpointCollections   map[uuid.UUID]memoryCheckpointCollection
+	activatedCheckpoints    []uuid.UUID
+	checkpointOrdinal       uint64
+	blobUploads             map[uuid.UUID]*memoryBlobUpload
+	blobUploadCreates       map[uuid.UUID]uuid.UUID
+	blobUploadFinalizations map[uuid.UUID]memoryBlobUploadFinalization
+	reservedBlobCount       int64
+	reservedBlobBytes       int64
 }
 
 type memorySubscriptionChange struct {
@@ -244,14 +249,17 @@ func (s *MemoryStore) createDomainLocked(
 		members: map[uuid.UUID]MemberRegistration{
 			initialMember.MemberID: initialMember,
 		},
-		admissions:             make(map[uuid.UUID]MemberAdmission),
-		messageByID:            make(map[uuid.UUID]*memoryMessage),
-		blobs:                  make(map[string]BlobMetadata),
-		rotations:              make(map[uuid.UUID]memoryCredentialRotation),
-		checkpoints:            make(map[uuid.UUID]*memoryCheckpoint),
-		checkpointStageRetries: make(map[uuid.UUID]uuid.UUID),
-		checkpointActivations:  make(map[uuid.UUID]memoryCheckpointActivation),
-		checkpointCollections:  make(map[uuid.UUID]memoryCheckpointCollection),
+		admissions:              make(map[uuid.UUID]MemberAdmission),
+		messageByID:             make(map[uuid.UUID]*memoryMessage),
+		blobs:                   make(map[string]BlobMetadata),
+		rotations:               make(map[uuid.UUID]memoryCredentialRotation),
+		checkpoints:             make(map[uuid.UUID]*memoryCheckpoint),
+		checkpointStageRetries:  make(map[uuid.UUID]uuid.UUID),
+		checkpointActivations:   make(map[uuid.UUID]memoryCheckpointActivation),
+		checkpointCollections:   make(map[uuid.UUID]memoryCheckpointCollection),
+		blobUploads:             make(map[uuid.UUID]*memoryBlobUpload),
+		blobUploadCreates:       make(map[uuid.UUID]uuid.UUID),
+		blobUploadFinalizations: make(map[uuid.UUID]memoryBlobUploadFinalization),
 	}
 }
 
@@ -1128,6 +1136,8 @@ func (s *MemoryStore) GetTenantStatus(_ context.Context, credential TenantCreden
 		TenantID: credential.TenantID, DomainCount: int64(domains),
 		AggregateMessageCount: int64(messages), AggregateMessageByteCount: messageBytes,
 		AggregateBlobCount: int64(blobs), AggregateBlobByteCount: blobBytes,
+		ReservedBlobCount:     s.tenantReservedBlobCountLocked(credential.TenantID),
+		ReservedBlobByteCount: s.tenantReservedBlobBytesLocked(credential.TenantID),
 		Quota: TenantQuota{
 			MaximumDomainCount:               tenant.registration.MaximumDomainCount,
 			MaximumAggregateMessageCount:     tenant.registration.MaximumAggregateMessageCount,
@@ -1165,6 +1175,8 @@ func (s *MemoryStore) GetDomainStatus(_ context.Context, credential Administrati
 		TenantID: credential.TenantID, DomainID: credential.DomainID,
 		MessageCount: int64(len(domain.messages)), MessageByteCount: domain.messageBytes,
 		BlobCount: int64(len(domain.blobs)), BlobByteCount: domain.blobBytes,
+		ReservedBlobCount:       domain.reservedBlobCount,
+		ReservedBlobByteCount:   domain.reservedBlobBytes,
 		ActiveSubscriptionCount: active, OldestUncollectedCursor: oldest,
 		LatestActivatedCheckpointID: latestCheckpointID,
 		Quota: DomainQuota{
@@ -1557,11 +1569,33 @@ func (s *MemoryStore) ensureTenantBlobCapacityLocked(
 		return protocolError(CodeTenantNotFound, "tenant was not found")
 	}
 	_, _, blobs, blobBytes := s.tenantUsageLocked(tenantID)
-	if blobs >= tenant.registration.MaximumAggregateBlobCount ||
-		additionalBytes > tenant.registration.MaximumAggregateBlobByteCount-blobBytes {
+	reservedCount := s.tenantReservedBlobCountLocked(tenantID)
+	reservedBytes := s.tenantReservedBlobBytesLocked(tenantID)
+	if int64(blobs)+reservedCount >= int64(tenant.registration.MaximumAggregateBlobCount) ||
+		additionalBytes > tenant.registration.MaximumAggregateBlobByteCount-blobBytes-reservedBytes {
 		return protocolError(CodeTenantFull, "tenant reached its blob or byte limit")
 	}
 	return nil
+}
+
+func (s *MemoryStore) tenantReservedBlobCountLocked(tenantID uuid.UUID) int64 {
+	var count int64
+	for key, domain := range s.domains {
+		if key.tenantID == tenantID {
+			count += domain.reservedBlobCount
+		}
+	}
+	return count
+}
+
+func (s *MemoryStore) tenantReservedBlobBytesLocked(tenantID uuid.UUID) int64 {
+	var count int64
+	for key, domain := range s.domains {
+		if key.tenantID == tenantID {
+			count += domain.reservedBlobBytes
+		}
+	}
+	return count
 }
 
 func (s *MemoryStore) authorizedDomain(

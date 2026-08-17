@@ -46,6 +46,14 @@ func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 		CollectionResponse                relay.CheckpointCollectionResponse      `json:"collectionResponse"`
 		DomainStatus                      relay.DomainStatus                      `json:"domainStatus"`
 		TenantStatus                      relay.TenantStatus                      `json:"tenantStatus"`
+		UploadRequest                     relay.BlobUploadRequest                 `json:"uploadRequest"`
+		UploadCreateResponse              relay.BlobUploadCreateResponse          `json:"uploadCreateResponse"`
+		UploadChunkRequest                relay.BlobUploadChunkRequest            `json:"uploadChunkRequest"`
+		UploadStatus                      relay.BlobUploadStatus                  `json:"uploadStatus"`
+		FullUnfinalizedUploadStatus       relay.BlobUploadStatus                  `json:"fullUnfinalizedUploadStatus"`
+		ZeroByteUnfinalizedUploadStatus   relay.BlobUploadStatus                  `json:"zeroByteUnfinalizedUploadStatus"`
+		UploadFinalizationRequest         relay.BlobUploadFinalizationRequest     `json:"uploadFinalizationRequest"`
+		UploadFinalizationResponse        relay.BlobUploadFinalizationResponse    `json:"uploadFinalizationResponse"`
 	}
 	if err := json.Unmarshal(contents, &fixture); err != nil {
 		t.Fatal(err)
@@ -79,10 +87,24 @@ func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 		"checkpoint collection":        fixture.CollectionRequest.Validate,
 		"admission":                    fixture.AdmissionCreateResponse.Admission.Admission.Validate,
 		"member":                       fixture.AdmissionClaimResponse.Member.MemberRegistration.Validate,
+		"upload request":               fixture.UploadRequest.Validate,
+		"upload chunk":                 fixture.UploadChunkRequest.Validate,
+		"upload status":                fixture.UploadStatus.Validate,
+		"full unfinalized upload":      fixture.FullUnfinalizedUploadStatus.Validate,
+		"zero byte unfinalized upload": fixture.ZeroByteUnfinalizedUploadStatus.Validate,
+		"upload finalization":          fixture.UploadFinalizationRequest.Validate,
 	} {
 		if err := validate(); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+	if fixture.UploadCreateResponse.RetryID != fixture.UploadRequest.RetryID ||
+		fixture.UploadCreateResponse.Status.UploadID != fixture.UploadRequest.UploadID ||
+		fixture.UploadFinalizationResponse.RetryID != fixture.UploadFinalizationRequest.RetryID ||
+		fixture.UploadFinalizationResponse.UploadID != fixture.UploadFinalizationRequest.UploadID ||
+		fixture.UploadFinalizationResponse.RelayBlobID != fixture.UploadFinalizationRequest.RelayBlobID ||
+		fixture.UploadFinalizationResponse.ByteCount != fixture.UploadFinalizationRequest.ByteCount {
+		t.Fatal("upload fixture responses are not bound to their exact requests")
 	}
 	if fixture.CheckpointStageResponse.CheckpointID != fixture.CheckpointCandidate.CheckpointID ||
 		fixture.CheckpointActivationResponse.CheckpointID != fixture.CheckpointCandidate.CheckpointID ||
