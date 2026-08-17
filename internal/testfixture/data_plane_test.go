@@ -37,6 +37,13 @@ func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 		SubscriptionCreateResponse        relay.SubscriptionCreateResponse        `json:"subscriptionCreateResponse"`
 		SubscriptionStatusChangeRequest   relay.SubscriptionStatusChangeRequest   `json:"subscriptionStatusChangeRequest"`
 		SubscriptionStatusChangeResponse  relay.SubscriptionStatusChangeResponse  `json:"subscriptionStatusChangeResponse"`
+		CheckpointCandidate               relay.CheckpointCandidate               `json:"checkpointCandidate"`
+		ActivationRequest                 relay.CheckpointActivationRequest       `json:"activationRequest"`
+		CheckpointStageResponse           relay.CheckpointStageResponse           `json:"checkpointStageResponse"`
+		CheckpointActivationResponse      relay.CheckpointActivationResponse      `json:"checkpointActivationResponse"`
+		DryRunResponse                    relay.CheckpointDryRunResponse          `json:"dryRunResponse"`
+		CollectionRequest                 relay.CheckpointCollectionRequest       `json:"collectionRequest"`
+		CollectionResponse                relay.CheckpointCollectionResponse      `json:"collectionResponse"`
 		DomainStatus                      relay.DomainStatus                      `json:"domainStatus"`
 		TenantStatus                      relay.TenantStatus                      `json:"tenantStatus"`
 	}
@@ -67,12 +74,21 @@ func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 		"subscription create response": fixture.SubscriptionCreateResponse.Subscription.Validate,
 		"subscription status request":  fixture.SubscriptionStatusChangeRequest.Validate,
 		"subscription status response": fixture.SubscriptionStatusChangeResponse.Subscription.Validate,
+		"checkpoint candidate":         fixture.CheckpointCandidate.Validate,
+		"checkpoint activation":        fixture.ActivationRequest.Validate,
+		"checkpoint collection":        fixture.CollectionRequest.Validate,
 		"admission":                    fixture.AdmissionCreateResponse.Admission.Admission.Validate,
 		"member":                       fixture.AdmissionClaimResponse.Member.MemberRegistration.Validate,
 	} {
 		if err := validate(); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+	if fixture.CheckpointStageResponse.CheckpointID != fixture.CheckpointCandidate.CheckpointID ||
+		fixture.CheckpointActivationResponse.CheckpointID != fixture.CheckpointCandidate.CheckpointID ||
+		fixture.DryRunResponse.CheckpointID != fixture.CheckpointCandidate.CheckpointID ||
+		fixture.CollectionResponse.PlanDigest != fixture.CollectionRequest.PlanDigest {
+		t.Fatal("checkpoint fixture operations are not bound to one exact checkpoint plan")
 	}
 	if fixture.DomainStatus.ReservedBlobCount != 2 ||
 		fixture.DomainStatus.ReservedBlobByteCount != 12_288 ||

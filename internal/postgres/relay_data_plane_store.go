@@ -552,7 +552,11 @@ func (s *RelayStore) CreateSubscription(ctx context.Context, credential relay.Ad
 	if request.CreatedAtMilliseconds < domain.CreatedAtMilliseconds {
 		return relay.SubscriptionCreateResponse{}, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription predates its domain")
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO relay_subscriptions (tenant_id,domain_id,subscription_id,create_retry_id,version,status,created_at_milliseconds,updated_at_milliseconds) VALUES ($1,$2,$3,$4,1,'active',$5,$5)`, credential.TenantID, credential.DomainID, request.SubscriptionID, request.RetryID, request.CreatedAtMilliseconds)
+	startSequence, err := latestActivatedCheckpointStart(ctx, tx, credential.TenantID, credential.DomainID)
+	if err != nil {
+		return relay.SubscriptionCreateResponse{}, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO relay_subscriptions (tenant_id,domain_id,subscription_id,create_retry_id,version,status,start_sequence,created_at_milliseconds,updated_at_milliseconds) VALUES ($1,$2,$3,$4,1,'active',$5,$6,$6)`, credential.TenantID, credential.DomainID, request.SubscriptionID, request.RetryID, startSequence, request.CreatedAtMilliseconds)
 	if err != nil {
 		return relay.SubscriptionCreateResponse{}, fmt.Errorf("insert subscription: %w", err)
 	}
@@ -562,7 +566,7 @@ func (s *RelayStore) CreateSubscription(ctx context.Context, credential relay.Ad
 	if err := tx.Commit(ctx); err != nil {
 		return relay.SubscriptionCreateResponse{}, err
 	}
-	subscription := relay.Subscription{Version: relay.SchemaVersion, TenantID: credential.TenantID, DomainID: credential.DomainID, SubscriptionID: request.SubscriptionID, Status: relay.SubscriptionActive, CreatedAtMilliseconds: request.CreatedAtMilliseconds, UpdatedAtMilliseconds: request.CreatedAtMilliseconds}
+	subscription := relay.Subscription{Version: relay.SchemaVersion, TenantID: credential.TenantID, DomainID: credential.DomainID, SubscriptionID: request.SubscriptionID, Status: relay.SubscriptionActive, StartCursor: cursorFromSequence(startSequence), CreatedAtMilliseconds: request.CreatedAtMilliseconds, UpdatedAtMilliseconds: request.CreatedAtMilliseconds}
 	return relay.SubscriptionCreateResponse{Acceptance: relay.AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription}, nil
 }
 
@@ -650,7 +654,10 @@ func (s *RelayStore) ChangeSubscriptionStatus(ctx context.Context, credential re
 	}
 	var startSequence *int64
 	if request.Status == relay.SubscriptionRebootstrapRequired {
-		startSequence = sequenceFromCursor(subscription.StartCursor)
+		startSequence, err = latestActivatedCheckpointStart(ctx, tx, credential.TenantID, credential.DomainID)
+		if err != nil {
+			return relay.SubscriptionStatusChangeResponse{}, err
+		}
 	}
 	_, err = tx.Exec(ctx, `UPDATE relay_subscriptions SET status=$4,start_sequence=$5,updated_at_milliseconds=$6,updated_at=now() WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3`, credential.TenantID, credential.DomainID, subscriptionID, request.Status, startSequence, request.ChangedAtMilliseconds)
 	if err != nil {
@@ -711,6 +718,18 @@ func sequenceFromCursor(cursor *string) *int64 {
 	}
 	value := int64(sequence)
 	return &value
+}
+
+func latestActivatedCheckpointStart(ctx context.Context, q relayQuerier, tenantID, domainID uuid.UUID) (*int64, error) {
+	var sequence *int64
+	err := q.QueryRow(ctx, `SELECT start_sequence FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' ORDER BY activation_ordinal DESC LIMIT 1`, tenantID, domainID).Scan(&sequence)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load latest activated checkpoint: %w", err)
+	}
+	return sequence, nil
 }
 
 func loadSubscriptionStatus(ctx context.Context, q relayQuerier, tenantID, domainID, subscriptionID uuid.UUID, lock string) (relay.SubscriptionStatus, error) {
@@ -803,6 +822,13 @@ func (s *RelayStore) GetDomainStatus(ctx context.Context, credential relay.Admin
 	if oldest != nil {
 		positionBefore := *oldest - 1
 		status.OldestUncollectedCursor = cursorFromSequence(&positionBefore)
+	}
+	var latestCheckpointID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT checkpoint_id FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' ORDER BY activation_ordinal DESC LIMIT 1`, credential.TenantID, credential.DomainID).Scan(&latestCheckpointID)
+	if err == nil {
+		status.LatestActivatedCheckpointID = &latestCheckpointID
+	} else if err != pgx.ErrNoRows {
+		return relay.DomainStatus{}, err
 	}
 	return status, nil
 }

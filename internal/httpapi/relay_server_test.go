@@ -917,6 +917,98 @@ func TestRelaySubscriptionLifecycleStatusAndTenantRotationAreExactRetrySafe(t *t
 	_ = newStatus.Body.Close()
 }
 
+func TestRelayCheckpointHTTPStagesActivatesPlansAndCollects(t *testing.T) {
+	operatorToken := relayTestToken(240)
+	server, err := NewWithRelay(
+		rendezvous.NewMemoryStore(), relay.NewMemoryStore(), nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), operatorToken,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowMilliseconds := int64(1_000)
+	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
+	handler := server.Handler()
+	authority := provisionRelayTestAuthority(t, handler, operatorToken, nowMilliseconds, 241, 242)
+	domainRoot := "/v1/relay/tenants/" + authority.Domain.TenantID.String() +
+		"/domains/" + authority.Domain.DomainID.String()
+
+	nowMilliseconds = 1_100
+	candidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		TenantID: authority.Domain.TenantID, DomainID: authority.Domain.DomainID,
+		PublisherSubscriptionID: authority.SubscriptionID,
+		CoveredThroughCursor:    relay.EncodeCursor(0),
+		RetainedMessageIDs:      []uuid.UUID{}, RetainedBlobIDs: []string{},
+		CreatedAtMilliseconds: nowMilliseconds,
+	}
+	stagePath := domainRoot + "/checkpoints/candidates"
+	stage := performRelayJSON(t, handler, http.MethodPost, stagePath, candidate, authority.MemberCredential.AuthorizationToken, authority.Member.MemberID)
+	requireStatus(t, stage, http.StatusCreated)
+	var stageResult relay.CheckpointStageResponse
+	if err := json.NewDecoder(stage.Body).Decode(&stageResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = stage.Body.Close()
+	if stageResult.Acceptance != relay.AcceptanceAccepted || stageResult.CheckpointID != candidate.CheckpointID {
+		t.Fatalf("unexpected checkpoint stage: %+v", stageResult)
+	}
+	stageRetry := performRelayJSON(t, handler, http.MethodPost, stagePath, candidate, authority.MemberCredential.AuthorizationToken, authority.Member.MemberID)
+	requireStatus(t, stageRetry, http.StatusOK)
+	_ = stageRetry.Body.Close()
+
+	nowMilliseconds = 1_200
+	activation := relay.CheckpointActivationRequest{RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, ActivatedAtMilliseconds: nowMilliseconds}
+	checkpointRoot := domainRoot + "/checkpoints/" + candidate.CheckpointID.String()
+	activate := performRelayJSON(t, handler, http.MethodPost, checkpointRoot+"/activation", activation, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, activate, http.StatusCreated)
+	var activationResult relay.CheckpointActivationResponse
+	if err := json.NewDecoder(activate.Body).Decode(&activationResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = activate.Body.Close()
+	if activationResult.StartCursor != relay.EncodeCursor(0) {
+		t.Fatalf("unexpected checkpoint start cursor: %+v", activationResult)
+	}
+
+	dryRun := performRelayJSON(t, handler, http.MethodPost, checkpointRoot+"/collection-dry-run", relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID}, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, dryRun, http.StatusOK)
+	var plan relay.CheckpointDryRunResponse
+	if err := json.NewDecoder(dryRun.Body).Decode(&plan); err != nil {
+		t.Fatal(err)
+	}
+	_ = dryRun.Body.Close()
+	if !plan.Eligible || plan.PlanDigest == "" || plan.MessageCount != 0 || plan.BlobCount != 0 {
+		t.Fatalf("unexpected checkpoint plan: %+v", plan)
+	}
+
+	nowMilliseconds = 1_300
+	collection := relay.CheckpointCollectionRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, PlanDigest: plan.PlanDigest,
+		MaximumMessageCount: 1, RequestedAtMilliseconds: nowMilliseconds,
+	}
+	collect := performRelayJSON(t, handler, http.MethodPost, checkpointRoot+"/collection", collection, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, collect, http.StatusOK)
+	var collected relay.CheckpointCollectionResponse
+	if err := json.NewDecoder(collect.Body).Decode(&collected); err != nil {
+		t.Fatal(err)
+	}
+	_ = collect.Body.Close()
+	if !collected.Completed || collected.Duplicate {
+		t.Fatalf("unexpected checkpoint collection: %+v", collected)
+	}
+	collectRetry := performRelayJSON(t, handler, http.MethodPost, checkpointRoot+"/collection", collection, authority.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, collectRetry, http.StatusOK)
+	var retried relay.CheckpointCollectionResponse
+	if err := json.NewDecoder(collectRetry.Body).Decode(&retried); err != nil {
+		t.Fatal(err)
+	}
+	_ = collectRetry.Body.Close()
+	if !retried.Duplicate || !retried.Completed {
+		t.Fatalf("unexpected checkpoint collection retry: %+v", retried)
+	}
+}
+
 func relayTestToken(seed byte) string {
 	value := make([]byte, 32)
 	for index := range value {

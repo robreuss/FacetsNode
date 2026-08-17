@@ -15,6 +15,7 @@ type domainKey struct {
 
 type memoryMessage struct {
 	message               Message
+	byteCount             int64
 	publisherMember       uuid.UUID
 	publisherSubscription uuid.UUID
 	acknowledgments       map[uuid.UUID]AcknowledgmentStage
@@ -37,6 +38,12 @@ type memoryDomain struct {
 	nextSequence           uint64
 	messageBytes           int64
 	blobBytes              int64
+	checkpoints            map[uuid.UUID]*memoryCheckpoint
+	checkpointStageRetries map[uuid.UUID]uuid.UUID
+	checkpointActivations  map[uuid.UUID]memoryCheckpointActivation
+	checkpointCollections  map[uuid.UUID]memoryCheckpointCollection
+	activatedCheckpoints   []uuid.UUID
+	checkpointOrdinal      uint64
 }
 
 type memorySubscriptionChange struct {
@@ -237,10 +244,14 @@ func (s *MemoryStore) createDomainLocked(
 		members: map[uuid.UUID]MemberRegistration{
 			initialMember.MemberID: initialMember,
 		},
-		admissions:  make(map[uuid.UUID]MemberAdmission),
-		messageByID: make(map[uuid.UUID]*memoryMessage),
-		blobs:       make(map[string]BlobMetadata),
-		rotations:   make(map[uuid.UUID]memoryCredentialRotation),
+		admissions:             make(map[uuid.UUID]MemberAdmission),
+		messageByID:            make(map[uuid.UUID]*memoryMessage),
+		blobs:                  make(map[string]BlobMetadata),
+		rotations:              make(map[uuid.UUID]memoryCredentialRotation),
+		checkpoints:            make(map[uuid.UUID]*memoryCheckpoint),
+		checkpointStageRetries: make(map[uuid.UUID]uuid.UUID),
+		checkpointActivations:  make(map[uuid.UUID]memoryCheckpointActivation),
+		checkpointCollections:  make(map[uuid.UUID]memoryCheckpointCollection),
 	}
 }
 
@@ -1013,6 +1024,7 @@ func (s *MemoryStore) CreateSubscription(
 		CreatedAtMilliseconds: request.CreatedAtMilliseconds,
 		UpdatedAtMilliseconds: request.CreatedAtMilliseconds,
 	}
+	subscription.StartCursor = latestCheckpointStartCursor(domain)
 	domain.subscriptions[request.SubscriptionID] = subscription
 	domain.subscriptionCreates[request.RetryID] = request
 	return SubscriptionCreateResponse{
@@ -1080,6 +1092,11 @@ func (s *MemoryStore) ChangeSubscriptionStatus(
 		return SubscriptionStatusChangeResponse{}, protocolError(CodeInvalidSubscription, "subscription update is out of order")
 	}
 	subscription.Status = request.Status
+	if request.Status == SubscriptionRebootstrapRequired {
+		subscription.StartCursor = latestCheckpointStartCursor(domain)
+	} else {
+		subscription.StartCursor = nil
+	}
 	subscription.UpdatedAtMilliseconds = request.ChangedAtMilliseconds
 	domain.subscriptions[subscriptionID] = subscription
 	domain.subscriptionChanges[request.RetryID] = memorySubscriptionChange{
@@ -1139,11 +1156,17 @@ func (s *MemoryStore) GetDomainStatus(_ context.Context, credential Administrati
 		cursor := EncodeCursor(domain.messages[0].message.Sequence - 1)
 		oldest = &cursor
 	}
+	var latestCheckpointID *uuid.UUID
+	if len(domain.activatedCheckpoints) > 0 {
+		value := domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1]
+		latestCheckpointID = &value
+	}
 	return DomainStatus{
 		TenantID: credential.TenantID, DomainID: credential.DomainID,
 		MessageCount: int64(len(domain.messages)), MessageByteCount: domain.messageBytes,
 		BlobCount: int64(len(domain.blobs)), BlobByteCount: domain.blobBytes,
 		ActiveSubscriptionCount: active, OldestUncollectedCursor: oldest,
+		LatestActivatedCheckpointID: latestCheckpointID,
 		Quota: DomainQuota{
 			MaximumMessageCount:     domain.registration.MaximumMessageCount,
 			MaximumMessageByteCount: domain.registration.MaximumMessageByteCount,
@@ -1211,6 +1234,7 @@ func (s *MemoryStore) Publish(
 			Envelope: envelope,
 		},
 		publisherMember:       credential.MemberID,
+		byteCount:             ciphertextByteCount,
 		publisherSubscription: publisherSubscription.SubscriptionID,
 		acknowledgments:       make(map[uuid.UUID]AcknowledgmentStage),
 	}
@@ -1246,6 +1270,15 @@ func (s *MemoryStore) Fetch(
 	subscription, err := activeMemberSubscription(domain, credential.MemberID)
 	if err != nil {
 		return FetchResult{}, err
+	}
+	if subscription.StartCursor != nil {
+		start, cursorErr := DecodeCursor(*subscription.StartCursor)
+		if cursorErr != nil {
+			return FetchResult{}, cursorErr
+		}
+		if start > afterSequence {
+			afterSequence = start
+		}
 	}
 	result := FetchResult{Messages: make([]Message, 0, limit)}
 	for _, stored := range domain.messages {
@@ -1468,6 +1501,18 @@ func activeMemberSubscription(domain *memoryDomain, memberID uuid.UUID) (Subscri
 		return Subscription{}, protocolError(CodeInvalidSubscription, "subscription is not active")
 	}
 	return subscription, nil
+}
+
+func latestCheckpointStartCursor(domain *memoryDomain) *string {
+	if len(domain.activatedCheckpoints) == 0 {
+		return nil
+	}
+	checkpoint := domain.checkpoints[domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1]]
+	if checkpoint == nil || checkpoint.state != "activated" {
+		return nil
+	}
+	value := EncodeCursor(checkpoint.startSequence)
+	return &value
 }
 
 func (s *MemoryStore) tenantUsageLocked(tenantID uuid.UUID) (int, int64, int, int64) {

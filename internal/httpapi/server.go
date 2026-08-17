@@ -111,6 +111,22 @@ func (s *Server) Handler() http.Handler {
 			s.handleRelayDomainStatus,
 		)
 		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/candidates",
+			s.handleStageRelayCheckpoint,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/activation",
+			s.handleActivateRelayCheckpoint,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/collection-dry-run",
+			s.handleDryRunRelayCheckpointCollection,
+		)
+		mux.HandleFunc(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/collection",
+			s.handleCollectRelayCheckpoint,
+		)
+		mux.HandleFunc(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members",
 			s.handleCreateRelayMember,
 		)
@@ -364,7 +380,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeInvalidAdmission,
 				relay.CodeInvalidCredentialRotation,
 				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob,
-				relay.CodeInvalidCursor,
+				relay.CodeInvalidCursor, relay.CodeInvalidCheckpoint,
 				relay.CodeWrongScope:
 				status = http.StatusBadRequest
 			case relay.CodeUnauthorized, relay.CodeTenantNotFound, relay.CodeDomainNotFound,
@@ -374,7 +390,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeAdmissionExpired, relay.CodeAdmissionRevoked,
 				relay.CodeMissingCapability:
 				status = http.StatusForbidden
-			case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound:
+			case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound,
+				relay.CodeCheckpointNotFound:
 				status = http.StatusNotFound
 			case relay.CodeTenantCollision, relay.CodeDomainCollision,
 				relay.CodeSubscriptionCollision, relay.CodeMemberCollision,
@@ -382,7 +399,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				relay.CodeCredentialRotationCollision,
 				relay.CodeCredentialReuse,
 				relay.CodeMessageCollision, relay.CodeBlobCollision,
-				relay.CodeInvalidAcknowledgment:
+				relay.CodeInvalidAcknowledgment, relay.CodeCheckpointCollision,
+				relay.CodeCheckpointNotEligible, relay.CodeCollectionPlanStale:
 				status = http.StatusConflict
 			case relay.CodeTenantFull, relay.CodeDomainFull:
 				status = http.StatusTooManyRequests

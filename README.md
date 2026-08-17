@@ -38,6 +38,8 @@ Facets core codebase.
   monotonic accepted/applied facts
 - Disposable domain change hints that accelerate, but never replace, cursor polling
 - Separate per-domain and tenant-wide message/blob count and byte quotas
+- Opaque checkpoint staging, administrator activation, custody-gated dry-run,
+  and exact-retry bounded message/blob collection with latest-two retention
 - PostgreSQL-backed concurrent publication with restart-safe ordering
 - Live delivery-matrix proof for cursor replay, delayed and concurrent traffic,
   independent recipients, acknowledgment progression, and interrupted uploads
@@ -45,13 +47,13 @@ Facets core codebase.
 - Domain-scoped, content-addressed encrypted-blob storage on a separate volume
 - Streaming blob upload with digest verification and Range-capable GET/HEAD
 
-Resumable/multipart blob upload, checkpoints, message/blob retention and orphan collection,
-hosted object storage/account admission, Shared Space membership, billing, and
-compute are later modules. Relay member admission grants routing authority
-only; it does not verify identity or carry a domain content key. The checkpoint
-capability name is reserved but its endpoint is not yet implemented. No valid
-FEF, device grant, payment record, or Shared Space membership will implicitly
-grant compute execution.
+Resumable/multipart blob upload, automatic orphan reconciliation, hosted object
+storage/account admission, Shared Space membership, billing, and compute are
+later modules. Relay member admission grants routing authority only; it does
+not verify identity or carry a domain content key. Checkpoint data remains
+opaque and collection requires explicit domain administration. No valid FEF,
+device grant, payment record, or Shared Space membership will implicitly grant
+compute execution.
 
 Operator provisioning atomically creates a tenant, a client-generated private
 tenant provisioning credential, its first domain, first subscription, and
@@ -160,7 +162,8 @@ The ordinary Go suite covers in-memory protocol behavior, cross-language
 fixtures, HTTP authorization, and the checked-in Caddy exposure policy. Tests
 that set `FACETS_NODE_TEST_DATABASE_URL` exercise a real disposable PostgreSQL
 store, including tenant/domain provisioning, subscription exact retries,
-subscription-level delivery, and split quota counters across pool restarts.
+subscription-level delivery, split quota counters across pool restarts, and
+checkpoint activation/collection under concurrent publication.
 Tests that set
 `FACETS_NODE_TEST_BASE_URL` and `FACETS_NODE_TEST_OPERATOR_TOKEN` exercise the
 running HTTP/PostgreSQL/filesystem stack, including a pre-existing-message wake

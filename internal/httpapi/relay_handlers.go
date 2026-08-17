@@ -386,6 +386,118 @@ func (s *Server) handleRelayDomainStatus(writer http.ResponseWriter, request *ht
 	writeJSON(writer, http.StatusOK, status)
 }
 
+func (s *Server) handleStageRelayCheckpoint(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var candidate relay.CheckpointCandidate
+	if err := readRelayJSON(writer, request, &candidate, maximumRelayRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if candidate.TenantID != tenantID || candidate.DomainID != domainID {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeWrongScope, "checkpoint path and body differ"))
+		return
+	}
+	result, err := s.relayStore.StageCheckpoint(request.Context(), credential, candidate, s.nowMilliseconds())
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleActivateRelayCheckpoint(writer http.ResponseWriter, request *http.Request) {
+	_, _, checkpointID, credential, err := s.relayCheckpointAdministration(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.CheckpointActivationRequest
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.CheckpointID != checkpointID || input.ActivatedAtMilliseconds > s.nowMilliseconds() {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "checkpoint activation path or time is invalid"))
+		return
+	}
+	result, err := s.relayStore.ActivateCheckpoint(request.Context(), credential, input)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleDryRunRelayCheckpointCollection(writer http.ResponseWriter, request *http.Request) {
+	_, _, checkpointID, credential, err := s.relayCheckpointAdministration(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.CheckpointDryRunRequest
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.CheckpointID != checkpointID {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeWrongScope, "checkpoint path and body differ"))
+		return
+	}
+	result, err := s.relayStore.DryRunCheckpointCollection(request.Context(), credential, input)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (s *Server) handleCollectRelayCheckpoint(writer http.ResponseWriter, request *http.Request) {
+	_, _, checkpointID, credential, err := s.relayCheckpointAdministration(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.CheckpointCollectionRequest
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.CheckpointID != checkpointID || input.RequestedAtMilliseconds > s.nowMilliseconds() {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "checkpoint collection path or time is invalid"))
+		return
+	}
+	result, err := s.relayStore.CollectCheckpoint(request.Context(), credential, input)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (s *Server) relayCheckpointAdministration(request *http.Request) (uuid.UUID, uuid.UUID, uuid.UUID, relay.AdministrationCredential, error) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, relay.AdministrationCredential{}, err
+	}
+	checkpointID, err := parseRelayUUID(request.PathValue("checkpointID"))
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, relay.AdministrationCredential{}, err
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, tenantID, domainID)
+	return tenantID, domainID, checkpointID, credential, err
+}
+
 func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *http.Request) {
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {

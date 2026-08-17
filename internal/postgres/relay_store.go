@@ -856,6 +856,13 @@ func (s *RelayStore) Fetch(
 	if err != nil {
 		return relay.FetchResult{}, err
 	}
+	var subscriptionStart *int64
+	if err := transaction.QueryRow(ctx, `SELECT start_sequence FROM relay_subscriptions WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3`, credential.TenantID, credential.DomainID, subscriptionID).Scan(&subscriptionStart); err != nil {
+		return relay.FetchResult{}, fmt.Errorf("load subscription start cursor: %w", err)
+	}
+	if subscriptionStart != nil && uint64(*subscriptionStart) > afterSequence {
+		afterSequence = uint64(*subscriptionStart)
+	}
 	rows, err := transaction.Query(ctx, `
 		SELECT domain_sequence, message_id, publisher_member_id,
 		       version, algorithm, key_epoch, created_at_milliseconds,
@@ -1367,6 +1374,7 @@ func (s *RelayStore) GetBlobMetadata(
 }
 
 type relayQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 

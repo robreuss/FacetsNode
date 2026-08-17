@@ -161,6 +161,67 @@ Any authorized agent may advance them. `applied` requires an existing
 `accepted`; an older retry after `applied` returns the higher durable fact.
 Periodic cursor fetch is authoritative; wake is only an acceleration hint.
 
+## Checkpoints and bounded collection
+
+A member with `checkpoint_publish` may stage an opaque checkpoint candidate:
+
+```text
+POST .../checkpoints/candidates
+```
+
+The candidate contains client-generated `retryID` and `checkpointID`, its
+publisher subscription, an opaque `coveredThroughCursor`, sorted complete
+retained-message and retained-blob ID sets, and a creation time. The Node
+validates only routing authority, cursor bounds, and the existence of retained
+objects. It does not interpret checkpoint ciphertext or application state.
+Staging is exact-retry safe.
+
+Domain administration controls activation and collection:
+
+```text
+POST .../checkpoints/{checkpointID}/activation
+POST .../checkpoints/{checkpointID}/collection-dry-run
+POST .../checkpoints/{checkpointID}/collection
+```
+
+Activation is exact-retry safe and freezes all of the following in one
+tenant/domain-serialized PostgreSQL transaction:
+
+- the then-active subscriptions whose custody is required;
+- messages at or before the covered-through cursor which are not retained by
+  the candidate or the immediately preceding activated checkpoint;
+- currently published blobs not retained by either of those checkpoints; and
+- the checkpoint start cursor used for later subscription bootstrap.
+
+Publication after that transaction is not part of its deletion set. Sequence
+allocation remains monotonic after collection. The latest two activated
+checkpoints remain retained; older checkpoints are marked retired. Only the
+latest activated checkpoint can be collected. When a checkpoint retires, its
+large retained/custody/deletion child sets are pruned in the activation
+transaction. Its compact candidate digest and operation results remain so
+exact stage, activation, and completed collection retries are still durable.
+
+Collection is eligible when each frozen required subscription has accepted or
+applied every frozen message it did not publish. A subscription that is now
+`rebootstrap_required` or `revoked` no longer blocks custody. There is no
+automatic staleness decision for an absent device.
+
+Dry-run returns remaining message/blob counts and bytes, sorted missing-custody
+subscription IDs, and a SHA-256 plan digest. Collection requires that digest,
+a new exact retry ID, and positive message/blob bounds. Each bound is at most
+10,000. A partial collection changes the plan digest, so its next batch must
+start with a fresh dry-run. Reusing the exact collection request returns the
+recorded result; reusing its retry ID for different input fails closed.
+
+PostgreSQL authority and quota counters commit first, and deleted blob IDs enter
+a durable collection queue. Packet 4A deliberately does not remove filesystem
+bytes: the separate grace-period orphan reconciler must re-check both published
+blob and active-upload authority immediately before physical deletion, making a
+same-ID re-publication safe. A new subscription, or one explicitly changed to
+`rebootstrap_required`, receives the latest checkpoint start cursor. Resetting
+a publisher requires a fresh subscription because a subscription never fetches
+its own publications.
+
 ## Blobs and quotas
 
 Existing content-addressed `PUT`, `GET`, and `HEAD .../blobs/{blobID}` routes
@@ -182,9 +243,10 @@ resumable-upload packet will account for durable staging reservations.
 
 ## Current limits
 
-Checkpoint stage/activation/collection, resumable uploads, retention/orphan
-collection, cross-instance notifications, distributed rate limits, hosted
-account admission, and Shared Space membership/key policy are not implemented
-in this packet. No long-absent subscription becomes stale automatically;
-revocation or explicit rebootstrap is required. PostgreSQL and the blob volume
-remain one coordinated backup/recovery unit.
+Resumable uploads, automatic orphan reconciliation, cross-instance
+notifications, distributed rate limits, hosted account admission, and Shared
+Space membership/key policy are not implemented in this packet. Checkpoint
+collection remains explicitly administration-triggered. No long-absent
+subscription becomes stale automatically; revocation or explicit rebootstrap
+is required. PostgreSQL and the blob volume remain one coordinated
+backup/recovery unit.
