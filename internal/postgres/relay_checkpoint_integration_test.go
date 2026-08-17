@@ -21,6 +21,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
 	pool := openPool(t, ctx, databaseURL)
 	if err := postgresstore.Migrate(ctx, pool); err != nil {
 		pool.Close()

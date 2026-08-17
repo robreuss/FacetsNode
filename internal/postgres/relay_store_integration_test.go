@@ -24,6 +24,7 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
 	fixture, err := testfixture.LoadRelayCarrier()
 	if err != nil {
 		t.Fatal(err)
@@ -481,6 +482,7 @@ func TestPostgresResumableBlobReservationsRetriesAndExpiry(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
 	pool := openPool(t, ctx, databaseURL)
 	defer pool.Close()
 	if err := postgresstore.Migrate(ctx, pool); err != nil {
@@ -614,6 +616,7 @@ func TestPostgresRelayTenantProvisioningPersistsAcrossPoolRestart(t *testing.T) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
 	pool := openPool(t, ctx, databaseURL)
 	if err := postgresstore.Migrate(ctx, pool); err != nil {
 		pool.Close()
@@ -739,6 +742,7 @@ func TestPostgresRelaySerializesOutstandingAdmissionLimit(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
 	pool := openPool(t, ctx, databaseURL)
 	defer pool.Close()
 	if err := postgresstore.Migrate(ctx, pool); err != nil {
@@ -871,6 +875,7 @@ func TestPostgresSubscriptionExactRetryFanoutAndSplitCounters(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
 	pool := openPool(t, ctx, databaseURL)
 	defer pool.Close()
 	if err := postgresstore.Migrate(ctx, pool); err != nil {

@@ -11,6 +11,7 @@ import (
 	postgresstore "github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/testfixture"
+	"github.com/robreuss/FacetsNode/internal/testpostgres"
 )
 
 func TestPostgresStorePersistsOpaqueMailboxAcrossPoolRestart(t *testing.T) {
@@ -20,6 +21,7 @@ func TestPostgresStorePersistsOpaqueMailboxAcrossPoolRestart(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
 	fixture, err := testfixture.LoadRendezvous()
 	if err != nil {
 		t.Fatal(err)
@@ -90,4 +92,21 @@ func openPool(t *testing.T, ctx context.Context, databaseURL string) *pgxpool.Po
 		t.Fatal(err)
 	}
 	return pool
+}
+
+func lockDisposablePostgres(
+	t *testing.T,
+	ctx context.Context,
+	databaseURL string,
+) {
+	t.Helper()
+	databaseLock, err := testpostgres.AcquireDisposableDatabaseLock(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := databaseLock.Close(); err != nil {
+			t.Errorf("release disposable PostgreSQL lock: %v", err)
+		}
+	})
 }

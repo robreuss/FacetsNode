@@ -19,6 +19,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/testfixture"
+	"github.com/robreuss/FacetsNode/internal/testpostgres"
 )
 
 type relayFetchSignalStore struct {
@@ -46,6 +47,15 @@ func TestPostgresRelayWakeCrossesInstancesAndMissedHintFallsBackToFetch(t *testi
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	databaseLock, err := testpostgres.AcquireDisposableDatabaseLock(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := databaseLock.Close(); err != nil {
+			t.Errorf("release disposable PostgreSQL lock: %v", err)
+		}
+	})
 	poolA := openRelayWakePool(t, ctx, databaseURL)
 	defer poolA.Close()
 	poolB := openRelayWakePool(t, ctx, databaseURL)
