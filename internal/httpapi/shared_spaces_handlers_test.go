@@ -142,7 +142,6 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: spaceID, ParticipantID: participantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
-		RevokedAtMilliseconds: nowMilliseconds,
 	}
 	revoked := performRelayJSON(
 		t, handler, http.MethodPost,

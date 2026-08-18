@@ -154,7 +154,6 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: spaceID, ParticipantID: participantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
-		RevokedAtMilliseconds: time.Now().UnixMilli(),
 	}
 	revokedResponse := requestRelayJSON(
 		t, client, http.MethodPost,

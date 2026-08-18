@@ -216,19 +216,18 @@ type InvitationClaimResult struct {
 }
 
 type ParticipantRevocation struct {
-	Version               int       `json:"version"`
-	RetryID               uuid.UUID `json:"retryID"`
-	SpaceID               uuid.UUID `json:"spaceID"`
-	ParticipantID         uuid.UUID `json:"participantID"`
-	PreviousKeyEpoch      uint64    `json:"previousKeyEpoch"`
-	NextKeyEpoch          uint64    `json:"nextKeyEpoch"`
-	RevokedAtMilliseconds int64     `json:"revokedAtMilliseconds"`
+	Version          int       `json:"version"`
+	RetryID          uuid.UUID `json:"retryID"`
+	SpaceID          uuid.UUID `json:"spaceID"`
+	ParticipantID    uuid.UUID `json:"participantID"`
+	PreviousKeyEpoch uint64    `json:"previousKeyEpoch"`
+	NextKeyEpoch     uint64    `json:"nextKeyEpoch"`
 }
 
 func (r ParticipantRevocation) Validate() error {
 	if r.Version != SchemaVersion || r.RetryID == uuid.Nil || r.SpaceID == uuid.Nil ||
 		r.ParticipantID == uuid.Nil || r.PreviousKeyEpoch < InitialKeyEpoch ||
-		r.NextKeyEpoch != r.PreviousKeyEpoch+1 || r.RevokedAtMilliseconds < 0 {
+		r.NextKeyEpoch != r.PreviousKeyEpoch+1 {
 		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant revocation fields are invalid")
 	}
 	return nil

@@ -441,11 +441,6 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	if err := revocation.Validate(); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, err
 	}
-	if revocation.RevokedAtMilliseconds > nowMilliseconds {
-		return sharedspaces.ParticipantRevocationResult{}, sharedspaces.NewProtocolError(
-			sharedspaces.CodeInvalidParticipant, "participant revocation is in the future",
-		)
-	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("begin Shared Space participant revocation: %w", err)
@@ -479,8 +474,7 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	if err == nil {
 		if existingVersion != revocation.Version || existingParticipantID != revocation.ParticipantID ||
 			existingPreviousKeyEpoch != revocation.PreviousKeyEpoch ||
-			existingNextKeyEpoch != revocation.NextKeyEpoch ||
-			existingRevokedAt != revocation.RevokedAtMilliseconds {
+			existingNextKeyEpoch != revocation.NextKeyEpoch {
 			return sharedspaces.ParticipantRevocationResult{}, sharedspaces.NewProtocolError(
 				sharedspaces.CodeParticipantCollision, "participant revocation retry ID was reused",
 			)
@@ -538,8 +532,8 @@ func (s *SharedSpacesStore) RevokeParticipant(
 			sharedspaces.CodeParticipantNotFound, "participant relay subscription was not found",
 		)
 	}
-	if revocation.RevokedAtMilliseconds < member.CreatedAtMilliseconds ||
-		revocation.RevokedAtMilliseconds < subscription.CreatedAtMilliseconds {
+	if nowMilliseconds < member.CreatedAtMilliseconds ||
+		nowMilliseconds < subscription.CreatedAtMilliseconds {
 		return sharedspaces.ParticipantRevocationResult{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeInvalidParticipant, "participant revocation predates membership",
 		)
@@ -555,7 +549,7 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		SET revoked_at_milliseconds=$4,updated_at=now()
 		WHERE tenant_id=$1 AND domain_id=$2 AND member_id=$3
 	`, revocation.SpaceID, domainID, revocation.ParticipantID,
-		revocation.RevokedAtMilliseconds); err != nil {
+		nowMilliseconds); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("revoke Shared Space relay member: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -563,13 +557,13 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		SET status='revoked',start_sequence=NULL,updated_at_milliseconds=$4,updated_at=now()
 		WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3
 	`, revocation.SpaceID, domainID, participant.SubscriptionID,
-		revocation.RevokedAtMilliseconds); err != nil {
+		nowMilliseconds); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("revoke Shared Space relay subscription: %w", err)
 	}
 	if err := insertDataPlaneAudit(
 		ctx, tx, revocation.SpaceID, &domainID, &participant.SubscriptionID,
 		&revocation.ParticipantID, "shared_space_participant_revoked",
-		revocation.RevokedAtMilliseconds,
+		nowMilliseconds,
 	); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, err
 	}
@@ -578,7 +572,7 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		SET revoked_at_milliseconds=$3,updated_at=now()
 		WHERE space_id=$1 AND participant_id=$2
 	`, revocation.SpaceID, revocation.ParticipantID,
-		revocation.RevokedAtMilliseconds); err != nil {
+		nowMilliseconds); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("revoke Shared Space participant: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -595,7 +589,7 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		) VALUES ($1,$2,$3,$4,$5,$6,$7)
 	`, revocation.SpaceID, revocation.RetryID, revocation.ParticipantID,
 		revocation.Version, revocation.PreviousKeyEpoch, revocation.NextKeyEpoch,
-		revocation.RevokedAtMilliseconds); err != nil {
+		nowMilliseconds); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("record Shared Space participant revocation: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -605,7 +599,7 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		Acceptance: relay.AcceptanceAccepted, RetryID: revocation.RetryID,
 		SpaceID: revocation.SpaceID, ParticipantID: revocation.ParticipantID,
 		PreviousKeyEpoch: revocation.PreviousKeyEpoch, CurrentKeyEpoch: revocation.NextKeyEpoch,
-		RevokedAtMilliseconds: revocation.RevokedAtMilliseconds,
+		RevokedAtMilliseconds: nowMilliseconds,
 	}, nil
 }
 

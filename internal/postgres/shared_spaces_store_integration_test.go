@@ -84,7 +84,6 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: invitation.SpaceID, ParticipantID: invitation.ParticipantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
-		RevokedAtMilliseconds: now + 300,
 	}
 	revoked, err := store.RevokeParticipant(ctx, admin, revocation, now+300)
 	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
@@ -116,7 +115,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 			 WHERE tenant_id=$1 AND domain_id=$4 AND member_id=$2 AND revoked_at_milliseconds=$3),
 			(SELECT count(*) FROM relay_subscriptions
 			 WHERE tenant_id=$1 AND domain_id=$4 AND subscription_id=$5 AND status='revoked')
-	`, invitation.SpaceID, invitation.ParticipantID, revocation.RevokedAtMilliseconds,
+	`, invitation.SpaceID, invitation.ParticipantID, revoked.RevokedAtMilliseconds,
 		admin.DomainID, invitation.SubscriptionID).Scan(
 		&participantCount, &relayMemberCount, &revokedSubscriptionCount,
 	); err != nil {

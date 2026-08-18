@@ -262,9 +262,6 @@ func (s *MemoryStore) RevokeParticipant(
 	if err := revocation.Validate(); err != nil {
 		return ParticipantRevocationResult{}, err
 	}
-	if revocation.RevokedAtMilliseconds > nowMilliseconds {
-		return ParticipantRevocationResult{}, NewProtocolError(CodeInvalidParticipant, "participant revocation is in the future")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	space := s.spaces[revocation.SpaceID]
@@ -295,11 +292,11 @@ func (s *MemoryStore) RevokeParticipant(
 	if participant.RevokedAtMilliseconds != nil {
 		return ParticipantRevocationResult{}, NewProtocolError(CodeParticipantRevoked, "participant is already revoked")
 	}
-	acceptance, err := s.relay.RevokeMember(ctx, credential, revocation.ParticipantID, revocation.RevokedAtMilliseconds)
+	acceptance, err := s.relay.RevokeMember(ctx, credential, revocation.ParticipantID, nowMilliseconds)
 	if err != nil {
 		return ParticipantRevocationResult{}, err
 	}
-	participant.RevokedAtMilliseconds = &revocation.RevokedAtMilliseconds
+	participant.RevokedAtMilliseconds = &nowMilliseconds
 	space.participants[participant.ParticipantID] = participant
 	space.keyEpoch = revocation.NextKeyEpoch
 	result := ParticipantRevocationResult{
@@ -307,7 +304,7 @@ func (s *MemoryStore) RevokeParticipant(
 		ParticipantID:         revocation.ParticipantID,
 		PreviousKeyEpoch:      revocation.PreviousKeyEpoch,
 		CurrentKeyEpoch:       revocation.NextKeyEpoch,
-		RevokedAtMilliseconds: revocation.RevokedAtMilliseconds,
+		RevokedAtMilliseconds: nowMilliseconds,
 	}
 	s.revocationRequests[revocation.RetryID] = revocation
 	s.revocationResponses[revocation.RetryID] = result

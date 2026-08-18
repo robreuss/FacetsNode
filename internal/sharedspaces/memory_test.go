@@ -76,7 +76,6 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID:    invitation.ParticipantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
-		RevokedAtMilliseconds: 1_400,
 	}
 	revoked, err := store.RevokeParticipant(ctx, admin, revocation, 1_400)
 	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
@@ -129,7 +128,6 @@ func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
 	stale := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID: invitation.ParticipantID, PreviousKeyEpoch: 2, NextKeyEpoch: 3,
-		RevokedAtMilliseconds: 4_300,
 	}
 	if _, err := store.RevokeParticipant(ctx, admin, stale, 4_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
 		t.Fatalf("stale revocation err=%v", err)
@@ -153,7 +151,6 @@ func TestMemoryStoreRejectsCrossSpaceAuthorityAndInitialHostRevocation(t *testin
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
 		ParticipantID:    provisioning.InitialParticipantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
-		RevokedAtMilliseconds: 3_200,
 	}
 	if _, err := store.RevokeParticipant(ctx, admin, revocation, 3_200); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInitialHost) {
 		t.Fatalf("initial host revocation err=%v", err)
