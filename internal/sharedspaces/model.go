@@ -1,7 +1,15 @@
 package sharedspaces
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"math/big"
 	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -9,8 +17,11 @@ import (
 )
 
 const (
-	SchemaVersion   = 1
-	InitialKeyEpoch = uint64(1)
+	SchemaVersion                                 = 1
+	InitialKeyEpoch                               = uint64(1)
+	ParticipantKeyGrantAlgorithm                  = "P256-HKDF-SHA256+A256GCM"
+	ParticipantKeyGrantSignatureAlgorithm         = "ES256"
+	MaximumParticipantKeyGrantCiphertextByteCount = 16 * 1_024
 )
 
 type SecurityMode string
@@ -152,6 +163,7 @@ type Invitation struct {
 	SubscriptionID        uuid.UUID             `json:"subscriptionID"`
 	Kind                  ParticipantKind       `json:"kind"`
 	Role                  Role                  `json:"role"`
+	KeyGrant              *ParticipantKeyGrant  `json:"keyGrant,omitempty"`
 	RelayAdmission        relay.MemberAdmission `json:"relayAdmission"`
 	CreatedAtMilliseconds int64                 `json:"createdAtMilliseconds"`
 }
@@ -165,6 +177,11 @@ func (i Invitation) Validate() error {
 	if err := i.RelayAdmission.Validate(); err != nil {
 		return err
 	}
+	if i.KeyGrant != nil {
+		if err := i.KeyGrant.Validate(); err != nil {
+			return err
+		}
+	}
 	if i.SpaceID != i.RelayAdmission.TenantID || i.InvitationID != i.RelayAdmission.AdmissionID ||
 		i.CreatedAtMilliseconds != i.RelayAdmission.CreatedAtMilliseconds ||
 		i.RelayAdmission.ClaimedAtMilliseconds != nil || i.RelayAdmission.ClaimedMemberID != nil ||
@@ -173,6 +190,141 @@ func (i Invitation) Validate() error {
 		return NewProtocolError(CodeWrongScope, "Shared Space invitation and relay admission scopes differ")
 	}
 	return nil
+}
+
+// ParticipantKeyGrant is an opaque, recipient-bound package for one Shared
+// Space content-key epoch. The server verifies self-authentication and routing
+// scope, but only a participant client can bind the signing key to the
+// encrypted participant authority and decrypt the wrapped key material.
+type ParticipantKeyGrant struct {
+	Version                          int                          `json:"version"`
+	SpaceID                          uuid.UUID                    `json:"spaceID"`
+	ParticipantID                    uuid.UUID                    `json:"participantID"`
+	IssuerParticipantID              uuid.UUID                    `json:"issuerParticipantID"`
+	KeyEpoch                         uint64                       `json:"keyEpoch"`
+	Algorithm                        string                       `json:"algorithm"`
+	RecipientAgreementKeyFingerprint string                       `json:"recipientAgreementKeyFingerprint"`
+	EphemeralAgreementPublicKeyX963  string                       `json:"ephemeralAgreementPublicKeyX963"`
+	Nonce                            string                       `json:"nonce"`
+	Ciphertext                       string                       `json:"ciphertext"`
+	AuthenticationTag                string                       `json:"authenticationTag"`
+	CreatedAtMilliseconds            int64                        `json:"createdAtMilliseconds"`
+	Signature                        ParticipantKeyGrantSignature `json:"signature"`
+}
+
+type ParticipantKeyGrantSignature struct {
+	Algorithm             string `json:"algorithm"`
+	PublicSigningKeyX963  string `json:"publicSigningKeyX963"`
+	SigningKeyFingerprint string `json:"signingKeyFingerprint"`
+	Signature             string `json:"signature"`
+}
+
+type participantKeyGrantSigningFields struct {
+	Version                          int       `json:"version"`
+	SpaceID                          uuid.UUID `json:"spaceID"`
+	ParticipantID                    uuid.UUID `json:"participantID"`
+	IssuerParticipantID              uuid.UUID `json:"issuerParticipantID"`
+	KeyEpoch                         uint64    `json:"keyEpoch"`
+	Algorithm                        string    `json:"algorithm"`
+	RecipientAgreementKeyFingerprint string    `json:"recipientAgreementKeyFingerprint"`
+	EphemeralAgreementPublicKeyX963  string    `json:"ephemeralAgreementPublicKeyX963"`
+	Nonce                            string    `json:"nonce"`
+	Ciphertext                       string    `json:"ciphertext"`
+	AuthenticationTag                string    `json:"authenticationTag"`
+	CreatedAtMilliseconds            int64     `json:"createdAtMilliseconds"`
+}
+
+func (g ParticipantKeyGrant) signingPayload() ([]byte, error) {
+	return json.Marshal(participantKeyGrantSigningFields{
+		Version: g.Version, SpaceID: g.SpaceID, ParticipantID: g.ParticipantID,
+		IssuerParticipantID: g.IssuerParticipantID, KeyEpoch: g.KeyEpoch,
+		Algorithm:                        g.Algorithm,
+		RecipientAgreementKeyFingerprint: g.RecipientAgreementKeyFingerprint,
+		EphemeralAgreementPublicKeyX963:  g.EphemeralAgreementPublicKeyX963,
+		Nonce:                            g.Nonce, Ciphertext: g.Ciphertext, AuthenticationTag: g.AuthenticationTag,
+		CreatedAtMilliseconds: g.CreatedAtMilliseconds,
+	})
+}
+
+// SigningPayload returns the canonical bytes covered by Signature. Clients
+// use this exact representation so Go and Swift implementations sign the same
+// recipient-bound grant without relying on map-key ordering.
+func (g ParticipantKeyGrant) SigningPayload() ([]byte, error) {
+	return g.signingPayload()
+}
+
+func (g ParticipantKeyGrant) Validate() error {
+	if g.Version != SchemaVersion || g.SpaceID == uuid.Nil || g.ParticipantID == uuid.Nil ||
+		g.IssuerParticipantID == uuid.Nil || g.KeyEpoch == 0 ||
+		g.Algorithm != ParticipantKeyGrantAlgorithm || g.CreatedAtMilliseconds < 0 ||
+		!validFingerprint(g.RecipientAgreementKeyFingerprint) ||
+		!validBase64URLSize(g.EphemeralAgreementPublicKeyX963, 65, 65) ||
+		!validBase64URLSize(g.Nonce, 12, 12) ||
+		!validBase64URLSize(g.Ciphertext, 1, MaximumParticipantKeyGrantCiphertextByteCount) ||
+		!validBase64URLSize(g.AuthenticationTag, 16, 16) ||
+		g.Signature.Algorithm != ParticipantKeyGrantSignatureAlgorithm ||
+		!validFingerprint(g.Signature.SigningKeyFingerprint) ||
+		!validBase64URLSize(g.Signature.PublicSigningKeyX963, 65, 65) ||
+		!validBase64URLSize(g.Signature.Signature, 64, 64) {
+		return NewProtocolError(CodeInvalidInvitation, "Shared Space participant key grant fields are invalid")
+	}
+	publicKeyBytes, _ := base64.RawURLEncoding.Strict().DecodeString(g.Signature.PublicSigningKeyX963)
+	fingerprint := sha256.Sum256(publicKeyBytes)
+	if hex.EncodeToString(fingerprint[:]) != g.Signature.SigningKeyFingerprint {
+		return NewProtocolError(CodeInvalidInvitation, "Shared Space participant key grant signing-key fingerprint differs")
+	}
+	x, y := elliptic.Unmarshal(elliptic.P256(), publicKeyBytes)
+	if x == nil || y == nil {
+		return NewProtocolError(CodeInvalidInvitation, "Shared Space participant key grant signing key is invalid")
+	}
+	signatureBytes, _ := base64.RawURLEncoding.Strict().DecodeString(g.Signature.Signature)
+	payload, err := g.signingPayload()
+	if err != nil {
+		return NewProtocolError(CodeInvalidInvitation, "Shared Space participant key grant cannot be encoded")
+	}
+	digest := sha256.Sum256(payload)
+	if !ecdsa.Verify(
+		&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, digest[:],
+		new(big.Int).SetBytes(signatureBytes[:32]), new(big.Int).SetBytes(signatureBytes[32:]),
+	) {
+		return NewProtocolError(CodeInvalidInvitation, "Shared Space participant key grant signature is invalid")
+	}
+	return nil
+}
+
+func (i Invitation) ValidateKeyGrant(mode SecurityMode, currentKeyEpoch uint64) error {
+	if mode == SecurityModeManaged {
+		if i.KeyGrant != nil {
+			return NewProtocolError(CodeInvalidInvitation, "managed Shared Space invitations cannot carry E2EE key grants")
+		}
+		return nil
+	}
+	if i.KeyGrant == nil {
+		return NewProtocolError(CodeInvalidInvitation, "E2EE Shared Space invitation is missing its participant key grant")
+	}
+	grant := i.KeyGrant
+	if grant.SpaceID != i.SpaceID || grant.ParticipantID != i.ParticipantID ||
+		grant.CreatedAtMilliseconds != i.CreatedAtMilliseconds {
+		return NewProtocolError(CodeWrongScope, "Shared Space invitation and participant key grant scopes differ")
+	}
+	if grant.KeyEpoch != currentKeyEpoch {
+		return NewProtocolError(CodeWrongKeyEpoch, "Shared Space participant key grant is not for the current key epoch")
+	}
+	return nil
+}
+
+func validFingerprint(value string) bool {
+	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func validBase64URLSize(value string, minimum, maximum int) bool {
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(value)
+	return err == nil && len(decoded) >= minimum && len(decoded) <= maximum &&
+		base64.RawURLEncoding.EncodeToString(decoded) == value
 }
 
 type InvitationCreateResult struct {
@@ -212,6 +364,7 @@ func (c InvitationClaim) Validate() error {
 type InvitationClaimResult struct {
 	Acceptance      relay.Acceptance                     `json:"acceptance"`
 	CurrentKeyEpoch uint64                               `json:"currentKeyEpoch"`
+	KeyGrant        *ParticipantKeyGrant                 `json:"keyGrant,omitempty"`
 	Participant     Participant                          `json:"participant"`
 	Member          relay.SubscriptionMemberRegistration `json:"member"`
 }

@@ -26,16 +26,17 @@ type sharedSpaceInvitationCredential struct {
 }
 
 type sharedSpaceInvitationCreateInput struct {
-	Version                     int                             `json:"version"`
-	RetryID                     uuid.UUID                       `json:"retryID"`
-	ParticipantID               uuid.UUID                       `json:"participantID"`
-	SubscriptionID              uuid.UUID                       `json:"subscriptionID"`
-	Kind                        sharedspaces.ParticipantKind    `json:"kind"`
-	Role                        sharedspaces.Role               `json:"role"`
-	InvitationCredential        sharedSpaceInvitationCredential `json:"invitationCredential"`
-	ExpiresAtMilliseconds       int64                           `json:"expiresAtMilliseconds"`
-	MemberExpiresAtMilliseconds *int64                          `json:"memberExpiresAtMilliseconds,omitempty"`
-	CreatedAtMilliseconds       int64                           `json:"createdAtMilliseconds"`
+	Version                     int                               `json:"version"`
+	RetryID                     uuid.UUID                         `json:"retryID"`
+	ParticipantID               uuid.UUID                         `json:"participantID"`
+	SubscriptionID              uuid.UUID                         `json:"subscriptionID"`
+	Kind                        sharedspaces.ParticipantKind      `json:"kind"`
+	Role                        sharedspaces.Role                 `json:"role"`
+	KeyGrant                    *sharedspaces.ParticipantKeyGrant `json:"keyGrant,omitempty"`
+	InvitationCredential        sharedSpaceInvitationCredential   `json:"invitationCredential"`
+	ExpiresAtMilliseconds       int64                             `json:"expiresAtMilliseconds"`
+	MemberExpiresAtMilliseconds *int64                            `json:"memberExpiresAtMilliseconds,omitempty"`
+	CreatedAtMilliseconds       int64                             `json:"createdAtMilliseconds"`
 }
 
 type sharedSpaceInvitationClaimInput struct {
@@ -142,7 +143,7 @@ func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, r
 		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
 		SpaceID: spaceID, InvitationID: invitationCredential.AdmissionID,
 		ParticipantID: input.ParticipantID, SubscriptionID: input.SubscriptionID,
-		Kind: input.Kind, Role: input.Role,
+		Kind: input.Kind, Role: input.Role, KeyGrant: input.KeyGrant,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: spaceID, DomainID: domainID,
 			AdmissionID:                 invitationCredential.AdmissionID,

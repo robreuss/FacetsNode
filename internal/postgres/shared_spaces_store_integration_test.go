@@ -2,6 +2,12 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"testing"
 	"time"
@@ -349,5 +355,59 @@ func postgresSharedSpaceInvitation(
 			CreatedAtMilliseconds: now, ExpiresAtMilliseconds: now + 60*60*1_000,
 		},
 	}
+	if space.SecurityMode == sharedspaces.SecurityModeE2EE {
+		invitation.KeyGrant = postgresParticipantKeyGrant(
+			t, space.SpaceID, invitation.ParticipantID, space.InitialParticipantID,
+			sharedspaces.InitialKeyEpoch, now,
+		)
+	}
 	return invitation, credential
+}
+
+func postgresParticipantKeyGrant(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	issuerParticipantID uuid.UUID,
+	keyEpoch uint64,
+	now int64,
+) *sharedspaces.ParticipantKeyGrant {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
+	signingFingerprint := sha256.Sum256(publicKey)
+	recipientFingerprint := sha256.Sum256([]byte("recipient agreement key"))
+	grant := sharedspaces.ParticipantKeyGrant{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
+		ParticipantID: participantID, IssuerParticipantID: issuerParticipantID,
+		KeyEpoch: keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
+		RecipientAgreementKeyFingerprint: hex.EncodeToString(recipientFingerprint[:]),
+		EphemeralAgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
+		Nonce:                            base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
+		Ciphertext:                       base64.RawURLEncoding.EncodeToString([]byte("opaque wrapped content key")),
+		AuthenticationTag:                base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+		CreatedAtMilliseconds:            now,
+		Signature: sharedspaces.ParticipantKeyGrantSignature{
+			Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
+			SigningKeyFingerprint: hex.EncodeToString(signingFingerprint[:]),
+		},
+	}
+	payload, err := grant.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return &grant
 }

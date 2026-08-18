@@ -157,6 +157,19 @@ func (s *MemoryStore) CreateInvitation(
 			"Shared Space does not have an activated checkpoint for the current key epoch",
 		)
 	}
+	if err := invitation.ValidateKeyGrant(space.provisioning.SecurityMode, space.keyEpoch); err != nil {
+		return InvitationCreateResult{}, err
+	}
+	if invitation.KeyGrant != nil {
+		issuer, found := space.participants[invitation.KeyGrant.IssuerParticipantID]
+		if !found || issuer.RevokedAtMilliseconds != nil ||
+			(issuer.Role != RoleHost && issuer.Role != RoleModerator) {
+			return InvitationCreateResult{}, NewProtocolError(
+				CodeUnauthorized,
+				"participant key grant issuer is not an active Shared Space host or moderator",
+			)
+		}
+	}
 	if participant, found := space.participants[invitation.ParticipantID]; found && participant.RevokedAtMilliseconds == nil {
 		return InvitationCreateResult{}, NewProtocolError(CodeParticipantCollision, "participant is already active")
 	}
@@ -214,6 +227,13 @@ func (s *MemoryStore) ClaimInvitation(
 	if record.cancellation != nil {
 		return InvitationClaimResult{}, NewProtocolError(CodeInvitationCancelled, "Shared Space invitation was cancelled")
 	}
+	space := s.spaces[claim.SpaceID]
+	if space == nil {
+		return InvitationClaimResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if err := record.invitation.ValidateKeyGrant(space.provisioning.SecurityMode, space.keyEpoch); err != nil {
+		return InvitationClaimResult{}, err
+	}
 	relayResult, err := s.relay.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{
 		TenantID: credential.SpaceID, DomainID: credential.DomainID,
 		AdmissionID: credential.InvitationID, Token: credential.Token,
@@ -226,14 +246,10 @@ func (s *MemoryStore) ClaimInvitation(
 		SubscriptionID: record.invitation.SubscriptionID, Kind: record.invitation.Kind,
 		Role: record.invitation.Role, CreatedAtMilliseconds: nowMilliseconds,
 	}
-	space := s.spaces[claim.SpaceID]
-	if space == nil {
-		return InvitationClaimResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
-	}
 	space.participants[participant.ParticipantID] = participant
 	result := InvitationClaimResult{
 		Acceptance: relayResult.Acceptance, CurrentKeyEpoch: space.keyEpoch,
-		Participant: participant, Member: relayResult.Member,
+		KeyGrant: record.invitation.KeyGrant, Participant: participant, Member: relayResult.Member,
 	}
 	record.result = &result
 	s.invitations[credential.InvitationID] = record

@@ -186,17 +186,13 @@ func (s *SharedSpacesStore) CreateInvitation(
 			sharedspaces.CodeInvalidInvitation, "Shared Space invitation is not currently issuable",
 		)
 	}
-	payload, err := json.Marshal(invitation)
-	if err != nil {
-		return sharedspaces.InvitationCreateResult{}, fmt.Errorf("encode Shared Space invitation: %w", err)
-	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return sharedspaces.InvitationCreateResult{}, fmt.Errorf("begin Shared Space invitation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	domainID, _, _, err := loadSharedSpaceAuthority(ctx, tx, invitation.SpaceID, credential, "FOR UPDATE")
+	domainID, provisioning, _, err := loadSharedSpaceAuthority(ctx, tx, invitation.SpaceID, credential, "FOR UPDATE")
 	if err != nil {
 		return sharedspaces.InvitationCreateResult{}, err
 	}
@@ -254,6 +250,26 @@ func (s *SharedSpacesStore) CreateInvitation(
 			"Shared Space does not have an activated checkpoint for the current key epoch",
 		)
 	}
+	if err := invitation.ValidateKeyGrant(provisioning.SecurityMode, currentKeyEpoch); err != nil {
+		return sharedspaces.InvitationCreateResult{}, err
+	}
+	if invitation.KeyGrant != nil {
+		var issuerRole sharedspaces.Role
+		err := tx.QueryRow(ctx, `
+			SELECT role FROM shared_space_participants
+			WHERE space_id=$1 AND participant_id=$2 AND revoked_at_milliseconds IS NULL
+		`, invitation.SpaceID, invitation.KeyGrant.IssuerParticipantID).Scan(&issuerRole)
+		if err == pgx.ErrNoRows ||
+			(err == nil && issuerRole != sharedspaces.RoleHost && issuerRole != sharedspaces.RoleModerator) {
+			return sharedspaces.InvitationCreateResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeUnauthorized,
+				"participant key grant issuer is not an active Shared Space host or moderator",
+			)
+		}
+		if err != nil {
+			return sharedspaces.InvitationCreateResult{}, fmt.Errorf("load participant key grant issuer: %w", err)
+		}
+	}
 
 	var activeParticipant bool
 	if err := tx.QueryRow(ctx, `
@@ -268,6 +284,10 @@ func (s *SharedSpacesStore) CreateInvitation(
 		return sharedspaces.InvitationCreateResult{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeParticipantCollision, "participant is already active",
 		)
+	}
+	payload, err := json.Marshal(invitation)
+	if err != nil {
+		return sharedspaces.InvitationCreateResult{}, fmt.Errorf("encode Shared Space invitation: %w", err)
 	}
 
 	if _, err := s.relay.createSubscriptionTx(ctx, tx, credential, relay.SubscriptionCreateRequest{
@@ -389,11 +409,20 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		}
 		return sharedspaces.InvitationClaimResult{
 			Acceptance: relay.AcceptanceDuplicate, Participant: participant,
-			CurrentKeyEpoch: currentKeyEpoch,
+			CurrentKeyEpoch: currentKeyEpoch, KeyGrant: invitation.KeyGrant,
 			Member: relay.SubscriptionMemberRegistration{
 				SubscriptionID: subscriptionID, MemberRegistration: member,
 			},
 		}, nil
+	}
+	var securityMode sharedspaces.SecurityMode
+	if err := tx.QueryRow(ctx, `
+		SELECT security_mode FROM shared_spaces WHERE space_id=$1
+	`, claim.SpaceID).Scan(&securityMode); err != nil {
+		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("load Shared Space security mode: %w", err)
+	}
+	if err := invitation.ValidateKeyGrant(securityMode, currentKeyEpoch); err != nil {
+		return sharedspaces.InvitationClaimResult{}, err
 	}
 
 	relayResult, err := s.relay.claimSubscriptionAdmissionTx(ctx, tx, relay.AdmissionCredential{
@@ -426,7 +455,7 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	}
 	return sharedspaces.InvitationClaimResult{
 		Acceptance: relayResult.Acceptance, CurrentKeyEpoch: currentKeyEpoch,
-		Participant: participant, Member: relayResult.Member,
+		KeyGrant: invitation.KeyGrant, Participant: participant, Member: relayResult.Member,
 	}, nil
 }
 

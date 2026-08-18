@@ -39,6 +39,40 @@ func TestInvitationRoleFreezesRelayCapabilities(t *testing.T) {
 	}
 }
 
+func TestParticipantKeyGrantRejectsTamperingAndWrongScope(t *testing.T) {
+	_, provisioning, admin := testSpaceProvisioning(t, 2_500, sharedspaces.SecurityModeE2EE)
+	invitation, _ := testInvitation(t, provisioning, admin, 2_600, sharedspaces.RoleParticipant)
+	if err := invitation.ValidateKeyGrant(sharedspaces.SecurityModeE2EE, sharedspaces.InitialKeyEpoch); err != nil {
+		t.Fatalf("valid E2EE grant: %v", err)
+	}
+
+	tampered := invitation
+	tamperedGrant := *invitation.KeyGrant
+	tamperedGrant.Ciphertext += "A"
+	tampered.KeyGrant = &tamperedGrant
+	if err := tampered.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
+		t.Fatalf("tampered grant err=%v", err)
+	}
+
+	wrongEpoch := invitation
+	if err := wrongEpoch.ValidateKeyGrant(sharedspaces.SecurityModeE2EE, sharedspaces.InitialKeyEpoch+1); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
+		t.Fatalf("wrong epoch err=%v", err)
+	}
+	wrongParticipant := invitation
+	wrongParticipant.ParticipantID = uuid.New()
+	if err := wrongParticipant.ValidateKeyGrant(sharedspaces.SecurityModeE2EE, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongScope) {
+		t.Fatalf("wrong participant err=%v", err)
+	}
+	if err := invitation.ValidateKeyGrant(sharedspaces.SecurityModeManaged, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
+		t.Fatalf("managed grant err=%v", err)
+	}
+	missing := invitation
+	missing.KeyGrant = nil
+	if err := missing.ValidateKeyGrant(sharedspaces.SecurityModeE2EE, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
+		t.Fatalf("missing E2EE grant err=%v", err)
+	}
+}
+
 func TestParticipantRevocationRejectsInvalidKeyEpochTransition(t *testing.T) {
 	revocation := sharedspaces.ParticipantRevocation{
 		Version:          sharedspaces.SchemaVersion,
