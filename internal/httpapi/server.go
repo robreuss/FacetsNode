@@ -581,7 +581,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				status = http.StatusNotFound
 			case sharedspaces.CodeSpaceCollision, sharedspaces.CodeInvitationCollision,
 				sharedspaces.CodeInvitationClaimed, sharedspaces.CodeParticipantCollision,
-				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost:
+				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost,
+				sharedspaces.CodeWrongKeyEpoch:
 				status = http.StatusConflict
 			}
 			if s.logger != nil {

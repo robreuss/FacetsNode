@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -158,6 +159,33 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		revokedResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("revoked=%+v", revokedResult)
 	}
+	staleEnvelope := relay.Envelope{
+		Version: relay.SchemaVersion, Algorithm: relay.EnvelopeAlgorithm,
+		TenantID: spaceID, DomainID: domainID, MessageID: uuid.New(),
+		PublisherMemberID: domain.MemberCredential.MemberID,
+		KeyEpoch:          sharedspaces.InitialKeyEpoch, CreatedAtMilliseconds: nowMilliseconds,
+		Nonce:             base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
+		Ciphertext:        base64.RawURLEncoding.EncodeToString([]byte("stale Shared Space payload")),
+		AuthenticationTag: base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+	}
+	relayRoot := "/v1/relay/tenants/" + spaceID.String() + "/domains/" + domainID.String()
+	stalePublish := performRelayJSON(
+		t, handler, http.MethodPut,
+		relayRoot+"/messages/"+staleEnvelope.MessageID.String(), staleEnvelope,
+		domain.MemberCredential.AuthorizationToken, domain.MemberCredential.MemberID,
+	)
+	requireStatus(t, stalePublish, http.StatusConflict)
+	_ = stalePublish.Body.Close()
+	currentEnvelope := staleEnvelope
+	currentEnvelope.MessageID = uuid.New()
+	currentEnvelope.KeyEpoch = sharedspaces.InitialKeyEpoch + 1
+	currentPublish := performRelayJSON(
+		t, handler, http.MethodPut,
+		relayRoot+"/messages/"+currentEnvelope.MessageID.String(), currentEnvelope,
+		domain.MemberCredential.AuthorizationToken, domain.MemberCredential.MemberID,
+	)
+	requireStatus(t, currentPublish, http.StatusCreated)
+	_ = currentPublish.Body.Close()
 	revokedMember := relay.Credential{
 		TenantID: spaceID, DomainID: domainID, MemberID: participantID, Token: memberToken,
 	}

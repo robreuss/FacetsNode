@@ -310,3 +310,25 @@ func (s *MemoryStore) RevokeParticipant(
 	s.revocationResponses[revocation.RetryID] = result
 	return result, nil
 }
+
+func (s *MemoryStore) PublishEnvelope(
+	ctx context.Context,
+	credential relay.Credential,
+	envelope relay.Envelope,
+	nowMilliseconds int64,
+) (relay.PublishResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return relay.PublishResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID ||
+		envelope.TenantID != credential.TenantID || envelope.DomainID != credential.DomainID {
+		return relay.PublishResult{}, NewProtocolError(CodeWrongScope, "envelope belongs to another Shared Space")
+	}
+	if envelope.KeyEpoch != space.keyEpoch {
+		return relay.PublishResult{}, NewProtocolError(CodeWrongKeyEpoch, "envelope key epoch is not current")
+	}
+	return s.relay.Publish(ctx, credential, envelope, nowMilliseconds)
+}

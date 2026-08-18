@@ -96,6 +96,18 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("status after revocation=%+v err=%v", status, err)
 	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	staleEnvelope := testSharedEnvelope(provisioning, sharedspaces.InitialKeyEpoch, 1_600)
+	if _, err := store.PublishEnvelope(ctx, hostCredential, staleEnvelope, 1_600); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
+		t.Fatalf("stale envelope publish err=%v", err)
+	}
+	currentEnvelope := testSharedEnvelope(provisioning, sharedspaces.InitialKeyEpoch+1, 1_600)
+	if result, err := store.PublishEnvelope(ctx, hostCredential, currentEnvelope, 1_600); err != nil || result.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("current envelope publish=%+v err=%v", result, err)
+	}
 }
 
 func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
@@ -221,6 +233,22 @@ func testSpaceProvisioning(
 		},
 	}
 	return tenantCredential, provisioning, admin
+}
+
+func testSharedEnvelope(
+	provisioning sharedspaces.SpaceProvisioning,
+	keyEpoch uint64,
+	createdAtMilliseconds int64,
+) relay.Envelope {
+	return relay.Envelope{
+		Version: relay.SchemaVersion, Algorithm: relay.EnvelopeAlgorithm,
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MessageID: uuid.New(), PublisherMemberID: provisioning.InitialParticipantID,
+		KeyEpoch: keyEpoch, CreatedAtMilliseconds: createdAtMilliseconds,
+		Nonce:             base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
+		Ciphertext:        base64.RawURLEncoding.EncodeToString([]byte("opaque Shared Space payload")),
+		AuthenticationTag: base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+	}
 }
 
 func testInvitation(

@@ -666,6 +666,25 @@ func (s *RelayStore) Publish(
 		return relay.PublishResult{}, fmt.Errorf("begin relay publish: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
+	result, err := s.publishInTransaction(
+		ctx, transaction, credential, envelope, nowMilliseconds,
+	)
+	if err != nil {
+		return relay.PublishResult{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return relay.PublishResult{}, fmt.Errorf("commit relay publish: %w", err)
+	}
+	return result, nil
+}
+
+func (s *RelayStore) publishInTransaction(
+	ctx context.Context,
+	transaction pgx.Tx,
+	credential relay.Credential,
+	envelope relay.Envelope,
+	nowMilliseconds int64,
+) (relay.PublishResult, error) {
 	tenant, err := loadRelayTenant(ctx, transaction, credential.TenantID, "FOR UPDATE")
 	if err != nil {
 		return relay.PublishResult{}, err
@@ -828,9 +847,6 @@ func (s *RelayStore) Publish(
 		nowMilliseconds,
 	); err != nil {
 		return relay.PublishResult{}, err
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return relay.PublishResult{}, fmt.Errorf("commit relay publish: %w", err)
 	}
 	return relay.PublishResult{
 		Acceptance: relay.AcceptanceAccepted,

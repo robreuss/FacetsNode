@@ -1098,9 +1098,16 @@ func (s *Server) handlePublishRelayMessage(writer http.ResponseWriter, request *
 		))
 		return
 	}
-	result, err := s.relayStore.Publish(
-		request.Context(), credential, envelope, s.nowMilliseconds(),
-	)
+	var result relay.PublishResult
+	if s.sharedSpacesStore != nil {
+		result, err = s.sharedSpacesStore.PublishEnvelope(
+			request.Context(), credential, envelope, s.nowMilliseconds(),
+		)
+	} else {
+		result, err = s.relayStore.Publish(
+			request.Context(), credential, envelope, s.nowMilliseconds(),
+		)
+	}
 	if err != nil {
 		s.writeError(writer, err)
 		return

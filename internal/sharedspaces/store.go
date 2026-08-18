@@ -12,4 +12,5 @@ type Store interface {
 	ClaimInvitation(context.Context, InvitationCredential, InvitationClaim, int64) (InvitationClaimResult, error)
 	GetSpaceStatus(context.Context, relay.AdministrationCredential) (SpaceStatus, error)
 	RevokeParticipant(context.Context, relay.AdministrationCredential, ParticipantRevocation, int64) (ParticipantRevocationResult, error)
+	PublishEnvelope(context.Context, relay.Credential, relay.Envelope, int64) (relay.PublishResult, error)
 }

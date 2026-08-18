@@ -603,6 +603,58 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	}, nil
 }
 
+func (s *SharedSpacesStore) PublishEnvelope(
+	ctx context.Context,
+	credential relay.Credential,
+	envelope relay.Envelope,
+	nowMilliseconds int64,
+) (relay.PublishResult, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.PublishResult{}, fmt.Errorf("begin Shared Space envelope publish: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var domainID uuid.UUID
+	var currentKeyEpoch uint64
+	err = tx.QueryRow(ctx, `
+		SELECT domain_id,current_key_epoch
+		FROM shared_spaces
+		WHERE space_id=$1
+		FOR SHARE
+	`, credential.TenantID).Scan(&domainID, &currentKeyEpoch)
+	if err == pgx.ErrNoRows {
+		return relay.PublishResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	}
+	if err != nil {
+		return relay.PublishResult{}, fmt.Errorf("load Shared Space publish authority: %w", err)
+	}
+	if credential.DomainID != domainID || envelope.TenantID != credential.TenantID ||
+		envelope.DomainID != credential.DomainID {
+		return relay.PublishResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "envelope belongs to another Shared Space",
+		)
+	}
+	if envelope.KeyEpoch != currentKeyEpoch {
+		return relay.PublishResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongKeyEpoch, "envelope key epoch is not current",
+		)
+	}
+
+	result, err := s.relay.publishInTransaction(
+		ctx, tx, credential, envelope, nowMilliseconds,
+	)
+	if err != nil {
+		return relay.PublishResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.PublishResult{}, fmt.Errorf("commit Shared Space envelope publish: %w", err)
+	}
+	return result, nil
+}
+
 func loadSharedSpaceKeyEpoch(ctx context.Context, tx pgx.Tx, spaceID uuid.UUID) (uint64, error) {
 	var keyEpoch uint64
 	if err := tx.QueryRow(ctx, `
