@@ -70,12 +70,14 @@ ssh -L 18080:127.0.0.1:8080 <vm-user>@<vm-address>
 ```
 
 The tunneled endpoint is then `http://127.0.0.1:18080`. This is a development
-transport only. Caddy separately publishes HTTPS on port 8443. It forwards
-only `/v1/pairing/*` and `/v1/relay/tenants/*`; operations and operator
-provisioning return `404`. The certificate must validate the client-visible
-host name. This route separation is necessary but does not by itself prove
-public-internet readiness; account admission, cross-instance distributed rate limits,
-monitoring, independent review, and incident procedures remain open gates.
+transport only. Caddy separately publishes HTTPS on port 8443. Its explicit
+allowlist includes pairing, relay member traffic, Device Sync account-admission
+claims, and authenticated Device Sync principal operations. Operator account-
+admission issuance, operations, and management endpoints return `404`. The
+certificate must validate the client-visible host name. This route separation
+is necessary but does not by itself prove public-internet readiness;
+cross-instance distributed rate limits, monitoring, independent review, and
+incident procedures remain open gates.
 
 ## Verification
 
@@ -91,7 +93,7 @@ FACETS_SERVER_TEST_DATABASE_URL='postgres://facets_device_sync:<password>@postgr
 
 FACETS_SERVER_TEST_BASE_URL='http://server:8080' \
 FACETS_SERVER_TEST_OPERATOR_TOKEN='<same operator value from .env>' \
-  go test ./integration -run 'TestLive(Pairing|ReplicaRelay)' -v
+  go test ./integration -run 'TestLive(Pairing|ReplicaRelay|DeviceSync)' -v
 
 # Use the CA required by the installed certificate; never use curl -k.
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
