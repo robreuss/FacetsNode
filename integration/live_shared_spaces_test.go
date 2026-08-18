@@ -116,7 +116,8 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	decodeLiveJSON(t, statusResponse, &status)
 	if status.SpaceID != spaceID || len(status.Participants) != 2 ||
 		status.Relay.ActiveSubscriptionCount != 2 ||
-		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
+		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch || !status.BootstrapReady ||
+		status.ActiveCheckpointEpoch == nil || *status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("unexpected Shared Space status: %+v", status)
 	}
 

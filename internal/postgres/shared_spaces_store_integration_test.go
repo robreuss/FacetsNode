@@ -43,6 +43,10 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		retry.Relay.InitialDomain.DomainID != provisioning.Domain.Registration.DomainID {
 		t.Fatalf("provision retry=%+v err=%v", retry, err)
 	}
+	status, err := store.GetSpaceStatus(ctx, admin)
+	if err != nil || status.BootstrapReady || status.ActiveCheckpointEpoch != nil {
+		t.Fatalf("status before bootstrap=%+v err=%v", status, err)
+	}
 
 	invitation, credential := postgresSharedSpaceInvitation(t, provisioning, admin, now+100)
 	if _, err := store.CreateInvitation(ctx, admin, invitation, now+100); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeBootstrapNotReady) {
@@ -108,8 +112,10 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		t.Fatalf("claim retry=%+v err=%v", claimRetry, err)
 	}
 
-	status, err := store.GetSpaceStatus(ctx, admin)
+	status, err = store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		!status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
+		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
 		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
@@ -127,7 +133,9 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		t.Fatalf("revoke retry=%+v err=%v", revokedRetry, err)
 	}
 	status, err = store.GetSpaceStatus(ctx, admin)
-	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
+		status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
+		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("status after revocation: %v", err)
 	}
 	retry, err = store.ProvisionSpace(ctx, provisioning, now+302)

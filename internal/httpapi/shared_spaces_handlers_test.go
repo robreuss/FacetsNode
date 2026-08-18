@@ -143,7 +143,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	}
 	_ = statusResponse.Body.Close()
 	if len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 ||
-		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
+		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch || !status.BootstrapReady ||
+		status.ActiveCheckpointEpoch == nil || *status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("status=%+v", status)
 	}
 

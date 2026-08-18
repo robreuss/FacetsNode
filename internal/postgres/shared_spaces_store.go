@@ -441,6 +441,19 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	if err != nil {
 		return sharedspaces.SpaceStatus{}, err
 	}
+	var activeCheckpointEpochValue *int64
+	if err := tx.QueryRow(ctx, `
+		SELECT key_epoch FROM relay_checkpoints
+		WHERE tenant_id=$1 AND domain_id=$2 AND state='activated'
+		ORDER BY activation_ordinal DESC LIMIT 1
+	`, credential.TenantID, domainID).Scan(&activeCheckpointEpochValue); err != nil && err != pgx.ErrNoRows {
+		return sharedspaces.SpaceStatus{}, fmt.Errorf("load Shared Space active checkpoint epoch: %w", err)
+	}
+	var activeCheckpointEpoch *uint64
+	if activeCheckpointEpochValue != nil {
+		epoch := uint64(*activeCheckpointEpochValue)
+		activeCheckpointEpoch = &epoch
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return sharedspaces.SpaceStatus{}, fmt.Errorf("commit Shared Space status snapshot: %w", err)
 	}
@@ -451,9 +464,11 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	return sharedspaces.SpaceStatus{
 		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 		SecurityMode: provisioning.SecurityMode, DomainID: domainID,
-		CurrentKeyEpoch:      currentKeyEpoch,
-		InitialParticipantID: provisioning.InitialParticipantID,
-		Participants:         participants, Relay: relayStatus,
+		CurrentKeyEpoch:       currentKeyEpoch,
+		BootstrapReady:        activeCheckpointEpoch != nil && *activeCheckpointEpoch == currentKeyEpoch,
+		ActiveCheckpointEpoch: activeCheckpointEpoch,
+		InitialParticipantID:  provisioning.InitialParticipantID,
+		Participants:          participants, Relay: relayStatus,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}, nil
 }

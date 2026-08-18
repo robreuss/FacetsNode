@@ -249,6 +249,8 @@ type SpaceStatus struct {
 	SpaceID               uuid.UUID          `json:"spaceID"`
 	SecurityMode          SecurityMode       `json:"securityMode"`
 	CurrentKeyEpoch       uint64             `json:"currentKeyEpoch"`
+	BootstrapReady        bool               `json:"bootstrapReady"`
+	ActiveCheckpointEpoch *uint64            `json:"activeCheckpointEpoch,omitempty"`
 	DomainID              uuid.UUID          `json:"domainID"`
 	InitialParticipantID  uuid.UUID          `json:"initialParticipantID"`
 	Participants          []Participant      `json:"participants"`

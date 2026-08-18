@@ -252,13 +252,20 @@ func (s *MemoryStore) GetSpaceStatus(
 	sort.Slice(participants, func(left, right int) bool {
 		return participants[left].ParticipantID.String() < participants[right].ParticipantID.String()
 	})
+	var activeCheckpointEpoch *uint64
+	if space.activeCheckpointEpoch != 0 {
+		epoch := space.activeCheckpointEpoch
+		activeCheckpointEpoch = &epoch
+	}
 	return SpaceStatus{
 		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
-		SecurityMode:         space.provisioning.SecurityMode,
-		CurrentKeyEpoch:      space.keyEpoch,
-		DomainID:             space.provisioning.Domain.Registration.DomainID,
-		InitialParticipantID: space.provisioning.InitialParticipantID,
-		Participants:         participants, Relay: relayStatus,
+		SecurityMode:          space.provisioning.SecurityMode,
+		CurrentKeyEpoch:       space.keyEpoch,
+		BootstrapReady:        space.activeCheckpointEpoch == space.keyEpoch,
+		ActiveCheckpointEpoch: activeCheckpointEpoch,
+		DomainID:              space.provisioning.Domain.Registration.DomainID,
+		InitialParticipantID:  space.provisioning.InitialParticipantID,
+		Participants:          participants, Relay: relayStatus,
 		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
 	}, nil
 }

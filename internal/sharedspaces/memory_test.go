@@ -78,6 +78,8 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 
 	status, err := store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		!status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
+		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
 		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
@@ -126,6 +128,11 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	}, 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
 		t.Fatalf("stale checkpoint activation err=%v", err)
 	}
+	status, err = store.GetSpaceStatus(ctx, admin)
+	if err != nil || status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
+		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("status awaiting rotated checkpoint=%+v err=%v", status, err)
+	}
 	staleCandidate := stagedBeforeRotation
 	staleCandidate.RetryID = uuid.New()
 	staleCandidate.CheckpointID = uuid.New()
@@ -148,7 +155,9 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		t.Fatalf("current checkpoint activation err=%v", err)
 	}
 	status, err = store.GetSpaceStatus(ctx, admin)
-	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
+		!status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
+		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("status after revocation=%+v err=%v", status, err)
 	}
 	staleEnvelope := testSharedEnvelope(provisioning, sharedspaces.InitialKeyEpoch, 1_600)
