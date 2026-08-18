@@ -1,0 +1,192 @@
+package integration_test
+
+import (
+	"net/http"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/sharedspaces"
+)
+
+// TestLiveSharedSpacesVerticalSlice proves the first product authority
+// lifecycle against a running PostgreSQL-backed Shared Spaces service. It does
+// not seed authority or relay state directly: a Space and host are provisioned
+// through the operator API, a reader is invited and claims membership, opaque
+// content crosses the relay, and revocation removes that participant's access.
+func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
+	baseURL := strings.TrimRight(os.Getenv("FACETS_SHARED_SPACES_TEST_BASE_URL"), "/")
+	operatorToken := os.Getenv("FACETS_SHARED_SPACES_TEST_OPERATOR_TOKEN")
+	if baseURL == "" || operatorToken == "" {
+		t.Skip("FACETS_SHARED_SPACES_TEST_BASE_URL and FACETS_SHARED_SPACES_TEST_OPERATOR_TOKEN are required")
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	now := time.Now().UnixMilli()
+	domain := newLiveRelayDomainProvisioningRequest(now)
+	spaceID := domain.AdministrationCredential.TenantID
+	domainID := domain.AdministrationCredential.DomainID
+	hostID := domain.MemberCredential.MemberID
+	provisioning := liveSharedSpaceProvisioningInput{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		SpaceID: spaceID, SecurityMode: sharedspaces.SecurityModeE2EE,
+		InitialParticipantID: hostID, InitialParticipantKind: sharedspaces.ParticipantPerson,
+		TenantProvisioning: liveRelayTenantProvisioningRequest{
+			Version: relay.SchemaVersion, RetryID: uuid.New(),
+			TenantProvisioningCredential: liveRelayTenantCredential{
+				TenantID: spaceID, AuthorizationToken: encodedBytes(8),
+			},
+			InitialDomain: domain,
+		},
+	}
+	created := requestRelayJSON(
+		t, client, http.MethodPost, baseURL+"/v1/shared-spaces",
+		provisioning, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, created, http.StatusCreated)
+	var createdResult sharedspaces.SpaceProvisioningResult
+	decodeLiveJSON(t, created, &createdResult)
+	if createdResult.SpaceID != spaceID ||
+		createdResult.InitialParticipant.ParticipantID != hostID ||
+		createdResult.InitialParticipant.Role != sharedspaces.RoleHost {
+		t.Fatalf("unexpected Shared Space provisioning: %+v", createdResult)
+	}
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, baseURL+"/v1/shared-spaces",
+		provisioning, operatorToken, uuid.Nil,
+	), http.StatusOK)
+
+	participantID := uuid.New()
+	invitationID := uuid.New()
+	invitationToken := encodedBytes(40)
+	invitation := liveSharedSpaceInvitationCreateInput{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		ParticipantID: participantID, SubscriptionID: uuid.New(),
+		Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleReader,
+		InvitationCredential: liveSharedSpaceInvitationCredential{
+			InvitationID: invitationID, AuthorizationToken: invitationToken,
+		},
+		ExpiresAtMilliseconds: now + int64(time.Hour/time.Millisecond),
+		CreatedAtMilliseconds: now,
+	}
+	spaceRoot := baseURL + "/v1/shared-spaces/" + spaceID.String() +
+		"/domains/" + domainID.String()
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, spaceRoot+"/invitations", invitation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusCreated)
+
+	participantToken := encodedBytes(72)
+	claim := liveSharedSpaceInvitationClaimInput{
+		Version: sharedspaces.SchemaVersion, ParticipantID: participantID,
+		MemberCredential: liveRelayMemberCredential{
+			TenantID: spaceID, DomainID: domainID, MemberID: participantID,
+			AuthorizationToken: participantToken,
+		},
+		ClaimedAtMilliseconds: now,
+	}
+	claimPath := spaceRoot + "/invitations/" + invitationID.String() + "/claim"
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, claimPath, claim, invitationToken, uuid.Nil,
+	), http.StatusCreated)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, claimPath, claim, invitationToken, uuid.Nil,
+	), http.StatusOK)
+
+	statusResponse := requestRelayJSON(
+		t, client, http.MethodGet, spaceRoot+"/status", nil,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, statusResponse, http.StatusOK)
+	var status sharedspaces.SpaceStatus
+	decodeLiveJSON(t, statusResponse, &status)
+	if status.SpaceID != spaceID || len(status.Participants) != 2 ||
+		status.Relay.ActiveSubscriptionCount != 2 {
+		t.Fatalf("unexpected Shared Space status: %+v", status)
+	}
+
+	relayRoot := baseURL + "/v1/relay/tenants/" + spaceID.String() +
+		"/domains/" + domainID.String()
+	message := relay.Envelope{
+		Version: relay.SchemaVersion, Algorithm: relay.EnvelopeAlgorithm,
+		TenantID: spaceID, DomainID: domainID, MessageID: uuid.New(),
+		PublisherMemberID: hostID, KeyEpoch: 1,
+		CreatedAtMilliseconds: now, Nonce: encodedBytes(104)[:16],
+		Ciphertext: encodedBytes(120), AuthenticationTag: encodedBytes(152)[:22],
+	}
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut, relayRoot+"/messages/"+message.MessageID.String(),
+		message, domain.MemberCredential.AuthorizationToken, hostID,
+	), http.StatusCreated)
+	participantCredential := relay.Credential{
+		TenantID: spaceID, DomainID: domainID, MemberID: participantID,
+		Token: participantToken,
+	}
+	fetched := requestRelayJSON(
+		t, client, http.MethodGet, relayRoot+"/messages?limit=10", nil,
+		participantCredential.Token, participantID,
+	)
+	requireStatus(t, fetched, http.StatusOK)
+	var delivery struct {
+		Messages []relay.Message `json:"messages"`
+		Cursor   string          `json:"cursor"`
+	}
+	decodeLiveJSON(t, fetched, &delivery)
+	if len(delivery.Messages) != 1 || delivery.Messages[0].Envelope.MessageID != message.MessageID {
+		t.Fatalf("unexpected Shared Space relay delivery: %+v", delivery)
+	}
+
+	revocation := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		SpaceID: spaceID, ParticipantID: participantID,
+		RevokedAtMilliseconds: time.Now().UnixMilli(),
+	}
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost,
+		spaceRoot+"/participants/"+participantID.String()+"/revocation",
+		revocation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusCreated)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodGet, relayRoot+"/messages?limit=1", nil,
+		participantCredential.Token, participantID,
+	), http.StatusForbidden)
+}
+
+type liveSharedSpaceProvisioningInput struct {
+	Version                int                                `json:"version"`
+	RetryID                uuid.UUID                          `json:"retryID"`
+	SpaceID                uuid.UUID                          `json:"spaceID"`
+	SecurityMode           sharedspaces.SecurityMode          `json:"securityMode"`
+	InitialParticipantID   uuid.UUID                          `json:"initialParticipantID"`
+	InitialParticipantKind sharedspaces.ParticipantKind       `json:"initialParticipantKind"`
+	TenantProvisioning     liveRelayTenantProvisioningRequest `json:"tenantProvisioning"`
+}
+
+type liveSharedSpaceInvitationCredential struct {
+	InvitationID       uuid.UUID `json:"invitationID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+type liveSharedSpaceInvitationCreateInput struct {
+	Version                     int                                 `json:"version"`
+	RetryID                     uuid.UUID                           `json:"retryID"`
+	ParticipantID               uuid.UUID                           `json:"participantID"`
+	SubscriptionID              uuid.UUID                           `json:"subscriptionID"`
+	Kind                        sharedspaces.ParticipantKind        `json:"kind"`
+	Role                        sharedspaces.Role                   `json:"role"`
+	InvitationCredential        liveSharedSpaceInvitationCredential `json:"invitationCredential"`
+	ExpiresAtMilliseconds       int64                               `json:"expiresAtMilliseconds"`
+	MemberExpiresAtMilliseconds *int64                              `json:"memberExpiresAtMilliseconds,omitempty"`
+	CreatedAtMilliseconds       int64                               `json:"createdAtMilliseconds"`
+}
+
+type liveSharedSpaceInvitationClaimInput struct {
+	Version               int                       `json:"version"`
+	ParticipantID         uuid.UUID                 `json:"participantID"`
+	MemberCredential      liveRelayMemberCredential `json:"memberCredential"`
+	ClaimedAtMilliseconds int64                     `json:"claimedAtMilliseconds"`
+}
