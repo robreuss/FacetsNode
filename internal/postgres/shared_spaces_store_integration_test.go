@@ -111,6 +111,30 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		claimRetry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("claim retry=%+v err=%v", claimRetry, err)
 	}
+	demotion := sharedspaces.ParticipantRoleChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleParticipant,
+		NextRole: sharedspaces.RoleReader, ChangedAtMilliseconds: now + 220,
+	}
+	demoted, err := store.ChangeParticipantRole(ctx, admin, demotion, now+220)
+	if err != nil || demoted.Acceptance != relay.AcceptanceAccepted ||
+		demoted.CurrentRole != sharedspaces.RoleReader {
+		t.Fatalf("demotion=%+v err=%v", demoted, err)
+	}
+	demotedRetry, err := store.ChangeParticipantRole(ctx, admin, demotion, now+221)
+	if err != nil || demotedRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("demotion retry=%+v err=%v", demotedRetry, err)
+	}
+	promotion := sharedspaces.ParticipantRoleChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleReader,
+		NextRole: sharedspaces.RoleParticipant, ChangedAtMilliseconds: now + 230,
+	}
+	promoted, err := store.ChangeParticipantRole(ctx, admin, promotion, now+230)
+	if err != nil || promoted.Acceptance != relay.AcceptanceAccepted ||
+		promoted.CurrentRole != sharedspaces.RoleParticipant {
+		t.Fatalf("promotion=%+v err=%v", promoted, err)
+	}
 
 	status, err = store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||

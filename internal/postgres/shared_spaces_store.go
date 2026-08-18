@@ -473,6 +473,132 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	}, nil
 }
 
+func (s *SharedSpacesStore) ChangeParticipantRole(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	change sharedspaces.ParticipantRoleChange,
+	nowMilliseconds int64,
+) (sharedspaces.ParticipantRoleChangeResult, error) {
+	if err := change.Validate(); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("begin Shared Space participant role change: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	domainID, provisioning, _, err := loadSharedSpaceAuthority(
+		ctx, tx, change.SpaceID, credential, "FOR UPDATE",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	if change.ParticipantID == provisioning.InitialParticipantID ||
+		change.PreviousRole == sharedspaces.RoleHost || change.NextRole == sharedspaces.RoleHost {
+		return sharedspaces.ParticipantRoleChangeResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInitialHost, "initial host role cannot be changed",
+		)
+	}
+
+	var existingVersion int
+	var existingParticipantID uuid.UUID
+	var existingPreviousRole, existingNextRole string
+	var existingChangedAt int64
+	err = tx.QueryRow(ctx, `
+		SELECT version,participant_id,previous_role,next_role,changed_at_milliseconds
+		FROM shared_space_participant_role_changes
+		WHERE space_id=$1 AND retry_id=$2
+		FOR UPDATE
+	`, change.SpaceID, change.RetryID).Scan(
+		&existingVersion, &existingParticipantID, &existingPreviousRole,
+		&existingNextRole, &existingChangedAt,
+	)
+	if err == nil {
+		if existingVersion != change.Version || existingParticipantID != change.ParticipantID ||
+			sharedspaces.Role(existingPreviousRole) != change.PreviousRole ||
+			sharedspaces.Role(existingNextRole) != change.NextRole ||
+			existingChangedAt != change.ChangedAtMilliseconds {
+			return sharedspaces.ParticipantRoleChangeResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeParticipantRoleCollision, "participant role change retry ID was reused",
+			)
+		}
+		return sharedspaces.ParticipantRoleChangeResult{
+			Acceptance: relay.AcceptanceDuplicate, RetryID: change.RetryID,
+			SpaceID: change.SpaceID, ParticipantID: change.ParticipantID,
+			PreviousRole: change.PreviousRole, CurrentRole: change.NextRole,
+			ChangedAtMilliseconds: existingChangedAt,
+		}, nil
+	}
+	if err != pgx.ErrNoRows {
+		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("load Shared Space participant role change: %w", err)
+	}
+	participant, err := loadSharedSpaceParticipant(
+		ctx, tx, change.SpaceID, change.ParticipantID, "FOR UPDATE",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	if change.ChangedAtMilliseconds > nowMilliseconds ||
+		change.ChangedAtMilliseconds < participant.CreatedAtMilliseconds {
+		return sharedspaces.ParticipantRoleChangeResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant, "participant role change time is invalid",
+		)
+	}
+	if participant.Role != change.PreviousRole {
+		return sharedspaces.ParticipantRoleChangeResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRoleCollision, "participant role changed concurrently",
+		)
+	}
+	if _, err := s.relay.changeMemberCapabilitiesInTransaction(
+		ctx, tx, credential, relay.MemberCapabilityChange{
+			Version: relay.SchemaVersion, RetryID: change.RetryID, MemberID: change.ParticipantID,
+			PreviousCapabilities:  change.PreviousRole.Capabilities(),
+			NextCapabilities:      change.NextRole.Capabilities(),
+			ChangedAtMilliseconds: change.ChangedAtMilliseconds,
+		}, nowMilliseconds,
+	); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE shared_space_participants
+		SET role=$3,updated_at=now()
+		WHERE space_id=$1 AND participant_id=$2
+	`, change.SpaceID, change.ParticipantID, string(change.NextRole)); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("change Shared Space participant role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_participant_role_changes (
+			space_id,retry_id,participant_id,version,previous_role,next_role,
+			changed_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+	`, change.SpaceID, change.RetryID, change.ParticipantID, change.Version,
+		string(change.PreviousRole), string(change.NextRole), change.ChangedAtMilliseconds); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("record Shared Space participant role change: %w", err)
+	}
+	participantSubscriptionID := participant.SubscriptionID
+	if err := insertDataPlaneAudit(
+		ctx, tx, change.SpaceID, &domainID, &participantSubscriptionID,
+		&change.ParticipantID, "shared_space_participant_role_changed",
+		change.ChangedAtMilliseconds,
+	); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("commit Shared Space participant role change: %w", err)
+	}
+	return sharedspaces.ParticipantRoleChangeResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: change.RetryID,
+		SpaceID: change.SpaceID, ParticipantID: change.ParticipantID,
+		PreviousRole: change.PreviousRole, CurrentRole: change.NextRole,
+		ChangedAtMilliseconds: change.ChangedAtMilliseconds,
+	}, nil
+}
+
 func (s *SharedSpacesStore) RevokeParticipant(
 	ctx context.Context,
 	credential relay.AdministrationCredential,

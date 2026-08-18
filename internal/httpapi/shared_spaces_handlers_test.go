@@ -131,6 +131,43 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	requireStatus(t, claimRetry, http.StatusOK)
 	_ = claimRetry.Body.Close()
 
+	rolePath := spaceRoot + "/participants/" + participantID.String() + "/role"
+	promotion := sharedspaces.ParticipantRoleChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		ParticipantID: participantID, PreviousRole: sharedspaces.RoleReader,
+		NextRole: sharedspaces.RoleParticipant, ChangedAtMilliseconds: nowMilliseconds,
+	}
+	promoted := performRelayJSON(
+		t, handler, http.MethodPost, rolePath, promotion,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, promoted, http.StatusCreated)
+	var promotedResult sharedspaces.ParticipantRoleChangeResult
+	if err := json.NewDecoder(promoted.Body).Decode(&promotedResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = promoted.Body.Close()
+	if promotedResult.CurrentRole != sharedspaces.RoleParticipant {
+		t.Fatalf("promoted=%+v", promotedResult)
+	}
+	promotionRetry := performRelayJSON(
+		t, handler, http.MethodPost, rolePath, promotion,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, promotionRetry, http.StatusOK)
+	_ = promotionRetry.Body.Close()
+	demotion := sharedspaces.ParticipantRoleChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		ParticipantID: participantID, PreviousRole: sharedspaces.RoleParticipant,
+		NextRole: sharedspaces.RoleReader, ChangedAtMilliseconds: nowMilliseconds,
+	}
+	demoted := performRelayJSON(
+		t, handler, http.MethodPost, rolePath, demotion,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, demoted, http.StatusCreated)
+	_ = demoted.Body.Close()
+
 	statusPath := spaceRoot + "/status"
 	statusResponse := performRelayJSON(
 		t, handler, http.MethodGet, statusPath, nil,
@@ -144,7 +181,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	_ = statusResponse.Body.Close()
 	if len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 ||
 		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch || !status.BootstrapReady ||
-		status.ActiveCheckpointEpoch == nil || *status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch {
+		status.ActiveCheckpointEpoch == nil || *status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
+		status.Participants[1].Role != sharedspaces.RoleReader {
 		t.Fatalf("status=%+v", status)
 	}
 

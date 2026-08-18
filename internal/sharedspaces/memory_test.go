@@ -203,6 +203,60 @@ func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
 	}, 4_200); err != nil {
 		t.Fatal(err)
 	}
+	readerEnvelope := testSharedEnvelope(provisioning, sharedspaces.InitialKeyEpoch, 4_210)
+	readerEnvelope.PublisherMemberID = invitation.ParticipantID
+	if _, err := store.PublishEnvelope(ctx, memberCredential, readerEnvelope, 4_210); !relay.ErrorHasCode(err, relay.CodeMissingCapability) {
+		t.Fatalf("reader publish err=%v", err)
+	}
+	promotion := sharedspaces.ParticipantRoleChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleReader,
+		NextRole: sharedspaces.RoleParticipant, ChangedAtMilliseconds: 4_220,
+	}
+	promoted, err := store.ChangeParticipantRole(ctx, admin, promotion, 4_220)
+	if err != nil || promoted.Acceptance != relay.AcceptanceAccepted ||
+		promoted.CurrentRole != sharedspaces.RoleParticipant {
+		t.Fatalf("promotion=%+v err=%v", promoted, err)
+	}
+	promotedRetry, err := store.ChangeParticipantRole(ctx, admin, promotion, 4_220)
+	if err != nil || promotedRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("promotion retry=%+v err=%v", promotedRetry, err)
+	}
+	participantEnvelope := readerEnvelope
+	participantEnvelope.MessageID = uuid.New()
+	participantEnvelope.CreatedAtMilliseconds = 4_230
+	if result, err := store.PublishEnvelope(ctx, memberCredential, participantEnvelope, 4_230); err != nil ||
+		result.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("participant publish=%+v err=%v", result, err)
+	}
+	demotion := sharedspaces.ParticipantRoleChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleParticipant,
+		NextRole: sharedspaces.RoleReader, ChangedAtMilliseconds: 4_240,
+	}
+	demoted, err := store.ChangeParticipantRole(ctx, admin, demotion, 4_240)
+	if err != nil || demoted.Acceptance != relay.AcceptanceAccepted ||
+		demoted.CurrentRole != sharedspaces.RoleReader {
+		t.Fatalf("demotion=%+v err=%v", demoted, err)
+	}
+	participantEnvelope.MessageID = uuid.New()
+	participantEnvelope.CreatedAtMilliseconds = 4_250
+	if _, err := store.PublishEnvelope(ctx, memberCredential, participantEnvelope, 4_250); !relay.ErrorHasCode(err, relay.CodeMissingCapability) {
+		t.Fatalf("demoted participant publish err=%v", err)
+	}
+	status, err := store.GetSpaceStatus(ctx, admin)
+	var changedParticipant *sharedspaces.Participant
+	for index := range status.Participants {
+		if status.Participants[index].ParticipantID == invitation.ParticipantID {
+			changedParticipant = &status.Participants[index]
+			break
+		}
+	}
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		len(status.Participants) != 2 || changedParticipant == nil ||
+		changedParticipant.Role != sharedspaces.RoleReader {
+		t.Fatalf("status after role changes=%+v err=%v", status, err)
+	}
 	stale := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID: invitation.ParticipantID, PreviousKeyEpoch: 2, NextKeyEpoch: 3,

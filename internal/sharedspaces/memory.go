@@ -33,6 +33,8 @@ type MemoryStore struct {
 	invitationRetries   map[uuid.UUID]uuid.UUID
 	revocationRequests  map[uuid.UUID]ParticipantRevocation
 	revocationResponses map[uuid.UUID]ParticipantRevocationResult
+	roleChangeRequests  map[uuid.UUID]ParticipantRoleChange
+	roleChangeResponses map[uuid.UUID]ParticipantRoleChangeResult
 	checkpointEpochs    map[uuid.UUID]uint64
 }
 
@@ -44,6 +46,8 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		invitationRetries:   make(map[uuid.UUID]uuid.UUID),
 		revocationRequests:  make(map[uuid.UUID]ParticipantRevocation),
 		revocationResponses: make(map[uuid.UUID]ParticipantRevocationResult),
+		roleChangeRequests:  make(map[uuid.UUID]ParticipantRoleChange),
+		roleChangeResponses: make(map[uuid.UUID]ParticipantRoleChangeResult),
 		checkpointEpochs:    make(map[uuid.UUID]uint64),
 	}
 }
@@ -268,6 +272,75 @@ func (s *MemoryStore) GetSpaceStatus(
 		Participants:          participants, Relay: relayStatus,
 		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
 	}, nil
+}
+
+func (s *MemoryStore) ChangeParticipantRole(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	change ParticipantRoleChange,
+	nowMilliseconds int64,
+) (ParticipantRoleChangeResult, error) {
+	if err := change.Validate(); err != nil {
+		return ParticipantRoleChangeResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[change.SpaceID]
+	if space == nil {
+		return ParticipantRoleChangeResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.TenantID != change.SpaceID ||
+		credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ParticipantRoleChangeResult{}, NewProtocolError(CodeWrongScope, "role change belongs to another Shared Space")
+	}
+	if change.ParticipantID == space.provisioning.InitialParticipantID ||
+		change.PreviousRole == RoleHost || change.NextRole == RoleHost {
+		return ParticipantRoleChangeResult{}, NewProtocolError(CodeInitialHost, "initial host role cannot be changed")
+	}
+	if existing, found := s.roleChangeResponses[change.RetryID]; found {
+		if reflect.DeepEqual(s.roleChangeRequests[change.RetryID], change) {
+			existing.Acceptance = relay.AcceptanceDuplicate
+			return existing, nil
+		}
+		return ParticipantRoleChangeResult{}, NewProtocolError(
+			CodeParticipantRoleCollision, "participant role change retry ID was reused",
+		)
+	}
+	participant, found := space.participants[change.ParticipantID]
+	if !found {
+		return ParticipantRoleChangeResult{}, NewProtocolError(CodeParticipantNotFound, "participant was not found")
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ParticipantRoleChangeResult{}, NewProtocolError(CodeParticipantRevoked, "participant is revoked")
+	}
+	if change.ChangedAtMilliseconds > nowMilliseconds ||
+		change.ChangedAtMilliseconds < participant.CreatedAtMilliseconds {
+		return ParticipantRoleChangeResult{}, NewProtocolError(CodeInvalidParticipant, "participant role change time is invalid")
+	}
+	if participant.Role != change.PreviousRole {
+		return ParticipantRoleChangeResult{}, NewProtocolError(
+			CodeParticipantRoleCollision, "participant role changed concurrently",
+		)
+	}
+	relayResult, err := s.relay.ChangeMemberCapabilities(ctx, credential, relay.MemberCapabilityChange{
+		Version: relay.SchemaVersion, RetryID: change.RetryID, MemberID: change.ParticipantID,
+		PreviousCapabilities:  change.PreviousRole.Capabilities(),
+		NextCapabilities:      change.NextRole.Capabilities(),
+		ChangedAtMilliseconds: change.ChangedAtMilliseconds,
+	}, nowMilliseconds)
+	if err != nil {
+		return ParticipantRoleChangeResult{}, err
+	}
+	participant.Role = change.NextRole
+	space.participants[participant.ParticipantID] = participant
+	result := ParticipantRoleChangeResult{
+		Acceptance: relayResult.Acceptance, RetryID: change.RetryID, SpaceID: change.SpaceID,
+		ParticipantID: change.ParticipantID, PreviousRole: change.PreviousRole,
+		CurrentRole: change.NextRole, ChangedAtMilliseconds: change.ChangedAtMilliseconds,
+	}
+	s.roleChangeRequests[change.RetryID] = change
+	s.roleChangeResponses[change.RetryID] = result
+	return result, nil
 }
 
 func (s *MemoryStore) RevokeParticipant(

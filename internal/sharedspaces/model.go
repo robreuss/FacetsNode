@@ -244,6 +244,35 @@ type ParticipantRevocationResult struct {
 	RevokedAtMilliseconds int64            `json:"revokedAtMilliseconds"`
 }
 
+type ParticipantRoleChange struct {
+	Version               int       `json:"version"`
+	RetryID               uuid.UUID `json:"retryID"`
+	SpaceID               uuid.UUID `json:"spaceID"`
+	ParticipantID         uuid.UUID `json:"participantID"`
+	PreviousRole          Role      `json:"previousRole"`
+	NextRole              Role      `json:"nextRole"`
+	ChangedAtMilliseconds int64     `json:"changedAtMilliseconds"`
+}
+
+func (c ParticipantRoleChange) Validate() error {
+	if c.Version != SchemaVersion || c.RetryID == uuid.Nil || c.SpaceID == uuid.Nil ||
+		c.ParticipantID == uuid.Nil || !c.PreviousRole.Valid() || !c.NextRole.Valid() ||
+		c.PreviousRole == c.NextRole || c.ChangedAtMilliseconds < 0 {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant role change fields are invalid")
+	}
+	return nil
+}
+
+type ParticipantRoleChangeResult struct {
+	Acceptance            relay.Acceptance `json:"acceptance"`
+	RetryID               uuid.UUID        `json:"retryID"`
+	SpaceID               uuid.UUID        `json:"spaceID"`
+	ParticipantID         uuid.UUID        `json:"participantID"`
+	PreviousRole          Role             `json:"previousRole"`
+	CurrentRole           Role             `json:"currentRole"`
+	ChangedAtMilliseconds int64            `json:"changedAtMilliseconds"`
+}
+
 type SpaceStatus struct {
 	Version               int                `json:"version"`
 	SpaceID               uuid.UUID          `json:"spaceID"`
