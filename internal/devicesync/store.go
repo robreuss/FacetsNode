@@ -11,4 +11,5 @@ type Store interface {
 	ClaimAccountAdmission(context.Context, AdmissionCredential, PrincipalProvisioning, int64) (PrincipalProvisioningResult, error)
 	CreateDeviceAdmission(context.Context, relay.AdministrationCredential, DeviceAdmission, int64) (DeviceAdmissionCreateResult, error)
 	ClaimDeviceAdmission(context.Context, DeviceAdmissionCredential, DeviceAdmissionClaim, int64) (DeviceAdmissionClaimResult, error)
+	ProvisionSpace(context.Context, relay.TenantCredential, SpaceProvisioning, int64) (SpaceProvisioningResult, error)
 }

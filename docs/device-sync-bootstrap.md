@@ -1,10 +1,11 @@
 # Facets Device Sync account bootstrap
 
-Status: bootstrap vertical slice. This contract provisions a new Device Sync
-principal and its first device, then admits additional devices to the opaque
-principal control-channel transport. Per-Space domain provisioning, client-side
-content-trust transfer, account admission UX, and hosted account integration
-remain later gates.
+Status: server-side bootstrap and opaque Space-domain provisioning vertical
+slice. This contract provisions a new Device Sync principal and its first
+device, admits additional devices to the opaque principal control-channel
+transport, and binds a Facets Space identifier to an isolated relay domain.
+Client-side content-trust transfer, account admission UX, Space-domain device
+admission, and hosted account integration remain later gates.
 
 ## Authority boundary
 
@@ -108,6 +109,35 @@ currently trusted device must subsequently transfer signed device authority
 and key material through the encrypted principal control channel. Until that
 client-side step succeeds, the admitted device cannot decrypt or authorize
 Device Sync content.
+
+## Provision an opaque Space domain
+
+An enrolled device provisions one isolated relay domain for each Space selected
+for Device Sync:
+
+```http
+POST /v1/device-sync/principals/<principal-id>/spaces/<space-id>
+Authorization: Bearer <principal-tenant-token>
+Content-Type: application/json
+```
+
+The request supplies an independently generated domain-administration bearer,
+subscription identifier, and initial-device member bearer. The server stores
+the opaque Space UUID, relay domain UUID, initial device UUID, and idempotency
+metadata. It never receives the Space name, content key, FEF graph, or plaintext
+content.
+
+The Device Sync service, rather than the caller, selects the initial member's
+transport capabilities and the service's default domain quotas. Product binding
+and generic relay-domain creation commit in one PostgreSQL transaction. Exact
+response-lost retries return `duplicate`; changed reuse of the Space, retry, or
+domain identifier returns a conflict. A generic relay domain that already
+exists without a Device Sync binding is rejected rather than adopted.
+
+Space-domain membership is transport authority only. Content trust and keys
+remain client-managed. The client acknowledges canonical application only after
+the opaque envelope has been decrypted and its FEF content has committed through
+the standard Facets importer; server receipt by itself is not application.
 
 ## Service isolation
 

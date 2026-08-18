@@ -21,6 +21,11 @@ type memoryDeviceAdmission struct {
 	result    *DeviceAdmissionClaimResult
 }
 
+type memorySpace struct {
+	provisioning SpaceProvisioning
+	result       relay.DomainProvisioningResult
+}
+
 type MemoryStore struct {
 	mu                   sync.Mutex
 	relay                relay.Store
@@ -29,6 +34,8 @@ type MemoryStore struct {
 	principals           map[uuid.UUID]memoryPrincipal
 	deviceAdmissions     map[uuid.UUID]memoryDeviceAdmission
 	deviceAdmissionRetry map[uuid.UUID]uuid.UUID
+	spaces               map[uuid.UUID]memorySpace
+	spaceRetry           map[uuid.UUID]uuid.UUID
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
@@ -37,6 +44,8 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		admissionRetry: make(map[uuid.UUID]uuid.UUID), principals: make(map[uuid.UUID]memoryPrincipal),
 		deviceAdmissions:     make(map[uuid.UUID]memoryDeviceAdmission),
 		deviceAdmissionRetry: make(map[uuid.UUID]uuid.UUID),
+		spaces:               make(map[uuid.UUID]memorySpace),
+		spaceRetry:           make(map[uuid.UUID]uuid.UUID),
 	}
 }
 
@@ -225,4 +234,64 @@ func (s *MemoryStore) principalDevice(principalID, deviceID uuid.UUID) (memoryDe
 	}
 	principal, found := s.principals[principalID]
 	return memoryDeviceAdmission{}, found && principal.provisioning.InitialDeviceID == deviceID
+}
+
+func (s *MemoryStore) ProvisionSpace(
+	ctx context.Context,
+	credential relay.TenantCredential,
+	provisioning SpaceProvisioning,
+	nowMilliseconds int64,
+) (SpaceProvisioningResult, error) {
+	if err := provisioning.Validate(); err != nil {
+		return SpaceProvisioningResult{}, err
+	}
+	if credential.TenantID != provisioning.PrincipalID ||
+		provisioning.CreatedAtMilliseconds > nowMilliseconds {
+		return SpaceProvisioningResult{}, NewProtocolError(
+			CodeWrongScope, "Device Sync Space belongs to another principal",
+		)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, found := s.principals[provisioning.PrincipalID]; !found {
+		return SpaceProvisioningResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
+	}
+	if _, found := s.principalDevice(provisioning.PrincipalID, provisioning.InitialDeviceID); !found {
+		return SpaceProvisioningResult{}, NewProtocolError(CodeUnauthorized, "initial Space device is not enrolled")
+	}
+	if spaceID, found := s.spaceRetry[provisioning.RetryID]; found && spaceID != provisioning.SpaceID {
+		return SpaceProvisioningResult{}, NewProtocolError(CodeSpaceCollision, "Device Sync Space retry ID was reused")
+	}
+	if existing, found := s.spaces[provisioning.SpaceID]; found {
+		if !reflect.DeepEqual(existing.provisioning, provisioning) {
+			return SpaceProvisioningResult{}, NewProtocolError(CodeSpaceCollision, "Device Sync Space ID was reused")
+		}
+		relayResult, err := s.relay.ProvisionDomain(ctx, credential, provisioning.Domain, nowMilliseconds)
+		if err != nil {
+			return SpaceProvisioningResult{}, err
+		}
+		return spaceProvisioningResult(provisioning, relayResult, relay.AcceptanceDuplicate), nil
+	}
+	relayResult, err := s.relay.ProvisionDomain(ctx, credential, provisioning.Domain, nowMilliseconds)
+	if err != nil {
+		return SpaceProvisioningResult{}, err
+	}
+	if relayResult.Acceptance != relay.AcceptanceAccepted {
+		return SpaceProvisioningResult{}, NewProtocolError(CodeSpaceCollision, "Space relay domain already exists")
+	}
+	s.spaces[provisioning.SpaceID] = memorySpace{provisioning: provisioning, result: relayResult}
+	s.spaceRetry[provisioning.RetryID] = provisioning.SpaceID
+	return spaceProvisioningResult(provisioning, relayResult, relay.AcceptanceAccepted), nil
+}
+
+func spaceProvisioningResult(
+	provisioning SpaceProvisioning,
+	relayResult relay.DomainProvisioningResult,
+	acceptance relay.Acceptance,
+) SpaceProvisioningResult {
+	relayResult.Acceptance = acceptance
+	return SpaceProvisioningResult{
+		Acceptance: acceptance, PrincipalID: provisioning.PrincipalID,
+		SpaceID: provisioning.SpaceID, Domain: relayResult,
+	}
 }

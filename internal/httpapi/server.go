@@ -289,6 +289,11 @@ func (s *Server) Handler() http.Handler {
 			traffic.SurfaceManagement,
 			s.handleClaimDeviceSyncDeviceAdmission,
 		)
+		register(
+			"POST /v1/device-sync/principals/{principalID}/spaces/{spaceID}",
+			traffic.SurfaceManagement,
+			s.handleProvisionDeviceSyncSpace,
+		)
 	}
 	return s.securityHeaders(s.requestLog(mux))
 }
@@ -477,6 +482,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			message = "The Device Sync request was rejected."
 			switch deviceSyncProtocol.Code {
 			case devicesync.CodeInvalidAdmission, devicesync.CodeInvalidPrincipal,
+				devicesync.CodeInvalidSpace,
 				devicesync.CodeWrongScope:
 				status = http.StatusBadRequest
 			case devicesync.CodeUnauthorized, devicesync.CodeAdmissionNotFound:
@@ -484,7 +490,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			case devicesync.CodeAdmissionExpired:
 				status = http.StatusGone
 			case devicesync.CodeAdmissionClaimed, devicesync.CodeAdmissionCollision,
-				devicesync.CodePrincipalCollision, devicesync.CodeDeviceCollision:
+				devicesync.CodePrincipalCollision, devicesync.CodeDeviceCollision,
+				devicesync.CodeSpaceCollision:
 				status = http.StatusConflict
 			}
 			writeJSON(writer, status, struct {

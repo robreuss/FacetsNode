@@ -138,6 +138,66 @@ func TestMemoryStoreRejectsDeviceAdmissionForAnotherPrincipal(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreProvisionsOpaqueSpaceDomainExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
+	principal := bootstrapMemoryPrincipal(t, store, 1_000)
+	credential, provisioning := testSpaceProvisioning(t, principal, 1_200)
+
+	created, err := store.ProvisionSpace(ctx, credential, provisioning, 1_200)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted ||
+		created.PrincipalID != principal.PrincipalID || created.SpaceID != provisioning.SpaceID ||
+		created.Domain.DomainID != provisioning.Domain.Registration.DomainID {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	retry, err := store.ProvisionSpace(ctx, credential, provisioning, 1_300)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate ||
+		retry.Domain.DomainID != created.Domain.DomainID {
+		t.Fatalf("retry=%+v err=%v", retry, err)
+	}
+
+	changed := provisioning
+	changed.SpaceID = uuid.New()
+	if _, err := store.ProvisionSpace(ctx, credential, changed, 1_300); !devicesync.ErrorHasCode(err, devicesync.CodeSpaceCollision) {
+		t.Fatalf("changed retry err=%v", err)
+	}
+}
+
+func TestMemoryStoreRejectsSpaceProvisioningByUnenrolledDevice(t *testing.T) {
+	ctx := context.Background()
+	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
+	principal := bootstrapMemoryPrincipal(t, store, 2_000)
+	credential, provisioning := testSpaceProvisioning(t, principal, 2_200)
+	provisioning.InitialDeviceID = uuid.New()
+	provisioning.Domain.InitialMember.MemberID = provisioning.InitialDeviceID
+	memberCredential := relay.Credential{
+		TenantID: principal.PrincipalID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialDeviceID, Token: testToken(0x43),
+	}
+	provisioning.Domain.InitialMember.AuthorizationDigest = testDigest(t, memberCredential)
+
+	if _, err := store.ProvisionSpace(ctx, credential, provisioning, 2_200); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
+		t.Fatalf("unenrolled initial device err=%v", err)
+	}
+}
+
+func bootstrapMemoryPrincipal(
+	t *testing.T,
+	store *devicesync.MemoryStore,
+	createdAt int64,
+) devicesync.PrincipalProvisioning {
+	t.Helper()
+	credential, admission := testAdmission(t, createdAt)
+	if _, err := store.CreateAccountAdmission(context.Background(), admission, createdAt); err != nil {
+		t.Fatal(err)
+	}
+	principal := testPrincipalProvisioning(t, createdAt+100)
+	if _, err := store.ClaimAccountAdmission(context.Background(), credential, principal, createdAt+100); err != nil {
+		t.Fatal(err)
+	}
+	return principal
+}
+
 func testAdmission(t *testing.T, createdAt int64) (devicesync.AdmissionCredential, devicesync.AccountAdmission) {
 	t.Helper()
 	credential := devicesync.AdmissionCredential{AdmissionID: uuid.New(), Token: testToken(0x51)}
@@ -253,6 +313,57 @@ func testDeviceAdmission(
 		PrincipalID: principal.PrincipalID, AdmissionID: credential.AdmissionID,
 		Token: credential.Token,
 	}, admission
+}
+
+func testSpaceProvisioning(
+	t *testing.T,
+	principal devicesync.PrincipalProvisioning,
+	createdAt int64,
+) (relay.TenantCredential, devicesync.SpaceProvisioning) {
+	t.Helper()
+	domainID := uuid.New()
+	administrationCredential := relay.AdministrationCredential{
+		TenantID: principal.PrincipalID, DomainID: domainID, Token: testToken(0x41),
+	}
+	memberCredential := relay.Credential{
+		TenantID: principal.PrincipalID, DomainID: domainID,
+		MemberID: principal.InitialDeviceID, Token: testToken(0x42),
+	}
+	administrationDigest, err := relay.AdministrationDigest(administrationCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := relay.DomainProvisioning{
+		Version: relay.SchemaVersion, RetryID: uuid.New(),
+		Registration: relay.DomainRegistration{
+			Version: relay.SchemaVersion, TenantID: principal.PrincipalID, DomainID: domainID,
+			AdministrationDigest: administrationDigest, CreatedAtMilliseconds: createdAt,
+			MaximumMessageCount:     relay.DefaultMaximumMessageCount,
+			MaximumMessageByteCount: relay.DefaultMaximumMessageByteCount,
+			MaximumBlobCount:        relay.DefaultMaximumBlobCount,
+			MaximumBlobByteCount:    relay.DefaultMaximumBlobByteCount,
+		},
+		Subscription: relay.Subscription{
+			Version: relay.SchemaVersion, TenantID: principal.PrincipalID, DomainID: domainID,
+			SubscriptionID: uuid.New(), Status: relay.SubscriptionActive,
+			CreatedAtMilliseconds: createdAt, UpdatedAtMilliseconds: createdAt,
+		},
+		InitialMember: relay.MemberRegistration{
+			Version: relay.SchemaVersion, TenantID: principal.PrincipalID, DomainID: domainID,
+			MemberID: principal.InitialDeviceID, AuthorizationDigest: memberDigest,
+			Capabilities:          append([]relay.Capability(nil), principal.ControlDomain.InitialMember.Capabilities...),
+			CreatedAtMilliseconds: createdAt,
+		},
+	}
+	return relay.TenantCredential{TenantID: principal.PrincipalID, Token: testToken(0x10)}, devicesync.SpaceProvisioning{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(), PrincipalID: principal.PrincipalID,
+		SpaceID: uuid.New(), InitialDeviceID: principal.InitialDeviceID,
+		Domain: domain, CreatedAtMilliseconds: createdAt,
+	}
 }
 
 func testDigest(t *testing.T, credential relay.Credential) string {

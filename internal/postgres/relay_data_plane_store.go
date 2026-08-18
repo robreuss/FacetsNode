@@ -119,6 +119,23 @@ func (s *RelayStore) ProvisionDomain(
 		return relay.DomainProvisioningResult{}, fmt.Errorf("begin domain provisioning: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.provisionDomainTx(ctx, tx, credential, domain, nowMilliseconds)
+	if err != nil {
+		return relay.DomainProvisioningResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.DomainProvisioningResult{}, fmt.Errorf("commit domain provisioning: %w", err)
+	}
+	return result, nil
+}
+
+func (s *RelayStore) provisionDomainTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	credential relay.TenantCredential,
+	domain relay.DomainProvisioning,
+	nowMilliseconds int64,
+) (relay.DomainProvisioningResult, error) {
 	tenant, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR UPDATE")
 	if err != nil {
 		return relay.DomainProvisioningResult{}, err
@@ -163,9 +180,6 @@ func (s *RelayStore) ProvisionDomain(
 	}
 	if err := auditProvisionedDomain(ctx, tx, domain); err != nil {
 		return relay.DomainProvisioningResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return relay.DomainProvisioningResult{}, fmt.Errorf("commit domain provisioning: %w", err)
 	}
 	return postgresDomainProvisioningResult(domain, relay.AcceptanceAccepted), nil
 }

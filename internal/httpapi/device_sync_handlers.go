@@ -46,6 +46,13 @@ type deviceSyncDeviceAdmissionClaimInput struct {
 	AuthorizationDigest string    `json:"authorizationDigest"`
 }
 
+type deviceSyncSpaceProvisioningInput struct {
+	Version         int                          `json:"version"`
+	RetryID         uuid.UUID                    `json:"retryID"`
+	InitialDeviceID uuid.UUID                    `json:"initialDeviceID"`
+	Domain          relayDomainProvisioningInput `json:"domain"`
+}
+
 func (s *Server) handleCreateDeviceSyncAccountAdmission(writer http.ResponseWriter, request *http.Request) {
 	if err := s.authorizeOperator(request); err != nil {
 		s.writeError(writer, err)
@@ -233,6 +240,59 @@ func (s *Server) handleClaimDeviceSyncDeviceAdmission(writer http.ResponseWriter
 			ClaimedAtMilliseconds: now,
 		},
 		now,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleProvisionDeviceSyncSpace(writer http.ResponseWriter, request *http.Request) {
+	principalID, err := parseUUID(request.PathValue("principalID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidPrincipal, err.Error()))
+		return
+	}
+	spaceID, err := parseUUID(request.PathValue("spaceID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidSpace, err.Error()))
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeUnauthorized, "Device Sync principal credential is missing"))
+		return
+	}
+	var input deviceSyncSpaceProvisioningInput
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.Version != devicesync.SchemaVersion {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidSpace, "Space provisioning version is invalid"))
+		return
+	}
+	// Device Sync owns its service policy. A caller may not enlarge relay quotas
+	// or omit capabilities required for opaque checkpoint, tail, and blob custody.
+	input.Domain.MemberCapabilities = append([]relay.Capability(nil), allRelayCapabilities...)
+	input.Domain.Quota = nil
+	domain, err := relayDomainProvisioning(input.Domain)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.deviceSyncStore.ProvisionSpace(
+		request.Context(),
+		relay.TenantCredential{TenantID: principalID, Token: token},
+		devicesync.SpaceProvisioning{
+			Version: devicesync.SchemaVersion, RetryID: input.RetryID,
+			PrincipalID: principalID, SpaceID: spaceID,
+			InitialDeviceID: input.InitialDeviceID, Domain: domain,
+			CreatedAtMilliseconds: domain.Registration.CreatedAtMilliseconds,
+		},
+		s.nowMilliseconds(),
 	)
 	if err != nil {
 		s.writeError(writer, err)

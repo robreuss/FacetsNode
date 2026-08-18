@@ -361,6 +361,96 @@ func (s *RelayStore) ClaimDeviceAdmission(
 	return deviceSyncDeviceClaimResult(claim, relayResult, relay.AcceptanceAccepted), nil
 }
 
+func (s *RelayStore) ProvisionSpace(
+	ctx context.Context,
+	credential relay.TenantCredential,
+	provisioning devicesync.SpaceProvisioning,
+	nowMilliseconds int64,
+) (devicesync.SpaceProvisioningResult, error) {
+	if err := provisioning.Validate(); err != nil {
+		return devicesync.SpaceProvisioningResult{}, err
+	}
+	if credential.TenantID != provisioning.PrincipalID ||
+		provisioning.CreatedAtMilliseconds > nowMilliseconds {
+		return devicesync.SpaceProvisioningResult{}, devicesync.NewProtocolError(
+			devicesync.CodeWrongScope, "Device Sync Space belongs to another principal",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return devicesync.SpaceProvisioningResult{}, fmt.Errorf("begin Device Sync Space provisioning: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	principal, err := loadDeviceSyncPrincipalAuthority(ctx, tx, provisioning.PrincipalID, "FOR UPDATE")
+	if err != nil {
+		return devicesync.SpaceProvisioningResult{}, err
+	}
+	if principal.tenantID != credential.TenantID {
+		return devicesync.SpaceProvisioningResult{}, devicesync.NewProtocolError(
+			devicesync.CodeWrongScope, "Device Sync Space belongs to another relay tenant",
+		)
+	}
+	var deviceExists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM device_sync_devices
+			WHERE principal_id=$1 AND device_id=$2
+		)
+	`, provisioning.PrincipalID, provisioning.InitialDeviceID).Scan(&deviceExists); err != nil {
+		return devicesync.SpaceProvisioningResult{}, fmt.Errorf("check initial Device Sync Space device: %w", err)
+	}
+	if !deviceExists {
+		return devicesync.SpaceProvisioningResult{}, devicesync.NewProtocolError(
+			devicesync.CodeUnauthorized, "initial Space device is not enrolled",
+		)
+	}
+
+	existing, found, err := loadDeviceSyncSpaceForProvisioning(ctx, tx, provisioning)
+	if err != nil {
+		return devicesync.SpaceProvisioningResult{}, err
+	}
+	if found && !deviceSyncSpaceProvisioningEqual(existing, provisioning) {
+		return devicesync.SpaceProvisioningResult{}, devicesync.NewProtocolError(
+			devicesync.CodeSpaceCollision, "Device Sync Space ID, retry ID, or domain ID was reused",
+		)
+	}
+	relayResult, err := s.provisionDomainTx(ctx, tx, credential, provisioning.Domain, nowMilliseconds)
+	if err != nil {
+		return devicesync.SpaceProvisioningResult{}, err
+	}
+	if found {
+		if relayResult.Acceptance != relay.AcceptanceDuplicate {
+			return devicesync.SpaceProvisioningResult{}, devicesync.NewProtocolError(
+				devicesync.CodeSpaceCollision, "Device Sync Space binding differs from its relay domain",
+			)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return devicesync.SpaceProvisioningResult{}, fmt.Errorf("commit duplicate Device Sync Space provisioning: %w", err)
+		}
+		return deviceSyncSpaceResult(provisioning, relayResult, relay.AcceptanceDuplicate), nil
+	}
+	if relayResult.Acceptance != relay.AcceptanceAccepted {
+		return devicesync.SpaceProvisioningResult{}, devicesync.NewProtocolError(
+			devicesync.CodeSpaceCollision, "Space relay domain already exists without a Device Sync binding",
+		)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO device_sync_spaces (
+			principal_id,space_id,provisioning_retry_id,domain_id,
+			initial_device_id,version,created_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+	`, provisioning.PrincipalID, provisioning.SpaceID, provisioning.RetryID,
+		provisioning.Domain.Registration.DomainID, provisioning.InitialDeviceID,
+		provisioning.Version, provisioning.CreatedAtMilliseconds); err != nil {
+		return devicesync.SpaceProvisioningResult{}, fmt.Errorf("insert Device Sync Space: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return devicesync.SpaceProvisioningResult{}, fmt.Errorf("commit Device Sync Space provisioning: %w", err)
+	}
+	return deviceSyncSpaceResult(provisioning, relayResult, relay.AcceptanceAccepted), nil
+}
+
 type deviceSyncPrincipalAuthority struct {
 	tenantID              uuid.UUID
 	controlDomainID       uuid.UUID
@@ -400,6 +490,69 @@ func loadDeviceSyncPrincipalAuthority(
 		return deviceSyncPrincipalAuthority{}, fmt.Errorf("load Device Sync principal authority: %w", err)
 	}
 	return authority, nil
+}
+
+type deviceSyncSpaceRecord struct {
+	version               int
+	retryID               uuid.UUID
+	principalID           uuid.UUID
+	spaceID               uuid.UUID
+	domainID              uuid.UUID
+	initialDeviceID       uuid.UUID
+	createdAtMilliseconds int64
+}
+
+func loadDeviceSyncSpaceForProvisioning(
+	ctx context.Context,
+	tx pgx.Tx,
+	provisioning devicesync.SpaceProvisioning,
+) (deviceSyncSpaceRecord, bool, error) {
+	var record deviceSyncSpaceRecord
+	err := tx.QueryRow(ctx, `
+		SELECT version,provisioning_retry_id,principal_id,space_id,domain_id,
+			initial_device_id,created_at_milliseconds
+		FROM device_sync_spaces
+		WHERE principal_id=$1 AND (
+			space_id=$2 OR provisioning_retry_id=$3 OR domain_id=$4
+		)
+		FOR UPDATE
+	`, provisioning.PrincipalID, provisioning.SpaceID, provisioning.RetryID,
+		provisioning.Domain.Registration.DomainID).Scan(
+		&record.version, &record.retryID, &record.principalID, &record.spaceID,
+		&record.domainID, &record.initialDeviceID, &record.createdAtMilliseconds,
+	)
+	if err == pgx.ErrNoRows {
+		return deviceSyncSpaceRecord{}, false, nil
+	}
+	if err != nil {
+		return deviceSyncSpaceRecord{}, false, fmt.Errorf("load Device Sync Space: %w", err)
+	}
+	return record, true, nil
+}
+
+func deviceSyncSpaceProvisioningEqual(
+	record deviceSyncSpaceRecord,
+	provisioning devicesync.SpaceProvisioning,
+) bool {
+	return record.version == provisioning.Version &&
+		record.retryID == provisioning.RetryID &&
+		record.principalID == provisioning.PrincipalID &&
+		record.spaceID == provisioning.SpaceID &&
+		record.domainID == provisioning.Domain.Registration.DomainID &&
+		record.initialDeviceID == provisioning.InitialDeviceID &&
+		record.createdAtMilliseconds == provisioning.CreatedAtMilliseconds
+}
+
+func deviceSyncSpaceResult(
+	provisioning devicesync.SpaceProvisioning,
+	relayResult relay.DomainProvisioningResult,
+	acceptance relay.Acceptance,
+) devicesync.SpaceProvisioningResult {
+	relayResult.Acceptance = acceptance
+	return devicesync.SpaceProvisioningResult{
+		Acceptance: acceptance, PrincipalID: provisioning.PrincipalID,
+		SpaceID: provisioning.SpaceID, Domain: relayResult,
+	}
 }
 
 type deviceSyncDeviceAdmissionRecord struct {

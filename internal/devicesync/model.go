@@ -219,6 +219,43 @@ type DeviceAdmissionClaimResult struct {
 	Member      relay.SubscriptionMemberRegistration `json:"member"`
 }
 
+// SpaceProvisioning binds one opaque Facets Space identifier to one isolated
+// relay domain. The service never receives a Space name, content key, FEF
+// graph, or plaintext content.
+type SpaceProvisioning struct {
+	Version               int                      `json:"version"`
+	RetryID               uuid.UUID                `json:"retryID"`
+	PrincipalID           uuid.UUID                `json:"principalID"`
+	SpaceID               uuid.UUID                `json:"spaceID"`
+	InitialDeviceID       uuid.UUID                `json:"initialDeviceID"`
+	Domain                relay.DomainProvisioning `json:"domain"`
+	CreatedAtMilliseconds int64                    `json:"createdAtMilliseconds"`
+}
+
+func (p SpaceProvisioning) Validate() error {
+	if p.Version != SchemaVersion || p.RetryID == uuid.Nil ||
+		p.PrincipalID == uuid.Nil || p.SpaceID == uuid.Nil ||
+		p.InitialDeviceID == uuid.Nil || p.CreatedAtMilliseconds < 0 {
+		return NewProtocolError(CodeInvalidSpace, "Device Sync Space fields are invalid")
+	}
+	if err := p.Domain.Validate(); err != nil {
+		return err
+	}
+	if p.PrincipalID != p.Domain.Registration.TenantID ||
+		p.InitialDeviceID != p.Domain.InitialMember.MemberID ||
+		p.CreatedAtMilliseconds != p.Domain.Registration.CreatedAtMilliseconds {
+		return NewProtocolError(CodeWrongScope, "Device Sync Space and relay scopes differ")
+	}
+	return nil
+}
+
+type SpaceProvisioningResult struct {
+	Acceptance  relay.Acceptance               `json:"acceptance"`
+	PrincipalID uuid.UUID                      `json:"principalID"`
+	SpaceID     uuid.UUID                      `json:"spaceID"`
+	Domain      relay.DomainProvisioningResult `json:"domain"`
+}
+
 func validDigest(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size

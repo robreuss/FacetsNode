@@ -256,6 +256,111 @@ func TestDeviceSyncPrincipalAdmitsAdditionalDeviceTransportExactlyOnce(t *testin
 	_ = claimRetry.Body.Close()
 }
 
+func TestDeviceSyncPrincipalProvisionsOpaqueSpaceDomainExactlyOnce(t *testing.T) {
+	const now = int64(4_000)
+	const tenantSeed = byte(243)
+	relayStore := relay.NewMemoryStore()
+	deviceSyncStore := devicesync.NewMemoryStore(relayStore)
+	controlDomain := newRelayDomainProvisioningRequest(now, 241, 242)
+	principalID := controlDomain.AdministrationCredential.TenantID
+	initialDeviceID := controlDomain.MemberCredential.MemberID
+	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, controlDomain, tenantSeed)
+	server := newRelayTestServer(t, relayStore, relayTestToken(244))
+	server.SetDeviceSyncStore(deviceSyncStore)
+	server.now = func() time.Time { return time.UnixMilli(now) }
+	handler := server.Handler()
+
+	spaceID := uuid.New()
+	spaceDomain := newRelayDomainProvisioningRequest(now, 245, 246)
+	spaceDomain.AdministrationCredential.TenantID = principalID
+	spaceDomain.MemberCredential.TenantID = principalID
+	spaceDomain.MemberCredential.MemberID = initialDeviceID
+	spaceDomain.MemberCapabilities = nil
+	spaceDomain.Quota = &relay.DomainQuota{
+		MaximumMessageCount: 1, MaximumMessageByteCount: 1,
+		MaximumBlobCount: 1, MaximumBlobByteCount: 1,
+	}
+	input := deviceSyncSpaceProvisioningInput{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		InitialDeviceID: initialDeviceID, Domain: relayDomainInput(spaceDomain),
+	}
+	path := "/v1/device-sync/principals/" + principalID.String() +
+		"/spaces/" + spaceID.String()
+
+	wrongCredential := performRelayJSON(
+		t, handler, http.MethodPost, path, input, relayTestToken(247), uuid.Nil,
+	)
+	requireStatus(t, wrongCredential, http.StatusUnauthorized)
+	_ = wrongCredential.Body.Close()
+
+	created := performRelayJSON(
+		t, handler, http.MethodPost, path, input, relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, created, http.StatusCreated)
+	var createdResult devicesync.SpaceProvisioningResult
+	if err := json.NewDecoder(created.Body).Decode(&createdResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = created.Body.Close()
+	if createdResult.Acceptance != relay.AcceptanceAccepted ||
+		createdResult.PrincipalID != principalID || createdResult.SpaceID != spaceID ||
+		createdResult.Domain.DomainID != spaceDomain.AdministrationCredential.DomainID {
+		t.Fatalf("unexpected Space provisioning: %+v", createdResult)
+	}
+
+	retry := performRelayJSON(
+		t, handler, http.MethodPost, path, input, relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, retry, http.StatusOK)
+	var retryResult devicesync.SpaceProvisioningResult
+	if err := json.NewDecoder(retry.Body).Decode(&retryResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = retry.Body.Close()
+	if retryResult.Acceptance != relay.AcceptanceDuplicate ||
+		retryResult.Domain.DomainID != createdResult.Domain.DomainID {
+		t.Fatalf("Space retry changed authority: %+v", retryResult)
+	}
+
+	changedPath := "/v1/device-sync/principals/" + principalID.String() +
+		"/spaces/" + uuid.NewString()
+	changed := performRelayJSON(
+		t, handler, http.MethodPost, changedPath, input, relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, changed, http.StatusConflict)
+	_ = changed.Body.Close()
+}
+
+func TestDeviceSyncSpaceProvisioningRejectsUnenrolledInitialDevice(t *testing.T) {
+	const now = int64(5_000)
+	const tenantSeed = byte(253)
+	relayStore := relay.NewMemoryStore()
+	deviceSyncStore := devicesync.NewMemoryStore(relayStore)
+	controlDomain := newRelayDomainProvisioningRequest(now, 251, 252)
+	principalID := controlDomain.AdministrationCredential.TenantID
+	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, controlDomain, tenantSeed)
+	server := newRelayTestServer(t, relayStore, relayTestToken(254))
+	server.SetDeviceSyncStore(deviceSyncStore)
+	server.now = func() time.Time { return time.UnixMilli(now) }
+
+	unknownDeviceID := uuid.New()
+	spaceDomain := newRelayDomainProvisioningRequest(now, 1, 2)
+	spaceDomain.AdministrationCredential.TenantID = principalID
+	spaceDomain.MemberCredential.TenantID = principalID
+	spaceDomain.MemberCredential.MemberID = unknownDeviceID
+	input := deviceSyncSpaceProvisioningInput{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		InitialDeviceID: unknownDeviceID, Domain: relayDomainInput(spaceDomain),
+	}
+	response := performRelayJSON(
+		t, server.Handler(), http.MethodPost,
+		"/v1/device-sync/principals/"+principalID.String()+"/spaces/"+uuid.NewString(),
+		input, relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusUnauthorized)
+	_ = response.Body.Close()
+}
+
 func TestDeviceSyncRoutesAreAbsentFromSharedSpacesSurface(t *testing.T) {
 	operatorToken := relayTestToken(221)
 	relayStore := relay.NewMemoryStore()
@@ -273,6 +378,13 @@ func TestDeviceSyncRoutesAreAbsentFromSharedSpacesSurface(t *testing.T) {
 	)
 	requireStatus(t, deviceResponse, http.StatusNotFound)
 	_ = deviceResponse.Body.Close()
+	spaceResponse := performRelayJSON(
+		t, server.Handler(), http.MethodPost,
+		"/v1/device-sync/principals/"+uuid.NewString()+"/spaces/"+uuid.NewString(),
+		map[string]any{}, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, spaceResponse, http.StatusNotFound)
+	_ = spaceResponse.Body.Close()
 }
 
 func bootstrapDeviceSyncPrincipal(
@@ -316,6 +428,18 @@ func bootstrapDeviceSyncPrincipal(
 		now,
 	); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func relayDomainInput(request relayDomainProvisioningRequest) relayDomainProvisioningInput {
+	return relayDomainProvisioningInput{
+		Version: request.Version, RetryID: request.RetryID,
+		AdministrationCredential: request.AdministrationCredential,
+		SubscriptionID:           request.SubscriptionID,
+		MemberCredential:         request.MemberCredential,
+		MemberCapabilities:       request.MemberCapabilities,
+		Quota:                    request.Quota,
+		CreatedAtMilliseconds:    request.CreatedAtMilliseconds,
 	}
 }
 
