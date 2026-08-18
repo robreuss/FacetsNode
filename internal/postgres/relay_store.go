@@ -523,6 +523,25 @@ func (s *RelayStore) RevokeAdmission(
 		return "", fmt.Errorf("begin relay admission revocation: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }()
+	acceptance, err := s.revokeAdmissionInTransaction(
+		ctx, transaction, credential, admissionID, nowMilliseconds,
+	)
+	if err != nil {
+		return "", err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit relay admission revocation: %w", err)
+	}
+	return acceptance, nil
+}
+
+func (s *RelayStore) revokeAdmissionInTransaction(
+	ctx context.Context,
+	transaction pgx.Tx,
+	credential relay.AdministrationCredential,
+	admissionID uuid.UUID,
+	nowMilliseconds int64,
+) (relay.Acceptance, error) {
 	domain, _, _, _, _, _, err := loadRelayDomain(
 		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
 	)
@@ -583,9 +602,6 @@ func (s *RelayStore) RevokeAdmission(
 		nowMilliseconds,
 	); err != nil {
 		return "", err
-	}
-	if err := transaction.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit relay admission revocation: %w", err)
 	}
 	return relay.AcceptanceAccepted, nil
 }

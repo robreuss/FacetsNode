@@ -216,6 +216,30 @@ type InvitationClaimResult struct {
 	Member          relay.SubscriptionMemberRegistration `json:"member"`
 }
 
+type InvitationCancellation struct {
+	Version                 int       `json:"version"`
+	RetryID                 uuid.UUID `json:"retryID"`
+	SpaceID                 uuid.UUID `json:"spaceID"`
+	InvitationID            uuid.UUID `json:"invitationID"`
+	CancelledAtMilliseconds int64     `json:"cancelledAtMilliseconds"`
+}
+
+func (c InvitationCancellation) Validate() error {
+	if c.Version != SchemaVersion || c.RetryID == uuid.Nil || c.SpaceID == uuid.Nil ||
+		c.InvitationID == uuid.Nil || c.CancelledAtMilliseconds < 0 {
+		return NewProtocolError(CodeInvalidInvitation, "Shared Space invitation cancellation fields are invalid")
+	}
+	return nil
+}
+
+type InvitationCancellationResult struct {
+	Acceptance              relay.Acceptance `json:"acceptance"`
+	RetryID                 uuid.UUID        `json:"retryID"`
+	SpaceID                 uuid.UUID        `json:"spaceID"`
+	InvitationID            uuid.UUID        `json:"invitationID"`
+	CancelledAtMilliseconds int64            `json:"cancelledAtMilliseconds"`
+}
+
 type ParticipantRevocation struct {
 	Version          int       `json:"version"`
 	RetryID          uuid.UUID `json:"retryID"`

@@ -348,6 +348,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleClaimSharedSpaceInvitation,
 		)
 		register(
+			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations/{invitationID}/cancellation",
+			traffic.SurfaceManagement,
+			s.handleCancelSharedSpaceInvitation,
+		)
+		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/role",
 			traffic.SurfaceManagement,
 			s.handleChangeSharedSpaceParticipantRole,
@@ -584,8 +589,11 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			case sharedspaces.CodeSpaceNotFound, sharedspaces.CodeInvitationNotFound,
 				sharedspaces.CodeParticipantNotFound:
 				status = http.StatusNotFound
+			case sharedspaces.CodeInvitationCancelled:
+				status = http.StatusGone
 			case sharedspaces.CodeSpaceCollision, sharedspaces.CodeInvitationCollision,
 				sharedspaces.CodeInvitationClaimed, sharedspaces.CodeParticipantCollision,
+				sharedspaces.CodeInvitationCancellationCollision,
 				sharedspaces.CodeParticipantRoleCollision,
 				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost,
 				sharedspaces.CodeWrongKeyEpoch, sharedspaces.CodeBootstrapNotReady:

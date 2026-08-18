@@ -230,6 +230,44 @@ func (s *Server) handleClaimSharedSpaceInvitation(writer http.ResponseWriter, re
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
+func (s *Server) handleCancelSharedSpaceInvitation(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	invitationID, err := parseSharedSpacesUUID(request.PathValue("invitationID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var cancellation sharedspaces.InvitationCancellation
+	if err := readSharedSpacesJSON(writer, request, &cancellation); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if cancellation.SpaceID != spaceID || cancellation.InvitationID != invitationID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "Shared Space invitation cancellation path and body differ",
+		))
+		return
+	}
+	result, err := s.sharedSpacesStore.CancelInvitation(
+		request.Context(), credential, cancellation, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
 func (s *Server) handleChangeSharedSpaceParticipantRole(writer http.ResponseWriter, request *http.Request) {
 	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
 	if err != nil {

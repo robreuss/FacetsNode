@@ -347,6 +347,20 @@ func (s *SharedSpacesStore) ClaimInvitation(
 			sharedspaces.CodeWrongScope, "invitation claim scope differs",
 		)
 	}
+	var cancelled bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM shared_space_invitation_cancellations
+			WHERE space_id=$1 AND invitation_id=$2
+		)
+	`, credential.SpaceID, credential.InvitationID).Scan(&cancelled); err != nil {
+		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("check Shared Space invitation cancellation: %w", err)
+	}
+	if cancelled {
+		return sharedspaces.InvitationClaimResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvitationCancelled, "Shared Space invitation was cancelled",
+		)
+	}
 	var invitation sharedspaces.Invitation
 	if err := json.Unmarshal(payload, &invitation); err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("decode Shared Space invitation: %w", err)
@@ -413,6 +427,137 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	return sharedspaces.InvitationClaimResult{
 		Acceptance: relayResult.Acceptance, CurrentKeyEpoch: currentKeyEpoch,
 		Participant: participant, Member: relayResult.Member,
+	}, nil
+}
+
+func (s *SharedSpacesStore) CancelInvitation(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	cancellation sharedspaces.InvitationCancellation,
+	nowMilliseconds int64,
+) (sharedspaces.InvitationCancellationResult, error) {
+	if err := cancellation.Validate(); err != nil {
+		return sharedspaces.InvitationCancellationResult{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return sharedspaces.InvitationCancellationResult{}, fmt.Errorf("begin Shared Space invitation cancellation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	domainID, _, _, err := loadSharedSpaceAuthority(ctx, tx, cancellation.SpaceID, credential, "FOR UPDATE")
+	if err != nil {
+		return sharedspaces.InvitationCancellationResult{}, err
+	}
+	var existingVersion int
+	var existingInvitationID uuid.UUID
+	var existingCancelledAt int64
+	err = tx.QueryRow(ctx, `
+		SELECT version,invitation_id,cancelled_at_milliseconds
+		FROM shared_space_invitation_cancellations
+		WHERE space_id=$1 AND retry_id=$2
+		FOR UPDATE
+	`, cancellation.SpaceID, cancellation.RetryID).Scan(
+		&existingVersion, &existingInvitationID, &existingCancelledAt,
+	)
+	if err == nil {
+		if existingVersion != cancellation.Version || existingInvitationID != cancellation.InvitationID ||
+			existingCancelledAt != cancellation.CancelledAtMilliseconds {
+			return sharedspaces.InvitationCancellationResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvitationCancellationCollision, "invitation cancellation retry ID was reused",
+			)
+		}
+		return sharedspaces.InvitationCancellationResult{
+			Acceptance: relay.AcceptanceDuplicate, RetryID: cancellation.RetryID,
+			SpaceID: cancellation.SpaceID, InvitationID: cancellation.InvitationID,
+			CancelledAtMilliseconds: existingCancelledAt,
+		}, nil
+	}
+	if err != pgx.ErrNoRows {
+		return sharedspaces.InvitationCancellationResult{}, fmt.Errorf("load Shared Space invitation cancellation: %w", err)
+	}
+	var invitationDomainID, subscriptionID, participantID uuid.UUID
+	var createdAt int64
+	var claimedAt *int64
+	err = tx.QueryRow(ctx, `
+		SELECT domain_id,subscription_id,participant_id,created_at_milliseconds,claimed_at_milliseconds
+		FROM shared_space_invitations
+		WHERE space_id=$1 AND invitation_id=$2
+		FOR UPDATE
+	`, cancellation.SpaceID, cancellation.InvitationID).Scan(
+		&invitationDomainID, &subscriptionID, &participantID, &createdAt, &claimedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return sharedspaces.InvitationCancellationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvitationNotFound, "Shared Space invitation was not found",
+		)
+	}
+	if err != nil {
+		return sharedspaces.InvitationCancellationResult{}, fmt.Errorf("load Shared Space invitation for cancellation: %w", err)
+	}
+	if invitationDomainID != domainID {
+		return sharedspaces.InvitationCancellationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "invitation cancellation belongs to another Shared Space",
+		)
+	}
+	if claimedAt != nil {
+		return sharedspaces.InvitationCancellationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvitationClaimed, "claimed Shared Space invitation cannot be cancelled",
+		)
+	}
+	if cancellation.CancelledAtMilliseconds < createdAt || cancellation.CancelledAtMilliseconds > nowMilliseconds {
+		return sharedspaces.InvitationCancellationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidInvitation, "Shared Space invitation cancellation time is invalid",
+		)
+	}
+	var priorRetryID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT retry_id FROM shared_space_invitation_cancellations
+		WHERE space_id=$1 AND invitation_id=$2
+		FOR UPDATE
+	`, cancellation.SpaceID, cancellation.InvitationID).Scan(&priorRetryID)
+	if err == nil {
+		return sharedspaces.InvitationCancellationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvitationCancellationCollision, "Shared Space invitation was already cancelled by another request",
+		)
+	}
+	if err != pgx.ErrNoRows {
+		return sharedspaces.InvitationCancellationResult{}, fmt.Errorf("check prior Shared Space invitation cancellation: %w", err)
+	}
+	acceptance, err := s.relay.revokeAdmissionInTransaction(
+		ctx, tx, credential, cancellation.InvitationID, cancellation.CancelledAtMilliseconds,
+	)
+	if err != nil {
+		return sharedspaces.InvitationCancellationResult{}, err
+	}
+	if _, err := s.relay.changeSubscriptionStatusInTransaction(
+		ctx, tx, credential, subscriptionID, relay.SubscriptionStatusChangeRequest{
+			RetryID: cancellation.RetryID, Status: relay.SubscriptionRevoked,
+			ChangedAtMilliseconds: cancellation.CancelledAtMilliseconds,
+		},
+	); err != nil {
+		return sharedspaces.InvitationCancellationResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_invitation_cancellations (
+			space_id,retry_id,invitation_id,version,cancelled_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5)
+	`, cancellation.SpaceID, cancellation.RetryID, cancellation.InvitationID,
+		cancellation.Version, cancellation.CancelledAtMilliseconds); err != nil {
+		return sharedspaces.InvitationCancellationResult{}, fmt.Errorf("record Shared Space invitation cancellation: %w", err)
+	}
+	if err := insertDataPlaneAudit(
+		ctx, tx, cancellation.SpaceID, &domainID, &subscriptionID, &participantID,
+		"shared_space_invitation_cancelled", cancellation.CancelledAtMilliseconds,
+	); err != nil {
+		return sharedspaces.InvitationCancellationResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.InvitationCancellationResult{}, fmt.Errorf("commit Shared Space invitation cancellation: %w", err)
+	}
+	return sharedspaces.InvitationCancellationResult{
+		Acceptance: acceptance, RetryID: cancellation.RetryID,
+		SpaceID: cancellation.SpaceID, InvitationID: cancellation.InvitationID,
+		CancelledAtMilliseconds: cancellation.CancelledAtMilliseconds,
 	}, nil
 }
 

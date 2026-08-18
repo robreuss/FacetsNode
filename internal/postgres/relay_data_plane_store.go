@@ -858,6 +858,29 @@ func (s *RelayStore) ChangeSubscriptionStatus(ctx context.Context, credential re
 		return relay.SubscriptionStatusChangeResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	response, err := s.changeSubscriptionStatusInTransaction(ctx, tx, credential, subscriptionID, request)
+	if err != nil {
+		return relay.SubscriptionStatusChangeResponse{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.SubscriptionStatusChangeResponse{}, err
+	}
+	return response, nil
+}
+
+func (s *RelayStore) changeSubscriptionStatusInTransaction(
+	ctx context.Context,
+	tx pgx.Tx,
+	credential relay.AdministrationCredential,
+	subscriptionID uuid.UUID,
+	request relay.SubscriptionStatusChangeRequest,
+) (relay.SubscriptionStatusChangeResponse, error) {
+	if subscriptionID == uuid.Nil {
+		return relay.SubscriptionStatusChangeResponse{}, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription ID is invalid")
+	}
+	if err := request.Validate(); err != nil {
+		return relay.SubscriptionStatusChangeResponse{}, err
+	}
 	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
 		return relay.SubscriptionStatusChangeResponse{}, err
 	}
@@ -918,9 +941,6 @@ func (s *RelayStore) ChangeSubscriptionStatus(ctx context.Context, credential re
 	subscription.StartCursor = cursorFromSequence(startSequence)
 	subscription.UpdatedAtMilliseconds = request.ChangedAtMilliseconds
 	if err := insertDataPlaneAudit(ctx, tx, credential.TenantID, &credential.DomainID, &subscriptionID, nil, "subscription_status_changed", request.ChangedAtMilliseconds); err != nil {
-		return relay.SubscriptionStatusChangeResponse{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return relay.SubscriptionStatusChangeResponse{}, err
 	}
 	return relay.SubscriptionStatusChangeResponse{Acceptance: relay.AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription}, nil

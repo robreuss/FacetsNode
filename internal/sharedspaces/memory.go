@@ -20,35 +20,40 @@ type memorySpace struct {
 }
 
 type memoryInvitation struct {
-	invitation Invitation
-	result     *InvitationClaimResult
+	invitation   Invitation
+	result       *InvitationClaimResult
+	cancellation *InvitationCancellationResult
 }
 
 type MemoryStore struct {
-	mu                  sync.Mutex
-	relay               relay.Store
-	spaces              map[uuid.UUID]*memorySpace
-	spaceRetries        map[uuid.UUID]uuid.UUID
-	invitations         map[uuid.UUID]memoryInvitation
-	invitationRetries   map[uuid.UUID]uuid.UUID
-	revocationRequests  map[uuid.UUID]ParticipantRevocation
-	revocationResponses map[uuid.UUID]ParticipantRevocationResult
-	roleChangeRequests  map[uuid.UUID]ParticipantRoleChange
-	roleChangeResponses map[uuid.UUID]ParticipantRoleChangeResult
-	checkpointEpochs    map[uuid.UUID]uint64
+	mu                              sync.Mutex
+	relay                           relay.Store
+	spaces                          map[uuid.UUID]*memorySpace
+	spaceRetries                    map[uuid.UUID]uuid.UUID
+	invitations                     map[uuid.UUID]memoryInvitation
+	invitationRetries               map[uuid.UUID]uuid.UUID
+	invitationCancellationRequests  map[uuid.UUID]InvitationCancellation
+	invitationCancellationResponses map[uuid.UUID]InvitationCancellationResult
+	revocationRequests              map[uuid.UUID]ParticipantRevocation
+	revocationResponses             map[uuid.UUID]ParticipantRevocationResult
+	roleChangeRequests              map[uuid.UUID]ParticipantRoleChange
+	roleChangeResponses             map[uuid.UUID]ParticipantRoleChangeResult
+	checkpointEpochs                map[uuid.UUID]uint64
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 	return &MemoryStore{
 		relay: relayStore, spaces: make(map[uuid.UUID]*memorySpace),
-		spaceRetries:        make(map[uuid.UUID]uuid.UUID),
-		invitations:         make(map[uuid.UUID]memoryInvitation),
-		invitationRetries:   make(map[uuid.UUID]uuid.UUID),
-		revocationRequests:  make(map[uuid.UUID]ParticipantRevocation),
-		revocationResponses: make(map[uuid.UUID]ParticipantRevocationResult),
-		roleChangeRequests:  make(map[uuid.UUID]ParticipantRoleChange),
-		roleChangeResponses: make(map[uuid.UUID]ParticipantRoleChangeResult),
-		checkpointEpochs:    make(map[uuid.UUID]uint64),
+		spaceRetries:                    make(map[uuid.UUID]uuid.UUID),
+		invitations:                     make(map[uuid.UUID]memoryInvitation),
+		invitationRetries:               make(map[uuid.UUID]uuid.UUID),
+		invitationCancellationRequests:  make(map[uuid.UUID]InvitationCancellation),
+		invitationCancellationResponses: make(map[uuid.UUID]InvitationCancellationResult),
+		revocationRequests:              make(map[uuid.UUID]ParticipantRevocation),
+		revocationResponses:             make(map[uuid.UUID]ParticipantRevocationResult),
+		roleChangeRequests:              make(map[uuid.UUID]ParticipantRoleChange),
+		roleChangeResponses:             make(map[uuid.UUID]ParticipantRoleChangeResult),
+		checkpointEpochs:                make(map[uuid.UUID]uint64),
 	}
 }
 
@@ -206,6 +211,9 @@ func (s *MemoryStore) ClaimInvitation(
 		}
 		return InvitationClaimResult{}, NewProtocolError(CodeInvitationClaimed, "Shared Space invitation was already claimed")
 	}
+	if record.cancellation != nil {
+		return InvitationClaimResult{}, NewProtocolError(CodeInvitationCancelled, "Shared Space invitation was cancelled")
+	}
 	relayResult, err := s.relay.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{
 		TenantID: credential.SpaceID, DomainID: credential.DomainID,
 		AdmissionID: credential.InvitationID, Token: credential.Token,
@@ -229,6 +237,71 @@ func (s *MemoryStore) ClaimInvitation(
 	}
 	record.result = &result
 	s.invitations[credential.InvitationID] = record
+	return result, nil
+}
+
+func (s *MemoryStore) CancelInvitation(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	cancellation InvitationCancellation,
+	nowMilliseconds int64,
+) (InvitationCancellationResult, error) {
+	if err := cancellation.Validate(); err != nil {
+		return InvitationCancellationResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[cancellation.SpaceID]
+	if space == nil {
+		return InvitationCancellationResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.TenantID != cancellation.SpaceID || credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return InvitationCancellationResult{}, NewProtocolError(CodeWrongScope, "invitation cancellation belongs to another Shared Space")
+	}
+	if existing, found := s.invitationCancellationResponses[cancellation.RetryID]; found {
+		if reflect.DeepEqual(s.invitationCancellationRequests[cancellation.RetryID], cancellation) {
+			existing.Acceptance = relay.AcceptanceDuplicate
+			return existing, nil
+		}
+		return InvitationCancellationResult{}, NewProtocolError(CodeInvitationCancellationCollision, "invitation cancellation retry ID was reused")
+	}
+	record, found := s.invitations[cancellation.InvitationID]
+	if !found {
+		return InvitationCancellationResult{}, NewProtocolError(CodeInvitationNotFound, "Shared Space invitation was not found")
+	}
+	if record.invitation.SpaceID != cancellation.SpaceID {
+		return InvitationCancellationResult{}, NewProtocolError(CodeWrongScope, "invitation cancellation belongs to another Shared Space")
+	}
+	if record.result != nil {
+		return InvitationCancellationResult{}, NewProtocolError(CodeInvitationClaimed, "claimed Shared Space invitation cannot be cancelled")
+	}
+	if record.cancellation != nil {
+		return InvitationCancellationResult{}, NewProtocolError(CodeInvitationCancellationCollision, "Shared Space invitation was already cancelled by another request")
+	}
+	if cancellation.CancelledAtMilliseconds < record.invitation.CreatedAtMilliseconds || cancellation.CancelledAtMilliseconds > nowMilliseconds {
+		return InvitationCancellationResult{}, NewProtocolError(CodeInvalidInvitation, "Shared Space invitation cancellation time is invalid")
+	}
+	acceptance, err := s.relay.RevokeAdmission(ctx, credential, cancellation.InvitationID, cancellation.CancelledAtMilliseconds)
+	if err != nil {
+		return InvitationCancellationResult{}, err
+	}
+	if _, err := s.relay.ChangeSubscriptionStatus(
+		ctx, credential, record.invitation.SubscriptionID,
+		relay.SubscriptionStatusChangeRequest{
+			RetryID: cancellation.RetryID, Status: relay.SubscriptionRevoked,
+			ChangedAtMilliseconds: cancellation.CancelledAtMilliseconds,
+		},
+	); err != nil {
+		return InvitationCancellationResult{}, err
+	}
+	result := InvitationCancellationResult{
+		Acceptance: acceptance, RetryID: cancellation.RetryID, SpaceID: cancellation.SpaceID,
+		InvitationID: cancellation.InvitationID, CancelledAtMilliseconds: cancellation.CancelledAtMilliseconds,
+	}
+	record.cancellation = &result
+	s.invitations[cancellation.InvitationID] = record
+	s.invitationCancellationRequests[cancellation.RetryID] = cancellation
+	s.invitationCancellationResponses[cancellation.RetryID] = result
 	return result, nil
 }
 

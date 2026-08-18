@@ -170,6 +170,68 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreCancelsUnclaimedInvitation(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 2_000, sharedspaces.SecurityModeE2EE)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 2_000); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(t, ctx, relayStore, store, provisioning, hostCredential, admin, sharedspaces.InitialKeyEpoch, 2_050)
+
+	invitation, credential := testInvitation(t, provisioning, admin, 2_100, sharedspaces.RoleReader)
+	if _, err := store.CreateInvitation(ctx, admin, invitation, 2_100); err != nil {
+		t.Fatal(err)
+	}
+	cancellation := sharedspaces.InvitationCancellation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		InvitationID: invitation.InvitationID, CancelledAtMilliseconds: 2_200,
+	}
+	cancelled, err := store.CancelInvitation(ctx, admin, cancellation, 2_200)
+	if err != nil || cancelled.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("cancel=%+v err=%v", cancelled, err)
+	}
+	cancelledRetry, err := store.CancelInvitation(ctx, admin, cancellation, 2_201)
+	if err != nil || cancelledRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("cancel retry=%+v err=%v", cancelledRetry, err)
+	}
+
+	memberCredential := relay.Credential{
+		TenantID: invitation.SpaceID, DomainID: invitation.RelayAdmission.DomainID,
+		MemberID: invitation.ParticipantID, Token: testToken(0x61),
+	}
+	digest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := sharedspaces.InvitationClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: invitation.ParticipantID, AuthorizationDigest: digest,
+		},
+		ClaimedAtMilliseconds: 2_300,
+	}
+	if _, err := store.ClaimInvitation(ctx, credential, claim, 2_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvitationCancelled) {
+		t.Fatalf("claim cancelled invitation err=%v", err)
+	}
+	if _, err := relayStore.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{
+		TenantID: credential.SpaceID, DomainID: credential.DomainID,
+		AdmissionID: credential.InvitationID, Token: credential.Token,
+	}, claim.RelayClaim, 2_300); !relay.ErrorHasCode(err, relay.CodeAdmissionRevoked) {
+		t.Fatalf("claim revoked relay admission err=%v", err)
+	}
+	status, err := store.GetSpaceStatus(ctx, admin)
+	if err != nil || len(status.Participants) != 1 || status.Participants[0].Role != sharedspaces.RoleHost {
+		t.Fatalf("status after invitation cancellation=%+v err=%v", status, err)
+	}
+}
+
 func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()

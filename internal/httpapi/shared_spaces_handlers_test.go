@@ -86,6 +86,59 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	requireStatus(t, blocked, http.StatusConflict)
 	_ = blocked.Body.Close()
 	publishSharedSpaceBootstrapCheckpointHTTP(t, handler, domain, nowMilliseconds)
+	cancelledParticipantID := uuid.New()
+	cancelledInvitationID := uuid.New()
+	cancelledToken := relayTestToken(0x52)
+	cancelledInvitation := sharedSpaceInvitationCreateInput{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		ParticipantID: cancelledParticipantID, SubscriptionID: uuid.New(),
+		Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleReader,
+		InvitationCredential: sharedSpaceInvitationCredential{
+			InvitationID: cancelledInvitationID, AuthorizationToken: cancelledToken,
+		},
+		ExpiresAtMilliseconds: nowMilliseconds + 60_000,
+		CreatedAtMilliseconds: nowMilliseconds,
+	}
+	cancelledIssue := performRelayJSON(
+		t, handler, http.MethodPost, spaceRoot+"/invitations",
+		cancelledInvitation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, cancelledIssue, http.StatusCreated)
+	_ = cancelledIssue.Body.Close()
+	cancellation := sharedspaces.InvitationCancellation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		InvitationID: cancelledInvitationID, CancelledAtMilliseconds: nowMilliseconds,
+	}
+	cancellationPath := spaceRoot + "/invitations/" + cancelledInvitationID.String() + "/cancellation"
+	cancelledResponse := performRelayJSON(
+		t, handler, http.MethodPost, cancellationPath, cancellation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, cancelledResponse, http.StatusCreated)
+	_ = cancelledResponse.Body.Close()
+	cancelledRetry := performRelayJSON(
+		t, handler, http.MethodPost, cancellationPath, cancellation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, cancelledRetry, http.StatusOK)
+	_ = cancelledRetry.Body.Close()
+	cancelledMemberToken := relayTestToken(0x62)
+	cancelledClaim := sharedSpaceInvitationClaimInput{
+		Version: sharedspaces.SchemaVersion, ParticipantID: cancelledParticipantID,
+		MemberCredential: relayMemberCredential{
+			TenantID: spaceID, DomainID: domainID, MemberID: cancelledParticipantID,
+			AuthorizationToken: cancelledMemberToken,
+		},
+		ClaimedAtMilliseconds: nowMilliseconds,
+	}
+	cancelledClaimResponse := performRelayJSON(
+		t, handler, http.MethodPost,
+		spaceRoot+"/invitations/"+cancelledInvitationID.String()+"/claim",
+		cancelledClaim, cancelledToken, uuid.Nil,
+	)
+	requireStatus(t, cancelledClaimResponse, http.StatusGone)
+	_ = cancelledClaimResponse.Body.Close()
+
 	issued := performRelayJSON(
 		t, handler, http.MethodPost, spaceRoot+"/invitations",
 		invitation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,

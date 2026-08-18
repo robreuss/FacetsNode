@@ -80,6 +80,40 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}, now+50); err != nil {
 		t.Fatalf("bootstrap activation: %v", err)
 	}
+	cancelledInvitation, cancelledCredential := postgresSharedSpaceInvitation(t, provisioning, admin, now+60)
+	if _, err := store.CreateInvitation(ctx, admin, cancelledInvitation, now+60); err != nil {
+		t.Fatalf("invite for cancellation: %v", err)
+	}
+	cancellation := sharedspaces.InvitationCancellation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		InvitationID: cancelledInvitation.InvitationID, CancelledAtMilliseconds: now + 70,
+	}
+	cancelled, err := store.CancelInvitation(ctx, admin, cancellation, now+70)
+	if err != nil || cancelled.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("cancel invitation=%+v err=%v", cancelled, err)
+	}
+	cancelledRetry, err := store.CancelInvitation(ctx, admin, cancellation, now+71)
+	if err != nil || cancelledRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("cancel invitation retry=%+v err=%v", cancelledRetry, err)
+	}
+	cancelledMemberCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: admin.DomainID,
+		MemberID: cancelledInvitation.ParticipantID, Token: postgresRelayToken(0x62),
+	}
+	cancelledDigest, err := relay.AuthorizationDigest(cancelledMemberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimInvitation(ctx, cancelledCredential, sharedspaces.InvitationClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID: cancelledInvitation.ParticipantID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: cancelledInvitation.ParticipantID, AuthorizationDigest: cancelledDigest,
+		},
+		ClaimedAtMilliseconds: now + 80,
+	}, now+80); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvitationCancelled) {
+		t.Fatalf("claim cancelled invitation err=%v", err)
+	}
 	issued, err := store.CreateInvitation(ctx, admin, invitation, now+100)
 	if err != nil || issued.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("invite=%+v err=%v", issued, err)
@@ -172,6 +206,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 
 	var participantCount, relayMemberCount, revokedSubscriptionCount int
+	var cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			(SELECT count(*) FROM shared_space_participants
@@ -179,15 +214,28 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 			(SELECT count(*) FROM relay_members
 			 WHERE tenant_id=$1 AND domain_id=$4 AND member_id=$2 AND revoked_at_milliseconds=$3),
 			(SELECT count(*) FROM relay_subscriptions
-			 WHERE tenant_id=$1 AND domain_id=$4 AND subscription_id=$5 AND status='revoked')
+			 WHERE tenant_id=$1 AND domain_id=$4 AND subscription_id=$5 AND status='revoked'),
+			(SELECT count(*) FROM shared_space_invitation_cancellations
+			 WHERE space_id=$1 AND invitation_id=$6),
+			(SELECT count(*) FROM relay_member_admissions
+			 WHERE tenant_id=$1 AND domain_id=$4 AND admission_id=$6 AND revoked_at_milliseconds=$7),
+			(SELECT count(*) FROM relay_subscriptions
+			 WHERE tenant_id=$1 AND domain_id=$4 AND subscription_id=$8 AND status='revoked')
 	`, invitation.SpaceID, invitation.ParticipantID, revoked.RevokedAtMilliseconds,
-		admin.DomainID, invitation.SubscriptionID).Scan(
+		admin.DomainID, invitation.SubscriptionID, cancelledInvitation.InvitationID,
+		cancellation.CancelledAtMilliseconds, cancelledInvitation.SubscriptionID).Scan(
 		&participantCount, &relayMemberCount, &revokedSubscriptionCount,
+		&cancellationCount, &revokedAdmissionCount, &cancelledSubscriptionCount,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if participantCount != 1 || relayMemberCount != 1 || revokedSubscriptionCount != 1 {
-		t.Fatalf("product=%d member=%d subscription=%d", participantCount, relayMemberCount, revokedSubscriptionCount)
+	if participantCount != 1 || relayMemberCount != 1 || revokedSubscriptionCount != 1 ||
+		cancellationCount != 1 || revokedAdmissionCount != 1 || cancelledSubscriptionCount != 1 {
+		t.Fatalf(
+			"product=%d member=%d subscription=%d cancellation=%d admission=%d cancelled subscription=%d",
+			participantCount, relayMemberCount, revokedSubscriptionCount,
+			cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount,
+		)
 	}
 }
 
