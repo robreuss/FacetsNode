@@ -567,7 +567,10 @@ func TestPostgresResumableBlobReservationsRetriesAndExpiry(t *testing.T) {
 	if _, err := store.AppendBlobUploadChunk(ctx, agent, competing, 1_300, func(relay.BlobUploadStatus) error { return nil }); !relay.ErrorHasCode(err, relay.CodeBlobUploadCollision) {
 		t.Fatalf("different chunk reused same offset err=%v", err)
 	}
-	finalRequest := relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: request.UploadID, RelayBlobID: request.RelayBlobID, ByteCount: 8, FinalizedAtMilliseconds: 1_400}
+	// A client-authored finalization timestamp may be behind the server's
+	// preceding chunk timestamp. Content validation must not assume synchronized
+	// clocks across devices.
+	finalRequest := relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: request.UploadID, RelayBlobID: request.RelayBlobID, ByteCount: 8, FinalizedAtMilliseconds: 1_250}
 	if finalized, err := store.FinalizeBlobUpload(ctx, publisher, finalRequest, 1_400, func(relay.BlobUploadStatus) error { return nil }); err != nil || finalized.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("finalize=%+v err=%v", finalized, err)
 	}
@@ -577,6 +580,9 @@ func TestPostgresResumableBlobReservationsRetriesAndExpiry(t *testing.T) {
 	}
 	if finalRetryCallback {
 		t.Fatal("finalization retry republished content")
+	}
+	if finalizedStatus, err := store.GetBlobUpload(ctx, publisher, request.UploadID, 1_400); err != nil || finalizedStatus.UpdatedAtMilliseconds != 1_400 {
+		t.Fatalf("finalized upload status=%+v err=%v", finalizedStatus, err)
 	}
 	second := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID([]byte("abcdefgh")), ByteCount: 8, CreatedAtMilliseconds: 1_500}
 	if _, err := store.CreateBlobUpload(ctx, publisher, second, 1_500); err != nil {

@@ -184,8 +184,7 @@ func (s *MemoryStore) FinalizeBlobUpload(
 		return BlobUploadFinalizationResponse{}, err
 	}
 	if request.RelayBlobID != upload.status.RelayBlobID || request.ByteCount != upload.status.ByteCount ||
-		upload.status.CommittedOffset != upload.status.ByteCount ||
-		request.FinalizedAtMilliseconds < upload.status.UpdatedAtMilliseconds {
+		upload.status.CommittedOffset != upload.status.ByteCount {
 		return BlobUploadFinalizationResponse{}, protocolError(CodeInvalidBlobUpload, "blob upload finalization does not match staged content")
 	}
 	existing, published := domain.blobs[request.RelayBlobID]
@@ -202,7 +201,7 @@ func (s *MemoryStore) FinalizeBlobUpload(
 		domain.blobs[request.RelayBlobID] = BlobMetadata{
 			TenantID: credential.TenantID, DomainID: credential.DomainID,
 			BlobID: request.RelayBlobID, PublisherMemberID: upload.publisherMemberID,
-			ByteCount: request.ByteCount, CreatedAtMilliseconds: request.FinalizedAtMilliseconds,
+			ByteCount: request.ByteCount, CreatedAtMilliseconds: nowMilliseconds,
 		}
 		if fence := memoryActiveFenceForSubscription(domain, subscription.SubscriptionID); fence != nil {
 			domain.blobFenceIDs[request.RelayBlobID] = fence.state.FenceID
@@ -212,7 +211,7 @@ func (s *MemoryStore) FinalizeBlobUpload(
 	domain.reservedBlobCount--
 	domain.reservedBlobBytes -= request.ByteCount
 	upload.status.Finalized = true
-	upload.status.UpdatedAtMilliseconds = request.FinalizedAtMilliseconds
+	upload.status.UpdatedAtMilliseconds = nowMilliseconds
 	result := BlobUploadFinalizationResponse{
 		Acceptance: AcceptanceAccepted, RetryID: request.RetryID, UploadID: request.UploadID,
 		RelayBlobID: request.RelayBlobID, ByteCount: request.ByteCount,

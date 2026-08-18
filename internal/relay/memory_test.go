@@ -393,7 +393,10 @@ func TestMemoryStoreResumableUploadReservesQuotaAndAllowsSameSubscriptionAgent(t
 	if err != nil || duplicate.CommittedOffset != 8 || duplicateCalled {
 		t.Fatalf("duplicate status=%+v callback=%v err=%v", duplicate, duplicateCalled, err)
 	}
-	finalRequest := relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: request.UploadID, RelayBlobID: request.RelayBlobID, ByteCount: 8, FinalizedAtMilliseconds: 1_400}
+	// The authoring device clock may trail the server clock used to timestamp
+	// chunk acceptance. Finalization must not rely on cross-device wall-clock
+	// ordering when the upload identity, byte count, and durable offset match.
+	finalRequest := relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: request.UploadID, RelayBlobID: request.RelayBlobID, ByteCount: 8, FinalizedAtMilliseconds: 1_250}
 	finalized, err := store.FinalizeBlobUpload(ctx, first, finalRequest, 1_400, func(relay.BlobUploadStatus) error { return nil })
 	if err != nil || finalized.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("finalize=%+v err=%v", finalized, err)
@@ -405,6 +408,9 @@ func TestMemoryStoreResumableUploadReservesQuotaAndAllowsSameSubscriptionAgent(t
 	}
 	if finalRetryCallback {
 		t.Fatal("finalization retry republished content")
+	}
+	if status, err := store.GetBlobUpload(ctx, first, request.UploadID, 1_400); err != nil || status.UpdatedAtMilliseconds != 1_400 {
+		t.Fatalf("finalized upload status=%+v err=%v", status, err)
 	}
 	status, _ = store.GetDomainStatus(ctx, admin)
 	if status.ReservedBlobCount != 0 || status.ReservedBlobByteCount != 0 || status.BlobCount != 1 || status.BlobByteCount != 8 {

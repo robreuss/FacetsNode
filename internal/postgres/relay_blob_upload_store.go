@@ -266,7 +266,7 @@ func (s *RelayStore) FinalizeBlobUpload(
 	if err != nil {
 		return relay.BlobUploadFinalizationResponse{}, err
 	}
-	if upload.state != "active" || request.RelayBlobID != upload.status.RelayBlobID || request.ByteCount != upload.status.ByteCount || upload.status.CommittedOffset != upload.status.ByteCount || request.FinalizedAtMilliseconds < upload.status.UpdatedAtMilliseconds {
+	if upload.state != "active" || request.RelayBlobID != upload.status.RelayBlobID || request.ByteCount != upload.status.ByteCount || upload.status.CommittedOffset != upload.status.ByteCount {
 		return relay.BlobUploadFinalizationResponse{}, relay.NewProtocolError(relay.CodeInvalidBlobUpload, "blob upload finalization does not match staged content")
 	}
 	existing, blobFound, err := loadRelayBlob(ctx, tx, credential.TenantID, credential.DomainID, request.RelayBlobID, "FOR UPDATE")
@@ -286,7 +286,7 @@ func (s *RelayStore) FinalizeBlobUpload(
 		if err := publish(upload.status); err != nil {
 			return relay.BlobUploadFinalizationResponse{}, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO relay_blobs (tenant_id,domain_id,blob_id,publisher_member_id,byte_count,created_at_milliseconds,checkpoint_fence_id) VALUES ($1,$2,$3,$4,$5,$6,$7)`, credential.TenantID, credential.DomainID, request.RelayBlobID, upload.publisherMemberID, request.ByteCount, request.FinalizedAtMilliseconds, fenceID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO relay_blobs (tenant_id,domain_id,blob_id,publisher_member_id,byte_count,created_at_milliseconds,checkpoint_fence_id) VALUES ($1,$2,$3,$4,$5,$6,$7)`, credential.TenantID, credential.DomainID, request.RelayBlobID, upload.publisherMemberID, request.ByteCount, nowMilliseconds, fenceID); err != nil {
 			return relay.BlobUploadFinalizationResponse{}, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE relay_domains SET blob_count=blob_count+1,blob_byte_count=blob_byte_count+$3,reserved_blob_count=reserved_blob_count-1,reserved_blob_byte_count=reserved_blob_byte_count-$3 WHERE tenant_id=$1 AND domain_id=$2`, credential.TenantID, credential.DomainID, request.ByteCount); err != nil {
@@ -303,7 +303,7 @@ func (s *RelayStore) FinalizeBlobUpload(
 			return relay.BlobUploadFinalizationResponse{}, err
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE relay_blob_uploads SET state='finalized',finalized_at_milliseconds=$4,updated_at_milliseconds=$4,updated_at=now() WHERE tenant_id=$1 AND domain_id=$2 AND upload_id=$3`, credential.TenantID, credential.DomainID, request.UploadID, request.FinalizedAtMilliseconds); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE relay_blob_uploads SET state='finalized',finalized_at_milliseconds=$4,updated_at_milliseconds=$4,updated_at=now() WHERE tenant_id=$1 AND domain_id=$2 AND upload_id=$3`, credential.TenantID, credential.DomainID, request.UploadID, nowMilliseconds); err != nil {
 		return relay.BlobUploadFinalizationResponse{}, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO relay_blob_upload_finalizations VALUES ($1,$2,$3,$4,$5,$6,$7,now())`, credential.TenantID, credential.DomainID, request.RetryID, request.UploadID, request.RelayBlobID, request.ByteCount, request.FinalizedAtMilliseconds); err != nil {
