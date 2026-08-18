@@ -406,6 +406,26 @@ func (s *RelayStore) CreateSubscriptionAdmission(
 		return relay.SubscriptionAdmissionCreateResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.createSubscriptionAdmissionTx(
+		ctx, tx, credential, subscriptionID, registration, nowMilliseconds,
+	)
+	if err != nil {
+		return relay.SubscriptionAdmissionCreateResult{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return relay.SubscriptionAdmissionCreateResult{}, err
+	}
+	return result, nil
+}
+
+func (s *RelayStore) createSubscriptionAdmissionTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	credential relay.AdministrationCredential,
+	subscriptionID uuid.UUID,
+	registration relay.MemberAdmission,
+	nowMilliseconds int64,
+) (relay.SubscriptionAdmissionCreateResult, error) {
 	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
 		return relay.SubscriptionAdmissionCreateResult{}, err
 	}
@@ -450,9 +470,6 @@ func (s *RelayStore) CreateSubscriptionAdmission(
 	if err := insertDataPlaneAudit(ctx, tx, registration.TenantID, &registration.DomainID, &subscriptionID, nil, "admission_created", nowMilliseconds); err != nil {
 		return relay.SubscriptionAdmissionCreateResult{}, err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return relay.SubscriptionAdmissionCreateResult{}, err
-	}
 	return relay.SubscriptionAdmissionCreateResult{Acceptance: relay.AcceptanceAccepted, Admission: relay.SubscriptionMemberAdmission{SubscriptionID: subscriptionID, Admission: registration}}, nil
 }
 
@@ -465,6 +482,23 @@ func (s *RelayStore) ClaimSubscriptionAdmission(ctx context.Context, credential 
 		return relay.SubscriptionAdmissionClaimResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.claimSubscriptionAdmissionTx(ctx, tx, credential, claim, nowMilliseconds)
+	if err != nil {
+		return relay.SubscriptionAdmissionClaimResult{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return relay.SubscriptionAdmissionClaimResult{}, err
+	}
+	return result, nil
+}
+
+func (s *RelayStore) claimSubscriptionAdmissionTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	credential relay.AdmissionCredential,
+	claim relay.MemberAdmissionClaim,
+	nowMilliseconds int64,
+) (relay.SubscriptionAdmissionClaimResult, error) {
 	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
 		return relay.SubscriptionAdmissionClaimResult{}, err
 	}
@@ -517,9 +551,6 @@ func (s *RelayStore) ClaimSubscriptionAdmission(ctx context.Context, credential 
 		return relay.SubscriptionAdmissionClaimResult{}, err
 	}
 	if err = insertDataPlaneAudit(ctx, tx, member.TenantID, &member.DomainID, &subscriptionID, &member.MemberID, "admission_claimed", nowMilliseconds); err != nil {
-		return relay.SubscriptionAdmissionClaimResult{}, err
-	}
-	if err = tx.Commit(ctx); err != nil {
 		return relay.SubscriptionAdmissionClaimResult{}, err
 	}
 	return relay.SubscriptionAdmissionClaimResult{Acceptance: relay.AcceptanceAccepted, Member: relay.SubscriptionMemberRegistration{SubscriptionID: subscriptionID, MemberRegistration: member}}, nil

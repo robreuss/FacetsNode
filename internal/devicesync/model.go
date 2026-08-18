@@ -146,6 +146,79 @@ func resultFor(provisioning PrincipalProvisioning, relayResult relay.TenantProvi
 	}
 }
 
+// DeviceAdmission binds a generic relay admission to exactly one Device Sync
+// principal and device. It grants transport membership only; content trust and
+// key material must still arrive through the encrypted principal control
+// channel from an already trusted device.
+type DeviceAdmission struct {
+	Version               int                   `json:"version"`
+	RetryID               uuid.UUID             `json:"retryID"`
+	PrincipalID           uuid.UUID             `json:"principalID"`
+	DeviceID              uuid.UUID             `json:"deviceID"`
+	SubscriptionID        uuid.UUID             `json:"subscriptionID"`
+	RelayAdmission        relay.MemberAdmission `json:"relayAdmission"`
+	CreatedAtMilliseconds int64                 `json:"createdAtMilliseconds"`
+}
+
+func (a DeviceAdmission) Validate() error {
+	if a.Version != SchemaVersion || a.RetryID == uuid.Nil ||
+		a.PrincipalID == uuid.Nil || a.DeviceID == uuid.Nil ||
+		a.SubscriptionID == uuid.Nil || a.CreatedAtMilliseconds < 0 {
+		return NewProtocolError(CodeInvalidAdmission, "device admission fields are invalid")
+	}
+	if err := a.RelayAdmission.Validate(); err != nil {
+		return err
+	}
+	if a.PrincipalID != a.RelayAdmission.TenantID ||
+		a.CreatedAtMilliseconds != a.RelayAdmission.CreatedAtMilliseconds ||
+		a.RelayAdmission.RevokedAtMilliseconds != nil ||
+		a.RelayAdmission.ClaimedAtMilliseconds != nil ||
+		a.RelayAdmission.ClaimedMemberID != nil {
+		return NewProtocolError(CodeWrongScope, "device admission and relay scopes differ")
+	}
+	return nil
+}
+
+type DeviceAdmissionCreateResult struct {
+	Acceptance relay.Acceptance `json:"acceptance"`
+	Admission  DeviceAdmission  `json:"admission"`
+}
+
+type DeviceAdmissionCredential struct {
+	PrincipalID uuid.UUID
+	AdmissionID uuid.UUID
+	Token       string
+}
+
+type DeviceAdmissionClaim struct {
+	Version               int                        `json:"version"`
+	PrincipalID           uuid.UUID                  `json:"principalID"`
+	DeviceID              uuid.UUID                  `json:"deviceID"`
+	RelayClaim            relay.MemberAdmissionClaim `json:"relayClaim"`
+	ClaimedAtMilliseconds int64                      `json:"claimedAtMilliseconds"`
+}
+
+func (c DeviceAdmissionClaim) Validate() error {
+	if c.Version != SchemaVersion || c.PrincipalID == uuid.Nil ||
+		c.DeviceID == uuid.Nil || c.ClaimedAtMilliseconds < 0 {
+		return NewProtocolError(CodeInvalidAdmission, "device admission claim fields are invalid")
+	}
+	if err := c.RelayClaim.Validate(); err != nil {
+		return err
+	}
+	if c.DeviceID != c.RelayClaim.MemberID {
+		return NewProtocolError(CodeWrongScope, "device and relay member scopes differ")
+	}
+	return nil
+}
+
+type DeviceAdmissionClaimResult struct {
+	Acceptance  relay.Acceptance                     `json:"acceptance"`
+	PrincipalID uuid.UUID                            `json:"principalID"`
+	DeviceID    uuid.UUID                            `json:"deviceID"`
+	Member      relay.SubscriptionMemberRegistration `json:"member"`
+}
+
 func validDigest(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size

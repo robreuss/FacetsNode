@@ -17,6 +17,7 @@ const (
 	CodeAdmissionClaimed   ErrorCode = "device_sync_admission_claimed"
 	CodeAdmissionCollision ErrorCode = "device_sync_admission_collision"
 	CodePrincipalCollision ErrorCode = "device_sync_principal_collision"
+	CodeDeviceCollision    ErrorCode = "device_sync_device_collision"
 )
 
 type ProtocolError struct {

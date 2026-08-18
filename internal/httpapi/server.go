@@ -279,6 +279,16 @@ func (s *Server) Handler() http.Handler {
 			traffic.SurfaceManagement,
 			s.handleClaimDeviceSyncAccountAdmission,
 		)
+		register(
+			"POST /v1/device-sync/principals/{principalID}/control-domains/{domainID}/device-admissions",
+			traffic.SurfaceManagement,
+			s.handleCreateDeviceSyncDeviceAdmission,
+		)
+		register(
+			"POST /v1/device-sync/principals/{principalID}/device-admissions/{admissionID}/claim",
+			traffic.SurfaceManagement,
+			s.handleClaimDeviceSyncDeviceAdmission,
+		)
 	}
 	return s.securityHeaders(s.requestLog(mux))
 }
@@ -474,7 +484,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			case devicesync.CodeAdmissionExpired:
 				status = http.StatusGone
 			case devicesync.CodeAdmissionClaimed, devicesync.CodeAdmissionCollision,
-				devicesync.CodePrincipalCollision:
+				devicesync.CodePrincipalCollision, devicesync.CodeDeviceCollision:
 				status = http.StatusConflict
 			}
 			writeJSON(writer, status, struct {

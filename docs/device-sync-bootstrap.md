@@ -1,9 +1,10 @@
 # Facets Device Sync account bootstrap
 
-Status: first vertical slice. This contract provisions a new Device Sync
-principal and its first device. Additional-device enrollment, per-Space domain
-provisioning, account admission UX, and hosted account integration remain later
-gates.
+Status: bootstrap vertical slice. This contract provisions a new Device Sync
+principal and its first device, then admits additional devices to the opaque
+principal control-channel transport. Per-Space domain provisioning, client-side
+content-trust transfer, account admission UX, and hosted account integration
+remain later gates.
 
 ## Authority boundary
 
@@ -70,6 +71,43 @@ relay tenant, control domain, subscription, initial member, Device Sync
 principal, and first-device registration either all commit or all roll back.
 The admission can create only one principal. An exact response-lost retry
 returns `duplicate`; altered reuse returns a conflict.
+
+## Admit another device
+
+An already enrolled device creates a short-lived admission for the new device
+on the principal control domain:
+
+```http
+POST /v1/device-sync/principals/<principal-id>/control-domains/<domain-id>/device-admissions
+Authorization: Bearer <control-domain-administration-token>
+Content-Type: application/json
+```
+
+The request binds one independently generated relay member admission to the
+Device Sync principal, the new device ID, and the principal control-channel
+subscription. The server selects the relay capabilities required by the
+control-channel transport; callers cannot enlarge them. The principal, domain,
+subscription, and relay admission scopes must all match. The product binding
+and relay admission commit in one PostgreSQL transaction.
+
+The new device claims that admission once:
+
+```http
+POST /v1/device-sync/principals/<principal-id>/device-admissions/<admission-id>/claim
+Authorization: Bearer <device-admission-token>
+Content-Type: application/json
+```
+
+The claim registers both the relay member and Device Sync device atomically.
+Exact response-lost retries return `duplicate`; changed IDs, device material,
+or credentials are rejected.
+
+This claim grants transport membership only. It does not make the device a
+trusted content principal and does not deliver any content-encryption key. A
+currently trusted device must subsequently transfer signed device authority
+and key material through the encrypted principal control channel. Until that
+client-side step succeeds, the admitted device cannot decrypt or authorize
+Device Sync content.
 
 ## Service isolation
 

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -163,6 +164,98 @@ func TestDeviceSyncAccountClaimRejectsWrongAdmissionCredential(t *testing.T) {
 	_ = response.Body.Close()
 }
 
+func TestDeviceSyncPrincipalAdmitsAdditionalDeviceTransportExactlyOnce(t *testing.T) {
+	const now = int64(3_000)
+	relayStore := relay.NewMemoryStore()
+	deviceSyncStore := devicesync.NewMemoryStore(relayStore)
+	domainInput := newRelayDomainProvisioningRequest(now, 231, 232)
+	principalID := domainInput.AdministrationCredential.TenantID
+	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, domainInput, 233)
+	server := newRelayTestServer(t, relayStore, relayTestToken(234))
+	server.SetDeviceSyncStore(deviceSyncStore)
+	server.now = func() time.Time { return time.UnixMilli(now) }
+	handler := server.Handler()
+
+	deviceID := uuid.New()
+	admissionCredential := deviceSyncAdmissionCredential{
+		AdmissionID: uuid.New(), AuthorizationToken: relayTestToken(235),
+	}
+	createInput := deviceSyncDeviceAdmissionCreateInput{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(), DeviceID: deviceID,
+		SubscriptionID:        domainInput.SubscriptionID,
+		AdmissionCredential:   admissionCredential,
+		ExpiresAtMilliseconds: now + devicesync.MinimumAdmissionLifetimeMilliseconds,
+	}
+	createPath := "/v1/device-sync/principals/" + principalID.String() +
+		"/control-domains/" + domainInput.AdministrationCredential.DomainID.String() +
+		"/device-admissions"
+	wrongAdministrator := performRelayJSON(
+		t, handler, http.MethodPost, createPath, createInput, relayTestToken(236), uuid.Nil,
+	)
+	requireStatus(t, wrongAdministrator, http.StatusUnauthorized)
+	_ = wrongAdministrator.Body.Close()
+
+	created := performRelayJSON(
+		t, handler, http.MethodPost, createPath, createInput,
+		domainInput.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, created, http.StatusCreated)
+	var createdResult devicesync.DeviceAdmissionCreateResult
+	if err := json.NewDecoder(created.Body).Decode(&createdResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = created.Body.Close()
+	if createdResult.Acceptance != relay.AcceptanceAccepted ||
+		createdResult.Admission.DeviceID != deviceID ||
+		len(createdResult.Admission.RelayAdmission.Capabilities) != len(allRelayCapabilities) {
+		t.Fatalf("unexpected device admission: %+v", createdResult)
+	}
+
+	retry := performRelayJSON(
+		t, handler, http.MethodPost, createPath, createInput,
+		domainInput.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, retry, http.StatusOK)
+	_ = retry.Body.Close()
+
+	memberCredential := relay.Credential{
+		TenantID: principalID, DomainID: domainInput.AdministrationCredential.DomainID,
+		MemberID: deviceID, Token: relayTestToken(237),
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimInput := deviceSyncDeviceAdmissionClaimInput{
+		Version: devicesync.SchemaVersion, DeviceID: deviceID,
+		AuthorizationDigest: memberDigest,
+	}
+	claimPath := "/v1/device-sync/principals/" + principalID.String() +
+		"/device-admissions/" + admissionCredential.AdmissionID.String() + "/claim"
+	claimed := performRelayJSON(
+		t, handler, http.MethodPost, claimPath, claimInput,
+		admissionCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, claimed, http.StatusCreated)
+	var claimedResult devicesync.DeviceAdmissionClaimResult
+	if err := json.NewDecoder(claimed.Body).Decode(&claimedResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = claimed.Body.Close()
+	if claimedResult.Acceptance != relay.AcceptanceAccepted ||
+		claimedResult.DeviceID != deviceID ||
+		claimedResult.Member.MemberRegistration.MemberID != deviceID {
+		t.Fatalf("unexpected device claim: %+v", claimedResult)
+	}
+
+	claimRetry := performRelayJSON(
+		t, handler, http.MethodPost, claimPath, claimInput,
+		admissionCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, claimRetry, http.StatusOK)
+	_ = claimRetry.Body.Close()
+}
+
 func TestDeviceSyncRoutesAreAbsentFromSharedSpacesSurface(t *testing.T) {
 	operatorToken := relayTestToken(221)
 	relayStore := relay.NewMemoryStore()
@@ -173,6 +266,57 @@ func TestDeviceSyncRoutesAreAbsentFromSharedSpacesSurface(t *testing.T) {
 	)
 	requireStatus(t, response, http.StatusNotFound)
 	_ = response.Body.Close()
+	deviceResponse := performRelayJSON(
+		t, server.Handler(), http.MethodPost,
+		"/v1/device-sync/principals/"+uuid.NewString()+"/control-domains/"+uuid.NewString()+"/device-admissions",
+		map[string]any{}, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, deviceResponse, http.StatusNotFound)
+	_ = deviceResponse.Body.Close()
+}
+
+func bootstrapDeviceSyncPrincipal(
+	t *testing.T,
+	store *devicesync.MemoryStore,
+	domainInput relayDomainProvisioningRequest,
+	seed byte,
+) {
+	t.Helper()
+	tenant, controlDomain, err := relayTenantAndDomainProvisioning(
+		newRelayTenantProvisioningRequest(domainInput, relayTestToken(seed)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionCredential := devicesync.AdmissionCredential{
+		AdmissionID: uuid.New(), Token: relayTestToken(seed + 1),
+	}
+	admissionDigest, err := devicesync.AdmissionAuthorizationDigest(admissionCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := domainInput.CreatedAtMilliseconds
+	admission := devicesync.AccountAdmission{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		AdmissionID:           admissionCredential.AdmissionID,
+		AuthorizationDigest:   admissionDigest,
+		CreatedAtMilliseconds: now,
+		ExpiresAtMilliseconds: now + devicesync.MinimumAdmissionLifetimeMilliseconds,
+	}
+	if _, err := store.CreateAccountAdmission(context.Background(), admission, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimAccountAdmission(
+		context.Background(), admissionCredential,
+		devicesync.PrincipalProvisioning{
+			Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+			PrincipalID: tenant.TenantID, InitialDeviceID: controlDomain.InitialMember.MemberID,
+			Tenant: tenant, ControlDomain: controlDomain, CreatedAtMilliseconds: now,
+		},
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newDeviceSyncTestServer(
