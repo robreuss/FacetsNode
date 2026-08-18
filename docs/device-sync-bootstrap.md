@@ -1,12 +1,14 @@
 # Facets Device Sync account bootstrap
 
-Status: server-side bootstrap and opaque Space-domain provisioning vertical
-slice. This contract provisions a new Device Sync principal and its first
-device, admits additional devices to the opaque principal control-channel
-transport, binds a Facets Space identifier to an isolated relay domain, and
-admits an already enrolled device to that Space transport. Client-side
-content-trust transfer, account admission UX, checkpoint/tail orchestration,
-and hosted account integration remain later gates.
+Status: server-side bootstrap, opaque Space-domain provisioning, and
+clean-device checkpoint/tail vertical slice. This contract provisions a new
+Device Sync principal and its first device, admits additional devices to the
+opaque principal control-channel transport, binds a Facets Space identifier to
+an isolated relay domain, admits an already enrolled device to that Space
+transport, and gives a newly admitted device the active opaque checkpoint plus
+the subsequent mutation tail. Client-side content-trust transfer, canonical FEF
+application orchestration, account admission UX, and hosted account integration
+remain later gates.
 
 ## Authority boundary
 

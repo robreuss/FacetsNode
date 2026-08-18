@@ -185,6 +185,116 @@ func TestLiveDeviceSyncVerticalSlice(t *testing.T) {
 		t.Fatalf("live Device Sync blob mismatch: got=%q expected=%q", downloaded, blobBytes)
 	}
 
+	// Activate a real relay checkpoint before enrolling a clean third device.
+	// Its fresh subscription must begin at the server-owned checkpoint boundary,
+	// receive the opaque bootstrap suffix, and then continue on the mutation tail.
+	fenceRequest := relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: time.Now().UnixMilli(),
+	}
+	fenceResponse := requestRelayJSON(
+		t, client, http.MethodPost, spaceBasePath+"/checkpoint-fences",
+		fenceRequest, initialSpaceCredential.Token, initialDeviceID,
+	)
+	requireStatus(t, fenceResponse, http.StatusCreated)
+	var fence relay.CheckpointFenceResponse
+	decodeLiveJSON(t, fenceResponse, &fence)
+	if fence.BoundaryCursor != relay.EncodeCursor(2) {
+		t.Fatalf("live Device Sync checkpoint boundary=%s want=%s", fence.BoundaryCursor, relay.EncodeCursor(2))
+	}
+	bootstrapCheckpoint := liveDeviceSyncTransportEnvelope(
+		t, protocol.PayloadFEFCheckpoint, time.Now().UnixMilli(),
+		[]byte(`{"fef":"opaque-clean-device-bootstrap"}`), nil,
+	)
+	bootstrapRelayEnvelope := liveDeviceSyncRelayEnvelope(
+		t, bootstrapCheckpoint, initialSpaceCredential,
+	)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut,
+		spaceBasePath+"/messages/"+bootstrapCheckpoint.MessageID.String(),
+		bootstrapRelayEnvelope, initialSpaceCredential.Token, initialDeviceID,
+	), http.StatusCreated)
+	candidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: principalID,
+		DomainID:                spaceDomain.AdministrationCredential.DomainID,
+		PublisherSubscriptionID: spaceResult.Domain.SubscriptionID,
+		CoveredThroughCursor:    fence.BoundaryCursor,
+		RetainedMessageIDs:      []uuid.UUID{bootstrapCheckpoint.MessageID},
+		RetainedBlobIDs:         []string{relay.BlobID(blobBytes)},
+		CreatedAtMilliseconds:   time.Now().UnixMilli(),
+	}
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, spaceBasePath+"/checkpoints/candidates",
+		candidate, initialSpaceCredential.Token, initialDeviceID,
+	), http.StatusCreated)
+	activation := relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		ActivatedAtMilliseconds: time.Now().UnixMilli(),
+	}
+	activationResponse := requestRelayJSON(
+		t, client, http.MethodPost,
+		spaceBasePath+"/checkpoints/"+candidate.CheckpointID.String()+"/activation",
+		activation, spaceDomain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, activationResponse, http.StatusCreated)
+	var activated relay.CheckpointActivationResponse
+	decodeLiveJSON(t, activationResponse, &activated)
+	if activated.StartCursor != fence.BoundaryCursor {
+		t.Fatalf("live Device Sync activation cursor=%s want=%s", activated.StartCursor, fence.BoundaryCursor)
+	}
+
+	thirdDeviceID := uuid.New()
+	_ = liveDeviceSyncAdmitDevice(
+		t, client, baseURL, principalID, thirdDeviceID, controlDomain,
+		uuid.Nil, expiresAt, encodedBytes(200), encodedBytes(232),
+	)
+	thirdSpaceCredential := liveDeviceSyncAdmitDevice(
+		t, client, baseURL, principalID, thirdDeviceID, spaceDomain,
+		spaceID, expiresAt, encodedBytes(16), encodedBytes(48),
+	)
+	cleanBootstrapResponse := requestRelayJSON(
+		t, client, http.MethodGet, spaceBasePath+"/messages?limit=10", nil,
+		thirdSpaceCredential.Token, thirdDeviceID,
+	)
+	requireStatus(t, cleanBootstrapResponse, http.StatusOK)
+	var cleanBootstrap struct {
+		Messages []relay.Message `json:"messages"`
+		Cursor   string          `json:"cursor"`
+	}
+	decodeLiveJSON(t, cleanBootstrapResponse, &cleanBootstrap)
+	if len(cleanBootstrap.Messages) != 1 ||
+		cleanBootstrap.Messages[0].Envelope.MessageID != bootstrapCheckpoint.MessageID ||
+		cleanBootstrap.Cursor != relay.EncodeCursor(3) {
+		t.Fatalf("unexpected clean-device bootstrap: %+v", cleanBootstrap)
+	}
+	postCheckpointMutation := liveDeviceSyncTransportEnvelope(
+		t, protocol.PayloadFEFMutationBatch, time.Now().UnixMilli(),
+		[]byte(`{"fef":"opaque-post-checkpoint-mutation"}`),
+		[]uuid.UUID{bootstrapCheckpoint.MessageID},
+	)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut,
+		spaceBasePath+"/messages/"+postCheckpointMutation.MessageID.String(),
+		liveDeviceSyncRelayEnvelope(t, postCheckpointMutation, initialSpaceCredential),
+		initialSpaceCredential.Token, initialDeviceID,
+	), http.StatusCreated)
+	tailResponse := requestRelayJSON(
+		t, client, http.MethodGet,
+		spaceBasePath+"/messages?cursor="+cleanBootstrap.Cursor+"&limit=10", nil,
+		thirdSpaceCredential.Token, thirdDeviceID,
+	)
+	requireStatus(t, tailResponse, http.StatusOK)
+	var tail struct {
+		Messages []relay.Message `json:"messages"`
+		Cursor   string          `json:"cursor"`
+	}
+	decodeLiveJSON(t, tailResponse, &tail)
+	if len(tail.Messages) != 1 ||
+		tail.Messages[0].Envelope.MessageID != postCheckpointMutation.MessageID ||
+		tail.Cursor != relay.EncodeCursor(4) {
+		t.Fatalf("unexpected clean-device mutation tail: %+v", tail)
+	}
+
 	statusPath := fmt.Sprintf("%s/v1/device-sync/principals/%s/status", baseURL, principalID)
 	statusResponse := requestRelayJSON(
 		t, client, http.MethodGet, statusPath, nil, principalToken, uuid.Nil,
@@ -192,8 +302,8 @@ func TestLiveDeviceSyncVerticalSlice(t *testing.T) {
 	requireStatus(t, statusResponse, http.StatusOK)
 	var status devicesync.PrincipalStatus
 	decodeLiveJSON(t, statusResponse, &status)
-	if len(status.Devices) != 2 || len(status.Spaces) != 1 ||
-		len(status.Spaces[0].Devices) != 2 {
+	if len(status.Devices) != 3 || len(status.Spaces) != 1 ||
+		len(status.Spaces[0].Devices) != 3 {
 		t.Fatalf("unexpected live Device Sync status: %+v", status)
 	}
 
