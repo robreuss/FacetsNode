@@ -361,6 +361,116 @@ func TestDeviceSyncSpaceProvisioningRejectsUnenrolledInitialDevice(t *testing.T)
 	_ = response.Body.Close()
 }
 
+func TestDeviceSyncSpaceAdmitsEnrolledDeviceTransportExactlyOnce(t *testing.T) {
+	const now = int64(5_500)
+	const tenantSeed = byte(41)
+	relayStore := relay.NewMemoryStore()
+	deviceSyncStore := devicesync.NewMemoryStore(relayStore)
+	controlDomain := newRelayDomainProvisioningRequest(now, 42, 43)
+	principalID := controlDomain.AdministrationCredential.TenantID
+	initialDeviceID := controlDomain.MemberCredential.MemberID
+	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, controlDomain, tenantSeed)
+	deviceID := uuid.New()
+	enrollDeviceSyncTestDevice(t, deviceSyncStore, controlDomain, deviceID, now, 44, 45)
+
+	spaceID := uuid.New()
+	spaceDomainInput := newRelayDomainProvisioningRequest(now, 46, 47)
+	spaceDomainInput.AdministrationCredential.TenantID = principalID
+	spaceDomainInput.MemberCredential.TenantID = principalID
+	spaceDomainInput.MemberCredential.MemberID = initialDeviceID
+	_, spaceDomain, err := relayTenantAndDomainProvisioning(
+		newRelayTenantProvisioningRequest(spaceDomainInput, relayTestToken(48)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deviceSyncStore.ProvisionSpace(
+		context.Background(), relay.TenantCredential{TenantID: principalID, Token: relayTestToken(tenantSeed)},
+		devicesync.SpaceProvisioning{
+			Version: devicesync.SchemaVersion, RetryID: uuid.New(), PrincipalID: principalID,
+			SpaceID: spaceID, InitialDeviceID: initialDeviceID, Domain: spaceDomain,
+			CreatedAtMilliseconds: now,
+		}, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	server := newRelayTestServer(t, relayStore, relayTestToken(49))
+	server.SetDeviceSyncStore(deviceSyncStore)
+	server.now = func() time.Time { return time.UnixMilli(now) }
+	handler := server.Handler()
+	admissionCredential := deviceSyncAdmissionCredential{
+		AdmissionID: uuid.New(), AuthorizationToken: relayTestToken(50),
+	}
+	createInput := deviceSyncDeviceAdmissionCreateInput{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(), DeviceID: deviceID,
+		SubscriptionID:        spaceDomainInput.SubscriptionID,
+		AdmissionCredential:   admissionCredential,
+		ExpiresAtMilliseconds: now + devicesync.MinimumAdmissionLifetimeMilliseconds,
+	}
+	createPath := "/v1/device-sync/principals/" + principalID.String() +
+		"/spaces/" + spaceID.String() + "/domains/" +
+		spaceDomainInput.AdministrationCredential.DomainID.String() + "/device-admissions"
+	created := performRelayJSON(
+		t, handler, http.MethodPost, createPath, createInput,
+		spaceDomainInput.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, created, http.StatusCreated)
+	var createdResult devicesync.SpaceDeviceAdmissionCreateResult
+	if err := json.NewDecoder(created.Body).Decode(&createdResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = created.Body.Close()
+	if createdResult.Acceptance != relay.AcceptanceAccepted ||
+		createdResult.Admission.SpaceID != spaceID ||
+		createdResult.Admission.DeviceID != deviceID ||
+		len(createdResult.Admission.RelayAdmission.Capabilities) != len(allRelayCapabilities) {
+		t.Fatalf("unexpected Space device admission: %+v", createdResult)
+	}
+	retry := performRelayJSON(
+		t, handler, http.MethodPost, createPath, createInput,
+		spaceDomainInput.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, retry, http.StatusOK)
+	_ = retry.Body.Close()
+
+	memberCredential := relay.Credential{
+		TenantID: principalID, DomainID: spaceDomainInput.AdministrationCredential.DomainID,
+		MemberID: deviceID, Token: relayTestToken(51),
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimInput := deviceSyncDeviceAdmissionClaimInput{
+		Version: devicesync.SchemaVersion, DeviceID: deviceID,
+		AuthorizationDigest: memberDigest,
+	}
+	claimPath := "/v1/device-sync/principals/" + principalID.String() +
+		"/spaces/" + spaceID.String() + "/device-admissions/" +
+		admissionCredential.AdmissionID.String() + "/claim"
+	claimed := performRelayJSON(
+		t, handler, http.MethodPost, claimPath, claimInput,
+		admissionCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, claimed, http.StatusCreated)
+	var claimedResult devicesync.SpaceDeviceAdmissionClaimResult
+	if err := json.NewDecoder(claimed.Body).Decode(&claimedResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = claimed.Body.Close()
+	if claimedResult.Acceptance != relay.AcceptanceAccepted ||
+		claimedResult.SpaceID != spaceID || claimedResult.DeviceID != deviceID {
+		t.Fatalf("unexpected Space device claim: %+v", claimedResult)
+	}
+	claimRetry := performRelayJSON(
+		t, handler, http.MethodPost, claimPath, claimInput,
+		admissionCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, claimRetry, http.StatusOK)
+	_ = claimRetry.Body.Close()
+}
+
 func TestDeviceSyncRoutesAreAbsentFromSharedSpacesSurface(t *testing.T) {
 	operatorToken := relayTestToken(221)
 	relayStore := relay.NewMemoryStore()
@@ -385,6 +495,92 @@ func TestDeviceSyncRoutesAreAbsentFromSharedSpacesSurface(t *testing.T) {
 	)
 	requireStatus(t, spaceResponse, http.StatusNotFound)
 	_ = spaceResponse.Body.Close()
+	spaceAdmissionResponse := performRelayJSON(
+		t, server.Handler(), http.MethodPost,
+		"/v1/device-sync/principals/"+uuid.NewString()+"/spaces/"+uuid.NewString()+
+			"/domains/"+uuid.NewString()+"/device-admissions",
+		map[string]any{}, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, spaceAdmissionResponse, http.StatusNotFound)
+	_ = spaceAdmissionResponse.Body.Close()
+	spaceAdmissionClaimResponse := performRelayJSON(
+		t, server.Handler(), http.MethodPost,
+		"/v1/device-sync/principals/"+uuid.NewString()+"/spaces/"+uuid.NewString()+
+			"/device-admissions/"+uuid.NewString()+"/claim",
+		map[string]any{}, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, spaceAdmissionClaimResponse, http.StatusNotFound)
+	_ = spaceAdmissionClaimResponse.Body.Close()
+}
+
+func enrollDeviceSyncTestDevice(
+	t *testing.T,
+	store *devicesync.MemoryStore,
+	controlDomain relayDomainProvisioningRequest,
+	deviceID uuid.UUID,
+	now int64,
+	admissionSeed byte,
+	memberSeed byte,
+) {
+	t.Helper()
+	credential := relay.AdmissionCredential{
+		TenantID:    controlDomain.AdministrationCredential.TenantID,
+		DomainID:    controlDomain.AdministrationCredential.DomainID,
+		AdmissionID: uuid.New(), Token: relayTestToken(admissionSeed),
+	}
+	digest, err := relay.AdmissionAuthorizationDigest(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := devicesync.DeviceAdmission{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: credential.TenantID, DeviceID: deviceID,
+		SubscriptionID: controlDomain.SubscriptionID,
+		RelayAdmission: relay.MemberAdmission{
+			Version: relay.SchemaVersion, TenantID: credential.TenantID,
+			DomainID: credential.DomainID, AdmissionID: credential.AdmissionID,
+			AuthorizationDigest:   digest,
+			Capabilities:          append([]relay.Capability(nil), allRelayCapabilities...),
+			CreatedAtMilliseconds: now,
+			ExpiresAtMilliseconds: now + devicesync.MinimumAdmissionLifetimeMilliseconds,
+		},
+		CreatedAtMilliseconds: now,
+	}
+	if _, err := store.CreateDeviceAdmission(
+		context.Background(), relay.AdministrationCredential{
+			TenantID: controlDomain.AdministrationCredential.TenantID,
+			DomainID: controlDomain.AdministrationCredential.DomainID,
+			Token:    controlDomain.AdministrationCredential.AuthorizationToken,
+		}, admission, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	memberCredential := relay.Credential{
+		TenantID: credential.TenantID, DomainID: credential.DomainID,
+		MemberID: deviceID, Token: relayTestToken(memberSeed),
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimDeviceAdmission(
+		context.Background(),
+		devicesync.DeviceAdmissionCredential{
+			PrincipalID: credential.TenantID, AdmissionID: credential.AdmissionID,
+			Token: credential.Token,
+		},
+		devicesync.DeviceAdmissionClaim{
+			Version: devicesync.SchemaVersion, PrincipalID: credential.TenantID,
+			DeviceID: deviceID,
+			RelayClaim: relay.MemberAdmissionClaim{
+				MemberID: deviceID, AuthorizationDigest: memberDigest,
+			},
+			ClaimedAtMilliseconds: now,
+		},
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func bootstrapDeviceSyncPrincipal(

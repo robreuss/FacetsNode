@@ -24,28 +24,38 @@ type memoryDeviceAdmission struct {
 type memorySpace struct {
 	provisioning SpaceProvisioning
 	result       relay.DomainProvisioningResult
+	devices      map[uuid.UUID]bool
+}
+
+type memorySpaceDeviceAdmission struct {
+	admission SpaceDeviceAdmission
+	result    *SpaceDeviceAdmissionClaimResult
 }
 
 type MemoryStore struct {
-	mu                   sync.Mutex
-	relay                relay.Store
-	admissions           map[uuid.UUID]AccountAdmission
-	admissionRetry       map[uuid.UUID]uuid.UUID
-	principals           map[uuid.UUID]memoryPrincipal
-	deviceAdmissions     map[uuid.UUID]memoryDeviceAdmission
-	deviceAdmissionRetry map[uuid.UUID]uuid.UUID
-	spaces               map[uuid.UUID]memorySpace
-	spaceRetry           map[uuid.UUID]uuid.UUID
+	mu                        sync.Mutex
+	relay                     relay.Store
+	admissions                map[uuid.UUID]AccountAdmission
+	admissionRetry            map[uuid.UUID]uuid.UUID
+	principals                map[uuid.UUID]memoryPrincipal
+	deviceAdmissions          map[uuid.UUID]memoryDeviceAdmission
+	deviceAdmissionRetry      map[uuid.UUID]uuid.UUID
+	spaces                    map[uuid.UUID]memorySpace
+	spaceRetry                map[uuid.UUID]uuid.UUID
+	spaceDeviceAdmissions     map[uuid.UUID]memorySpaceDeviceAdmission
+	spaceDeviceAdmissionRetry map[uuid.UUID]uuid.UUID
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 	return &MemoryStore{
 		relay: relayStore, admissions: make(map[uuid.UUID]AccountAdmission),
 		admissionRetry: make(map[uuid.UUID]uuid.UUID), principals: make(map[uuid.UUID]memoryPrincipal),
-		deviceAdmissions:     make(map[uuid.UUID]memoryDeviceAdmission),
-		deviceAdmissionRetry: make(map[uuid.UUID]uuid.UUID),
-		spaces:               make(map[uuid.UUID]memorySpace),
-		spaceRetry:           make(map[uuid.UUID]uuid.UUID),
+		deviceAdmissions:          make(map[uuid.UUID]memoryDeviceAdmission),
+		deviceAdmissionRetry:      make(map[uuid.UUID]uuid.UUID),
+		spaces:                    make(map[uuid.UUID]memorySpace),
+		spaceRetry:                make(map[uuid.UUID]uuid.UUID),
+		spaceDeviceAdmissions:     make(map[uuid.UUID]memorySpaceDeviceAdmission),
+		spaceDeviceAdmissionRetry: make(map[uuid.UUID]uuid.UUID),
 	}
 }
 
@@ -279,9 +289,133 @@ func (s *MemoryStore) ProvisionSpace(
 	if relayResult.Acceptance != relay.AcceptanceAccepted {
 		return SpaceProvisioningResult{}, NewProtocolError(CodeSpaceCollision, "Space relay domain already exists")
 	}
-	s.spaces[provisioning.SpaceID] = memorySpace{provisioning: provisioning, result: relayResult}
+	s.spaces[provisioning.SpaceID] = memorySpace{
+		provisioning: provisioning, result: relayResult,
+		devices: map[uuid.UUID]bool{provisioning.InitialDeviceID: true},
+	}
 	s.spaceRetry[provisioning.RetryID] = provisioning.SpaceID
 	return spaceProvisioningResult(provisioning, relayResult, relay.AcceptanceAccepted), nil
+}
+
+func (s *MemoryStore) CreateSpaceDeviceAdmission(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	admission SpaceDeviceAdmission,
+	nowMilliseconds int64,
+) (SpaceDeviceAdmissionCreateResult, error) {
+	if err := admission.Validate(); err != nil {
+		return SpaceDeviceAdmissionCreateResult{}, err
+	}
+	if admission.CreatedAtMilliseconds > nowMilliseconds ||
+		admission.RelayAdmission.ExpiresAtMilliseconds <= nowMilliseconds {
+		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(
+			CodeInvalidAdmission, "Space device admission is not currently issuable",
+		)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, found := s.principalDevice(admission.PrincipalID, admission.DeviceID); !found {
+		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(
+			CodeUnauthorized, "Space device is not enrolled in the Device Sync principal",
+		)
+	}
+	space, found := s.spaces[admission.SpaceID]
+	if !found || space.provisioning.PrincipalID != admission.PrincipalID {
+		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeUnauthorized, "Device Sync Space was not found")
+	}
+	if credential.TenantID != admission.PrincipalID ||
+		credential.DomainID != space.provisioning.Domain.Registration.DomainID ||
+		admission.RelayAdmission.DomainID != credential.DomainID ||
+		admission.SubscriptionID != space.provisioning.Domain.Subscription.SubscriptionID {
+		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(
+			CodeWrongScope, "Space device admission belongs to another Space domain",
+		)
+	}
+	if admissionID, found := s.spaceDeviceAdmissionRetry[admission.RetryID]; found {
+		existing := s.spaceDeviceAdmissions[admissionID]
+		if reflect.DeepEqual(existing.admission, admission) {
+			return SpaceDeviceAdmissionCreateResult{Acceptance: relay.AcceptanceDuplicate, Admission: admission}, nil
+		}
+		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionCollision, "Space device admission retry ID was reused")
+	}
+	if existing, found := s.spaceDeviceAdmissions[admission.RelayAdmission.AdmissionID]; found {
+		if reflect.DeepEqual(existing.admission, admission) {
+			return SpaceDeviceAdmissionCreateResult{Acceptance: relay.AcceptanceDuplicate, Admission: admission}, nil
+		}
+		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionCollision, "Space device admission ID was reused")
+	}
+	if space.devices[admission.DeviceID] {
+		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device is already admitted to the Space")
+	}
+	for _, existing := range s.spaceDeviceAdmissions {
+		if existing.admission.PrincipalID == admission.PrincipalID &&
+			existing.admission.SpaceID == admission.SpaceID &&
+			existing.admission.DeviceID == admission.DeviceID && existing.result == nil {
+			return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device already has another pending Space admission")
+		}
+	}
+	relayResult, err := s.relay.CreateSubscriptionAdmission(
+		ctx, credential, admission.SubscriptionID, admission.RelayAdmission, nowMilliseconds,
+	)
+	if err != nil {
+		return SpaceDeviceAdmissionCreateResult{}, err
+	}
+	s.spaceDeviceAdmissions[admission.RelayAdmission.AdmissionID] = memorySpaceDeviceAdmission{admission: admission}
+	s.spaceDeviceAdmissionRetry[admission.RetryID] = admission.RelayAdmission.AdmissionID
+	return SpaceDeviceAdmissionCreateResult{Acceptance: relayResult.Acceptance, Admission: admission}, nil
+}
+
+func (s *MemoryStore) ClaimSpaceDeviceAdmission(
+	ctx context.Context,
+	credential SpaceDeviceAdmissionCredential,
+	claim SpaceDeviceAdmissionClaim,
+	nowMilliseconds int64,
+) (SpaceDeviceAdmissionClaimResult, error) {
+	if err := claim.Validate(); err != nil {
+		return SpaceDeviceAdmissionClaimResult{}, err
+	}
+	if claim.ClaimedAtMilliseconds != nowMilliseconds {
+		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeInvalidAdmission, "Space device claim time differs from server time")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, found := s.spaceDeviceAdmissions[credential.AdmissionID]
+	if !found {
+		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeAdmissionNotFound, "Space device admission was not found")
+	}
+	if credential.PrincipalID != record.admission.PrincipalID ||
+		credential.SpaceID != record.admission.SpaceID ||
+		claim.PrincipalID != record.admission.PrincipalID ||
+		claim.SpaceID != record.admission.SpaceID ||
+		claim.DeviceID != record.admission.DeviceID {
+		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeWrongScope, "Space device claim belongs to another admission")
+	}
+	if record.result != nil {
+		if record.result.DeviceID == claim.DeviceID &&
+			record.result.Member.MemberRegistration.AuthorizationDigest == claim.RelayClaim.AuthorizationDigest {
+			duplicate := *record.result
+			duplicate.Acceptance = relay.AcceptanceDuplicate
+			return duplicate, nil
+		}
+		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeAdmissionClaimed, "Space device admission was already claimed")
+	}
+	relayResult, err := s.relay.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{
+		TenantID: record.admission.PrincipalID, DomainID: record.admission.RelayAdmission.DomainID,
+		AdmissionID: credential.AdmissionID, Token: credential.Token,
+	}, claim.RelayClaim, nowMilliseconds)
+	if err != nil {
+		return SpaceDeviceAdmissionClaimResult{}, err
+	}
+	space := s.spaces[claim.SpaceID]
+	space.devices[claim.DeviceID] = true
+	s.spaces[claim.SpaceID] = space
+	result := SpaceDeviceAdmissionClaimResult{
+		Acceptance: relayResult.Acceptance, PrincipalID: claim.PrincipalID,
+		SpaceID: claim.SpaceID, DeviceID: claim.DeviceID, Member: relayResult.Member,
+	}
+	record.result = &result
+	s.spaceDeviceAdmissions[credential.AdmissionID] = record
+	return result, nil
 }
 
 func spaceProvisioningResult(

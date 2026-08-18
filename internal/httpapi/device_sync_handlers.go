@@ -301,3 +301,126 @@ func (s *Server) handleProvisionDeviceSyncSpace(writer http.ResponseWriter, requ
 	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
+
+func (s *Server) handleCreateDeviceSyncSpaceDeviceAdmission(writer http.ResponseWriter, request *http.Request) {
+	principalID, err := parseUUID(request.PathValue("principalID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidPrincipal, err.Error()))
+		return
+	}
+	spaceID, err := parseUUID(request.PathValue("spaceID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidSpace, err.Error()))
+		return
+	}
+	domainID, err := parseUUID(request.PathValue("domainID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidAdmission, err.Error()))
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeUnauthorized, "Space-domain administration credential is missing"))
+		return
+	}
+	var input deviceSyncDeviceAdmissionCreateInput
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.Version != devicesync.SchemaVersion {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidAdmission, "Space device admission version is invalid"))
+		return
+	}
+	admissionCredential := relay.AdmissionCredential{
+		TenantID: principalID, DomainID: domainID,
+		AdmissionID: input.AdmissionCredential.AdmissionID,
+		Token:       input.AdmissionCredential.AuthorizationToken,
+	}
+	authorizationDigest, err := relay.AdmissionAuthorizationDigest(admissionCredential)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidAdmission, err.Error()))
+		return
+	}
+	now := s.nowMilliseconds()
+	result, err := s.deviceSyncStore.CreateSpaceDeviceAdmission(
+		request.Context(),
+		relay.AdministrationCredential{TenantID: principalID, DomainID: domainID, Token: token},
+		devicesync.SpaceDeviceAdmission{
+			Version: devicesync.SchemaVersion, RetryID: input.RetryID,
+			PrincipalID: principalID, SpaceID: spaceID, DeviceID: input.DeviceID,
+			SubscriptionID: input.SubscriptionID,
+			RelayAdmission: relay.MemberAdmission{
+				Version: relay.SchemaVersion, TenantID: principalID, DomainID: domainID,
+				AdmissionID:           input.AdmissionCredential.AdmissionID,
+				AuthorizationDigest:   authorizationDigest,
+				Capabilities:          append([]relay.Capability(nil), allRelayCapabilities...),
+				CreatedAtMilliseconds: now, ExpiresAtMilliseconds: input.ExpiresAtMilliseconds,
+				MemberExpiresAtMilliseconds: input.MemberExpiresAtMilliseconds,
+			},
+			CreatedAtMilliseconds: now,
+		},
+		now,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleClaimDeviceSyncSpaceDeviceAdmission(writer http.ResponseWriter, request *http.Request) {
+	principalID, err := parseUUID(request.PathValue("principalID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidPrincipal, err.Error()))
+		return
+	}
+	spaceID, err := parseUUID(request.PathValue("spaceID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidSpace, err.Error()))
+		return
+	}
+	admissionID, err := parseUUID(request.PathValue("admissionID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidAdmission, err.Error()))
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeUnauthorized, "Space device admission credential is missing"))
+		return
+	}
+	var input deviceSyncDeviceAdmissionClaimInput
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.Version != devicesync.SchemaVersion {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidAdmission, "Space device admission claim version is invalid"))
+		return
+	}
+	now := s.nowMilliseconds()
+	result, err := s.deviceSyncStore.ClaimSpaceDeviceAdmission(
+		request.Context(),
+		devicesync.SpaceDeviceAdmissionCredential{
+			PrincipalID: principalID, SpaceID: spaceID,
+			AdmissionID: admissionID, Token: token,
+		},
+		devicesync.SpaceDeviceAdmissionClaim{
+			Version: devicesync.SchemaVersion, PrincipalID: principalID,
+			SpaceID: spaceID, DeviceID: input.DeviceID,
+			RelayClaim: relay.MemberAdmissionClaim{
+				MemberID: input.DeviceID, AuthorizationDigest: input.AuthorizationDigest,
+			},
+			ClaimedAtMilliseconds: now,
+		},
+		now,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}

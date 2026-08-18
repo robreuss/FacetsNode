@@ -3,9 +3,10 @@
 Status: server-side bootstrap and opaque Space-domain provisioning vertical
 slice. This contract provisions a new Device Sync principal and its first
 device, admits additional devices to the opaque principal control-channel
-transport, and binds a Facets Space identifier to an isolated relay domain.
-Client-side content-trust transfer, account admission UX, Space-domain device
-admission, and hosted account integration remain later gates.
+transport, binds a Facets Space identifier to an isolated relay domain, and
+admits an already enrolled device to that Space transport. Client-side
+content-trust transfer, account admission UX, checkpoint/tail orchestration,
+and hosted account integration remain later gates.
 
 ## Authority boundary
 
@@ -138,6 +139,42 @@ Space-domain membership is transport authority only. Content trust and keys
 remain client-managed. The client acknowledges canonical application only after
 the opaque envelope has been decrypted and its FEF content has committed through
 the standard Facets importer; server receipt by itself is not application.
+
+## Admit an enrolled device to a Space domain
+
+An enrolled device creates a short-lived admission for another enrolled device
+on the selected Space domain:
+
+```http
+POST /v1/device-sync/principals/<principal-id>/spaces/<space-id>/domains/<domain-id>/device-admissions
+Authorization: Bearer <space-domain-administration-token>
+Content-Type: application/json
+```
+
+The request binds one relay member admission to the exact Device Sync principal,
+opaque Space ID, relay domain, subscription, and already enrolled device. The
+server rejects a device that is not registered in the principal control domain,
+and it never infers Space membership from LAN discovery or device names. The
+server selects the relay capabilities; callers cannot enlarge them.
+
+The new device claims that Space transport admission once:
+
+```http
+POST /v1/device-sync/principals/<principal-id>/spaces/<space-id>/device-admissions/<admission-id>/claim
+Authorization: Bearer <space-device-admission-token>
+Content-Type: application/json
+```
+
+The product Space-device binding and generic relay member registration commit in
+one PostgreSQL transaction. Exact response-lost creation and claim retries are
+idempotent. Reusing a retry ID, admission ID, or credential for changed Space,
+device, domain, or member material is rejected.
+
+This is still transport membership only. A trusted Facets device must deliver
+the Space key and signed client-side authority over the encrypted principal
+control channel before the newly admitted device can decrypt, apply, or
+authorize Space content. The Device Sync server stores no such key or trust
+decision.
 
 ## Service isolation
 

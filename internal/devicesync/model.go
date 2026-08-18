@@ -256,6 +256,85 @@ type SpaceProvisioningResult struct {
 	Domain      relay.DomainProvisioningResult `json:"domain"`
 }
 
+// SpaceDeviceAdmission binds one already enrolled Device Sync device to one
+// opaque Space relay domain. It grants transport membership only. The server
+// does not grant Space content trust, distribute content keys, or interpret
+// the encrypted payloads carried by the domain.
+type SpaceDeviceAdmission struct {
+	Version               int                   `json:"version"`
+	RetryID               uuid.UUID             `json:"retryID"`
+	PrincipalID           uuid.UUID             `json:"principalID"`
+	SpaceID               uuid.UUID             `json:"spaceID"`
+	DeviceID              uuid.UUID             `json:"deviceID"`
+	SubscriptionID        uuid.UUID             `json:"subscriptionID"`
+	RelayAdmission        relay.MemberAdmission `json:"relayAdmission"`
+	CreatedAtMilliseconds int64                 `json:"createdAtMilliseconds"`
+}
+
+func (a SpaceDeviceAdmission) Validate() error {
+	if a.Version != SchemaVersion || a.RetryID == uuid.Nil ||
+		a.PrincipalID == uuid.Nil || a.SpaceID == uuid.Nil ||
+		a.DeviceID == uuid.Nil || a.SubscriptionID == uuid.Nil ||
+		a.CreatedAtMilliseconds < 0 {
+		return NewProtocolError(CodeInvalidAdmission, "Space device admission fields are invalid")
+	}
+	if err := a.RelayAdmission.Validate(); err != nil {
+		return err
+	}
+	if a.PrincipalID != a.RelayAdmission.TenantID ||
+		a.CreatedAtMilliseconds != a.RelayAdmission.CreatedAtMilliseconds ||
+		a.RelayAdmission.RevokedAtMilliseconds != nil ||
+		a.RelayAdmission.ClaimedAtMilliseconds != nil ||
+		a.RelayAdmission.ClaimedMemberID != nil {
+		return NewProtocolError(CodeWrongScope, "Space device admission and relay scopes differ")
+	}
+	return nil
+}
+
+type SpaceDeviceAdmissionCreateResult struct {
+	Acceptance relay.Acceptance     `json:"acceptance"`
+	Admission  SpaceDeviceAdmission `json:"admission"`
+}
+
+type SpaceDeviceAdmissionCredential struct {
+	PrincipalID uuid.UUID
+	SpaceID     uuid.UUID
+	AdmissionID uuid.UUID
+	Token       string
+}
+
+type SpaceDeviceAdmissionClaim struct {
+	Version               int                        `json:"version"`
+	PrincipalID           uuid.UUID                  `json:"principalID"`
+	SpaceID               uuid.UUID                  `json:"spaceID"`
+	DeviceID              uuid.UUID                  `json:"deviceID"`
+	RelayClaim            relay.MemberAdmissionClaim `json:"relayClaim"`
+	ClaimedAtMilliseconds int64                      `json:"claimedAtMilliseconds"`
+}
+
+func (c SpaceDeviceAdmissionClaim) Validate() error {
+	if c.Version != SchemaVersion || c.PrincipalID == uuid.Nil ||
+		c.SpaceID == uuid.Nil || c.DeviceID == uuid.Nil ||
+		c.ClaimedAtMilliseconds < 0 {
+		return NewProtocolError(CodeInvalidAdmission, "Space device admission claim fields are invalid")
+	}
+	if err := c.RelayClaim.Validate(); err != nil {
+		return err
+	}
+	if c.DeviceID != c.RelayClaim.MemberID {
+		return NewProtocolError(CodeWrongScope, "Space device and relay member scopes differ")
+	}
+	return nil
+}
+
+type SpaceDeviceAdmissionClaimResult struct {
+	Acceptance  relay.Acceptance                     `json:"acceptance"`
+	PrincipalID uuid.UUID                            `json:"principalID"`
+	SpaceID     uuid.UUID                            `json:"spaceID"`
+	DeviceID    uuid.UUID                            `json:"deviceID"`
+	Member      relay.SubscriptionMemberRegistration `json:"member"`
+}
+
 func validDigest(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size

@@ -294,6 +294,16 @@ func (s *Server) Handler() http.Handler {
 			traffic.SurfaceManagement,
 			s.handleProvisionDeviceSyncSpace,
 		)
+		register(
+			"POST /v1/device-sync/principals/{principalID}/spaces/{spaceID}/domains/{domainID}/device-admissions",
+			traffic.SurfaceManagement,
+			s.handleCreateDeviceSyncSpaceDeviceAdmission,
+		)
+		register(
+			"POST /v1/device-sync/principals/{principalID}/spaces/{spaceID}/device-admissions/{admissionID}/claim",
+			traffic.SurfaceManagement,
+			s.handleClaimDeviceSyncSpaceDeviceAdmission,
+		)
 	}
 	return s.securityHeaders(s.requestLog(mux))
 }

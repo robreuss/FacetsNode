@@ -181,6 +181,91 @@ func TestMemoryStoreRejectsSpaceProvisioningByUnenrolledDevice(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreAdmitsEnrolledDeviceToSpaceExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
+	principal := bootstrapMemoryPrincipal(t, store, 3_000)
+	deviceID := enrollMemoryDevice(t, store, principal, 3_200)
+	_, space := testSpaceProvisioning(t, principal, 3_400)
+	if _, err := store.ProvisionSpace(
+		ctx,
+		relay.TenantCredential{TenantID: principal.PrincipalID, Token: testToken(0x10)},
+		space,
+		3_400,
+	); err != nil {
+		t.Fatal(err)
+	}
+	admin := relay.AdministrationCredential{
+		TenantID: principal.PrincipalID,
+		DomainID: space.Domain.Registration.DomainID,
+		Token:    testToken(0x41),
+	}
+	credential, admission := testSpaceDeviceAdmission(t, space, deviceID, 3_500)
+	created, err := store.CreateSpaceDeviceAdmission(ctx, admin, admission, 3_500)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("create=%+v err=%v", created, err)
+	}
+	duplicate, err := store.CreateSpaceDeviceAdmission(ctx, admin, admission, 3_500)
+	if err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("duplicate=%+v err=%v", duplicate, err)
+	}
+	memberDigest := testDigest(t, relay.Credential{
+		TenantID: principal.PrincipalID, DomainID: admin.DomainID,
+		MemberID: deviceID, Token: testToken(0x74),
+	})
+	claim := devicesync.SpaceDeviceAdmissionClaim{
+		Version: devicesync.SchemaVersion, PrincipalID: principal.PrincipalID,
+		SpaceID: space.SpaceID, DeviceID: deviceID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: deviceID, AuthorizationDigest: memberDigest,
+		},
+		ClaimedAtMilliseconds: 3_600,
+	}
+	claimed, err := store.ClaimSpaceDeviceAdmission(ctx, credential, claim, 3_600)
+	if err != nil || claimed.Acceptance != relay.AcceptanceAccepted ||
+		claimed.SpaceID != space.SpaceID || claimed.DeviceID != deviceID {
+		t.Fatalf("claim=%+v err=%v", claimed, err)
+	}
+	retry, err := store.ClaimSpaceDeviceAdmission(ctx, credential, claim, 3_600)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("claim retry=%+v err=%v", retry, err)
+	}
+}
+
+func TestMemoryStoreRejectsSpaceAdmissionForUnenrolledDeviceAndWrongDomain(t *testing.T) {
+	ctx := context.Background()
+	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
+	principal := bootstrapMemoryPrincipal(t, store, 4_000)
+	_, space := testSpaceProvisioning(t, principal, 4_200)
+	if _, err := store.ProvisionSpace(
+		ctx,
+		relay.TenantCredential{TenantID: principal.PrincipalID, Token: testToken(0x10)},
+		space,
+		4_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, admission := testSpaceDeviceAdmission(t, space, uuid.New(), 4_300)
+	spaceAdmin := relay.AdministrationCredential{
+		TenantID: principal.PrincipalID, DomainID: space.Domain.Registration.DomainID,
+		Token: testToken(0x41),
+	}
+	if _, err := store.CreateSpaceDeviceAdmission(ctx, spaceAdmin, admission, 4_300); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
+		t.Fatalf("unenrolled device err=%v", err)
+	}
+
+	deviceID := enrollMemoryDevice(t, store, principal, 4_400)
+	_, admission = testSpaceDeviceAdmission(t, space, deviceID, 4_500)
+	controlAdmin := relay.AdministrationCredential{
+		TenantID: principal.PrincipalID,
+		DomainID: principal.ControlDomain.Registration.DomainID,
+		Token:    testToken(0x20),
+	}
+	if _, err := store.CreateSpaceDeviceAdmission(ctx, controlAdmin, admission, 4_500); !devicesync.ErrorHasCode(err, devicesync.CodeWrongScope) {
+		t.Fatalf("wrong domain err=%v", err)
+	}
+}
+
 func bootstrapMemoryPrincipal(
 	t *testing.T,
 	store *devicesync.MemoryStore,
@@ -196,6 +281,40 @@ func bootstrapMemoryPrincipal(
 		t.Fatal(err)
 	}
 	return principal
+}
+
+func enrollMemoryDevice(
+	t *testing.T,
+	store *devicesync.MemoryStore,
+	principal devicesync.PrincipalProvisioning,
+	createdAt int64,
+) uuid.UUID {
+	t.Helper()
+	credential, admission := testDeviceAdmission(t, principal, createdAt)
+	admin := relay.AdministrationCredential{
+		TenantID: principal.PrincipalID,
+		DomainID: principal.ControlDomain.Registration.DomainID,
+		Token:    testToken(0x20),
+	}
+	if _, err := store.CreateDeviceAdmission(context.Background(), admin, admission, createdAt); err != nil {
+		t.Fatal(err)
+	}
+	digest := testDigest(t, relay.Credential{
+		TenantID: principal.PrincipalID, DomainID: admin.DomainID,
+		MemberID: admission.DeviceID, Token: testToken(0x71),
+	})
+	claim := devicesync.DeviceAdmissionClaim{
+		Version: devicesync.SchemaVersion, PrincipalID: principal.PrincipalID,
+		DeviceID: admission.DeviceID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: admission.DeviceID, AuthorizationDigest: digest,
+		},
+		ClaimedAtMilliseconds: createdAt + 100,
+	}
+	if _, err := store.ClaimDeviceAdmission(context.Background(), credential, claim, createdAt+100); err != nil {
+		t.Fatal(err)
+	}
+	return admission.DeviceID
 }
 
 func testAdmission(t *testing.T, createdAt int64) (devicesync.AdmissionCredential, devicesync.AccountAdmission) {
@@ -364,6 +483,41 @@ func testSpaceProvisioning(
 		SpaceID: uuid.New(), InitialDeviceID: principal.InitialDeviceID,
 		Domain: domain, CreatedAtMilliseconds: createdAt,
 	}
+}
+
+func testSpaceDeviceAdmission(
+	t *testing.T,
+	space devicesync.SpaceProvisioning,
+	deviceID uuid.UUID,
+	createdAt int64,
+) (devicesync.SpaceDeviceAdmissionCredential, devicesync.SpaceDeviceAdmission) {
+	t.Helper()
+	credential := relay.AdmissionCredential{
+		TenantID: space.PrincipalID, DomainID: space.Domain.Registration.DomainID,
+		AdmissionID: uuid.New(), Token: testToken(0x73),
+	}
+	digest, err := relay.AdmissionAuthorizationDigest(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := devicesync.SpaceDeviceAdmission{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: space.PrincipalID, SpaceID: space.SpaceID, DeviceID: deviceID,
+		SubscriptionID: space.Domain.Subscription.SubscriptionID,
+		RelayAdmission: relay.MemberAdmission{
+			Version: relay.SchemaVersion, TenantID: space.PrincipalID,
+			DomainID: credential.DomainID, AdmissionID: credential.AdmissionID,
+			AuthorizationDigest:   digest,
+			Capabilities:          append([]relay.Capability(nil), space.Domain.InitialMember.Capabilities...),
+			CreatedAtMilliseconds: createdAt,
+			ExpiresAtMilliseconds: createdAt + devicesync.MinimumAdmissionLifetimeMilliseconds,
+		},
+		CreatedAtMilliseconds: createdAt,
+	}
+	return devicesync.SpaceDeviceAdmissionCredential{
+		PrincipalID: space.PrincipalID, SpaceID: space.SpaceID,
+		AdmissionID: credential.AdmissionID, Token: credential.Token,
+	}, admission
 }
 
 func testDigest(t *testing.T, credential relay.Credential) string {
