@@ -131,6 +131,40 @@ revocation times. The server reads the inventory in one consistent database
 snapshot. This endpoint supports diagnostics and eventual client sync status;
 it does not grant transport, content, or decryption authority.
 
+## Revoke an enrolled device
+
+An authenticated principal permanently removes one device from its protected
+control channel and every opaque Space domain to which that device was
+admitted:
+
+```http
+POST /v1/device-sync/principals/<principal-id>/devices/<device-id>/revocation
+Authorization: Bearer <principal-tenant-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "version": 1,
+  "retryID": "<uuid>",
+  "principalID": "<principal-id>",
+  "deviceID": "<device-id>"
+}
+```
+
+The Device Sync record, relay members, and device-specific subscriptions are
+fenced in one database transaction. No control-channel or Space-domain
+membership can remain active after the product revocation commits. An exact
+response-lost retry returns `duplicate`; a second revocation with different
+retry material is rejected as already revoked.
+
+The account credential selects the Device Sync principal but does not grant
+content access or disclose which opaque Space contains what. The content-blind
+status inventory reports the resulting revocation times. Because zero-device
+key recovery is deferred, the service rejects revocation of the final active
+device. At least one enrolled device must remain able to administer the account
+and preserve client-held recovery authority.
+
 ## Provision an opaque Space domain
 
 An enrolled device provisions one isolated relay domain for each Space selected

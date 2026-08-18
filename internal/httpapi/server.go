@@ -285,6 +285,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleGetDeviceSyncPrincipalStatus,
 		)
 		register(
+			"POST /v1/device-sync/principals/{principalID}/devices/{deviceID}/revocation",
+			traffic.SurfaceManagement,
+			s.handleRevokeDeviceSyncDevice,
+		)
+		register(
 			"POST /v1/device-sync/principals/{principalID}/control-domains/{domainID}/device-admissions",
 			traffic.SurfaceManagement,
 			s.handleCreateDeviceSyncDeviceAdmission,
@@ -502,10 +507,13 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				status = http.StatusBadRequest
 			case devicesync.CodeUnauthorized, devicesync.CodeAdmissionNotFound:
 				status = http.StatusUnauthorized
+			case devicesync.CodeDeviceNotFound:
+				status = http.StatusNotFound
 			case devicesync.CodeAdmissionExpired:
 				status = http.StatusGone
 			case devicesync.CodeAdmissionClaimed, devicesync.CodeAdmissionCollision,
 				devicesync.CodePrincipalCollision, devicesync.CodeDeviceCollision,
+				devicesync.CodeDeviceRevoked, devicesync.CodeLastDevice,
 				devicesync.CodeSpaceCollision:
 				status = http.StatusConflict
 			}

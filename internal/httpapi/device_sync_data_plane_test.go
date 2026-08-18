@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -199,6 +200,133 @@ func TestDeviceSyncSpaceDataPlaneCarriesOpaqueCheckpointTailAndBlob(t *testing.T
 	if !bytes.Equal(downloaded, blobBytes) {
 		t.Fatalf("Device Sync blob mismatch: got=%q expected=%q", downloaded, blobBytes)
 	}
+
+	revocation := devicesync.DeviceRevocation{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: principalID, DeviceID: secondDeviceID,
+	}
+	revocationPath := "/v1/device-sync/principals/" + principalID.String() +
+		"/devices/" + secondDeviceID.String() + "/revocation"
+	revoked := performRelayJSON(
+		t, handler, http.MethodPost, revocationPath, revocation,
+		relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, revoked, http.StatusCreated)
+	var revokedResult devicesync.DeviceRevocationResult
+	if err := json.NewDecoder(revoked.Body).Decode(&revokedResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = revoked.Body.Close()
+	if revokedResult.Acceptance != relay.AcceptanceAccepted ||
+		revokedResult.DeviceID != secondDeviceID || len(revokedResult.Memberships) != 2 {
+		t.Fatalf("unexpected Device Sync revocation: %+v", revokedResult)
+	}
+	revocationRetry := performRelayJSON(
+		t, handler, http.MethodPost, revocationPath, revocation,
+		relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, revocationRetry, http.StatusOK)
+	var retryResult devicesync.DeviceRevocationResult
+	if err := json.NewDecoder(revocationRetry.Body).Decode(&retryResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = revocationRetry.Body.Close()
+	if retryResult.Acceptance != relay.AcceptanceDuplicate ||
+		!reflect.DeepEqual(retryResult.Memberships, revokedResult.Memberships) {
+		t.Fatalf("revocation retry changed result: %+v", retryResult)
+	}
+
+	secondControlCredential := relay.Credential{
+		TenantID: principalID,
+		DomainID: controlDomain.AdministrationCredential.DomainID,
+		MemberID: secondDeviceID,
+		Token:    relayTestToken(65),
+	}
+	controlPath := "/v1/relay/tenants/" + principalID.String() +
+		"/domains/" + controlDomain.AdministrationCredential.DomainID.String()
+	for _, denied := range []*http.Response{
+		performRelayJSON(
+			t, handler, http.MethodGet, controlPath+"/messages?limit=1", nil,
+			secondControlCredential.Token, secondControlCredential.MemberID,
+		),
+		performRelayJSON(
+			t, handler, http.MethodGet, basePath+"/messages?limit=1", nil,
+			secondSpaceCredential.Token, secondSpaceCredential.MemberID,
+		),
+		performRelayBlob(
+			t, handler, http.MethodGet, basePath+"/blobs/"+blobID, nil,
+			secondSpaceCredential.Token, secondSpaceCredential.MemberID, "",
+		),
+	} {
+		requireStatus(t, denied, http.StatusForbidden)
+		_ = denied.Body.Close()
+	}
+	initialStillActive := performRelayJSON(
+		t, handler, http.MethodGet, basePath+"/messages?limit=1", nil,
+		publisher.Token, publisher.MemberID,
+	)
+	requireStatus(t, initialStillActive, http.StatusOK)
+	_ = initialStillActive.Body.Close()
+
+	statusResponse := performRelayJSON(
+		t, handler, http.MethodGet,
+		"/v1/device-sync/principals/"+principalID.String()+"/status", nil,
+		relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, statusResponse, http.StatusOK)
+	var status devicesync.PrincipalStatus
+	if err := json.NewDecoder(statusResponse.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	_ = statusResponse.Body.Close()
+	if !principalDeviceIsRevoked(status, secondDeviceID) ||
+		!spaceDeviceIsRevoked(status, spaceID, secondDeviceID) {
+		t.Fatalf("revocation is missing from content-blind status: %+v", status)
+	}
+
+	revokedAgain := revocation
+	revokedAgain.RetryID = uuid.New()
+	collision := performRelayJSON(
+		t, handler, http.MethodPost, revocationPath, revokedAgain,
+		relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, collision, http.StatusConflict)
+	_ = collision.Body.Close()
+	lastDevice := devicesync.DeviceRevocation{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: principalID, DeviceID: initialDeviceID,
+	}
+	lastDeviceResponse := performRelayJSON(
+		t, handler, http.MethodPost,
+		"/v1/device-sync/principals/"+principalID.String()+"/devices/"+
+			initialDeviceID.String()+"/revocation",
+		lastDevice, relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, lastDeviceResponse, http.StatusConflict)
+	_ = lastDeviceResponse.Body.Close()
+}
+
+func principalDeviceIsRevoked(status devicesync.PrincipalStatus, deviceID uuid.UUID) bool {
+	for _, device := range status.Devices {
+		if device.DeviceID == deviceID {
+			return device.RevokedAtMilliseconds != nil
+		}
+	}
+	return false
+}
+
+func spaceDeviceIsRevoked(status devicesync.PrincipalStatus, spaceID, deviceID uuid.UUID) bool {
+	for _, space := range status.Spaces {
+		if space.SpaceID != spaceID {
+			continue
+		}
+		for _, device := range space.Devices {
+			if device.DeviceID == deviceID {
+				return device.RevokedAtMilliseconds != nil
+			}
+		}
+	}
+	return false
 }
 
 func admitDeviceToTestSpace(

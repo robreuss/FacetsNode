@@ -80,7 +80,7 @@ func TestPostgresDeviceSyncSpaceAndRelayDomainCommitAtomically(t *testing.T) {
 	}
 
 	additionalDeviceID := uuid.New()
-	postgresEnrollDeviceSyncDevice(
+	additionalControlCredential, additionalControlSubscriptionID := postgresEnrollDeviceSyncDevice(
 		t, ctx, store, authority, additionalDeviceID, now+1,
 	)
 	spaceAdmissionCredential := relay.AdmissionCredential{
@@ -94,7 +94,7 @@ func TestPostgresDeviceSyncSpaceAndRelayDomainCommitAtomically(t *testing.T) {
 	spaceAdmission := devicesync.SpaceDeviceAdmission{
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
 		PrincipalID: principalID, SpaceID: spaceID, DeviceID: additionalDeviceID,
-		SubscriptionID: space.Domain.Subscription.SubscriptionID,
+		SubscriptionID: uuid.New(),
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: principalID,
 			DomainID:            spaceAdmissionCredential.DomainID,
@@ -211,6 +211,75 @@ func TestPostgresDeviceSyncSpaceAndRelayDomainCommitAtomically(t *testing.T) {
 	if bindingCount != 0 {
 		t.Fatalf("orphan relay domain acquired %d Device Sync bindings", bindingCount)
 	}
+
+	revocation := devicesync.DeviceRevocation{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: principalID, DeviceID: additionalDeviceID,
+	}
+	revoked, err := store.RevokeDevice(
+		ctx, authority.TenantCredential, revocation, now+4,
+	)
+	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted ||
+		len(revoked.Memberships) != 2 {
+		t.Fatalf("revoke Device Sync device=%+v err=%v", revoked, err)
+	}
+	revocationRetry, err := store.RevokeDevice(
+		ctx, authority.TenantCredential, revocation, now+4,
+	)
+	if err != nil || revocationRetry.Acceptance != relay.AcceptanceDuplicate ||
+		len(revocationRetry.Memberships) != 2 {
+		t.Fatalf("retry Device Sync device revocation=%+v err=%v", revocationRetry, err)
+	}
+	var productRevocationCount, relayRevocationCount, revokedSubscriptionCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM device_sync_device_revocations
+			 WHERE principal_id=$1 AND device_id=$2),
+			(SELECT count(*) FROM relay_tenant_membership_revocation_items
+			 WHERE tenant_id=$1 AND retry_id=$3),
+			(SELECT count(*) FROM relay_subscriptions
+			 WHERE tenant_id=$1 AND subscription_id=ANY($4) AND status='revoked')
+	`, principalID, additionalDeviceID, revocation.RetryID,
+		[]uuid.UUID{additionalControlSubscriptionID, spaceAdmission.SubscriptionID},
+	).Scan(&productRevocationCount, &relayRevocationCount, &revokedSubscriptionCount); err != nil {
+		t.Fatal(err)
+	}
+	if productRevocationCount != 1 || relayRevocationCount != 2 || revokedSubscriptionCount != 2 {
+		t.Fatalf(
+			"product revocations=%d relay revocations=%d revoked subscriptions=%d",
+			productRevocationCount, relayRevocationCount, revokedSubscriptionCount,
+		)
+	}
+	if _, err := store.Fetch(ctx, additionalControlCredential, 0, 1, now+4); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("revoked control member fetch error=%v", err)
+	}
+	if _, err := store.Fetch(ctx, spaceMemberCredential, 0, 1, now+4); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("revoked Space member fetch error=%v", err)
+	}
+	status, err := store.GetPrincipalStatus(ctx, authority.TenantCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !postgresPrincipalDeviceRevoked(status, additionalDeviceID) ||
+		!postgresSpaceDeviceRevoked(status, spaceID, additionalDeviceID) {
+		t.Fatalf("revoked device is missing from content-blind status: %+v", status)
+	}
+	changedRetry := revocation
+	changedRetry.RetryID = uuid.New()
+	if _, err := store.RevokeDevice(
+		ctx, authority.TenantCredential, changedRetry, now+5,
+	); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceRevoked) {
+		t.Fatalf("changed device revocation retry error=%v", err)
+	}
+	lastDevice := devicesync.DeviceRevocation{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: principalID, DeviceID: initialDeviceID,
+	}
+	if _, err := store.RevokeDevice(
+		ctx, authority.TenantCredential, lastDevice, now+5,
+	); !devicesync.ErrorHasCode(err, devicesync.CodeLastDevice) {
+		t.Fatalf("last Device Sync device revocation error=%v", err)
+	}
 }
 
 type postgresDeviceSyncAuthority struct {
@@ -293,7 +362,7 @@ func postgresEnrollDeviceSyncDevice(
 	authority postgresDeviceSyncAuthority,
 	deviceID uuid.UUID,
 	now int64,
-) {
+) (relay.Credential, uuid.UUID) {
 	t.Helper()
 	credential := relay.AdmissionCredential{
 		TenantID:    authority.TenantCredential.TenantID,
@@ -304,10 +373,11 @@ func postgresEnrollDeviceSyncDevice(
 	if err != nil {
 		t.Fatal(err)
 	}
+	controlSubscriptionID := uuid.New()
 	admission := devicesync.DeviceAdmission{
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
 		PrincipalID: credential.TenantID, DeviceID: deviceID,
-		SubscriptionID: authority.ControlDomain.Subscription.SubscriptionID,
+		SubscriptionID: controlSubscriptionID,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: credential.TenantID,
 			DomainID: credential.DomainID, AdmissionID: credential.AdmissionID,
@@ -353,6 +423,34 @@ func postgresEnrollDeviceSyncDevice(
 	if err != nil || claimed.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("claim device admission=%+v err=%v", claimed, err)
 	}
+	return memberCredential, controlSubscriptionID
+}
+
+func postgresPrincipalDeviceRevoked(status devicesync.PrincipalStatus, deviceID uuid.UUID) bool {
+	for _, device := range status.Devices {
+		if device.DeviceID == deviceID {
+			return device.RevokedAtMilliseconds != nil
+		}
+	}
+	return false
+}
+
+func postgresSpaceDeviceRevoked(
+	status devicesync.PrincipalStatus,
+	spaceID uuid.UUID,
+	deviceID uuid.UUID,
+) bool {
+	for _, space := range status.Spaces {
+		if space.SpaceID != spaceID {
+			continue
+		}
+		for _, device := range space.Devices {
+			if device.DeviceID == deviceID {
+				return device.RevokedAtMilliseconds != nil
+			}
+		}
+	}
+	return false
 }
 
 func postgresDeviceSyncDomain(

@@ -338,6 +338,34 @@ type SpaceDeviceAdmissionClaimResult struct {
 	Member      relay.SubscriptionMemberRegistration `json:"member"`
 }
 
+// DeviceRevocation permanently fences one enrolled device from the principal
+// control channel and every opaque Space domain to which it was admitted. The
+// account credential authorizes the product operation; content keys never
+// enter the service.
+type DeviceRevocation struct {
+	Version     int       `json:"version"`
+	RetryID     uuid.UUID `json:"retryID"`
+	PrincipalID uuid.UUID `json:"principalID"`
+	DeviceID    uuid.UUID `json:"deviceID"`
+}
+
+func (r DeviceRevocation) Validate() error {
+	if r.Version != SchemaVersion || r.RetryID == uuid.Nil ||
+		r.PrincipalID == uuid.Nil || r.DeviceID == uuid.Nil {
+		return NewProtocolError(CodeInvalidPrincipal, "device revocation fields are invalid")
+	}
+	return nil
+}
+
+type DeviceRevocationResult struct {
+	Acceptance            relay.Acceptance                       `json:"acceptance"`
+	RetryID               uuid.UUID                              `json:"retryID"`
+	PrincipalID           uuid.UUID                              `json:"principalID"`
+	DeviceID              uuid.UUID                              `json:"deviceID"`
+	RevokedAtMilliseconds int64                                  `json:"revokedAtMilliseconds"`
+	Memberships           []relay.TenantMembershipRevocationItem `json:"memberships"`
+}
+
 // PrincipalStatus is a content-blind inventory of one Device Sync principal's
 // transport registrations. Space names, content keys, FEF graphs, and payload
 // metadata never enter this status surface.

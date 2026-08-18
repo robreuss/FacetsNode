@@ -21,7 +21,10 @@ device, or Space semantics and never receives a domain content key. The
 Device Sync executable additionally exposes the first product-level account
 bootstrap boundary: an operator-issued, one-time admission atomically creates
 an isolated Device Sync principal, relay tenant, protected control domain, and
-initial device. Shared Spaces membership remains a later implementation gate.
+initial device. It can enroll additional devices, provision opaque per-Space
+domains, report a content-blind transport inventory, and atomically revoke a
+device from its control and Space memberships. Shared Spaces membership remains
+a later implementation gate.
 
 ## Implemented shared foundation
 

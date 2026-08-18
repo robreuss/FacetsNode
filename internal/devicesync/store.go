@@ -15,4 +15,5 @@ type Store interface {
 	CreateSpaceDeviceAdmission(context.Context, relay.AdministrationCredential, SpaceDeviceAdmission, int64) (SpaceDeviceAdmissionCreateResult, error)
 	ClaimSpaceDeviceAdmission(context.Context, SpaceDeviceAdmissionCredential, SpaceDeviceAdmissionClaim, int64) (SpaceDeviceAdmissionClaimResult, error)
 	GetPrincipalStatus(context.Context, relay.TenantCredential) (PrincipalStatus, error)
+	RevokeDevice(context.Context, relay.TenantCredential, DeviceRevocation, int64) (DeviceRevocationResult, error)
 }

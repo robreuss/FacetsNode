@@ -18,6 +18,9 @@ const (
 	CodeAdmissionCollision ErrorCode = "device_sync_admission_collision"
 	CodePrincipalCollision ErrorCode = "device_sync_principal_collision"
 	CodeDeviceCollision    ErrorCode = "device_sync_device_collision"
+	CodeDeviceNotFound     ErrorCode = "device_sync_device_not_found"
+	CodeDeviceRevoked      ErrorCode = "device_sync_device_revoked"
+	CodeLastDevice         ErrorCode = "device_sync_last_device"
 	CodeInvalidSpace       ErrorCode = "invalid_device_sync_space"
 	CodeSpaceCollision     ErrorCode = "device_sync_space_collision"
 )

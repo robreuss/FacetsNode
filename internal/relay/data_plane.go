@@ -139,6 +139,49 @@ type SubscriptionStatusChangeResponse struct {
 	Subscription Subscription `json:"subscription"`
 }
 
+// TenantMembershipRevocation is an internal, tenant-authorized operation used
+// by products such as Device Sync to fence one logical client from every relay
+// domain it can reach. It intentionally carries only opaque relay identifiers.
+// The operation is atomic: every listed member and subscription is revoked, or
+// none of them are.
+type TenantMembershipRevocation struct {
+	Version               int                              `json:"version"`
+	RetryID               uuid.UUID                        `json:"retryID"`
+	RevokedAtMilliseconds int64                            `json:"revokedAtMilliseconds"`
+	Memberships           []TenantMembershipRevocationItem `json:"memberships"`
+}
+
+type TenantMembershipRevocationItem struct {
+	DomainID       uuid.UUID `json:"domainID"`
+	SubscriptionID uuid.UUID `json:"subscriptionID"`
+	MemberID       uuid.UUID `json:"memberID"`
+}
+
+func (r TenantMembershipRevocation) Validate() error {
+	if r.Version != SchemaVersion || r.RetryID == uuid.Nil ||
+		r.RevokedAtMilliseconds < 0 || len(r.Memberships) == 0 {
+		return protocolError(CodeInvalidMember, "tenant membership revocation is invalid")
+	}
+	seenDomains := make(map[uuid.UUID]struct{}, len(r.Memberships))
+	for _, item := range r.Memberships {
+		if item.DomainID == uuid.Nil || item.SubscriptionID == uuid.Nil || item.MemberID == uuid.Nil {
+			return protocolError(CodeInvalidMember, "tenant membership revocation target is invalid")
+		}
+		if _, duplicate := seenDomains[item.DomainID]; duplicate {
+			return protocolError(CodeInvalidMember, "tenant membership revocation repeats a domain")
+		}
+		seenDomains[item.DomainID] = struct{}{}
+	}
+	return nil
+}
+
+type TenantMembershipRevocationResult struct {
+	Acceptance            Acceptance                       `json:"acceptance"`
+	RetryID               uuid.UUID                        `json:"retryID"`
+	RevokedAtMilliseconds int64                            `json:"revokedAtMilliseconds"`
+	Memberships           []TenantMembershipRevocationItem `json:"memberships"`
+}
+
 type DomainQuota struct {
 	MaximumMessageCount     int   `json:"maximumMessageCount"`
 	MaximumMessageByteCount int64 `json:"maximumMessageByteCount"`

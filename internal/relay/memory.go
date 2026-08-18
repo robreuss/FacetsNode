@@ -71,8 +71,9 @@ type memorySubscriptionChange struct {
 }
 
 type memoryTenant struct {
-	registration TenantRegistration
-	rotations    map[uuid.UUID]memoryTenantRotation
+	registration          TenantRegistration
+	rotations             map[uuid.UUID]memoryTenantRotation
+	membershipRevocations map[uuid.UUID]TenantMembershipRevocation
 }
 
 type memoryTenantRotation struct {
@@ -156,7 +157,8 @@ func (s *MemoryStore) CreateDomain(
 				MaximumAggregateBlobCount:        DefaultMaximumBlobCountPerTenant,
 				MaximumAggregateBlobByteCount:    DefaultMaximumBlobBytesPerTenant,
 			},
-			rotations: make(map[uuid.UUID]memoryTenantRotation),
+			rotations:             make(map[uuid.UUID]memoryTenantRotation),
+			membershipRevocations: make(map[uuid.UUID]TenantMembershipRevocation),
 		}
 	}
 	s.createDomainLocked(provisioning)
@@ -193,8 +195,9 @@ func (s *MemoryStore) ProvisionTenant(
 		return TenantProvisioningResult{}, protocolError(CodeTenantCollision, "tenant ID or retry ID was reused")
 	}
 	s.tenants[tenant.TenantID] = &memoryTenant{
-		registration: tenant,
-		rotations:    make(map[uuid.UUID]memoryTenantRotation),
+		registration:          tenant,
+		rotations:             make(map[uuid.UUID]memoryTenantRotation),
+		membershipRevocations: make(map[uuid.UUID]TenantMembershipRevocation),
 	}
 	s.createDomainLocked(initialDomain)
 	return tenantProvisioningResult(tenant, initialDomain, AcceptanceAccepted), nil
@@ -1137,6 +1140,93 @@ func (s *MemoryStore) ChangeSubscriptionStatus(
 	return SubscriptionStatusChangeResponse{
 		Acceptance: AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription,
 	}, nil
+}
+
+func (s *MemoryStore) RevokeTenantMemberships(
+	_ context.Context,
+	credential TenantCredential,
+	revocation TenantMembershipRevocation,
+) (TenantMembershipRevocationResult, error) {
+	if err := revocation.Validate(); err != nil {
+		return TenantMembershipRevocationResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tenant := s.tenants[credential.TenantID]
+	if tenant == nil {
+		return TenantMembershipRevocationResult{}, protocolError(CodeTenantNotFound, "tenant was not found")
+	}
+	if err := tenant.registration.Authorize(credential); err != nil {
+		return TenantMembershipRevocationResult{}, err
+	}
+	if existing, ok := tenant.membershipRevocations[revocation.RetryID]; ok {
+		if tenantMembershipRevocationEqual(existing, revocation) {
+			return TenantMembershipRevocationResult{
+				Acceptance: AcceptanceDuplicate, RetryID: existing.RetryID,
+				RevokedAtMilliseconds: existing.RevokedAtMilliseconds,
+				Memberships:           append([]TenantMembershipRevocationItem(nil), existing.Memberships...),
+			}, nil
+		}
+		return TenantMembershipRevocationResult{}, protocolError(CodeMemberCollision, "tenant membership revocation retry ID was reused")
+	}
+	// Validate the complete target set before changing any domain.
+	for _, target := range revocation.Memberships {
+		domain := s.domains[domainKey{credential.TenantID, target.DomainID}]
+		if domain == nil {
+			return TenantMembershipRevocationResult{}, protocolError(CodeDomainNotFound, "revocation domain was not found")
+		}
+		member, memberFound := domain.members[target.MemberID]
+		subscription, subscriptionFound := domain.subscriptions[target.SubscriptionID]
+		if !memberFound || domain.memberSubscriptions[target.MemberID] != target.SubscriptionID {
+			return TenantMembershipRevocationResult{}, protocolError(CodeMemberNotFound, "revocation member was not found")
+		}
+		if !subscriptionFound || subscription.Status == SubscriptionRevoked {
+			return TenantMembershipRevocationResult{}, protocolError(CodeSubscriptionNotFound, "active revocation subscription was not found")
+		}
+		if member.RevokedAtMilliseconds != nil {
+			return TenantMembershipRevocationResult{}, protocolError(CodeMemberRevoked, "revocation member was already revoked")
+		}
+		if revocation.RevokedAtMilliseconds < member.CreatedAtMilliseconds ||
+			revocation.RevokedAtMilliseconds < subscription.CreatedAtMilliseconds ||
+			revocation.RevokedAtMilliseconds < subscription.UpdatedAtMilliseconds {
+			return TenantMembershipRevocationResult{}, protocolError(CodeInvalidMember, "tenant membership revocation is out of order")
+		}
+	}
+	for _, target := range revocation.Memberships {
+		domain := s.domains[domainKey{credential.TenantID, target.DomainID}]
+		member := domain.members[target.MemberID]
+		member.RevokedAtMilliseconds = &revocation.RevokedAtMilliseconds
+		domain.members[target.MemberID] = member
+		subscription := domain.subscriptions[target.SubscriptionID]
+		subscription.Status = SubscriptionRevoked
+		subscription.StartCursor = nil
+		subscription.UpdatedAtMilliseconds = revocation.RevokedAtMilliseconds
+		domain.subscriptions[target.SubscriptionID] = subscription
+	}
+	tenant.membershipRevocations[revocation.RetryID] = TenantMembershipRevocation{
+		Version: revocation.Version, RetryID: revocation.RetryID,
+		RevokedAtMilliseconds: revocation.RevokedAtMilliseconds,
+		Memberships:           append([]TenantMembershipRevocationItem(nil), revocation.Memberships...),
+	}
+	return TenantMembershipRevocationResult{
+		Acceptance: AcceptanceAccepted, RetryID: revocation.RetryID,
+		RevokedAtMilliseconds: revocation.RevokedAtMilliseconds,
+		Memberships:           append([]TenantMembershipRevocationItem(nil), revocation.Memberships...),
+	}, nil
+}
+
+func tenantMembershipRevocationEqual(left, right TenantMembershipRevocation) bool {
+	if left.Version != right.Version || left.RetryID != right.RetryID ||
+		left.RevokedAtMilliseconds != right.RevokedAtMilliseconds ||
+		len(left.Memberships) != len(right.Memberships) {
+		return false
+	}
+	for index := range left.Memberships {
+		if left.Memberships[index] != right.Memberships[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *MemoryStore) GetTenantStatus(_ context.Context, credential TenantCredential) (TenantStatus, error) {

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -10,6 +11,183 @@ import (
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
+
+func (s *RelayStore) RevokeDevice(
+	ctx context.Context,
+	credential relay.TenantCredential,
+	revocation devicesync.DeviceRevocation,
+	nowMilliseconds int64,
+) (devicesync.DeviceRevocationResult, error) {
+	if err := revocation.Validate(); err != nil {
+		return devicesync.DeviceRevocationResult{}, err
+	}
+	if credential.TenantID != revocation.PrincipalID || nowMilliseconds < 0 {
+		return devicesync.DeviceRevocationResult{}, devicesync.NewProtocolError(
+			devicesync.CodeWrongScope, "device revocation belongs to another principal",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("begin Device Sync device revocation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tenant, err := loadRelayTenant(ctx, tx, revocation.PrincipalID, "FOR UPDATE")
+	if err != nil {
+		return devicesync.DeviceRevocationResult{}, err
+	}
+	if err := tenant.Authorize(credential); err != nil {
+		return devicesync.DeviceRevocationResult{}, err
+	}
+	if _, err := loadDeviceSyncPrincipalAuthority(ctx, tx, revocation.PrincipalID, "FOR UPDATE"); err != nil {
+		return devicesync.DeviceRevocationResult{}, err
+	}
+
+	var existingVersion int
+	var existingDeviceID uuid.UUID
+	var existingRevokedAt int64
+	err = tx.QueryRow(ctx, `
+		SELECT version,device_id,revoked_at_milliseconds
+		FROM device_sync_device_revocations
+		WHERE principal_id=$1 AND retry_id=$2
+		FOR UPDATE
+	`, revocation.PrincipalID, revocation.RetryID).Scan(
+		&existingVersion, &existingDeviceID, &existingRevokedAt,
+	)
+	if err == nil {
+		if existingVersion != revocation.Version || existingDeviceID != revocation.DeviceID {
+			return devicesync.DeviceRevocationResult{}, devicesync.NewProtocolError(
+				devicesync.CodeDeviceCollision, "device revocation retry ID was reused",
+			)
+		}
+		memberships, err := loadTenantMembershipRevocationItems(
+			ctx, tx, revocation.PrincipalID, revocation.RetryID,
+		)
+		if err != nil {
+			return devicesync.DeviceRevocationResult{}, err
+		}
+		return devicesync.DeviceRevocationResult{
+			Acceptance: relay.AcceptanceDuplicate, RetryID: revocation.RetryID,
+			PrincipalID: revocation.PrincipalID, DeviceID: revocation.DeviceID,
+			RevokedAtMilliseconds: existingRevokedAt, Memberships: memberships,
+		}, nil
+	}
+	if err != pgx.ErrNoRows {
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("load Device Sync device revocation: %w", err)
+	}
+
+	var priorRetryID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT retry_id
+		FROM device_sync_device_revocations
+		WHERE principal_id=$1 AND device_id=$2
+		FOR UPDATE
+	`, revocation.PrincipalID, revocation.DeviceID).Scan(&priorRetryID)
+	if err == nil {
+		return devicesync.DeviceRevocationResult{}, devicesync.NewProtocolError(
+			devicesync.CodeDeviceRevoked, "device is already revoked",
+		)
+	}
+	if err != pgx.ErrNoRows {
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("check Device Sync device revocation: %w", err)
+	}
+
+	var controlTarget relay.TenantMembershipRevocationItem
+	err = tx.QueryRow(ctx, `
+		SELECT d.control_domain_id,m.subscription_id,d.control_member_id
+		FROM device_sync_devices d
+		JOIN relay_members m
+		  ON m.tenant_id=d.tenant_id AND m.domain_id=d.control_domain_id
+		 AND m.member_id=d.control_member_id
+		WHERE d.principal_id=$1 AND d.device_id=$2
+		  AND m.revoked_at_milliseconds IS NULL
+		FOR UPDATE OF d,m
+	`, revocation.PrincipalID, revocation.DeviceID).Scan(
+		&controlTarget.DomainID, &controlTarget.SubscriptionID, &controlTarget.MemberID,
+	)
+	if err == pgx.ErrNoRows {
+		return devicesync.DeviceRevocationResult{}, devicesync.NewProtocolError(
+			devicesync.CodeDeviceNotFound, "device is not enrolled",
+		)
+	}
+	if err != nil {
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("load Device Sync device revocation target: %w", err)
+	}
+
+	var activeDeviceCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM device_sync_devices d
+		JOIN relay_members m
+		  ON m.tenant_id=d.tenant_id AND m.domain_id=d.control_domain_id
+		 AND m.member_id=d.control_member_id
+		WHERE d.principal_id=$1 AND m.revoked_at_milliseconds IS NULL
+	`, revocation.PrincipalID).Scan(&activeDeviceCount); err != nil {
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("count active Device Sync devices: %w", err)
+	}
+	if activeDeviceCount <= 1 {
+		return devicesync.DeviceRevocationResult{}, devicesync.NewProtocolError(
+			devicesync.CodeLastDevice, "last active device cannot be revoked without key recovery",
+		)
+	}
+
+	targets := []relay.TenantMembershipRevocationItem{controlTarget}
+	rows, err := tx.Query(ctx, `
+		SELECT sd.domain_id,sd.subscription_id,sd.member_id
+		FROM device_sync_space_devices sd
+		JOIN relay_members m
+		  ON m.tenant_id=sd.principal_id AND m.domain_id=sd.domain_id
+		 AND m.member_id=sd.member_id
+		WHERE sd.principal_id=$1 AND sd.device_id=$2
+		  AND m.revoked_at_milliseconds IS NULL
+		ORDER BY sd.domain_id
+		FOR UPDATE OF sd,m
+	`, revocation.PrincipalID, revocation.DeviceID)
+	if err != nil {
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("query Device Sync Space revocation targets: %w", err)
+	}
+	for rows.Next() {
+		var target relay.TenantMembershipRevocationItem
+		if err := rows.Scan(&target.DomainID, &target.SubscriptionID, &target.MemberID); err != nil {
+			rows.Close()
+			return devicesync.DeviceRevocationResult{}, fmt.Errorf("scan Device Sync Space revocation target: %w", err)
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("iterate Device Sync Space revocation targets: %w", err)
+	}
+	rows.Close()
+	sort.Slice(targets, func(left, right int) bool {
+		return targets[left].DomainID.String() < targets[right].DomainID.String()
+	})
+
+	relayResult, err := s.revokeTenantMembershipsTx(ctx, tx, credential, relay.TenantMembershipRevocation{
+		Version: relay.SchemaVersion, RetryID: revocation.RetryID,
+		RevokedAtMilliseconds: nowMilliseconds, Memberships: targets,
+	})
+	if err != nil {
+		return devicesync.DeviceRevocationResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO device_sync_device_revocations (
+			principal_id,retry_id,device_id,version,revoked_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5)
+	`, revocation.PrincipalID, revocation.RetryID, revocation.DeviceID,
+		revocation.Version, nowMilliseconds); err != nil {
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("insert Device Sync device revocation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return devicesync.DeviceRevocationResult{}, fmt.Errorf("commit Device Sync device revocation: %w", err)
+	}
+	return devicesync.DeviceRevocationResult{
+		Acceptance: relayResult.Acceptance, RetryID: revocation.RetryID,
+		PrincipalID: revocation.PrincipalID, DeviceID: revocation.DeviceID,
+		RevokedAtMilliseconds: nowMilliseconds,
+		Memberships:           append([]relay.TenantMembershipRevocationItem(nil), relayResult.Memberships...),
+	}, nil
+}
 
 func (s *RelayStore) GetPrincipalStatus(
 	ctx context.Context,
@@ -541,8 +719,13 @@ func (s *RelayStore) ProvisionSpace(
 	var deviceExists bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS(
-			SELECT 1 FROM device_sync_devices
-			WHERE principal_id=$1 AND device_id=$2
+			SELECT 1
+			FROM device_sync_devices d
+			JOIN relay_members m
+			  ON m.tenant_id=d.tenant_id AND m.domain_id=d.control_domain_id
+			 AND m.member_id=d.control_member_id
+			WHERE d.principal_id=$1 AND d.device_id=$2
+			  AND m.revoked_at_milliseconds IS NULL
 		)
 	`, provisioning.PrincipalID, provisioning.InitialDeviceID).Scan(&deviceExists); err != nil {
 		return devicesync.SpaceProvisioningResult{}, fmt.Errorf("check initial Device Sync Space device: %w", err)
@@ -634,7 +817,7 @@ func loadDeviceSyncPrincipalAuthority(
 		JOIN relay_subscriptions s
 		  ON s.tenant_id=m.tenant_id AND s.domain_id=m.domain_id
 		 AND s.subscription_id=m.subscription_id
-		WHERE p.principal_id=$1 AND s.status='active'`
+		WHERE p.principal_id=$1`
 	if lock != "" {
 		query += " " + lock + " OF p"
 	}
@@ -758,8 +941,13 @@ func (s *RelayStore) CreateSpaceDeviceAdmission(
 	var enrolled bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS(
-			SELECT 1 FROM device_sync_devices
-			WHERE principal_id=$1 AND device_id=$2
+			SELECT 1
+			FROM device_sync_devices d
+			JOIN relay_members m
+			  ON m.tenant_id=d.tenant_id AND m.domain_id=d.control_domain_id
+			 AND m.member_id=d.control_member_id
+			WHERE d.principal_id=$1 AND d.device_id=$2
+			  AND m.revoked_at_milliseconds IS NULL
 		)
 	`, admission.PrincipalID, admission.DeviceID).Scan(&enrolled); err != nil {
 		return devicesync.SpaceDeviceAdmissionCreateResult{}, fmt.Errorf("check enrolled Device Sync Space device: %w", err)

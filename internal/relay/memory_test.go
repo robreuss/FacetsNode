@@ -162,6 +162,141 @@ func TestMemoryStoreDeliversOncePerDomainWithPerSubscriptionFacts(t *testing.T) 
 	}
 }
 
+func TestMemoryStoreRevokesTenantMembershipsAtomically(t *testing.T) {
+	ctx := context.Background()
+	tenantCredential := relay.TenantCredential{TenantID: uuid.New(), Token: token(201)}
+	tenantDigest, err := relay.TenantAuthorizationDigest(tenantCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberID := uuid.New()
+	first, firstCredential := tenantDomainProvisioning(
+		t,
+		tenantCredential.TenantID,
+		uuid.New(),
+		uuid.New(),
+		memberID,
+		202,
+		203,
+	)
+	second, secondCredential := tenantDomainProvisioning(
+		t,
+		tenantCredential.TenantID,
+		uuid.New(),
+		uuid.New(),
+		memberID,
+		204,
+		205,
+	)
+	store := relay.NewMemoryStore()
+	tenant := relay.TenantRegistration{
+		Version:                          relay.SchemaVersion,
+		RetryID:                          uuid.New(),
+		TenantID:                         tenantCredential.TenantID,
+		AuthorizationDigest:              tenantDigest,
+		CreatedAtMilliseconds:            1_000,
+		MaximumDomainCount:               4,
+		MaximumAggregateMessageCount:     100,
+		MaximumAggregateMessageByteCount: 1_024,
+		MaximumAggregateBlobCount:        100,
+		MaximumAggregateBlobByteCount:    1_024,
+	}
+	if result, provisionErr := store.ProvisionTenant(ctx, tenant, first); provisionErr != nil ||
+		result.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("provision tenant result=%+v err=%v", result, provisionErr)
+	}
+	if result, provisionErr := store.ProvisionDomain(ctx, tenantCredential, second, 1_000); provisionErr != nil ||
+		result.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("provision second domain result=%+v err=%v", result, provisionErr)
+	}
+
+	revocation := relay.TenantMembershipRevocation{
+		Version:               relay.SchemaVersion,
+		RetryID:               uuid.New(),
+		RevokedAtMilliseconds: 1_500,
+		Memberships: []relay.TenantMembershipRevocationItem{
+			{
+				DomainID:       first.Registration.DomainID,
+				SubscriptionID: first.Subscription.SubscriptionID,
+				MemberID:       memberID,
+			},
+			{
+				DomainID:       second.Registration.DomainID,
+				SubscriptionID: uuid.New(),
+				MemberID:       memberID,
+			},
+		},
+	}
+	if _, revokeErr := store.RevokeTenantMemberships(ctx, tenantCredential, revocation); !relay.ErrorHasCode(revokeErr, relay.CodeMemberNotFound) {
+		t.Fatalf("partial revocation should fail before mutation err=%v", revokeErr)
+	}
+	if _, fetchErr := store.Fetch(ctx, firstCredential, 0, 1, 1_500); fetchErr != nil {
+		t.Fatalf("first membership was changed by failed atomic revocation: %v", fetchErr)
+	}
+	if _, fetchErr := store.Fetch(ctx, secondCredential, 0, 1, 1_500); fetchErr != nil {
+		t.Fatalf("second membership was changed by failed atomic revocation: %v", fetchErr)
+	}
+
+	revocation.Memberships[1].SubscriptionID = second.Subscription.SubscriptionID
+	accepted, err := store.RevokeTenantMemberships(ctx, tenantCredential, revocation)
+	if err != nil || accepted.Acceptance != relay.AcceptanceAccepted || len(accepted.Memberships) != 2 {
+		t.Fatalf("accepted revocation=%+v err=%v", accepted, err)
+	}
+	if _, fetchErr := store.Fetch(ctx, firstCredential, 0, 1, 1_500); !relay.ErrorHasCode(fetchErr, relay.CodeMemberRevoked) {
+		t.Fatalf("first membership remained active err=%v", fetchErr)
+	}
+	if _, fetchErr := store.Fetch(ctx, secondCredential, 0, 1, 1_500); !relay.ErrorHasCode(fetchErr, relay.CodeMemberRevoked) {
+		t.Fatalf("second membership remained active err=%v", fetchErr)
+	}
+	retry, err := store.RevokeTenantMemberships(ctx, tenantCredential, revocation)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate || !reflect.DeepEqual(retry.Memberships, accepted.Memberships) {
+		t.Fatalf("revocation retry=%+v err=%v", retry, err)
+	}
+}
+
+func tenantDomainProvisioning(
+	t *testing.T,
+	tenantID uuid.UUID,
+	domainID uuid.UUID,
+	subscriptionID uuid.UUID,
+	memberID uuid.UUID,
+	adminSeed byte,
+	memberSeed byte,
+) (relay.DomainProvisioning, relay.Credential) {
+	t.Helper()
+	admin := relay.AdministrationCredential{TenantID: tenantID, DomainID: domainID, Token: token(adminSeed)}
+	adminDigest, err := relay.AdministrationDigest(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := relay.Credential{TenantID: tenantID, DomainID: domainID, MemberID: memberID, Token: token(memberSeed)}
+	memberDigest, err := relay.AuthorizationDigest(member)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relay.DomainProvisioning{
+		Version: relay.SchemaVersion,
+		RetryID: uuid.New(),
+		Registration: relay.DomainRegistration{
+			Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID,
+			AdministrationDigest: adminDigest, CreatedAtMilliseconds: 1_000,
+			MaximumMessageCount: 100, MaximumMessageByteCount: 1_024,
+			MaximumBlobCount: 100, MaximumBlobByteCount: 1_024,
+		},
+		Subscription: relay.Subscription{
+			Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID,
+			SubscriptionID: subscriptionID, Status: relay.SubscriptionActive,
+			CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
+		},
+		InitialMember: relay.MemberRegistration{
+			Version: relay.SchemaVersion, TenantID: tenantID, DomainID: domainID,
+			MemberID: memberID, AuthorizationDigest: memberDigest,
+			Capabilities:          []relay.Capability{relay.CapabilityFetchMessage},
+			CreatedAtMilliseconds: 1_000,
+		},
+	}, member
+}
+
 func TestMemoryStoreResumableUploadReservesQuotaAndAllowsSameSubscriptionAgent(t *testing.T) {
 	ctx := context.Background()
 	tenantID, domainID := uuid.New(), uuid.New()

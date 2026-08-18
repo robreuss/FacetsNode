@@ -77,6 +77,49 @@ func (s *Server) handleGetDeviceSyncPrincipalStatus(writer http.ResponseWriter, 
 	writeJSON(writer, http.StatusOK, status)
 }
 
+func (s *Server) handleRevokeDeviceSyncDevice(writer http.ResponseWriter, request *http.Request) {
+	principalID, err := parseUUID(request.PathValue("principalID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidPrincipal, err.Error()))
+		return
+	}
+	deviceID, err := parseUUID(request.PathValue("deviceID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidPrincipal, err.Error()))
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(
+			devicesync.CodeUnauthorized, "Device Sync principal credential is missing",
+		))
+		return
+	}
+	var revocation devicesync.DeviceRevocation
+	if err := readRelayJSON(writer, request, &revocation, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if revocation.PrincipalID != principalID || revocation.DeviceID != deviceID {
+		s.writeError(writer, devicesync.NewProtocolError(
+			devicesync.CodeWrongScope, "device revocation path and body differ",
+		))
+		return
+	}
+	result, err := s.deviceSyncStore.RevokeDevice(
+		request.Context(),
+		relay.TenantCredential{TenantID: principalID, Token: token},
+		revocation,
+		s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
 func (s *Server) handleCreateDeviceSyncAccountAdmission(writer http.ResponseWriter, request *http.Request) {
 	if err := s.authorizeOperator(request); err != nil {
 		s.writeError(writer, err)

@@ -673,6 +673,179 @@ func (s *RelayStore) GetSubscription(ctx context.Context, credential relay.Admin
 	return subscription, nil
 }
 
+func (s *RelayStore) RevokeTenantMemberships(
+	ctx context.Context,
+	credential relay.TenantCredential,
+	revocation relay.TenantMembershipRevocation,
+) (relay.TenantMembershipRevocationResult, error) {
+	if err := revocation.Validate(); err != nil {
+		return relay.TenantMembershipRevocationResult{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.TenantMembershipRevocationResult{}, fmt.Errorf("begin tenant membership revocation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.revokeTenantMembershipsTx(ctx, tx, credential, revocation)
+	if err != nil {
+		return relay.TenantMembershipRevocationResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.TenantMembershipRevocationResult{}, fmt.Errorf("commit tenant membership revocation: %w", err)
+	}
+	return result, nil
+}
+
+func (s *RelayStore) revokeTenantMembershipsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	credential relay.TenantCredential,
+	revocation relay.TenantMembershipRevocation,
+) (relay.TenantMembershipRevocationResult, error) {
+	tenant, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR UPDATE")
+	if err != nil {
+		return relay.TenantMembershipRevocationResult{}, err
+	}
+	if err := tenant.Authorize(credential); err != nil {
+		return relay.TenantMembershipRevocationResult{}, err
+	}
+	var storedVersion int
+	var storedRevokedAt int64
+	err = tx.QueryRow(ctx, `
+		SELECT version,revoked_at_milliseconds
+		FROM relay_tenant_membership_revocations
+		WHERE tenant_id=$1 AND retry_id=$2
+		FOR UPDATE
+	`, credential.TenantID, revocation.RetryID).Scan(&storedVersion, &storedRevokedAt)
+	if err == nil {
+		storedItems, loadErr := loadTenantMembershipRevocationItems(ctx, tx, credential.TenantID, revocation.RetryID)
+		if loadErr != nil {
+			return relay.TenantMembershipRevocationResult{}, loadErr
+		}
+		if storedVersion != revocation.Version || storedRevokedAt != revocation.RevokedAtMilliseconds ||
+			!tenantMembershipRevocationItemsEqual(storedItems, revocation.Memberships) {
+			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeMemberCollision, "tenant membership revocation retry ID was reused")
+		}
+		return relay.TenantMembershipRevocationResult{
+			Acceptance: relay.AcceptanceDuplicate, RetryID: revocation.RetryID,
+			RevokedAtMilliseconds: storedRevokedAt, Memberships: storedItems,
+		}, nil
+	}
+	if err != pgx.ErrNoRows {
+		return relay.TenantMembershipRevocationResult{}, err
+	}
+	// Lock and validate the complete target set before changing any row.
+	for _, target := range revocation.Memberships {
+		member, found, loadErr := loadRelayMember(ctx, tx, credential.TenantID, target.DomainID, target.MemberID, "FOR UPDATE")
+		if loadErr != nil {
+			return relay.TenantMembershipRevocationResult{}, loadErr
+		}
+		if !found {
+			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeMemberNotFound, "revocation member was not found")
+		}
+		var memberSubscriptionID uuid.UUID
+		if loadErr := tx.QueryRow(ctx, `
+			SELECT subscription_id FROM relay_members
+			WHERE tenant_id=$1 AND domain_id=$2 AND member_id=$3
+		`, credential.TenantID, target.DomainID, target.MemberID).Scan(&memberSubscriptionID); loadErr != nil {
+			return relay.TenantMembershipRevocationResult{}, loadErr
+		}
+		if memberSubscriptionID != target.SubscriptionID {
+			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeMemberNotFound, "revocation member does not own the subscription")
+		}
+		subscription, _, found, loadErr := loadSubscription(ctx, tx, credential.TenantID, target.DomainID, target.SubscriptionID, "FOR UPDATE")
+		if loadErr != nil {
+			return relay.TenantMembershipRevocationResult{}, loadErr
+		}
+		if !found || subscription.Status == relay.SubscriptionRevoked {
+			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeSubscriptionNotFound, "active revocation subscription was not found")
+		}
+		if member.RevokedAtMilliseconds != nil {
+			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeMemberRevoked, "revocation member was already revoked")
+		}
+		if revocation.RevokedAtMilliseconds < member.CreatedAtMilliseconds ||
+			revocation.RevokedAtMilliseconds < subscription.CreatedAtMilliseconds ||
+			revocation.RevokedAtMilliseconds < subscription.UpdatedAtMilliseconds {
+			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeInvalidMember, "tenant membership revocation is out of order")
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO relay_tenant_membership_revocations
+		(tenant_id,retry_id,version,revoked_at_milliseconds)
+		VALUES ($1,$2,$3,$4)
+	`, credential.TenantID, revocation.RetryID, revocation.Version, revocation.RevokedAtMilliseconds); err != nil {
+		return relay.TenantMembershipRevocationResult{}, fmt.Errorf("insert tenant membership revocation: %w", err)
+	}
+	for ordinal, target := range revocation.Memberships {
+		if _, err := tx.Exec(ctx, `
+			UPDATE relay_members SET revoked_at_milliseconds=$4,updated_at=now()
+			WHERE tenant_id=$1 AND domain_id=$2 AND member_id=$3
+		`, credential.TenantID, target.DomainID, target.MemberID, revocation.RevokedAtMilliseconds); err != nil {
+			return relay.TenantMembershipRevocationResult{}, fmt.Errorf("revoke tenant relay member: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE relay_subscriptions
+			SET status='revoked',start_sequence=NULL,updated_at_milliseconds=$4,updated_at=now()
+			WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3
+		`, credential.TenantID, target.DomainID, target.SubscriptionID, revocation.RevokedAtMilliseconds); err != nil {
+			return relay.TenantMembershipRevocationResult{}, fmt.Errorf("revoke tenant relay subscription: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO relay_tenant_membership_revocation_items
+			(tenant_id,retry_id,ordinal,domain_id,subscription_id,member_id)
+			VALUES ($1,$2,$3,$4,$5,$6)
+		`, credential.TenantID, revocation.RetryID, ordinal, target.DomainID, target.SubscriptionID, target.MemberID); err != nil {
+			return relay.TenantMembershipRevocationResult{}, fmt.Errorf("insert tenant membership revocation item: %w", err)
+		}
+		if err := insertDataPlaneAudit(ctx, tx, credential.TenantID, &target.DomainID, &target.SubscriptionID, &target.MemberID, "tenant_membership_revoked", revocation.RevokedAtMilliseconds); err != nil {
+			return relay.TenantMembershipRevocationResult{}, err
+		}
+	}
+	return relay.TenantMembershipRevocationResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: revocation.RetryID,
+		RevokedAtMilliseconds: revocation.RevokedAtMilliseconds,
+		Memberships:           append([]relay.TenantMembershipRevocationItem(nil), revocation.Memberships...),
+	}, nil
+}
+
+func loadTenantMembershipRevocationItems(
+	ctx context.Context,
+	q relayQuerier,
+	tenantID, retryID uuid.UUID,
+) ([]relay.TenantMembershipRevocationItem, error) {
+	rows, err := q.Query(ctx, `
+		SELECT domain_id,subscription_id,member_id
+		FROM relay_tenant_membership_revocation_items
+		WHERE tenant_id=$1 AND retry_id=$2
+		ORDER BY ordinal
+	`, tenantID, retryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]relay.TenantMembershipRevocationItem, 0)
+	for rows.Next() {
+		var item relay.TenantMembershipRevocationItem
+		if err := rows.Scan(&item.DomainID, &item.SubscriptionID, &item.MemberID); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func tenantMembershipRevocationItemsEqual(left, right []relay.TenantMembershipRevocationItem) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *RelayStore) ChangeSubscriptionStatus(ctx context.Context, credential relay.AdministrationCredential, subscriptionID uuid.UUID, request relay.SubscriptionStatusChangeRequest) (relay.SubscriptionStatusChangeResponse, error) {
 	if subscriptionID == uuid.Nil {
 		return relay.SubscriptionStatusChangeResponse{}, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription ID is invalid")

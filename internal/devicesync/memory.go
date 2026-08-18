@@ -45,6 +45,9 @@ type MemoryStore struct {
 	spaceRetry                map[uuid.UUID]uuid.UUID
 	spaceDeviceAdmissions     map[uuid.UUID]memorySpaceDeviceAdmission
 	spaceDeviceAdmissionRetry map[uuid.UUID]uuid.UUID
+	deviceRevocationRequests  map[uuid.UUID]DeviceRevocation
+	deviceRevocations         map[uuid.UUID]DeviceRevocationResult
+	revokedDevices            map[uuid.UUID]map[uuid.UUID]int64
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
@@ -57,6 +60,9 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		spaceRetry:                make(map[uuid.UUID]uuid.UUID),
 		spaceDeviceAdmissions:     make(map[uuid.UUID]memorySpaceDeviceAdmission),
 		spaceDeviceAdmissionRetry: make(map[uuid.UUID]uuid.UUID),
+		deviceRevocationRequests:  make(map[uuid.UUID]DeviceRevocation),
+		deviceRevocations:         make(map[uuid.UUID]DeviceRevocationResult),
+		revokedDevices:            make(map[uuid.UUID]map[uuid.UUID]int64),
 	}
 }
 
@@ -173,7 +179,7 @@ func (s *MemoryStore) CreateDeviceAdmission(
 		}
 		return DeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionCollision, "device admission ID was reused")
 	}
-	if _, found := s.principalDevice(admission.PrincipalID, admission.DeviceID); found {
+	if _, found := s.registeredPrincipalDevice(admission.PrincipalID, admission.DeviceID); found {
 		return DeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device is already registered")
 	}
 	if _, err := s.relay.CreateSubscription(ctx, credential, relay.SubscriptionCreateRequest{
@@ -245,6 +251,15 @@ func (s *MemoryStore) ClaimDeviceAdmission(
 }
 
 func (s *MemoryStore) principalDevice(principalID, deviceID uuid.UUID) (memoryDeviceAdmission, bool) {
+	if revoked := s.revokedDevices[principalID]; revoked != nil {
+		if _, found := revoked[deviceID]; found {
+			return memoryDeviceAdmission{}, false
+		}
+	}
+	return s.registeredPrincipalDevice(principalID, deviceID)
+}
+
+func (s *MemoryStore) registeredPrincipalDevice(principalID, deviceID uuid.UUID) (memoryDeviceAdmission, bool) {
 	for _, admission := range s.deviceAdmissions {
 		if admission.admission.PrincipalID == principalID &&
 			admission.admission.DeviceID == deviceID && admission.result != nil {
@@ -253,6 +268,123 @@ func (s *MemoryStore) principalDevice(principalID, deviceID uuid.UUID) (memoryDe
 	}
 	principal, found := s.principals[principalID]
 	return memoryDeviceAdmission{}, found && principal.provisioning.InitialDeviceID == deviceID
+}
+
+func (s *MemoryStore) RevokeDevice(
+	ctx context.Context,
+	credential relay.TenantCredential,
+	revocation DeviceRevocation,
+	nowMilliseconds int64,
+) (DeviceRevocationResult, error) {
+	if err := revocation.Validate(); err != nil {
+		return DeviceRevocationResult{}, err
+	}
+	if credential.TenantID != revocation.PrincipalID || nowMilliseconds < 0 {
+		return DeviceRevocationResult{}, NewProtocolError(CodeWrongScope, "device revocation belongs to another principal")
+	}
+	if _, err := s.relay.GetTenantStatus(ctx, credential); err != nil {
+		return DeviceRevocationResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	principal, found := s.principals[revocation.PrincipalID]
+	if !found {
+		return DeviceRevocationResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
+	}
+	if existing, found := s.deviceRevocations[revocation.RetryID]; found {
+		if s.deviceRevocationRequests[revocation.RetryID] == revocation {
+			existing.Acceptance = relay.AcceptanceDuplicate
+			existing.Memberships = append([]relay.TenantMembershipRevocationItem(nil), existing.Memberships...)
+			return existing, nil
+		}
+		return DeviceRevocationResult{}, NewProtocolError(CodeDeviceCollision, "device revocation retry ID was reused")
+	}
+	if revoked := s.revokedDevices[revocation.PrincipalID]; revoked != nil {
+		if _, found := revoked[revocation.DeviceID]; found {
+			return DeviceRevocationResult{}, NewProtocolError(CodeDeviceRevoked, "device is already revoked")
+		}
+	}
+	if _, found := s.registeredPrincipalDevice(revocation.PrincipalID, revocation.DeviceID); !found {
+		return DeviceRevocationResult{}, NewProtocolError(CodeDeviceNotFound, "device is not enrolled")
+	}
+	activeDeviceCount := 1
+	for _, record := range s.deviceAdmissions {
+		if record.result != nil && record.admission.PrincipalID == revocation.PrincipalID {
+			activeDeviceCount++
+		}
+	}
+	activeDeviceCount -= len(s.revokedDevices[revocation.PrincipalID])
+	if activeDeviceCount <= 1 {
+		return DeviceRevocationResult{}, NewProtocolError(CodeLastDevice, "last active device cannot be revoked without key recovery")
+	}
+	targets := make([]relay.TenantMembershipRevocationItem, 0, len(s.spaces)+1)
+	if revocation.DeviceID == principal.provisioning.InitialDeviceID {
+		targets = append(targets, relay.TenantMembershipRevocationItem{
+			DomainID:       principal.provisioning.ControlDomain.Registration.DomainID,
+			SubscriptionID: principal.provisioning.ControlDomain.Subscription.SubscriptionID,
+			MemberID:       principal.provisioning.ControlDomain.InitialMember.MemberID,
+		})
+	} else {
+		for _, record := range s.deviceAdmissions {
+			if record.result != nil && record.admission.PrincipalID == revocation.PrincipalID &&
+				record.admission.DeviceID == revocation.DeviceID {
+				targets = append(targets, relay.TenantMembershipRevocationItem{
+					DomainID:       record.admission.RelayAdmission.DomainID,
+					SubscriptionID: record.result.Member.SubscriptionID,
+					MemberID:       record.result.Member.MemberRegistration.MemberID,
+				})
+				break
+			}
+		}
+	}
+	for _, space := range s.spaces {
+		if space.provisioning.PrincipalID != revocation.PrincipalID || !space.devices[revocation.DeviceID] {
+			continue
+		}
+		if revocation.DeviceID == space.provisioning.InitialDeviceID {
+			targets = append(targets, relay.TenantMembershipRevocationItem{
+				DomainID:       space.provisioning.Domain.Registration.DomainID,
+				SubscriptionID: space.provisioning.Domain.Subscription.SubscriptionID,
+				MemberID:       space.provisioning.Domain.InitialMember.MemberID,
+			})
+			continue
+		}
+		for _, record := range s.spaceDeviceAdmissions {
+			if record.result != nil && record.admission.PrincipalID == revocation.PrincipalID &&
+				record.admission.SpaceID == space.provisioning.SpaceID &&
+				record.admission.DeviceID == revocation.DeviceID {
+				targets = append(targets, relay.TenantMembershipRevocationItem{
+					DomainID:       record.admission.RelayAdmission.DomainID,
+					SubscriptionID: record.result.Member.SubscriptionID,
+					MemberID:       record.result.Member.MemberRegistration.MemberID,
+				})
+				break
+			}
+		}
+	}
+	sort.Slice(targets, func(left, right int) bool {
+		return targets[left].DomainID.String() < targets[right].DomainID.String()
+	})
+	relayResult, err := s.relay.RevokeTenantMemberships(ctx, credential, relay.TenantMembershipRevocation{
+		Version: relay.SchemaVersion, RetryID: revocation.RetryID,
+		RevokedAtMilliseconds: nowMilliseconds, Memberships: targets,
+	})
+	if err != nil {
+		return DeviceRevocationResult{}, err
+	}
+	if s.revokedDevices[revocation.PrincipalID] == nil {
+		s.revokedDevices[revocation.PrincipalID] = make(map[uuid.UUID]int64)
+	}
+	s.revokedDevices[revocation.PrincipalID][revocation.DeviceID] = nowMilliseconds
+	result := DeviceRevocationResult{
+		Acceptance: relayResult.Acceptance, RetryID: revocation.RetryID,
+		PrincipalID: revocation.PrincipalID, DeviceID: revocation.DeviceID,
+		RevokedAtMilliseconds: nowMilliseconds,
+		Memberships:           append([]relay.TenantMembershipRevocationItem(nil), relayResult.Memberships...),
+	}
+	s.deviceRevocationRequests[revocation.RetryID] = revocation
+	s.deviceRevocations[revocation.RetryID] = result
+	return result, nil
 }
 
 func (s *MemoryStore) ProvisionSpace(
@@ -525,5 +657,19 @@ func (s *MemoryStore) GetPrincipalStatus(
 	sort.Slice(status.Spaces, func(left, right int) bool {
 		return status.Spaces[left].SpaceID.String() < status.Spaces[right].SpaceID.String()
 	})
+	for index := range status.Devices {
+		if revokedAt, found := s.revokedDevices[credential.TenantID][status.Devices[index].DeviceID]; found {
+			value := revokedAt
+			status.Devices[index].RevokedAtMilliseconds = &value
+		}
+	}
+	for spaceIndex := range status.Spaces {
+		for deviceIndex := range status.Spaces[spaceIndex].Devices {
+			if revokedAt, found := s.revokedDevices[credential.TenantID][status.Spaces[spaceIndex].Devices[deviceIndex].DeviceID]; found {
+				value := revokedAt
+				status.Spaces[spaceIndex].Devices[deviceIndex].RevokedAtMilliseconds = &value
+			}
+		}
+	}
 	return status, nil
 }

@@ -24,6 +24,11 @@ type Store interface {
 		rotation TenantCredentialRotation,
 	) (TenantCredentialRotationResult, error)
 	GetTenantStatus(context.Context, TenantCredential) (TenantStatus, error)
+	RevokeTenantMemberships(
+		context.Context,
+		TenantCredential,
+		TenantMembershipRevocation,
+	) (TenantMembershipRevocationResult, error)
 	CreateSubscription(
 		context.Context,
 		AdministrationCredential,

@@ -283,6 +283,111 @@ func TestMemoryStoreReportsContentBlindPrincipalStatus(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRevokesDeviceAcrossPrincipalAndSpaceAtomically(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := devicesync.NewMemoryStore(relayStore)
+	principal := bootstrapMemoryPrincipal(t, store, 6_000)
+	deviceID := enrollMemoryDevice(t, store, principal, 6_200)
+	credential, space := testSpaceProvisioning(t, principal, 6_400)
+	if _, err := store.ProvisionSpace(ctx, credential, space, 6_400); err != nil {
+		t.Fatal(err)
+	}
+	enrollMemoryDeviceInSpace(t, store, space, deviceID, 6_500)
+
+	revocation := devicesync.DeviceRevocation{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: principal.PrincipalID, DeviceID: deviceID,
+	}
+	result, err := store.RevokeDevice(ctx, credential, revocation, 6_700)
+	if err != nil || result.Acceptance != relay.AcceptanceAccepted ||
+		result.PrincipalID != principal.PrincipalID || result.DeviceID != deviceID ||
+		result.RevokedAtMilliseconds != 6_700 || len(result.Memberships) != 2 {
+		t.Fatalf("revoke=%+v err=%v", result, err)
+	}
+	if result.Memberships[0].DomainID.String() > result.Memberships[1].DomainID.String() {
+		t.Fatalf("revoked memberships are not deterministic: %+v", result.Memberships)
+	}
+	retry, err := store.RevokeDevice(ctx, credential, revocation, 6_800)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate ||
+		retry.RevokedAtMilliseconds != result.RevokedAtMilliseconds ||
+		len(retry.Memberships) != len(result.Memberships) {
+		t.Fatalf("revoke retry=%+v err=%v", retry, err)
+	}
+
+	controlCredential := relay.Credential{
+		TenantID: principal.PrincipalID,
+		DomainID: principal.ControlDomain.Registration.DomainID,
+		MemberID: deviceID,
+		Token:    testToken(0x71),
+	}
+	if _, err := relayStore.Fetch(ctx, controlCredential, 0, 1, 6_800); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("revoked control credential err=%v", err)
+	}
+	spaceCredential := relay.Credential{
+		TenantID: principal.PrincipalID,
+		DomainID: space.Domain.Registration.DomainID,
+		MemberID: deviceID,
+		Token:    testToken(0x74),
+	}
+	if _, err := relayStore.Fetch(ctx, spaceCredential, 0, 1, 6_800); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("revoked Space credential err=%v", err)
+	}
+
+	status, err := store.GetPrincipalStatus(ctx, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revokedAt := deviceRevokedAt(status.Devices, deviceID); revokedAt == nil || *revokedAt != 6_700 {
+		t.Fatalf("principal device status did not expose revocation: %+v", status.Devices)
+	}
+	if len(status.Spaces) != 1 {
+		t.Fatalf("unexpected Space status: %+v", status.Spaces)
+	}
+	if revokedAt := spaceDeviceRevokedAt(status.Spaces[0].Devices, deviceID); revokedAt == nil || *revokedAt != 6_700 {
+		t.Fatalf("Space device status did not expose revocation: %+v", status.Spaces[0].Devices)
+	}
+
+	changedRetry := revocation
+	changedRetry.RetryID = uuid.New()
+	if _, err := store.RevokeDevice(ctx, credential, changedRetry, 6_800); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceRevoked) {
+		t.Fatalf("second revocation err=%v", err)
+	}
+	initialRevocation := devicesync.DeviceRevocation{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: principal.PrincipalID, DeviceID: principal.InitialDeviceID,
+	}
+	if _, err := store.RevokeDevice(ctx, credential, initialRevocation, 6_800); !devicesync.ErrorHasCode(err, devicesync.CodeLastDevice) {
+		t.Fatalf("last-device revocation err=%v", err)
+	}
+	if _, err := relayStore.Fetch(ctx, relay.Credential{
+		TenantID: principal.PrincipalID,
+		DomainID: principal.ControlDomain.Registration.DomainID,
+		MemberID: principal.InitialDeviceID,
+		Token:    testToken(0x30),
+	}, 0, 1, 6_800); err != nil {
+		t.Fatalf("failed last-device revocation fenced the surviving device: %v", err)
+	}
+}
+
+func deviceRevokedAt(devices []devicesync.DeviceStatus, deviceID uuid.UUID) *int64 {
+	for _, device := range devices {
+		if device.DeviceID == deviceID {
+			return device.RevokedAtMilliseconds
+		}
+	}
+	return nil
+}
+
+func spaceDeviceRevokedAt(devices []devicesync.SpaceDeviceStatus, deviceID uuid.UUID) *int64 {
+	for _, device := range devices {
+		if device.DeviceID == deviceID {
+			return device.RevokedAtMilliseconds
+		}
+	}
+	return nil
+}
+
 func TestMemoryStoreRejectsSpaceAdmissionForUnenrolledDeviceAndWrongDomain(t *testing.T) {
 	ctx := context.Background()
 	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
