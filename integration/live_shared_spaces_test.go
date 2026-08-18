@@ -1,6 +1,8 @@
 package integration_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"net/http"
 	"os"
 	"strings"
@@ -115,8 +117,14 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		Version: relay.SchemaVersion, Algorithm: relay.EnvelopeAlgorithm,
 		TenantID: spaceID, DomainID: domainID, MessageID: uuid.New(),
 		PublisherMemberID: hostID, KeyEpoch: 1,
-		CreatedAtMilliseconds: now, Nonce: encodedBytes(104)[:16],
-		Ciphertext: encodedBytes(120), AuthenticationTag: encodedBytes(152)[:22],
+		CreatedAtMilliseconds: now,
+		Nonce: base64.RawURLEncoding.EncodeToString(
+			bytes.Repeat([]byte{0x68}, 12),
+		),
+		Ciphertext: encodedBytes(120),
+		AuthenticationTag: base64.RawURLEncoding.EncodeToString(
+			bytes.Repeat([]byte{0x98}, 16),
+		),
 	}
 	requireStatusAndClose(t, requestRelayJSON(
 		t, client, http.MethodPut, relayRoot+"/messages/"+message.MessageID.String(),
