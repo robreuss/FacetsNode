@@ -15,6 +15,7 @@ type memorySpace struct {
 	provisioning SpaceProvisioning
 	result       relay.TenantProvisioningResult
 	participants map[uuid.UUID]Participant
+	keyEpoch     uint64
 }
 
 type memoryInvitation struct {
@@ -84,6 +85,7 @@ func (s *MemoryStore) ProvisionSpace(
 	space := &memorySpace{
 		provisioning: provisioning, result: relayResult,
 		participants: map[uuid.UUID]Participant{participant.ParticipantID: participant},
+		keyEpoch:     InitialKeyEpoch,
 	}
 	s.spaces[provisioning.SpaceID] = space
 	s.spaceRetries[provisioning.RetryID] = provisioning.SpaceID
@@ -95,6 +97,7 @@ func spaceProvisioningResult(space *memorySpace, acceptance relay.Acceptance) Sp
 	return SpaceProvisioningResult{
 		Acceptance: acceptance, RetryID: space.provisioning.RetryID,
 		SpaceID: space.provisioning.SpaceID, SecurityMode: space.provisioning.SecurityMode,
+		CurrentKeyEpoch:    space.keyEpoch,
 		InitialParticipant: initial, Relay: space.result,
 	}
 }
@@ -242,6 +245,7 @@ func (s *MemoryStore) GetSpaceStatus(
 	return SpaceStatus{
 		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
 		SecurityMode:         space.provisioning.SecurityMode,
+		CurrentKeyEpoch:      space.keyEpoch,
 		DomainID:             space.provisioning.Domain.Registration.DomainID,
 		InitialParticipantID: space.provisioning.InitialParticipantID,
 		Participants:         participants, Relay: relayStatus,
@@ -281,6 +285,9 @@ func (s *MemoryStore) RevokeParticipant(
 		}
 		return ParticipantRevocationResult{}, NewProtocolError(CodeParticipantCollision, "participant revocation retry ID was reused")
 	}
+	if revocation.PreviousKeyEpoch != space.keyEpoch {
+		return ParticipantRevocationResult{}, NewProtocolError(CodeWrongKeyEpoch, "participant revocation key epoch is stale")
+	}
 	participant, found := space.participants[revocation.ParticipantID]
 	if !found {
 		return ParticipantRevocationResult{}, NewProtocolError(CodeParticipantNotFound, "participant was not found")
@@ -294,9 +301,12 @@ func (s *MemoryStore) RevokeParticipant(
 	}
 	participant.RevokedAtMilliseconds = &revocation.RevokedAtMilliseconds
 	space.participants[participant.ParticipantID] = participant
+	space.keyEpoch = revocation.NextKeyEpoch
 	result := ParticipantRevocationResult{
 		Acceptance: acceptance, RetryID: revocation.RetryID, SpaceID: revocation.SpaceID,
 		ParticipantID:         revocation.ParticipantID,
+		PreviousKeyEpoch:      revocation.PreviousKeyEpoch,
+		CurrentKeyEpoch:       revocation.NextKeyEpoch,
 		RevokedAtMilliseconds: revocation.RevokedAtMilliseconds,
 	}
 	s.revocationRequests[revocation.RetryID] = revocation

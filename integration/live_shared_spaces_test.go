@@ -54,7 +54,8 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	decodeLiveJSON(t, created, &createdResult)
 	if createdResult.SpaceID != spaceID ||
 		createdResult.InitialParticipant.ParticipantID != hostID ||
-		createdResult.InitialParticipant.Role != sharedspaces.RoleHost {
+		createdResult.InitialParticipant.Role != sharedspaces.RoleHost ||
+		createdResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("unexpected Shared Space provisioning: %+v", createdResult)
 	}
 	requireStatusAndClose(t, requestRelayJSON(
@@ -107,7 +108,8 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	var status sharedspaces.SpaceStatus
 	decodeLiveJSON(t, statusResponse, &status)
 	if status.SpaceID != spaceID || len(status.Participants) != 2 ||
-		status.Relay.ActiveSubscriptionCount != 2 {
+		status.Relay.ActiveSubscriptionCount != 2 ||
+		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("unexpected Shared Space status: %+v", status)
 	}
 
@@ -151,13 +153,30 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: spaceID, ParticipantID: participantID,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
 		RevokedAtMilliseconds: time.Now().UnixMilli(),
 	}
-	requireStatusAndClose(t, requestRelayJSON(
+	revokedResponse := requestRelayJSON(
 		t, client, http.MethodPost,
 		spaceRoot+"/participants/"+participantID.String()+"/revocation",
 		revocation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
-	), http.StatusCreated)
+	)
+	requireStatus(t, revokedResponse, http.StatusCreated)
+	var revokedResult sharedspaces.ParticipantRevocationResult
+	decodeLiveJSON(t, revokedResponse, &revokedResult)
+	if revokedResult.PreviousKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		revokedResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("unexpected Shared Space revocation: %+v", revokedResult)
+	}
+	statusResponse = requestRelayJSON(
+		t, client, http.MethodGet, spaceRoot+"/status", nil,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, statusResponse, http.StatusOK)
+	decodeLiveJSON(t, statusResponse, &status)
+	if status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("Shared Space key epoch did not advance: %+v", status)
+	}
 	requireStatusAndClose(t, requestRelayJSON(
 		t, client, http.MethodGet, relayRoot+"/messages?limit=1", nil,
 		participantCredential.Token, participantID,

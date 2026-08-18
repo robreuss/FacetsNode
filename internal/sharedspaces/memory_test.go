@@ -67,17 +67,24 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	}
 
 	status, err := store.GetSpaceStatus(ctx, admin)
-	if err != nil || len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
-		ParticipantID: invitation.ParticipantID, RevokedAtMilliseconds: 1_400,
+		ParticipantID:    invitation.ParticipantID,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+		RevokedAtMilliseconds: 1_400,
 	}
 	revoked, err := store.RevokeParticipant(ctx, admin, revocation, 1_400)
 	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("revoke=%+v err=%v", revoked, err)
+	}
+	if revoked.PreviousKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		revoked.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("revocation did not rotate key epoch: %+v", revoked)
 	}
 	revokedRetry, err := store.RevokeParticipant(ctx, admin, revocation, 1_500)
 	if err != nil || revokedRetry.Acceptance != relay.AcceptanceDuplicate {
@@ -85,6 +92,47 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	}
 	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, 1_500); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked relay credential err=%v", err)
+	}
+	status, err = store.GetSpaceStatus(ctx, admin)
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("status after revocation=%+v err=%v", status, err)
+	}
+}
+
+func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
+	ctx := context.Background()
+	store := sharedspaces.NewMemoryStore(relay.NewMemoryStore())
+	_, provisioning, admin := testSpaceProvisioning(t, 4_000, sharedspaces.SecurityModeE2EE)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 4_000); err != nil {
+		t.Fatal(err)
+	}
+	invitation, credential := testInvitation(t, provisioning, admin, 4_100, sharedspaces.RoleReader)
+	if _, err := store.CreateInvitation(ctx, admin, invitation, 4_100); err != nil {
+		t.Fatal(err)
+	}
+	memberCredential := relay.Credential{
+		TenantID: invitation.SpaceID, DomainID: invitation.RelayAdmission.DomainID,
+		MemberID: invitation.ParticipantID, Token: testToken(0x61),
+	}
+	digest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimInvitation(ctx, credential, sharedspaces.InvitationClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: invitation.SpaceID,
+		ParticipantID:         invitation.ParticipantID,
+		RelayClaim:            relay.MemberAdmissionClaim{MemberID: invitation.ParticipantID, AuthorizationDigest: digest},
+		ClaimedAtMilliseconds: 4_200,
+	}, 4_200); err != nil {
+		t.Fatal(err)
+	}
+	stale := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, PreviousKeyEpoch: 2, NextKeyEpoch: 3,
+		RevokedAtMilliseconds: 4_300,
+	}
+	if _, err := store.RevokeParticipant(ctx, admin, stale, 4_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
+		t.Fatalf("stale revocation err=%v", err)
 	}
 }
 
@@ -103,7 +151,9 @@ func TestMemoryStoreRejectsCrossSpaceAuthorityAndInitialHostRevocation(t *testin
 	}
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
-		ParticipantID: provisioning.InitialParticipantID, RevokedAtMilliseconds: 3_200,
+		ParticipantID:    provisioning.InitialParticipantID,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+		RevokedAtMilliseconds: 3_200,
 	}
 	if _, err := store.RevokeParticipant(ctx, admin, revocation, 3_200); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInitialHost) {
 		t.Fatalf("initial host revocation err=%v", err)

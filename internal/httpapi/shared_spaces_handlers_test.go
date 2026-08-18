@@ -48,7 +48,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	}
 	_ = created.Body.Close()
 	if createdResult.Acceptance != relay.AcceptanceAccepted ||
-		createdResult.InitialParticipant.Role != sharedspaces.RoleHost {
+		createdResult.InitialParticipant.Role != sharedspaces.RoleHost ||
+		createdResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("created=%+v", createdResult)
 	}
 	retry := performRelayJSON(
@@ -132,13 +133,15 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		t.Fatal(err)
 	}
 	_ = statusResponse.Body.Close()
-	if len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
+	if len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 ||
+		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("status=%+v", status)
 	}
 
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: spaceID, ParticipantID: participantID,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
 		RevokedAtMilliseconds: nowMilliseconds,
 	}
 	revoked := performRelayJSON(
@@ -147,7 +150,15 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		revocation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
 	)
 	requireStatus(t, revoked, http.StatusCreated)
+	var revokedResult sharedspaces.ParticipantRevocationResult
+	if err := json.NewDecoder(revoked.Body).Decode(&revokedResult); err != nil {
+		t.Fatal(err)
+	}
 	_ = revoked.Body.Close()
+	if revokedResult.PreviousKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		revokedResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("revoked=%+v", revokedResult)
+	}
 	revokedMember := relay.Credential{
 		TenantID: spaceID, DomainID: domainID, MemberID: participantID, Token: memberToken,
 	}

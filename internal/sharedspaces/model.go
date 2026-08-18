@@ -8,7 +8,10 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
-const SchemaVersion = 1
+const (
+	SchemaVersion   = 1
+	InitialKeyEpoch = uint64(1)
+)
 
 type SecurityMode string
 
@@ -135,6 +138,7 @@ type SpaceProvisioningResult struct {
 	RetryID            uuid.UUID                      `json:"retryID"`
 	SpaceID            uuid.UUID                      `json:"spaceID"`
 	SecurityMode       SecurityMode                   `json:"securityMode"`
+	CurrentKeyEpoch    uint64                         `json:"currentKeyEpoch"`
 	InitialParticipant Participant                    `json:"initialParticipant"`
 	Relay              relay.TenantProvisioningResult `json:"relay"`
 }
@@ -216,12 +220,15 @@ type ParticipantRevocation struct {
 	RetryID               uuid.UUID `json:"retryID"`
 	SpaceID               uuid.UUID `json:"spaceID"`
 	ParticipantID         uuid.UUID `json:"participantID"`
+	PreviousKeyEpoch      uint64    `json:"previousKeyEpoch"`
+	NextKeyEpoch          uint64    `json:"nextKeyEpoch"`
 	RevokedAtMilliseconds int64     `json:"revokedAtMilliseconds"`
 }
 
 func (r ParticipantRevocation) Validate() error {
 	if r.Version != SchemaVersion || r.RetryID == uuid.Nil || r.SpaceID == uuid.Nil ||
-		r.ParticipantID == uuid.Nil || r.RevokedAtMilliseconds < 0 {
+		r.ParticipantID == uuid.Nil || r.PreviousKeyEpoch < InitialKeyEpoch ||
+		r.NextKeyEpoch != r.PreviousKeyEpoch+1 || r.RevokedAtMilliseconds < 0 {
 		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant revocation fields are invalid")
 	}
 	return nil
@@ -232,6 +239,8 @@ type ParticipantRevocationResult struct {
 	RetryID               uuid.UUID        `json:"retryID"`
 	SpaceID               uuid.UUID        `json:"spaceID"`
 	ParticipantID         uuid.UUID        `json:"participantID"`
+	PreviousKeyEpoch      uint64           `json:"previousKeyEpoch"`
+	CurrentKeyEpoch       uint64           `json:"currentKeyEpoch"`
 	RevokedAtMilliseconds int64            `json:"revokedAtMilliseconds"`
 }
 
@@ -239,6 +248,7 @@ type SpaceStatus struct {
 	Version               int                `json:"version"`
 	SpaceID               uuid.UUID          `json:"spaceID"`
 	SecurityMode          SecurityMode       `json:"securityMode"`
+	CurrentKeyEpoch       uint64             `json:"currentKeyEpoch"`
 	DomainID              uuid.UUID          `json:"domainID"`
 	InitialParticipantID  uuid.UUID          `json:"initialParticipantID"`
 	Participants          []Participant      `json:"participants"`

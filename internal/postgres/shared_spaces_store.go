@@ -70,12 +70,15 @@ func (s *SharedSpacesStore) ProvisionSpace(
 
 	var existingSpaceID uuid.UUID
 	var existingPayload []byte
+	var existingKeyEpoch uint64
 	err = tx.QueryRow(ctx, `
-		SELECT space_id,provisioning_payload
+		SELECT space_id,provisioning_payload,current_key_epoch
 		FROM shared_spaces
 		WHERE space_id=$1 OR provisioning_retry_id=$2
 		FOR UPDATE
-	`, provisioning.SpaceID, provisioning.RetryID).Scan(&existingSpaceID, &existingPayload)
+	`, provisioning.SpaceID, provisioning.RetryID).Scan(
+		&existingSpaceID, &existingPayload, &existingKeyEpoch,
+	)
 	if err == nil {
 		existing, decodeErr := decodeSpaceProvisioning(existingPayload)
 		if decodeErr != nil {
@@ -86,7 +89,9 @@ func (s *SharedSpacesStore) ProvisionSpace(
 				sharedspaces.CodeSpaceCollision, "Shared Space ID or retry ID was reused",
 			)
 		}
-		return postgresSharedSpaceProvisioningResult(existing, relay.AcceptanceDuplicate), nil
+		return postgresSharedSpaceProvisioningResult(
+			existing, existingKeyEpoch, relay.AcceptanceDuplicate,
+		), nil
 	}
 	if err != pgx.ErrNoRows {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("load Shared Space provisioning: %w", err)
@@ -125,12 +130,14 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	return sharedspaces.SpaceProvisioningResult{
 		Acceptance: relayResult.Acceptance, RetryID: provisioning.RetryID,
 		SpaceID: provisioning.SpaceID, SecurityMode: provisioning.SecurityMode,
+		CurrentKeyEpoch:    sharedspaces.InitialKeyEpoch,
 		InitialParticipant: initial, Relay: relayResult,
 	}, nil
 }
 
 func postgresSharedSpaceProvisioningResult(
 	provisioning sharedspaces.SpaceProvisioning,
+	currentKeyEpoch uint64,
 	acceptance relay.Acceptance,
 ) sharedspaces.SpaceProvisioningResult {
 	initial := sharedspaces.Participant{
@@ -143,6 +150,7 @@ func postgresSharedSpaceProvisioningResult(
 	return sharedspaces.SpaceProvisioningResult{
 		Acceptance: acceptance, RetryID: provisioning.RetryID,
 		SpaceID: provisioning.SpaceID, SecurityMode: provisioning.SecurityMode,
+		CurrentKeyEpoch:    currentKeyEpoch,
 		InitialParticipant: initial,
 		Relay:              postgresTenantProvisioningResult(provisioning.Tenant, provisioning.Domain, acceptance),
 	}
@@ -403,6 +411,10 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	if err != nil {
 		return sharedspaces.SpaceStatus{}, err
 	}
+	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, credential.TenantID)
+	if err != nil {
+		return sharedspaces.SpaceStatus{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return sharedspaces.SpaceStatus{}, fmt.Errorf("commit Shared Space status snapshot: %w", err)
 	}
@@ -413,6 +425,7 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	return sharedspaces.SpaceStatus{
 		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 		SecurityMode: provisioning.SecurityMode, DomainID: domainID,
+		CurrentKeyEpoch:      currentKeyEpoch,
 		InitialParticipantID: provisioning.InitialParticipantID,
 		Participants:         participants, Relay: relayStatus,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
@@ -453,16 +466,20 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	var existingVersion int
 	var existingParticipantID uuid.UUID
 	var existingRevokedAt int64
+	var existingPreviousKeyEpoch, existingNextKeyEpoch uint64
 	err = tx.QueryRow(ctx, `
-		SELECT version,participant_id,revoked_at_milliseconds
+		SELECT version,participant_id,previous_key_epoch,next_key_epoch,revoked_at_milliseconds
 		FROM shared_space_participant_revocations
 		WHERE space_id=$1 AND retry_id=$2
 		FOR UPDATE
 	`, revocation.SpaceID, revocation.RetryID).Scan(
-		&existingVersion, &existingParticipantID, &existingRevokedAt,
+		&existingVersion, &existingParticipantID, &existingPreviousKeyEpoch,
+		&existingNextKeyEpoch, &existingRevokedAt,
 	)
 	if err == nil {
 		if existingVersion != revocation.Version || existingParticipantID != revocation.ParticipantID ||
+			existingPreviousKeyEpoch != revocation.PreviousKeyEpoch ||
+			existingNextKeyEpoch != revocation.NextKeyEpoch ||
 			existingRevokedAt != revocation.RevokedAtMilliseconds {
 			return sharedspaces.ParticipantRevocationResult{}, sharedspaces.NewProtocolError(
 				sharedspaces.CodeParticipantCollision, "participant revocation retry ID was reused",
@@ -471,11 +488,21 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		return sharedspaces.ParticipantRevocationResult{
 			Acceptance: relay.AcceptanceDuplicate, RetryID: revocation.RetryID,
 			SpaceID: revocation.SpaceID, ParticipantID: revocation.ParticipantID,
+			PreviousKeyEpoch: existingPreviousKeyEpoch, CurrentKeyEpoch: existingNextKeyEpoch,
 			RevokedAtMilliseconds: existingRevokedAt,
 		}, nil
 	}
 	if err != pgx.ErrNoRows {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("load Shared Space participant revocation: %w", err)
+	}
+	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, revocation.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, err
+	}
+	if currentKeyEpoch != revocation.PreviousKeyEpoch {
+		return sharedspaces.ParticipantRevocationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongKeyEpoch, "participant revocation key epoch is stale",
+		)
 	}
 
 	participant, err := loadSharedSpaceParticipant(
@@ -555,11 +582,20 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("revoke Shared Space participant: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
+		UPDATE shared_spaces
+		SET current_key_epoch=$2
+		WHERE space_id=$1
+	`, revocation.SpaceID, revocation.NextKeyEpoch); err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("advance Shared Space key epoch: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_space_participant_revocations (
-			space_id,retry_id,participant_id,version,revoked_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5)
+			space_id,retry_id,participant_id,version,previous_key_epoch,next_key_epoch,
+			revoked_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)
 	`, revocation.SpaceID, revocation.RetryID, revocation.ParticipantID,
-		revocation.Version, revocation.RevokedAtMilliseconds); err != nil {
+		revocation.Version, revocation.PreviousKeyEpoch, revocation.NextKeyEpoch,
+		revocation.RevokedAtMilliseconds); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("record Shared Space participant revocation: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -568,8 +604,19 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	return sharedspaces.ParticipantRevocationResult{
 		Acceptance: relay.AcceptanceAccepted, RetryID: revocation.RetryID,
 		SpaceID: revocation.SpaceID, ParticipantID: revocation.ParticipantID,
+		PreviousKeyEpoch: revocation.PreviousKeyEpoch, CurrentKeyEpoch: revocation.NextKeyEpoch,
 		RevokedAtMilliseconds: revocation.RevokedAtMilliseconds,
 	}, nil
+}
+
+func loadSharedSpaceKeyEpoch(ctx context.Context, tx pgx.Tx, spaceID uuid.UUID) (uint64, error) {
+	var keyEpoch uint64
+	if err := tx.QueryRow(ctx, `
+		SELECT current_key_epoch FROM shared_spaces WHERE space_id=$1
+	`, spaceID).Scan(&keyEpoch); err != nil {
+		return 0, fmt.Errorf("load Shared Space key epoch: %w", err)
+	}
+	return keyEpoch, nil
 }
 
 func loadSharedSpaceAuthority(

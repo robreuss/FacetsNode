@@ -76,12 +76,14 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 
 	status, err := store.GetSpaceStatus(ctx, admin)
-	if err != nil || len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: invitation.SpaceID, ParticipantID: invitation.ParticipantID,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
 		RevokedAtMilliseconds: now + 300,
 	}
 	revoked, err := store.RevokeParticipant(ctx, admin, revocation, now+300)
@@ -92,8 +94,14 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	if err != nil || revokedRetry.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("revoke retry=%+v err=%v", revokedRetry, err)
 	}
-	if _, err := store.GetSpaceStatus(ctx, admin); err != nil {
+	status, err = store.GetSpaceStatus(ctx, admin)
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("status after revocation: %v", err)
+	}
+	retry, err = store.ProvisionSpace(ctx, provisioning, now+302)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate ||
+		retry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("provision retry after key rotation=%+v err=%v", retry, err)
 	}
 	if _, err := postgresstore.NewRelayStore(pool).Fetch(ctx, memberCredential, 0, 1, now+301); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked participant relay access err=%v", err)

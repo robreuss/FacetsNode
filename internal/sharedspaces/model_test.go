@@ -38,3 +38,18 @@ func TestInvitationRoleFreezesRelayCapabilities(t *testing.T) {
 		t.Fatalf("wrong Space scope err=%v", err)
 	}
 }
+
+func TestParticipantRevocationRejectsInvalidKeyEpochTransition(t *testing.T) {
+	revocation := sharedspaces.ParticipantRevocation{
+		Version:               sharedspaces.SchemaVersion,
+		RetryID:               uuid.New(),
+		SpaceID:               uuid.New(),
+		ParticipantID:         uuid.New(),
+		PreviousKeyEpoch:      sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:          sharedspaces.InitialKeyEpoch + 2,
+		RevokedAtMilliseconds: 1_000,
+	}
+	if err := revocation.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("invalid key epoch transition err=%v", err)
+	}
+}
