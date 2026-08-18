@@ -184,6 +184,33 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	requireStatus(t, claimRetry, http.StatusOK)
 	_ = claimRetry.Body.Close()
 
+	invitationListResponse := performRelayJSON(
+		t, handler, http.MethodGet, spaceRoot+"/invitations", nil,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, invitationListResponse, http.StatusOK)
+	var invitationList sharedspaces.InvitationList
+	if err := json.NewDecoder(invitationListResponse.Body).Decode(&invitationList); err != nil {
+		t.Fatal(err)
+	}
+	_ = invitationListResponse.Body.Close()
+	states := map[uuid.UUID]sharedspaces.InvitationStatus{}
+	for _, status := range invitationList.Invitations {
+		states[status.InvitationID] = status
+	}
+	if len(states) != 2 || states[invitationID].State != sharedspaces.InvitationClaimed ||
+		states[invitationID].ClaimedAtMilliseconds == nil ||
+		states[cancelledInvitationID].State != sharedspaces.InvitationCancelled ||
+		states[cancelledInvitationID].CancelledAtMilliseconds == nil {
+		t.Fatalf("invitation list=%+v", invitationList)
+	}
+	unauthorizedList := performRelayJSON(
+		t, handler, http.MethodGet, spaceRoot+"/invitations", nil,
+		relayTestToken(0x7f), uuid.Nil,
+	)
+	requireStatus(t, unauthorizedList, http.StatusUnauthorized)
+	_ = unauthorizedList.Body.Close()
+
 	rolePath := spaceRoot + "/participants/" + participantID.String() + "/role"
 	promotion := sharedspaces.ParticipantRoleChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,

@@ -305,6 +305,60 @@ func (s *MemoryStore) CancelInvitation(
 	return result, nil
 }
 
+func (s *MemoryStore) ListInvitations(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	nowMilliseconds int64,
+) (InvitationList, error) {
+	if nowMilliseconds < 0 {
+		return InvitationList{}, NewProtocolError(CodeInvalidInvitation, "invitation status time is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return InvitationList{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return InvitationList{}, NewProtocolError(CodeWrongScope, "invitation status credential belongs to another Shared Space")
+	}
+	if _, err := s.relay.GetDomainStatus(ctx, credential); err != nil {
+		return InvitationList{}, err
+	}
+	statuses := make([]InvitationStatus, 0, len(s.invitations))
+	for _, record := range s.invitations {
+		if record.invitation.SpaceID != credential.TenantID {
+			continue
+		}
+		state := InvitationPending
+		var claimedAt, cancelledAt *int64
+		if record.result != nil {
+			state = InvitationClaimed
+			value := record.result.Participant.CreatedAtMilliseconds
+			claimedAt = &value
+		} else if record.cancellation != nil {
+			state = InvitationCancelled
+			value := record.cancellation.CancelledAtMilliseconds
+			cancelledAt = &value
+		} else if record.invitation.RelayAdmission.ExpiresAtMilliseconds <= nowMilliseconds {
+			state = InvitationExpired
+		}
+		statuses = append(statuses, InvitationStatus{
+			Version: record.invitation.Version, SpaceID: record.invitation.SpaceID,
+			InvitationID: record.invitation.InvitationID, ParticipantID: record.invitation.ParticipantID,
+			SubscriptionID: record.invitation.SubscriptionID, Kind: record.invitation.Kind,
+			Role: record.invitation.Role, State: state,
+			CreatedAtMilliseconds: record.invitation.CreatedAtMilliseconds,
+			ExpiresAtMilliseconds: record.invitation.RelayAdmission.ExpiresAtMilliseconds,
+			ClaimedAtMilliseconds: claimedAt, CancelledAtMilliseconds: cancelledAt,
+		})
+	}
+	sort.Slice(statuses, func(left, right int) bool {
+		return statuses[left].InvitationID.String() < statuses[right].InvitationID.String()
+	})
+	return InvitationList{Version: SchemaVersion, SpaceID: credential.TenantID, Invitations: statuses}, nil
+}
+
 func (s *MemoryStore) GetSpaceStatus(
 	ctx context.Context,
 	credential relay.AdministrationCredential,

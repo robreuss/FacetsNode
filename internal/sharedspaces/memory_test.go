@@ -75,6 +75,15 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		claimRetry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("claim retry=%+v err=%v", claimRetry, err)
 	}
+	invitationList, err := store.ListInvitations(ctx, admin, 1_300)
+	if err != nil || invitationList.SpaceID != provisioning.SpaceID ||
+		len(invitationList.Invitations) != 1 ||
+		invitationList.Invitations[0].State != sharedspaces.InvitationClaimed ||
+		invitationList.Invitations[0].ClaimedAtMilliseconds == nil ||
+		*invitationList.Invitations[0].ClaimedAtMilliseconds != 1_300 ||
+		invitationList.Invitations[0].CancelledAtMilliseconds != nil {
+		t.Fatalf("invitation list after claim=%+v err=%v", invitationList, err)
+	}
 
 	status, err := store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
@@ -199,6 +208,14 @@ func TestMemoryStoreCancelsUnclaimedInvitation(t *testing.T) {
 	cancelledRetry, err := store.CancelInvitation(ctx, admin, cancellation, 2_201)
 	if err != nil || cancelledRetry.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("cancel retry=%+v err=%v", cancelledRetry, err)
+	}
+	invitationList, err := store.ListInvitations(ctx, admin, 2_201)
+	if err != nil || len(invitationList.Invitations) != 1 ||
+		invitationList.Invitations[0].State != sharedspaces.InvitationCancelled ||
+		invitationList.Invitations[0].CancelledAtMilliseconds == nil ||
+		*invitationList.Invitations[0].CancelledAtMilliseconds != 2_200 ||
+		invitationList.Invitations[0].ClaimedAtMilliseconds != nil {
+		t.Fatalf("invitation list after cancellation=%+v err=%v", invitationList, err)
 	}
 
 	memberCredential := relay.Credential{

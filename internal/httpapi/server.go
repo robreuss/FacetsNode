@@ -343,6 +343,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleCreateSharedSpaceInvitation,
 		)
 		register(
+			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations",
+			traffic.SurfaceManagement,
+			s.handleListSharedSpaceInvitations,
+		)
+		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations/{invitationID}/claim",
 			traffic.SurfaceManagement,
 			s.handleClaimSharedSpaceInvitation,

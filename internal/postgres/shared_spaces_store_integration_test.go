@@ -145,6 +145,21 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		claimRetry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("claim retry=%+v err=%v", claimRetry, err)
 	}
+	invitationList, err := store.ListInvitations(ctx, admin, now+201)
+	if err != nil {
+		t.Fatalf("list invitations: %v", err)
+	}
+	invitationStates := map[uuid.UUID]sharedspaces.InvitationStatus{}
+	for _, invitationStatus := range invitationList.Invitations {
+		invitationStates[invitationStatus.InvitationID] = invitationStatus
+	}
+	if len(invitationStates) != 2 ||
+		invitationStates[invitation.InvitationID].State != sharedspaces.InvitationClaimed ||
+		invitationStates[invitation.InvitationID].ClaimedAtMilliseconds == nil ||
+		invitationStates[cancelledInvitation.InvitationID].State != sharedspaces.InvitationCancelled ||
+		invitationStates[cancelledInvitation.InvitationID].CancelledAtMilliseconds == nil {
+		t.Fatalf("invitation list=%+v", invitationList)
+	}
 	demotion := sharedspaces.ParticipantRoleChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleParticipant,

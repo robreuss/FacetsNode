@@ -165,6 +165,27 @@ func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, r
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
+func (s *Server) handleListSharedSpaceInvitations(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	result, err := s.sharedSpacesStore.ListInvitations(
+		request.Context(), credential, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func (s *Server) handleClaimSharedSpaceInvitation(writer http.ResponseWriter, request *http.Request) {
 	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
 	if err != nil {

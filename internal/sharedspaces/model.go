@@ -240,6 +240,36 @@ type InvitationCancellationResult struct {
 	CancelledAtMilliseconds int64            `json:"cancelledAtMilliseconds"`
 }
 
+type InvitationState string
+
+const (
+	InvitationPending   InvitationState = "pending"
+	InvitationClaimed   InvitationState = "claimed"
+	InvitationCancelled InvitationState = "cancelled"
+	InvitationExpired   InvitationState = "expired"
+)
+
+type InvitationStatus struct {
+	Version                 int             `json:"version"`
+	SpaceID                 uuid.UUID       `json:"spaceID"`
+	InvitationID            uuid.UUID       `json:"invitationID"`
+	ParticipantID           uuid.UUID       `json:"participantID"`
+	SubscriptionID          uuid.UUID       `json:"subscriptionID"`
+	Kind                    ParticipantKind `json:"kind"`
+	Role                    Role            `json:"role"`
+	State                   InvitationState `json:"state"`
+	CreatedAtMilliseconds   int64           `json:"createdAtMilliseconds"`
+	ExpiresAtMilliseconds   int64           `json:"expiresAtMilliseconds"`
+	ClaimedAtMilliseconds   *int64          `json:"claimedAtMilliseconds,omitempty"`
+	CancelledAtMilliseconds *int64          `json:"cancelledAtMilliseconds,omitempty"`
+}
+
+type InvitationList struct {
+	Version     int                `json:"version"`
+	SpaceID     uuid.UUID          `json:"spaceID"`
+	Invitations []InvitationStatus `json:"invitations"`
+}
+
 type ParticipantRevocation struct {
 	Version          int       `json:"version"`
 	RetryID          uuid.UUID `json:"retryID"`

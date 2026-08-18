@@ -561,6 +561,81 @@ func (s *SharedSpacesStore) CancelInvitation(
 	}, nil
 }
 
+func (s *SharedSpacesStore) ListInvitations(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	nowMilliseconds int64,
+) (sharedspaces.InvitationList, error) {
+	if nowMilliseconds < 0 {
+		return sharedspaces.InvitationList{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidInvitation, "invitation status time is invalid",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return sharedspaces.InvitationList{}, fmt.Errorf("begin Shared Space invitation list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, _, _, err := loadSharedSpaceAuthority(
+		ctx, tx, credential.TenantID, credential, "",
+	); err != nil {
+		return sharedspaces.InvitationList{}, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT i.invitation_payload,i.claimed_at_milliseconds,c.cancelled_at_milliseconds
+		FROM shared_space_invitations i
+		LEFT JOIN shared_space_invitation_cancellations c
+		  ON c.space_id=i.space_id AND c.invitation_id=i.invitation_id
+		WHERE i.space_id=$1
+		ORDER BY i.invitation_id
+	`, credential.TenantID)
+	if err != nil {
+		return sharedspaces.InvitationList{}, fmt.Errorf("query Shared Space invitations: %w", err)
+	}
+	defer rows.Close()
+	statuses := []sharedspaces.InvitationStatus{}
+	for rows.Next() {
+		var payload []byte
+		var claimedAt, cancelledAt *int64
+		if err := rows.Scan(&payload, &claimedAt, &cancelledAt); err != nil {
+			return sharedspaces.InvitationList{}, fmt.Errorf("scan Shared Space invitation status: %w", err)
+		}
+		var invitation sharedspaces.Invitation
+		if err := json.Unmarshal(payload, &invitation); err != nil {
+			return sharedspaces.InvitationList{}, fmt.Errorf("decode Shared Space invitation status: %w", err)
+		}
+		state := sharedspaces.InvitationPending
+		if claimedAt != nil {
+			state = sharedspaces.InvitationClaimed
+		} else if cancelledAt != nil {
+			state = sharedspaces.InvitationCancelled
+		} else if invitation.RelayAdmission.ExpiresAtMilliseconds <= nowMilliseconds {
+			state = sharedspaces.InvitationExpired
+		}
+		statuses = append(statuses, sharedspaces.InvitationStatus{
+			Version: invitation.Version, SpaceID: invitation.SpaceID,
+			InvitationID: invitation.InvitationID, ParticipantID: invitation.ParticipantID,
+			SubscriptionID: invitation.SubscriptionID, Kind: invitation.Kind,
+			Role: invitation.Role, State: state,
+			CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
+			ExpiresAtMilliseconds: invitation.RelayAdmission.ExpiresAtMilliseconds,
+			ClaimedAtMilliseconds: claimedAt, CancelledAtMilliseconds: cancelledAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return sharedspaces.InvitationList{}, fmt.Errorf("iterate Shared Space invitation status: %w", err)
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.InvitationList{}, fmt.Errorf("commit Shared Space invitation list: %w", err)
+	}
+	return sharedspaces.InvitationList{
+		Version: sharedspaces.SchemaVersion, SpaceID: credential.TenantID, Invitations: statuses,
+	}, nil
+}
+
 func (s *SharedSpacesStore) GetSpaceStatus(
 	ctx context.Context,
 	credential relay.AdministrationCredential,
