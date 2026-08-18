@@ -584,6 +584,13 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost:
 				status = http.StatusConflict
 			}
+			if s.logger != nil {
+				s.logger.Warn(
+					"Shared Spaces protocol request rejected",
+					"code", code,
+					"error", sharedSpacesProtocol,
+				)
+			}
 		} else {
 			var relayProtocol *relay.ProtocolError
 			if errors.As(err, &relayProtocol) {
