@@ -235,6 +235,26 @@ func (s *SharedSpacesStore) CreateInvitation(
 		return sharedspaces.InvitationCreateResult{}, fmt.Errorf("load Shared Space invitation: %w", err)
 	}
 
+	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, invitation.SpaceID)
+	if err != nil {
+		return sharedspaces.InvitationCreateResult{}, err
+	}
+	var bootstrapReady bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM relay_checkpoints
+			WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' AND key_epoch=$3
+		)
+	`, invitation.SpaceID, domainID, currentKeyEpoch).Scan(&bootstrapReady); err != nil {
+		return sharedspaces.InvitationCreateResult{}, fmt.Errorf("check Shared Space bootstrap checkpoint: %w", err)
+	}
+	if !bootstrapReady {
+		return sharedspaces.InvitationCreateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeBootstrapNotReady,
+			"Shared Space does not have an activated checkpoint for the current key epoch",
+		)
+	}
+
 	var activeParticipant bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (

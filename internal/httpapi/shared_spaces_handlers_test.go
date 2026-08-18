@@ -79,6 +79,13 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		CreatedAtMilliseconds: nowMilliseconds,
 	}
 	spaceRoot := "/v1/shared-spaces/" + spaceID.String() + "/domains/" + domainID.String()
+	blocked := performRelayJSON(
+		t, handler, http.MethodPost, spaceRoot+"/invitations",
+		invitation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, blocked, http.StatusConflict)
+	_ = blocked.Body.Close()
+	publishSharedSpaceBootstrapCheckpointHTTP(t, handler, domain, nowMilliseconds)
 	issued := performRelayJSON(
 		t, handler, http.MethodPost, spaceRoot+"/invitations",
 		invitation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
@@ -193,6 +200,56 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	if _, err := relayStore.Fetch(t.Context(), revokedMember, 0, 1, nowMilliseconds+1); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked member relay access err=%v", err)
 	}
+}
+
+func publishSharedSpaceBootstrapCheckpointHTTP(
+	t *testing.T,
+	handler http.Handler,
+	domain relayDomainProvisioningRequest,
+	nowMilliseconds int64,
+) {
+	t.Helper()
+	domainRoot := "/v1/relay/tenants/" + domain.AdministrationCredential.TenantID.String() +
+		"/domains/" + domain.AdministrationCredential.DomainID.String()
+	fenceRequest := relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: nowMilliseconds,
+	}
+	fenceResponse := performRelayJSON(
+		t, handler, http.MethodPost, domainRoot+"/checkpoint-fences", fenceRequest,
+		domain.MemberCredential.AuthorizationToken, domain.MemberCredential.MemberID,
+	)
+	requireStatus(t, fenceResponse, http.StatusCreated)
+	var fence relay.CheckpointFenceResponse
+	if err := json.NewDecoder(fenceResponse.Body).Decode(&fence); err != nil {
+		t.Fatal(err)
+	}
+	_ = fenceResponse.Body.Close()
+	candidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID:                 fence.FenceID,
+		TenantID:                domain.AdministrationCredential.TenantID,
+		DomainID:                domain.AdministrationCredential.DomainID,
+		PublisherSubscriptionID: domain.SubscriptionID,
+		KeyEpoch:                sharedspaces.InitialKeyEpoch, CoveredThroughCursor: fence.BoundaryCursor,
+		CreatedAtMilliseconds: nowMilliseconds,
+	}
+	staged := performRelayJSON(
+		t, handler, http.MethodPost, domainRoot+"/checkpoints/candidates", candidate,
+		domain.MemberCredential.AuthorizationToken, domain.MemberCredential.MemberID,
+	)
+	requireStatus(t, staged, http.StatusCreated)
+	_ = staged.Body.Close()
+	activation := relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		ActivatedAtMilliseconds: nowMilliseconds,
+	}
+	activated := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/checkpoints/"+candidate.CheckpointID.String()+"/activation",
+		activation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, activated, http.StatusCreated)
+	_ = activated.Body.Close()
 }
 
 func TestProductAuthorityRoutesAreIsolatedByServiceConfiguration(t *testing.T) {

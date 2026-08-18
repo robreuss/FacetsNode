@@ -31,6 +31,14 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	invitation, invitationCredential := testInvitation(
 		t, provisioning, admin, 1_200, sharedspaces.RoleParticipant,
 	)
+	if _, err := store.CreateInvitation(ctx, admin, invitation, 1_200); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeBootstrapNotReady) {
+		t.Fatalf("invitation before bootstrap err=%v", err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(t, ctx, relayStore, store, provisioning, hostCredential, admin, sharedspaces.InitialKeyEpoch, 1_150)
 	issued, err := store.CreateInvitation(ctx, admin, invitation, 1_200)
 	if err != nil || issued.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("invitation=%+v err=%v", issued, err)
@@ -72,10 +80,6 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
 		t.Fatalf("status=%+v err=%v", status, err)
-	}
-	hostCredential := relay.Credential{
-		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
-		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
 	}
 	fence, err := relayStore.CreateCheckpointFence(ctx, hostCredential, relay.CheckpointFenceRequest{
 		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: 1_350,
@@ -159,11 +163,17 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 
 func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
 	ctx := context.Background()
-	store := sharedspaces.NewMemoryStore(relay.NewMemoryStore())
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
 	_, provisioning, admin := testSpaceProvisioning(t, 4_000, sharedspaces.SecurityModeE2EE)
 	if _, err := store.ProvisionSpace(ctx, provisioning, 4_000); err != nil {
 		t.Fatal(err)
 	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(t, ctx, relayStore, store, provisioning, hostCredential, admin, sharedspaces.InitialKeyEpoch, 4_050)
 	invitation, credential := testInvitation(t, provisioning, admin, 4_100, sharedspaces.RoleReader)
 	if _, err := store.CreateInvitation(ctx, admin, invitation, 4_100); err != nil {
 		t.Fatal(err)
@@ -190,6 +200,43 @@ func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
 	}
 	if _, err := store.RevokeParticipant(ctx, admin, stale, 4_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
 		t.Fatalf("stale revocation err=%v", err)
+	}
+}
+
+func activateSharedSpaceCheckpoint(
+	t *testing.T,
+	ctx context.Context,
+	relayStore *relay.MemoryStore,
+	store sharedspaces.Store,
+	provisioning sharedspaces.SpaceProvisioning,
+	hostCredential relay.Credential,
+	admin relay.AdministrationCredential,
+	keyEpoch uint64,
+	now int64,
+) {
+	t.Helper()
+	fence, err := relayStore.CreateCheckpointFence(ctx, hostCredential, relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: now,
+	}, now)
+	if err != nil {
+		t.Fatalf("create bootstrap checkpoint fence: %v", err)
+	}
+	candidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: provisioning.SpaceID,
+		DomainID:                provisioning.Domain.Registration.DomainID,
+		PublisherSubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
+		KeyEpoch:                keyEpoch,
+		CoveredThroughCursor:    fence.BoundaryCursor,
+		CreatedAtMilliseconds:   now,
+	}
+	if _, err := store.StageCheckpoint(ctx, hostCredential, candidate, now); err != nil {
+		t.Fatalf("stage bootstrap checkpoint: %v", err)
+	}
+	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, ActivatedAtMilliseconds: now,
+	}, now); err != nil {
+		t.Fatalf("activate bootstrap checkpoint: %v", err)
 	}
 }
 

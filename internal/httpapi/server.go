@@ -582,7 +582,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			case sharedspaces.CodeSpaceCollision, sharedspaces.CodeInvitationCollision,
 				sharedspaces.CodeInvitationClaimed, sharedspaces.CodeParticipantCollision,
 				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost,
-				sharedspaces.CodeWrongKeyEpoch:
+				sharedspaces.CodeWrongKeyEpoch, sharedspaces.CodeBootstrapNotReady:
 				status = http.StatusConflict
 			}
 			if s.logger != nil {

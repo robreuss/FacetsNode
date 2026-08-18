@@ -23,6 +23,7 @@ const (
 	CodeUnauthorized         ErrorCode = "shared_space_unauthorized"
 	CodeWrongScope           ErrorCode = "shared_space_wrong_scope"
 	CodeWrongKeyEpoch        ErrorCode = "shared_space_wrong_key_epoch"
+	CodeBootstrapNotReady    ErrorCode = "shared_space_bootstrap_not_ready"
 )
 
 type ProtocolError struct {

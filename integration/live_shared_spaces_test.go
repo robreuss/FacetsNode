@@ -78,6 +78,13 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	}
 	spaceRoot := baseURL + "/v1/shared-spaces/" + spaceID.String() +
 		"/domains/" + domainID.String()
+	relayRoot := baseURL + "/v1/relay/tenants/" + spaceID.String() +
+		"/domains/" + domainID.String()
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, spaceRoot+"/invitations", invitation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusConflict)
+	publishLiveSharedSpaceBootstrapCheckpoint(t, client, relayRoot, domain, now)
 	requireStatusAndClose(t, requestRelayJSON(
 		t, client, http.MethodPost, spaceRoot+"/invitations", invitation,
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
@@ -113,8 +120,6 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		t.Fatalf("unexpected Shared Space status: %+v", status)
 	}
 
-	relayRoot := baseURL + "/v1/relay/tenants/" + spaceID.String() +
-		"/domains/" + domainID.String()
 	message := relay.Envelope{
 		Version: relay.SchemaVersion, Algorithm: relay.EnvelopeAlgorithm,
 		TenantID: spaceID, DomainID: domainID, MessageID: uuid.New(),
@@ -195,6 +200,48 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		t, client, http.MethodGet, relayRoot+"/messages?limit=1", nil,
 		participantCredential.Token, participantID,
 	), http.StatusForbidden)
+}
+
+func publishLiveSharedSpaceBootstrapCheckpoint(
+	t *testing.T,
+	client *http.Client,
+	relayRoot string,
+	domain liveRelayDomainProvisioningRequest,
+	now int64,
+) {
+	t.Helper()
+	fenceRequest := relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: now,
+	}
+	fenceResponse := requestRelayJSON(
+		t, client, http.MethodPost, relayRoot+"/checkpoint-fences", fenceRequest,
+		domain.MemberCredential.AuthorizationToken, domain.MemberCredential.MemberID,
+	)
+	requireStatus(t, fenceResponse, http.StatusCreated)
+	var fence relay.CheckpointFenceResponse
+	decodeLiveJSON(t, fenceResponse, &fence)
+	candidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID:                 fence.FenceID,
+		TenantID:                domain.AdministrationCredential.TenantID,
+		DomainID:                domain.AdministrationCredential.DomainID,
+		PublisherSubscriptionID: domain.SubscriptionID,
+		KeyEpoch:                sharedspaces.InitialKeyEpoch, CoveredThroughCursor: fence.BoundaryCursor,
+		CreatedAtMilliseconds: now,
+	}
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, relayRoot+"/checkpoints/candidates", candidate,
+		domain.MemberCredential.AuthorizationToken, domain.MemberCredential.MemberID,
+	), http.StatusCreated)
+	activation := relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		ActivatedAtMilliseconds: now,
+	}
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost,
+		relayRoot+"/checkpoints/"+candidate.CheckpointID.String()+"/activation",
+		activation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusCreated)
 }
 
 type liveSharedSpaceProvisioningInput struct {

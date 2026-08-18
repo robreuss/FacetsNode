@@ -45,6 +45,37 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 
 	invitation, credential := postgresSharedSpaceInvitation(t, provisioning, admin, now+100)
+	if _, err := store.CreateInvitation(ctx, admin, invitation, now+100); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeBootstrapNotReady) {
+		t.Fatalf("invite before bootstrap err=%v", err)
+	}
+	relayStore := postgresstore.NewRelayStore(pool)
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: postgresRelayToken(0x31),
+	}
+	fence, err := relayStore.CreateCheckpointFence(ctx, hostCredential, relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: now + 50,
+	}, now+50)
+	if err != nil {
+		t.Fatalf("bootstrap fence: %v", err)
+	}
+	checkpoint := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: provisioning.SpaceID,
+		DomainID:                provisioning.Domain.Registration.DomainID,
+		PublisherSubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
+		KeyEpoch:                sharedspaces.InitialKeyEpoch,
+		CoveredThroughCursor:    fence.BoundaryCursor,
+		CreatedAtMilliseconds:   now + 50,
+	}
+	if _, err := store.StageCheckpoint(ctx, hostCredential, checkpoint, now+50); err != nil {
+		t.Fatalf("bootstrap stage: %v", err)
+	}
+	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: checkpoint.CheckpointID, ActivatedAtMilliseconds: now + 50,
+	}, now+50); err != nil {
+		t.Fatalf("bootstrap activation: %v", err)
+	}
 	issued, err := store.CreateInvitation(ctx, admin, invitation, now+100)
 	if err != nil || issued.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("invite=%+v err=%v", issued, err)
@@ -104,7 +135,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		retry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("provision retry after key rotation=%+v err=%v", retry, err)
 	}
-	if _, err := postgresstore.NewRelayStore(pool).Fetch(ctx, memberCredential, 0, 1, now+301); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, now+301); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked participant relay access err=%v", err)
 	}
 

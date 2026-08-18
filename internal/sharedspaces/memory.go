@@ -12,10 +12,11 @@ import (
 )
 
 type memorySpace struct {
-	provisioning SpaceProvisioning
-	result       relay.TenantProvisioningResult
-	participants map[uuid.UUID]Participant
-	keyEpoch     uint64
+	provisioning          SpaceProvisioning
+	result                relay.TenantProvisioningResult
+	participants          map[uuid.UUID]Participant
+	keyEpoch              uint64
+	activeCheckpointEpoch uint64
 }
 
 type memoryInvitation struct {
@@ -140,6 +141,12 @@ func (s *MemoryStore) CreateInvitation(
 			return InvitationCreateResult{Acceptance: relay.AcceptanceDuplicate, Invitation: existing.invitation}, nil
 		}
 		return InvitationCreateResult{}, NewProtocolError(CodeInvitationCollision, "invitation ID was reused")
+	}
+	if space.activeCheckpointEpoch != space.keyEpoch {
+		return InvitationCreateResult{}, NewProtocolError(
+			CodeBootstrapNotReady,
+			"Shared Space does not have an activated checkpoint for the current key epoch",
+		)
 	}
 	if participant, found := space.participants[invitation.ParticipantID]; found && participant.RevokedAtMilliseconds == nil {
 		return InvitationCreateResult{}, NewProtocolError(CodeParticipantCollision, "participant is already active")
@@ -381,5 +388,10 @@ func (s *MemoryStore) ActivateCheckpoint(
 	if s.checkpointEpochs[request.CheckpointID] != space.keyEpoch {
 		return relay.CheckpointActivationResponse{}, NewProtocolError(CodeWrongKeyEpoch, "checkpoint key epoch is not current")
 	}
-	return s.relay.ActivateCheckpoint(ctx, credential, request, nowMilliseconds)
+	result, err := s.relay.ActivateCheckpoint(ctx, credential, request, nowMilliseconds)
+	if err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	space.activeCheckpointEpoch = space.keyEpoch
+	return result, nil
 }
