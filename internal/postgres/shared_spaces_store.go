@@ -331,6 +331,10 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	if err := json.Unmarshal(payload, &invitation); err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("decode Shared Space invitation: %w", err)
 	}
+	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, claim.SpaceID)
+	if err != nil {
+		return sharedspaces.InvitationClaimResult{}, err
+	}
 
 	if claimedAt != nil && claimedMemberID != nil {
 		member, found, err := loadRelayMember(
@@ -351,6 +355,7 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		}
 		return sharedspaces.InvitationClaimResult{
 			Acceptance: relay.AcceptanceDuplicate, Participant: participant,
+			CurrentKeyEpoch: currentKeyEpoch,
 			Member: relay.SubscriptionMemberRegistration{
 				SubscriptionID: subscriptionID, MemberRegistration: member,
 			},
@@ -386,7 +391,8 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("commit Shared Space invitation claim: %w", err)
 	}
 	return sharedspaces.InvitationClaimResult{
-		Acceptance: relayResult.Acceptance, Participant: participant, Member: relayResult.Member,
+		Acceptance: relayResult.Acceptance, CurrentKeyEpoch: currentKeyEpoch,
+		Participant: participant, Member: relayResult.Member,
 	}, nil
 }
 

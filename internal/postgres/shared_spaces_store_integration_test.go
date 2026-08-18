@@ -67,11 +67,13 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 	claimed, err := store.ClaimInvitation(ctx, credential, claim, now+200)
 	if err != nil || claimed.Acceptance != relay.AcceptanceAccepted ||
+		claimed.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		claimed.Participant.Role != sharedspaces.RoleParticipant {
 		t.Fatalf("claim=%+v err=%v", claimed, err)
 	}
 	claimRetry, err := store.ClaimInvitation(ctx, credential, claim, now+201)
-	if err != nil || claimRetry.Acceptance != relay.AcceptanceDuplicate {
+	if err != nil || claimRetry.Acceptance != relay.AcceptanceDuplicate ||
+		claimRetry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("claim retry=%+v err=%v", claimRetry, err)
 	}
 

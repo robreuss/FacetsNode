@@ -210,9 +210,10 @@ func (c InvitationClaim) Validate() error {
 }
 
 type InvitationClaimResult struct {
-	Acceptance  relay.Acceptance                     `json:"acceptance"`
-	Participant Participant                          `json:"participant"`
-	Member      relay.SubscriptionMemberRegistration `json:"member"`
+	Acceptance      relay.Acceptance                     `json:"acceptance"`
+	CurrentKeyEpoch uint64                               `json:"currentKeyEpoch"`
+	Participant     Participant                          `json:"participant"`
+	Member          relay.SubscriptionMemberRegistration `json:"member"`
 }
 
 type ParticipantRevocation struct {

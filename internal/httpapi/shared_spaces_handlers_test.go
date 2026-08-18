@@ -114,7 +114,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		t.Fatal(err)
 	}
 	_ = claimed.Body.Close()
-	if claimResult.Participant.Role != sharedspaces.RoleReader {
+	if claimResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		claimResult.Participant.Role != sharedspaces.RoleReader {
 		t.Fatalf("claim=%+v", claimResult)
 	}
 	claimRetry := performRelayJSON(

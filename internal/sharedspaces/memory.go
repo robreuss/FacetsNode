@@ -211,7 +211,8 @@ func (s *MemoryStore) ClaimInvitation(
 	}
 	space.participants[participant.ParticipantID] = participant
 	result := InvitationClaimResult{
-		Acceptance: relayResult.Acceptance, Participant: participant, Member: relayResult.Member,
+		Acceptance: relayResult.Acceptance, CurrentKeyEpoch: space.keyEpoch,
+		Participant: participant, Member: relayResult.Member,
 	}
 	record.result = &result
 	s.invitations[credential.InvitationID] = record
