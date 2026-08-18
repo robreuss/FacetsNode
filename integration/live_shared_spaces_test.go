@@ -176,6 +176,21 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	if status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("Shared Space key epoch did not advance: %+v", status)
 	}
+	staleMessage := message
+	staleMessage.MessageID = uuid.New()
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut,
+		relayRoot+"/messages/"+staleMessage.MessageID.String(), staleMessage,
+		domain.MemberCredential.AuthorizationToken, hostID,
+	), http.StatusConflict)
+	currentMessage := message
+	currentMessage.MessageID = uuid.New()
+	currentMessage.KeyEpoch = sharedspaces.InitialKeyEpoch + 1
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut,
+		relayRoot+"/messages/"+currentMessage.MessageID.String(), currentMessage,
+		domain.MemberCredential.AuthorizationToken, hostID,
+	), http.StatusCreated)
 	requireStatusAndClose(t, requestRelayJSON(
 		t, client, http.MethodGet, relayRoot+"/messages?limit=1", nil,
 		participantCredential.Token, participantID,
