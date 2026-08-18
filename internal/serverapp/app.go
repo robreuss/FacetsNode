@@ -88,6 +88,9 @@ func Main(service config.Service) {
 	if service == config.DeviceSync {
 		api.SetDeviceSyncStore(relayStore)
 	}
+	if service == config.SharedSpaces {
+		api.SetSharedSpacesStore(postgres.NewSharedSpacesStore(pool))
+	}
 	if err := api.SetTrafficLimits(configuration.TrafficLimits); err != nil {
 		logger.Error("traffic limits rejected", "error", err)
 		os.Exit(1)

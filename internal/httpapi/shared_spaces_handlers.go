@@ -1,0 +1,300 @@
+package httpapi
+
+import (
+	"net/http"
+
+	"github.com/google/uuid"
+
+	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/sharedspaces"
+	"github.com/robreuss/FacetsNode/internal/traffic"
+)
+
+type sharedSpaceProvisioningInput struct {
+	Version                int                          `json:"version"`
+	RetryID                uuid.UUID                    `json:"retryID"`
+	SpaceID                uuid.UUID                    `json:"spaceID"`
+	SecurityMode           sharedspaces.SecurityMode    `json:"securityMode"`
+	InitialParticipantID   uuid.UUID                    `json:"initialParticipantID"`
+	InitialParticipantKind sharedspaces.ParticipantKind `json:"initialParticipantKind"`
+	TenantProvisioning     relayTenantProvisioningInput `json:"tenantProvisioning"`
+}
+
+type sharedSpaceInvitationCredential struct {
+	InvitationID       uuid.UUID `json:"invitationID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+type sharedSpaceInvitationCreateInput struct {
+	Version                     int                             `json:"version"`
+	RetryID                     uuid.UUID                       `json:"retryID"`
+	ParticipantID               uuid.UUID                       `json:"participantID"`
+	SubscriptionID              uuid.UUID                       `json:"subscriptionID"`
+	Kind                        sharedspaces.ParticipantKind    `json:"kind"`
+	Role                        sharedspaces.Role               `json:"role"`
+	InvitationCredential        sharedSpaceInvitationCredential `json:"invitationCredential"`
+	ExpiresAtMilliseconds       int64                           `json:"expiresAtMilliseconds"`
+	MemberExpiresAtMilliseconds *int64                          `json:"memberExpiresAtMilliseconds,omitempty"`
+	CreatedAtMilliseconds       int64                           `json:"createdAtMilliseconds"`
+}
+
+type sharedSpaceInvitationClaimInput struct {
+	Version               int                   `json:"version"`
+	ParticipantID         uuid.UUID             `json:"participantID"`
+	MemberCredential      relayMemberCredential `json:"memberCredential"`
+	ClaimedAtMilliseconds int64                 `json:"claimedAtMilliseconds"`
+}
+
+func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request *http.Request) {
+	if err := s.authorizeOperator(request); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input sharedSpaceProvisioningInput
+	if err := readSharedSpacesJSON(writer, request, &input); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.Version != sharedspaces.SchemaVersion {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidSpace, "Shared Space provisioning version is invalid",
+		))
+		return
+	}
+	tenant, domain, err := relayTenantAndDomainProvisioning(input.TenantProvisioning)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	provisioning := sharedspaces.SpaceProvisioning{
+		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
+		SpaceID: input.SpaceID, SecurityMode: input.SecurityMode,
+		InitialParticipantID:   input.InitialParticipantID,
+		InitialParticipantKind: input.InitialParticipantKind,
+		Tenant:                 tenant, Domain: domain,
+		CreatedAtMilliseconds: tenant.CreatedAtMilliseconds,
+	}
+	result, err := s.sharedSpacesStore.ProvisionSpace(
+		request.Context(), provisioning, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleGetSharedSpaceStatus(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	status, err := s.sharedSpacesStore.GetSpaceStatus(request.Context(), credential)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input sharedSpaceInvitationCreateInput
+	if err := readSharedSpacesJSON(writer, request, &input); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.Version != sharedspaces.SchemaVersion {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidInvitation, "Shared Space invitation version is invalid",
+		))
+		return
+	}
+	invitationCredential := relay.AdmissionCredential{
+		TenantID: spaceID, DomainID: domainID,
+		AdmissionID: input.InvitationCredential.InvitationID,
+		Token:       input.InvitationCredential.AuthorizationToken,
+	}
+	authorizationDigest, err := relay.AdmissionAuthorizationDigest(invitationCredential)
+	if err != nil {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidInvitation, err.Error(),
+		))
+		return
+	}
+	invitation := sharedspaces.Invitation{
+		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
+		SpaceID: spaceID, InvitationID: invitationCredential.AdmissionID,
+		ParticipantID: input.ParticipantID, SubscriptionID: input.SubscriptionID,
+		Kind: input.Kind, Role: input.Role,
+		RelayAdmission: relay.MemberAdmission{
+			Version: relay.SchemaVersion, TenantID: spaceID, DomainID: domainID,
+			AdmissionID:                 invitationCredential.AdmissionID,
+			AuthorizationDigest:         authorizationDigest,
+			Capabilities:                input.Role.Capabilities(),
+			CreatedAtMilliseconds:       input.CreatedAtMilliseconds,
+			ExpiresAtMilliseconds:       input.ExpiresAtMilliseconds,
+			MemberExpiresAtMilliseconds: input.MemberExpiresAtMilliseconds,
+		},
+		CreatedAtMilliseconds: input.CreatedAtMilliseconds,
+	}
+	result, err := s.sharedSpacesStore.CreateInvitation(
+		request.Context(), credential, invitation, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleClaimSharedSpaceInvitation(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	invitationID, err := parseSharedSpacesUUID(request.PathValue("invitationID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	invitationToken, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeUnauthorized, "Shared Space invitation credential is missing",
+		))
+		return
+	}
+	var input sharedSpaceInvitationClaimInput
+	if err := readSharedSpacesJSON(writer, request, &input); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.Version != sharedspaces.SchemaVersion || input.MemberCredential.TenantID != spaceID ||
+		input.MemberCredential.DomainID != domainID || input.MemberCredential.MemberID != input.ParticipantID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "Shared Space invitation claim path and body differ",
+		))
+		return
+	}
+	memberCredential := relay.Credential{
+		TenantID: spaceID, DomainID: domainID, MemberID: input.ParticipantID,
+		Token: input.MemberCredential.AuthorizationToken,
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant, err.Error(),
+		))
+		return
+	}
+	claim := sharedspaces.InvitationClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
+		ParticipantID: input.ParticipantID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: input.ParticipantID, AuthorizationDigest: memberDigest,
+		},
+		ClaimedAtMilliseconds: input.ClaimedAtMilliseconds,
+	}
+	result, err := s.sharedSpacesStore.ClaimInvitation(
+		request.Context(),
+		sharedspaces.InvitationCredential{
+			SpaceID: spaceID, DomainID: domainID,
+			InvitationID: invitationID, Token: invitationToken,
+		},
+		claim, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleRevokeSharedSpaceParticipant(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	participantID, err := parseSharedSpacesUUID(request.PathValue("participantID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var revocation sharedspaces.ParticipantRevocation
+	if err := readSharedSpacesJSON(writer, request, &revocation); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if revocation.SpaceID != spaceID || revocation.ParticipantID != participantID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "Shared Space participant revocation path and body differ",
+		))
+		return
+	}
+	result, err := s.sharedSpacesStore.RevokeParticipant(
+		request.Context(), credential, revocation, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func readSharedSpacesJSON(writer http.ResponseWriter, request *http.Request, destination any) error {
+	return decodeJSONWithLimit(
+		writer, request, destination, maximumRequestByteCount,
+		func(message string) error {
+			return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidSpace, message)
+		},
+	)
+}
+
+func sharedSpacesScopeFromPath(request *http.Request) (uuid.UUID, uuid.UUID, error) {
+	spaceID, err := parseSharedSpacesUUID(request.PathValue("spaceID"))
+	if err != nil {
+		return uuid.Nil, uuid.Nil, err
+	}
+	domainID, err := parseSharedSpacesUUID(request.PathValue("domainID"))
+	if err != nil {
+		return uuid.Nil, uuid.Nil, err
+	}
+	return spaceID, domainID, nil
+}
+
+func parseSharedSpacesUUID(value string) (uuid.UUID, error) {
+	identifier, err := uuid.Parse(value)
+	if err != nil || identifier == uuid.Nil {
+		return uuid.Nil, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "Shared Space identifier is invalid",
+		)
+	}
+	return identifier, nil
+}

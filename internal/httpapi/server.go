@@ -16,6 +16,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
+	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -26,6 +27,7 @@ type Server struct {
 	store                  rendezvous.Store
 	relayStore             relay.Store
 	deviceSyncStore        devicesync.Store
+	sharedSpacesStore      sharedspaces.Store
 	blobContentStore       relay.BlobContentStore
 	blobUploadContentStore relay.BlobUploadContentStore
 	relayWakeBroker        *relayWakeBroker
@@ -65,6 +67,13 @@ func (s *Server) SetServiceIdentity(identity string) {
 // underlying opaque relay implementation.
 func (s *Server) SetDeviceSyncStore(store devicesync.Store) {
 	s.deviceSyncStore = store
+}
+
+// SetSharedSpacesStore enables the product-level Shared Spaces authority
+// routes. Device Sync intentionally leaves this unset even though both
+// products reuse the same content-blind relay data plane.
+func (s *Server) SetSharedSpacesStore(store sharedspaces.Store) {
+	s.sharedSpacesStore = store
 }
 
 func NewWithRelay(
@@ -315,6 +324,35 @@ func (s *Server) Handler() http.Handler {
 			s.handleClaimDeviceSyncSpaceDeviceAdmission,
 		)
 	}
+	if s.sharedSpacesStore != nil {
+		if s.operatorProvisioningOn {
+			register(
+				"POST /v1/shared-spaces",
+				traffic.SurfaceManagement,
+				s.handleProvisionSharedSpace,
+			)
+		}
+		register(
+			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/status",
+			traffic.SurfaceManagement,
+			s.handleGetSharedSpaceStatus,
+		)
+		register(
+			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations",
+			traffic.SurfaceManagement,
+			s.handleCreateSharedSpaceInvitation,
+		)
+		register(
+			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations/{invitationID}/claim",
+			traffic.SurfaceManagement,
+			s.handleClaimSharedSpaceInvitation,
+		)
+		register(
+			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/revocation",
+			traffic.SurfaceManagement,
+			s.handleRevokeSharedSpaceParticipant,
+		)
+	}
 	return s.securityHeaders(s.requestLog(mux))
 }
 
@@ -528,44 +566,64 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			}{Code: code, Message: message}})
 			return
 		}
-		var relayProtocol *relay.ProtocolError
-		if errors.As(err, &relayProtocol) {
-			code = string(relayProtocol.Code)
-			message = "The relay request was rejected."
-			switch relayProtocol.Code {
-			case relay.CodeInvalidTenant, relay.CodeInvalidDomain,
-				relay.CodeInvalidSubscription, relay.CodeInvalidMember,
-				relay.CodeInvalidAdmission,
-				relay.CodeInvalidCredentialRotation,
-				relay.CodeInvalidEnvelope, relay.CodeInvalidBlob, relay.CodeInvalidBlobUpload,
-				relay.CodeInvalidCursor, relay.CodeInvalidCheckpoint, relay.CodeInvalidCheckpointFence,
-				relay.CodeWrongScope:
+		var sharedSpacesProtocol *sharedspaces.ProtocolError
+		if errors.As(err, &sharedSpacesProtocol) {
+			code = string(sharedSpacesProtocol.Code)
+			message = "The Shared Spaces request was rejected."
+			switch sharedSpacesProtocol.Code {
+			case sharedspaces.CodeInvalidSpace, sharedspaces.CodeInvalidInvitation,
+				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeWrongScope:
 				status = http.StatusBadRequest
-			case relay.CodeUnauthorized, relay.CodeTenantNotFound, relay.CodeDomainNotFound,
-				relay.CodeMemberNotFound, relay.CodeAdmissionNotFound:
+			case sharedspaces.CodeUnauthorized:
 				status = http.StatusUnauthorized
-			case relay.CodeMemberExpired, relay.CodeMemberRevoked,
-				relay.CodeAdmissionExpired, relay.CodeAdmissionRevoked,
-				relay.CodeMissingCapability:
-				status = http.StatusForbidden
-			case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound, relay.CodeBlobUploadNotFound,
-				relay.CodeCheckpointNotFound, relay.CodeCheckpointFenceNotFound:
+			case sharedspaces.CodeSpaceNotFound, sharedspaces.CodeInvitationNotFound,
+				sharedspaces.CodeParticipantNotFound:
 				status = http.StatusNotFound
-			case relay.CodeTenantCollision, relay.CodeDomainCollision,
-				relay.CodeSubscriptionCollision, relay.CodeMemberCollision,
-				relay.CodeAdmissionCollision, relay.CodeAdmissionClaimed,
-				relay.CodeCredentialRotationCollision,
-				relay.CodeCredentialReuse,
-				relay.CodeMessageCollision, relay.CodeBlobCollision, relay.CodeBlobUploadCollision,
-				relay.CodeInvalidAcknowledgment, relay.CodeCheckpointCollision, relay.CodeCheckpointFenceCollision,
-				relay.CodeCheckpointFenceActive,
-				relay.CodeCheckpointNotEligible, relay.CodeCollectionPlanStale:
+			case sharedspaces.CodeSpaceCollision, sharedspaces.CodeInvitationCollision,
+				sharedspaces.CodeInvitationClaimed, sharedspaces.CodeParticipantCollision,
+				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost:
 				status = http.StatusConflict
-			case relay.CodeTenantFull, relay.CodeDomainFull:
-				status = http.StatusTooManyRequests
 			}
 		} else {
-			s.logger.Error("request failed", "error", err)
+			var relayProtocol *relay.ProtocolError
+			if errors.As(err, &relayProtocol) {
+				code = string(relayProtocol.Code)
+				message = "The relay request was rejected."
+				switch relayProtocol.Code {
+				case relay.CodeInvalidTenant, relay.CodeInvalidDomain,
+					relay.CodeInvalidSubscription, relay.CodeInvalidMember,
+					relay.CodeInvalidAdmission,
+					relay.CodeInvalidCredentialRotation,
+					relay.CodeInvalidEnvelope, relay.CodeInvalidBlob, relay.CodeInvalidBlobUpload,
+					relay.CodeInvalidCursor, relay.CodeInvalidCheckpoint, relay.CodeInvalidCheckpointFence,
+					relay.CodeWrongScope:
+					status = http.StatusBadRequest
+				case relay.CodeUnauthorized, relay.CodeTenantNotFound, relay.CodeDomainNotFound,
+					relay.CodeMemberNotFound, relay.CodeAdmissionNotFound:
+					status = http.StatusUnauthorized
+				case relay.CodeMemberExpired, relay.CodeMemberRevoked,
+					relay.CodeAdmissionExpired, relay.CodeAdmissionRevoked,
+					relay.CodeMissingCapability:
+					status = http.StatusForbidden
+				case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound, relay.CodeBlobUploadNotFound,
+					relay.CodeCheckpointNotFound, relay.CodeCheckpointFenceNotFound:
+					status = http.StatusNotFound
+				case relay.CodeTenantCollision, relay.CodeDomainCollision,
+					relay.CodeSubscriptionCollision, relay.CodeMemberCollision,
+					relay.CodeAdmissionCollision, relay.CodeAdmissionClaimed,
+					relay.CodeCredentialRotationCollision,
+					relay.CodeCredentialReuse,
+					relay.CodeMessageCollision, relay.CodeBlobCollision, relay.CodeBlobUploadCollision,
+					relay.CodeInvalidAcknowledgment, relay.CodeCheckpointCollision, relay.CodeCheckpointFenceCollision,
+					relay.CodeCheckpointFenceActive,
+					relay.CodeCheckpointNotEligible, relay.CodeCollectionPlanStale:
+					status = http.StatusConflict
+				case relay.CodeTenantFull, relay.CodeDomainFull:
+					status = http.StatusTooManyRequests
+				}
+			} else {
+				s.logger.Error("request failed", "error", err)
+			}
 		}
 	}
 	writeJSON(writer, status, struct {
