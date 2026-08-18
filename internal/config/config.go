@@ -19,6 +19,7 @@ type Config struct {
 	TransferPeriod     time.Duration
 	DatabaseConns      int32
 	OperatorToken      string
+	PublicURL          string
 	BlobRoot           string
 	BlobUploadTTL      time.Duration
 	BlobOrphanGrace    time.Duration
@@ -73,6 +74,7 @@ func Load(service Service) (Config, error) {
 		TransferPeriod:     10 * time.Minute,
 		DatabaseConns:      10,
 		OperatorToken:      os.Getenv(prefix + "_OPERATOR_TOKEN"),
+		PublicURL:          os.Getenv(prefix + "_PUBLIC_URL"),
 		BlobRoot:           environment(prefix+"_BLOB_ROOT", defaultBlobRoot),
 		BlobUploadTTL:      7 * 24 * time.Hour,
 		BlobOrphanGrace:    24 * time.Hour,

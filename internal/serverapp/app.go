@@ -3,6 +3,7 @@ package serverapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,6 +23,13 @@ import (
 func Main(service config.Service) {
 	if len(os.Args) == 3 && os.Args[1] == "healthcheck" {
 		healthcheck(os.Args[2])
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "issue-account-admission" {
+		if err := issueAccountAdmission(service, os.Args[2:]); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "issue Device Sync account admission: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", service)

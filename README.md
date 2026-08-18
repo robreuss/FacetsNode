@@ -81,10 +81,14 @@ FACETS_SERVER_SOURCE_TREE="$TREE" \
   docker compose build
 docker compose up --no-build -d
 curl --fail http://127.0.0.1:8080/readyz
+docker compose exec -T server \
+  /facets-device-sync-server issue-account-admission
 ```
 
 The private management listener is published only on loopback. Caddy publishes
-the reviewed application allowlist over HTTPS on port 8443. Never expose the
+the reviewed application allowlist, including Device Sync admission claims and
+authenticated principal operations, over HTTPS on port 8443. Operator admission
+issuance remains private. Never expose the
 plaintext management port or disable certificate verification.
 
 ## Run Facets Shared Spaces Server

@@ -17,6 +17,8 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 		"/v1/pairing/routes",
 		"/v1/pairing/routes/11111111-1111-4111-8111-111111111111/messages",
 		"/v1/relay/tenants/11111111-1111-4111-8111-111111111111/domains/22222222-2222-4222-8222-222222222222/messages",
+		"/v1/device-sync/account-admissions/11111111-1111-4111-8111-111111111111/claim",
+		"/v1/device-sync/principals/11111111-1111-4111-8111-111111111111/status",
 	} {
 		if !matchesAnyCaddyPathPattern(requestPath, patterns) {
 			t.Errorf("public application path %q is not routed", requestPath)
@@ -24,6 +26,7 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 	}
 	for _, requestPath := range []string{
 		"/v1/relay/tenants",
+		"/v1/device-sync/account-admissions",
 		"/livez",
 		"/readyz",
 		"/metrics",

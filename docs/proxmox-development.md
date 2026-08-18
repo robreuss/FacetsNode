@@ -16,6 +16,8 @@ openssl rand -hex 32
 # Put that output after FACETS_DEVICE_SYNC_POSTGRES_PASSWORD= in .env.
 openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 # Put this separate value after FACETS_DEVICE_SYNC_OPERATOR_TOKEN= in .env.
+# Set FACETS_DEVICE_SYNC_PUBLIC_URL to the client-visible HTTPS origin,
+# including the non-default port when applicable.
 install -d -m 700 deploy/tls
 # Install the certificate and private key for the public DNS name as
 # deploy/tls/server.crt and deploy/tls/server.key.
@@ -28,6 +30,8 @@ FACETS_SERVER_SOURCE_TREE="$TREE" \
 docker compose up --no-build -d
 docker compose ps
 curl --fail http://127.0.0.1:8080/readyz
+docker compose exec -T server \
+  /facets-device-sync-server issue-account-admission
 ```
 
 Derive both source values in the canonical repository before copying its

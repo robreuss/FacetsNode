@@ -22,6 +22,28 @@ Sync payloads and blobs remain opaque to the service.
 
 ## Issue an account admission
 
+For a self-hosted Compose installation, the operator does not construct this
+request by hand. Configure `FACETS_DEVICE_SYNC_PUBLIC_URL` with the
+client-visible HTTPS origin, then run:
+
+```sh
+docker compose exec -T server \
+  /facets-device-sync-server issue-account-admission
+```
+
+The command writes one JSON object containing a 15-minute bootstrap credential
+and a `facets://device-sync/bootstrap#...` setup URL. Transfer either complete
+value directly to Facets. The URL fragment contains the same bearer secret as
+the JSON credential: do not log it, paste it into a browser, or retain it after
+the first device claims it. Use `--lifetime` only when operationally necessary;
+the accepted range is five minutes through seven days.
+
+The command writes directly through the service's transactional Device Sync
+store. Running it requires administrative access to the container and database;
+it does not expose operator admission issuance on public HTTPS ingress.
+
+Hosted admission services use the equivalent private management request.
+
 An operator or hosted admission service generates a random UUID and independent
 32-byte unpadded base64url token. It sends the credential over the private
 management surface:
