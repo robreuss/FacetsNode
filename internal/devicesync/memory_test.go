@@ -416,7 +416,7 @@ func testDeviceAdmission(
 	admission := devicesync.DeviceAdmission{
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
 		PrincipalID: principal.PrincipalID, DeviceID: deviceID,
-		SubscriptionID: principal.ControlDomain.Subscription.SubscriptionID,
+		SubscriptionID: uuid.New(),
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: principal.PrincipalID,
 			DomainID: credential.DomainID, AdmissionID: credential.AdmissionID,
@@ -503,7 +503,7 @@ func testSpaceDeviceAdmission(
 	admission := devicesync.SpaceDeviceAdmission{
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
 		PrincipalID: space.PrincipalID, SpaceID: space.SpaceID, DeviceID: deviceID,
-		SubscriptionID: space.Domain.Subscription.SubscriptionID,
+		SubscriptionID: uuid.New(),
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: space.PrincipalID,
 			DomainID: credential.DomainID, AdmissionID: credential.AdmissionID,

@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -182,7 +184,7 @@ func TestDeviceSyncPrincipalAdmitsAdditionalDeviceTransportExactlyOnce(t *testin
 	}
 	createInput := deviceSyncDeviceAdmissionCreateInput{
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(), DeviceID: deviceID,
-		SubscriptionID:        domainInput.SubscriptionID,
+		SubscriptionID:        uuid.New(),
 		AdmissionCredential:   admissionCredential,
 		ExpiresAtMilliseconds: now + devicesync.MinimumAdmissionLifetimeMilliseconds,
 	}
@@ -246,6 +248,32 @@ func TestDeviceSyncPrincipalAdmitsAdditionalDeviceTransportExactlyOnce(t *testin
 		claimedResult.DeviceID != deviceID ||
 		claimedResult.Member.MemberRegistration.MemberID != deviceID {
 		t.Fatalf("unexpected device claim: %+v", claimedResult)
+	}
+
+	messageID := uuid.New()
+	publisherCredential := relay.Credential{
+		TenantID: principalID, DomainID: domainInput.AdministrationCredential.DomainID,
+		MemberID: domainInput.MemberCredential.MemberID,
+		Token:    domainInput.MemberCredential.AuthorizationToken,
+	}
+	envelope := relay.Envelope{
+		Version: relay.SchemaVersion, Algorithm: relay.EnvelopeAlgorithm,
+		TenantID: principalID, DomainID: domainInput.AdministrationCredential.DomainID,
+		MessageID: messageID, PublisherMemberID: publisherCredential.MemberID,
+		KeyEpoch: 1, CreatedAtMilliseconds: now,
+		Nonce:             base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xa1}, 12)),
+		Ciphertext:        base64.RawURLEncoding.EncodeToString([]byte("opaque-control-message")),
+		AuthenticationTag: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xb2}, 16)),
+	}
+	if _, err := relayStore.Publish(context.Background(), publisherCredential, envelope, now); err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := relayStore.Fetch(context.Background(), memberCredential, 0, 10, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fetched.Messages) != 1 || fetched.Messages[0].Envelope.MessageID != messageID {
+		t.Fatalf("new device did not receive opaque control message: %+v", fetched)
 	}
 
 	claimRetry := performRelayJSON(
@@ -404,7 +432,7 @@ func TestDeviceSyncSpaceAdmitsEnrolledDeviceTransportExactlyOnce(t *testing.T) {
 	}
 	createInput := deviceSyncDeviceAdmissionCreateInput{
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(), DeviceID: deviceID,
-		SubscriptionID:        spaceDomainInput.SubscriptionID,
+		SubscriptionID:        uuid.New(),
 		AdmissionCredential:   admissionCredential,
 		ExpiresAtMilliseconds: now + devicesync.MinimumAdmissionLifetimeMilliseconds,
 	}
@@ -535,7 +563,7 @@ func enrollDeviceSyncTestDevice(
 	admission := devicesync.DeviceAdmission{
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
 		PrincipalID: credential.TenantID, DeviceID: deviceID,
-		SubscriptionID: controlDomain.SubscriptionID,
+		SubscriptionID: uuid.New(),
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: credential.TenantID,
 			DomainID: credential.DomainID, AdmissionID: credential.AdmissionID,

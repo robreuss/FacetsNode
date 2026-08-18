@@ -147,9 +147,11 @@ func resultFor(provisioning PrincipalProvisioning, relayResult relay.TenantProvi
 }
 
 // DeviceAdmission binds a generic relay admission to exactly one Device Sync
-// principal and device. It grants transport membership only; content trust and
-// key material must still arrive through the encrypted principal control
-// channel from an already trusted device.
+// principal and device. SubscriptionID is a fresh logical recipient for this
+// device and must not be shared with another device, because relay delivery
+// excludes only the publisher's subscription. The admission grants transport
+// membership only; content trust and key material must still arrive through the
+// encrypted principal control channel from an already trusted device.
 type DeviceAdmission struct {
 	Version               int                   `json:"version"`
 	RetryID               uuid.UUID             `json:"retryID"`
@@ -257,9 +259,10 @@ type SpaceProvisioningResult struct {
 }
 
 // SpaceDeviceAdmission binds one already enrolled Device Sync device to one
-// opaque Space relay domain. It grants transport membership only. The server
-// does not grant Space content trust, distribute content keys, or interpret
-// the encrypted payloads carried by the domain.
+// opaque Space relay domain. SubscriptionID is a fresh logical recipient for
+// this device and must not be shared with another device. It grants transport
+// membership only. The server does not grant Space content trust, distribute
+// content keys, or interpret the encrypted payloads carried by the domain.
 type SpaceDeviceAdmission struct {
 	Version               int                   `json:"version"`
 	RetryID               uuid.UUID             `json:"retryID"`

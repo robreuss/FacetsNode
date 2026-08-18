@@ -86,11 +86,14 @@ Content-Type: application/json
 ```
 
 The request binds one independently generated relay member admission to the
-Device Sync principal, the new device ID, and the principal control-channel
-subscription. The server selects the relay capabilities required by the
-control-channel transport; callers cannot enlarge them. The principal, domain,
-subscription, and relay admission scopes must all match. The product binding
-and relay admission commit in one PostgreSQL transaction.
+Device Sync principal, the new device ID, and a fresh device-specific principal
+control-channel subscription. A subscription must never be reused by another
+device: relay delivery excludes the publisher's own subscription, so sharing a
+subscription would silently suppress device-to-device delivery. The server
+selects the relay capabilities required by the control-channel transport;
+callers cannot enlarge them. The principal and domain scopes must match, and
+the server creates the subscription, product binding, and relay admission in
+one PostgreSQL transaction.
 
 The new device claims that admission once:
 
@@ -152,10 +155,13 @@ Content-Type: application/json
 ```
 
 The request binds one relay member admission to the exact Device Sync principal,
-opaque Space ID, relay domain, subscription, and already enrolled device. The
-server rejects a device that is not registered in the principal control domain,
-and it never infers Space membership from LAN discovery or device names. The
-server selects the relay capabilities; callers cannot enlarge them.
+opaque Space ID, relay domain, a fresh device-specific subscription, and an
+already enrolled device. Per-device subscriptions are mandatory for the same
+delivery-isolation reason as the principal control channel. The server creates
+the subscription atomically with the product and relay admissions, rejects a
+device that is not registered in the principal control domain, and never infers
+Space membership from LAN discovery or device names. The server selects the
+relay capabilities; callers cannot enlarge them.
 
 The new device claims that Space transport admission once:
 

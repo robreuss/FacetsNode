@@ -579,6 +579,25 @@ func (s *RelayStore) CreateSubscription(ctx context.Context, credential relay.Ad
 		return relay.SubscriptionCreateResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.createSubscriptionTx(ctx, tx, credential, request)
+	if err != nil {
+		return relay.SubscriptionCreateResponse{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.SubscriptionCreateResponse{}, err
+	}
+	return result, nil
+}
+
+func (s *RelayStore) createSubscriptionTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	credential relay.AdministrationCredential,
+	request relay.SubscriptionCreateRequest,
+) (relay.SubscriptionCreateResponse, error) {
+	if err := request.Validate(); err != nil {
+		return relay.SubscriptionCreateResponse{}, err
+	}
 	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
 		return relay.SubscriptionCreateResponse{}, err
 	}
@@ -619,9 +638,6 @@ func (s *RelayStore) CreateSubscription(ctx context.Context, credential relay.Ad
 		return relay.SubscriptionCreateResponse{}, fmt.Errorf("insert subscription: %w", err)
 	}
 	if err := insertDataPlaneAudit(ctx, tx, credential.TenantID, &credential.DomainID, &request.SubscriptionID, nil, "subscription_created", request.CreatedAtMilliseconds); err != nil {
-		return relay.SubscriptionCreateResponse{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return relay.SubscriptionCreateResponse{}, err
 	}
 	subscription := relay.Subscription{Version: relay.SchemaVersion, TenantID: credential.TenantID, DomainID: credential.DomainID, SubscriptionID: request.SubscriptionID, Status: relay.SubscriptionActive, StartCursor: cursorFromSequence(startSequence), CreatedAtMilliseconds: request.CreatedAtMilliseconds, UpdatedAtMilliseconds: request.CreatedAtMilliseconds}

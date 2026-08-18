@@ -154,8 +154,9 @@ func (s *MemoryStore) CreateDeviceAdmission(
 	}
 	if credential.TenantID != admission.PrincipalID ||
 		credential.DomainID != principal.provisioning.ControlDomain.Registration.DomainID ||
+		admission.RelayAdmission.TenantID != admission.PrincipalID ||
 		admission.RelayAdmission.DomainID != credential.DomainID ||
-		admission.SubscriptionID != principal.provisioning.ControlDomain.Subscription.SubscriptionID {
+		admission.SubscriptionID == principal.provisioning.ControlDomain.Subscription.SubscriptionID {
 		return DeviceAdmissionCreateResult{}, NewProtocolError(CodeWrongScope, "device admission belongs to another principal control domain")
 	}
 	if admissionID, found := s.deviceAdmissionRetry[admission.RetryID]; found {
@@ -173,6 +174,13 @@ func (s *MemoryStore) CreateDeviceAdmission(
 	}
 	if _, found := s.principalDevice(admission.PrincipalID, admission.DeviceID); found {
 		return DeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device is already registered")
+	}
+	if _, err := s.relay.CreateSubscription(ctx, credential, relay.SubscriptionCreateRequest{
+		RetryID:               admission.RetryID,
+		SubscriptionID:        admission.SubscriptionID,
+		CreatedAtMilliseconds: admission.CreatedAtMilliseconds,
+	}); err != nil {
+		return DeviceAdmissionCreateResult{}, err
 	}
 	relayResult, err := s.relay.CreateSubscriptionAdmission(
 		ctx, credential, admission.SubscriptionID, admission.RelayAdmission, nowMilliseconds,
@@ -325,8 +333,9 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 	}
 	if credential.TenantID != admission.PrincipalID ||
 		credential.DomainID != space.provisioning.Domain.Registration.DomainID ||
+		admission.RelayAdmission.TenantID != admission.PrincipalID ||
 		admission.RelayAdmission.DomainID != credential.DomainID ||
-		admission.SubscriptionID != space.provisioning.Domain.Subscription.SubscriptionID {
+		admission.SubscriptionID == space.provisioning.Domain.Subscription.SubscriptionID {
 		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(
 			CodeWrongScope, "Space device admission belongs to another Space domain",
 		)
@@ -353,6 +362,13 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 			existing.admission.DeviceID == admission.DeviceID && existing.result == nil {
 			return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device already has another pending Space admission")
 		}
+	}
+	if _, err := s.relay.CreateSubscription(ctx, credential, relay.SubscriptionCreateRequest{
+		RetryID:               admission.RetryID,
+		SubscriptionID:        admission.SubscriptionID,
+		CreatedAtMilliseconds: admission.CreatedAtMilliseconds,
+	}); err != nil {
+		return SpaceDeviceAdmissionCreateResult{}, err
 	}
 	relayResult, err := s.relay.CreateSubscriptionAdmission(
 		ctx, credential, admission.SubscriptionID, admission.RelayAdmission, nowMilliseconds,
