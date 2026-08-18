@@ -1,12 +1,12 @@
 :8443 {
-	tls /etc/facets-node/tls/server.crt /etc/facets-node/tls/server.key
+	tls /etc/facets-server/tls/server.crt /etc/facets-server/tls/server.key
 
 	# Public ingress is deliberately limited to application protocol families.
 	# Operator provisioning and operations endpoints remain available only on
-	# the Node's loopback-bound management ingress.
+	# the server's loopback-bound management ingress.
 	route {
 		@application path /v1/pairing/* /v1/relay/tenants/*
-		reverse_proxy @application node:8080
+		reverse_proxy @application server:8080
 		respond 404
 	}
 }

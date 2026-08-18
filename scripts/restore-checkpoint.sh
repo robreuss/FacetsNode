@@ -15,21 +15,21 @@ published_port=${4:-18081}
 [[ $repository_path == /* && -d $repository_path ]] || usage
 [[ $password_file == /* && -f $password_file && -r $password_file ]] || usage
 [[ $target_project =~ ^[a-z0-9][a-z0-9_-]*$ ]] || usage
-[[ $target_project != facets-node ]] || {
-  echo "restore target must be a new Compose project, not facets-node" >&2
+[[ $target_project != facets-device-sync ]] || {
+  echo "restore target must be a new Compose project, not facets-device-sync" >&2
   exit 65
 }
 [[ $published_port =~ ^[0-9]+$ && $published_port -ge 1024 && $published_port -le 65535 ]] || usage
 
-restore_directory=$(mktemp -d "${TMPDIR:-/tmp}/facets-node-restore.XXXXXX")
-checkpoint_placeholder=$(mktemp -d "${TMPDIR:-/tmp}/facets-node-checkpoint-placeholder.XXXXXX")
+restore_directory=$(mktemp -d "${TMPDIR:-/tmp}/facets-device-sync-restore.XXXXXX")
+checkpoint_placeholder=$(mktemp -d "${TMPDIR:-/tmp}/facets-device-sync-checkpoint-placeholder.XXXXXX")
 chmod 0700 -- "$restore_directory" "$checkpoint_placeholder"
 
-export FACETS_NODE_BACKUP_REPOSITORY=$repository_path
-export FACETS_NODE_BACKUP_PASSWORD_FILE=$password_file
-export FACETS_NODE_CHECKPOINT_DIRECTORY=$checkpoint_placeholder
-export FACETS_NODE_RESTORE_DIRECTORY=$restore_directory
-export FACETS_NODE_PUBLISHED_PORT=$published_port
+export FACETS_DEVICE_SYNC_BACKUP_REPOSITORY=$repository_path
+export FACETS_DEVICE_SYNC_BACKUP_PASSWORD_FILE=$password_file
+export FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY=$checkpoint_placeholder
+export FACETS_DEVICE_SYNC_RESTORE_DIRECTORY=$restore_directory
+export FACETS_DEVICE_SYNC_MANAGEMENT_PORT=$published_port
 
 compose=(docker compose -p "$target_project" -f compose.yaml -f compose.backup.yaml)
 
@@ -44,22 +44,22 @@ if [[ -n $("${compose[@]}" ps -aq) ]]; then
   exit 65
 fi
 for volume_name in postgres blobs; do
-  if docker volume inspect "${target_project}_facets-node-${volume_name}" >/dev/null 2>&1; then
-    echo "restore target volume already exists: ${target_project}_facets-node-${volume_name}" >&2
+  if docker volume inspect "${target_project}_facets-device-sync-${volume_name}" >/dev/null 2>&1; then
+    echo "restore target volume already exists: ${target_project}_facets-device-sync-${volume_name}" >&2
     exit 65
   fi
 done
 
 "${compose[@]}" run --rm --no-deps repository restore latest \
-  --host facets-node \
-  --tag facets-node-checkpoint \
+  --host facets-device-sync \
+  --tag facets-device-sync-checkpoint \
   --target /restore
 "${compose[@]}" run --rm --no-deps checkpoint-verify
 
 "${compose[@]}" up -d postgres >/dev/null
 database_ready=false
 for _ in {1..30}; do
-  if "${compose[@]}" exec -T postgres pg_isready -U facets -d facets >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T postgres pg_isready -U facets_device_sync -d facets_device_sync >/dev/null 2>&1; then
     database_ready=true
     break
   fi
@@ -72,18 +72,18 @@ done
 
 "${compose[@]}" run --rm --no-deps restore-database
 "${compose[@]}" run --rm --no-deps restore-blobs
-"${compose[@]}" up -d node >/dev/null
+"${compose[@]}" up -d server >/dev/null
 
-node_ready=false
+server_ready=false
 for _ in {1..30}; do
   if curl --fail --silent "http://127.0.0.1:${published_port}/readyz" >/dev/null; then
-    node_ready=true
+    server_ready=true
     break
   fi
   sleep 1
 done
-[[ $node_ready == true ]] || {
-  echo "restored Facets Node did not become ready" >&2
+[[ $server_ready == true ]] || {
+  echo "restored Facets Device Sync Server did not become ready" >&2
   exit 1
 }
 

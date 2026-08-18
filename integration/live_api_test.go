@@ -21,9 +21,9 @@ import (
 )
 
 func TestLivePairingRendezvousRoundTrip(t *testing.T) {
-	baseURL := strings.TrimRight(os.Getenv("FACETS_NODE_TEST_BASE_URL"), "/")
+	baseURL := strings.TrimRight(os.Getenv("FACETS_SERVER_TEST_BASE_URL"), "/")
 	if baseURL == "" {
-		t.Skip("FACETS_NODE_TEST_BASE_URL is not set")
+		t.Skip("FACETS_SERVER_TEST_BASE_URL is not set")
 	}
 	now := time.Now().UnixMilli()
 	routeID := uuid.New()
@@ -127,10 +127,10 @@ func TestLivePairingRendezvousRoundTrip(t *testing.T) {
 }
 
 func TestLiveReplicaRelayRoundTripAndRevocation(t *testing.T) {
-	baseURL := strings.TrimRight(os.Getenv("FACETS_NODE_TEST_BASE_URL"), "/")
-	operatorToken := os.Getenv("FACETS_NODE_TEST_OPERATOR_TOKEN")
+	baseURL := strings.TrimRight(os.Getenv("FACETS_SERVER_TEST_BASE_URL"), "/")
+	operatorToken := os.Getenv("FACETS_SERVER_TEST_OPERATOR_TOKEN")
 	if baseURL == "" || operatorToken == "" {
-		t.Skip("FACETS_NODE_TEST_BASE_URL and FACETS_NODE_TEST_OPERATOR_TOKEN are required")
+		t.Skip("FACETS_SERVER_TEST_BASE_URL and FACETS_SERVER_TEST_OPERATOR_TOKEN are required")
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	domain := provisionLiveRelayDomain(t, client, baseURL, operatorToken)

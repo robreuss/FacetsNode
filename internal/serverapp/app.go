@@ -1,4 +1,4 @@
-package main
+package serverapp
 
 import (
 	"context"
@@ -19,13 +19,13 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
-func main() {
+func Main(service config.Service) {
 	if len(os.Args) == 3 && os.Args[1] == "healthcheck" {
 		healthcheck(os.Args[2])
 		return
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	configuration, err := config.Load()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", service)
+	configuration, err := config.Load(service)
 	if err != nil {
 		logger.Error("configuration rejected", "error", err)
 		os.Exit(1)
@@ -40,9 +40,7 @@ func main() {
 	poolConfiguration.MaxConnLifetime = time.Hour
 	poolConfiguration.MaxConnIdleTime = 15 * time.Minute
 
-	rootContext, stop := signal.NotifyContext(
-		context.Background(), syscall.SIGINT, syscall.SIGTERM,
-	)
+	rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	pool, err := pgxpool.NewWithConfig(rootContext, poolConfiguration)
 	if err != nil {
@@ -60,6 +58,7 @@ func main() {
 		logger.Error("database migration failed", "error", err)
 		os.Exit(1)
 	}
+
 	store := postgres.NewStore(pool)
 	relayStore := postgres.NewRelayStore(pool, configuration.BlobUploadTTL, configuration.CheckpointFenceTTL)
 	blobContentStore, err := relay.NewFileBlobContentStore(configuration.BlobRoot)
@@ -72,25 +71,18 @@ func main() {
 		logger.Error("blob upload store configuration rejected", "error", err)
 		os.Exit(1)
 	}
-	api, err := httpapi.NewWithRelay(
-		store,
-		relayStore,
-		blobContentStore,
-		logger,
-		configuration.OperatorToken,
-		blobUploadContentStore,
-	)
+	api, err := httpapi.NewWithRelay(store, relayStore, blobContentStore, logger, configuration.OperatorToken, blobUploadContentStore)
 	if err != nil {
 		logger.Error("relay API configuration rejected", "error", err)
 		os.Exit(1)
 	}
+	api.SetServiceIdentity(string(service))
 	if err := api.SetTrafficLimits(configuration.TrafficLimits); err != nil {
 		logger.Error("traffic limits rejected", "error", err)
 		os.Exit(1)
 	}
-	relayWakeNotifier := postgres.NewRelayWakeNotifier(pool)
 	relayWakeListener := postgres.NewRelayWakeListener(pool)
-	api.SetRelayWakeNotifier(relayWakeNotifier)
+	api.SetRelayWakeNotifier(postgres.NewRelayWakeNotifier(pool))
 	relayWakeContext, cancelRelayWake := context.WithCancel(rootContext)
 	defer cancelRelayWake()
 	relayWakeDone := make(chan struct{})
@@ -100,6 +92,7 @@ func main() {
 			logger.Warn("cross-instance relay wake listener unavailable", "error", err)
 		})
 	}()
+
 	httpServer := &http.Server{
 		Addr:              configuration.ListenAddress,
 		Handler:           api.Handler(),
@@ -109,16 +102,11 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 * 1_024,
 	}
-
 	go cleanupLoop(rootContext, logger, store, configuration.CleanupPeriod)
 	go blobMaintenanceLoop(rootContext, logger, relayStore, blobContentStore, blobUploadContentStore, configuration.CleanupPeriod, configuration.BlobOrphanGrace)
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Info(
-			"facets node listening",
-			"address", configuration.ListenAddress,
-			"go_version", runtime.Version(),
-		)
+		logger.Info("Facets server listening", "address", configuration.ListenAddress, "go_version", runtime.Version())
 		serverErrors <- httpServer.ListenAndServe()
 	}()
 
@@ -127,13 +115,11 @@ func main() {
 		logger.Info("shutdown requested")
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("http server failed", "error", err)
+			logger.Error("HTTP server failed", "error", err)
 			os.Exit(1)
 		}
 	}
-	shutdownContext, cancel := context.WithTimeout(
-		context.Background(), configuration.ShutdownPeriod,
-	)
+	shutdownContext, cancel := context.WithTimeout(context.Background(), configuration.ShutdownPeriod)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownContext); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
@@ -148,15 +134,7 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-func blobMaintenanceLoop(
-	ctx context.Context,
-	logger *slog.Logger,
-	store relay.BlobMaintenanceStore,
-	blobs *relay.FileBlobContentStore,
-	uploads *relay.FileBlobUploadContentStore,
-	period time.Duration,
-	grace time.Duration,
-) {
+func blobMaintenanceLoop(ctx context.Context, logger *slog.Logger, store relay.BlobMaintenanceStore, blobs *relay.FileBlobContentStore, uploads *relay.FileBlobUploadContentStore, period, grace time.Duration) {
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 	for {
@@ -174,14 +152,7 @@ func blobMaintenanceLoop(
 	}
 }
 
-func reconcileBlobFiles(
-	ctx context.Context,
-	store relay.BlobMaintenanceStore,
-	blobs *relay.FileBlobContentStore,
-	uploads *relay.FileBlobUploadContentStore,
-	nowMilliseconds int64,
-	graceMilliseconds int64,
-) error {
+func reconcileBlobFiles(ctx context.Context, store relay.BlobMaintenanceStore, blobs *relay.FileBlobContentStore, uploads *relay.FileBlobUploadContentStore, nowMilliseconds, graceMilliseconds int64) error {
 	if _, err := store.ExpireBlobUploads(ctx, nowMilliseconds, graceMilliseconds); err != nil {
 		return err
 	}
@@ -216,12 +187,7 @@ type expiryStore interface {
 	PurgeExpired(context.Context, int64) error
 }
 
-func cleanupLoop(
-	ctx context.Context,
-	logger *slog.Logger,
-	store expiryStore,
-	period time.Duration,
-) {
+func cleanupLoop(ctx context.Context, logger *slog.Logger, store expiryStore, period time.Duration) {
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 	for {

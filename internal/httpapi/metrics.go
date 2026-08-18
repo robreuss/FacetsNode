@@ -159,61 +159,61 @@ func (m *Metrics) ObserveRelayWakeNotification(success bool) {
 func (m *Metrics) ObserveRelayWakeReceived() { m.relayWakeReceived.Add(1) }
 
 func (m *Metrics) WritePrometheus(writer io.Writer) error {
-	if _, err := io.WriteString(writer, `# HELP facets_node_http_surface_requests_total HTTP requests reaching a fixed API surface.
-# TYPE facets_node_http_surface_requests_total counter
+	if _, err := io.WriteString(writer, `# HELP facets_server_http_surface_requests_total HTTP requests reaching a fixed API surface.
+# TYPE facets_server_http_surface_requests_total counter
 `); err != nil {
 		return err
 	}
 	for _, surface := range traffic.Surfaces() {
-		if _, err := fmt.Fprintf(writer, "facets_node_http_surface_requests_total{surface=%q} %d\n", surface.Name(), m.requests[surface].Load()); err != nil {
+		if _, err := fmt.Fprintf(writer, "facets_server_http_surface_requests_total{surface=%q} %d\n", surface.Name(), m.requests[surface].Load()); err != nil {
 			return err
 		}
 	}
-	if _, err := io.WriteString(writer, `# HELP facets_node_http_surface_responses_total HTTP responses by fixed surface and status class.
-# TYPE facets_node_http_surface_responses_total counter
+	if _, err := io.WriteString(writer, `# HELP facets_server_http_surface_responses_total HTTP responses by fixed surface and status class.
+# TYPE facets_server_http_surface_responses_total counter
 `); err != nil {
 		return err
 	}
 	for _, surface := range traffic.Surfaces() {
 		for _, class := range allResponseClasses {
-			if _, err := fmt.Fprintf(writer, "facets_node_http_surface_responses_total{surface=%q,class=%q} %d\n", surface.Name(), class.name(), m.responses[surface][class].Load()); err != nil {
+			if _, err := fmt.Fprintf(writer, "facets_server_http_surface_responses_total{surface=%q,class=%q} %d\n", surface.Name(), class.name(), m.responses[surface][class].Load()); err != nil {
 				return err
 			}
 		}
 	}
-	if _, err := io.WriteString(writer, `# HELP facets_node_operation_outcomes_total Accepted and exact-duplicate durable operation outcomes.
-# TYPE facets_node_operation_outcomes_total counter
+	if _, err := io.WriteString(writer, `# HELP facets_server_operation_outcomes_total Accepted and exact-duplicate durable operation outcomes.
+# TYPE facets_server_operation_outcomes_total counter
 `); err != nil {
 		return err
 	}
 	for _, surface := range traffic.Surfaces() {
 		for _, outcome := range allOperationOutcomes {
-			if _, err := fmt.Fprintf(writer, "facets_node_operation_outcomes_total{surface=%q,outcome=%q} %d\n", surface.Name(), outcome.name(), m.outcomes[surface][outcome].Load()); err != nil {
+			if _, err := fmt.Fprintf(writer, "facets_server_operation_outcomes_total{surface=%q,outcome=%q} %d\n", surface.Name(), outcome.name(), m.outcomes[surface][outcome].Load()); err != nil {
 				return err
 			}
 		}
 	}
-	if _, err := io.WriteString(writer, `# HELP facets_node_rejections_total Rejected requests by fixed surface and bounded rejection class.
-# TYPE facets_node_rejections_total counter
+	if _, err := io.WriteString(writer, `# HELP facets_server_rejections_total Rejected requests by fixed surface and bounded rejection class.
+# TYPE facets_server_rejections_total counter
 `); err != nil {
 		return err
 	}
 	for _, surface := range traffic.Surfaces() {
 		for _, class := range allRejectionClasses {
-			if _, err := fmt.Fprintf(writer, "facets_node_rejections_total{surface=%q,class=%q} %d\n", surface.Name(), class.name(), m.rejections[surface][class].Load()); err != nil {
+			if _, err := fmt.Fprintf(writer, "facets_server_rejections_total{surface=%q,class=%q} %d\n", surface.Name(), class.name(), m.rejections[surface][class].Load()); err != nil {
 				return err
 			}
 		}
 	}
-	_, err := fmt.Fprintf(writer, `# HELP facets_node_relay_wake_notifications_total Cross-instance relay wake hints published.
-# TYPE facets_node_relay_wake_notifications_total counter
-facets_node_relay_wake_notifications_total %d
-# HELP facets_node_relay_wake_notification_errors_total Cross-instance relay wake hint publication failures.
-# TYPE facets_node_relay_wake_notification_errors_total counter
-facets_node_relay_wake_notification_errors_total %d
-# HELP facets_node_relay_wake_received_total Cross-instance relay wake hints received.
-# TYPE facets_node_relay_wake_received_total counter
-facets_node_relay_wake_received_total %d
+	_, err := fmt.Fprintf(writer, `# HELP facets_server_relay_wake_notifications_total Cross-instance relay wake hints published.
+# TYPE facets_server_relay_wake_notifications_total counter
+facets_server_relay_wake_notifications_total %d
+# HELP facets_server_relay_wake_notification_errors_total Cross-instance relay wake hint publication failures.
+# TYPE facets_server_relay_wake_notification_errors_total counter
+facets_server_relay_wake_notification_errors_total %d
+# HELP facets_server_relay_wake_received_total Cross-instance relay wake hints received.
+# TYPE facets_server_relay_wake_received_total counter
+facets_server_relay_wake_received_total %d
 `, m.relayWakeNotifications.Load(), m.relayWakeNotificationErrors.Load(), m.relayWakeReceived.Load())
 	return err
 }

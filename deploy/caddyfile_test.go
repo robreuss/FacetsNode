@@ -34,7 +34,7 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(string(contents), "reverse_proxy @application node:8080") {
+	if !strings.Contains(string(contents), "reverse_proxy @application server:8080") {
 		t.Fatal("public reverse proxy is not bound to the application matcher")
 	}
 	if !strings.Contains(string(contents), "\troute {\n") {

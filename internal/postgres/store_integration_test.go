@@ -15,9 +15,9 @@ import (
 )
 
 func TestPostgresStorePersistsOpaqueMailboxAcrossPoolRestart(t *testing.T) {
-	databaseURL := os.Getenv("FACETS_NODE_TEST_DATABASE_URL")
+	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
 	if databaseURL == "" {
-		t.Skip("FACETS_NODE_TEST_DATABASE_URL is not set")
+		t.Skip("FACETS_SERVER_TEST_DATABASE_URL is not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

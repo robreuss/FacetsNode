@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
-facets_node_resolve_checkpoint_revision() {
+facets_device_sync_resolve_checkpoint_revision() {
   local revision
-  if [[ ${FACETS_NODE_CHECKPOINT_REVISION+x} == x ]]; then
-    revision=$FACETS_NODE_CHECKPOINT_REVISION
+  if [[ ${FACETS_DEVICE_SYNC_CHECKPOINT_REVISION+x} == x ]]; then
+    revision=$FACETS_DEVICE_SYNC_CHECKPOINT_REVISION
     if [[ ! $revision =~ ^[0-9a-f]{40}$ ]]; then
-      echo "FACETS_NODE_CHECKPOINT_REVISION must be a 40-character lowercase Git commit ID" >&2
+      echo "FACETS_DEVICE_SYNC_CHECKPOINT_REVISION must be a 40-character lowercase Git commit ID" >&2
       return 65
     fi
     printf '%s\n' "$revision"

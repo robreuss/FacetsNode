@@ -15,6 +15,29 @@ import (
 	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
+func TestHealthResponsesIdentifyTheRunningService(t *testing.T) {
+	server := New(
+		rendezvous.NewMemoryStore(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	server.SetServiceIdentity("facets-device-sync-server")
+
+	for _, path := range []string{"/livez", "/readyz"} {
+		response := performJSON(t, server.Handler(), http.MethodGet, path, nil, "", "")
+		requireStatus(t, response, http.StatusOK)
+		var body struct {
+			Status  string `json:"status"`
+			Service string `json:"service"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Service != "facets-device-sync-server" {
+			t.Fatalf("%s service=%q", path, body.Service)
+		}
+	}
+}
+
 func TestPairingAPIReproducesOpaqueMailboxFlowWithoutLoggingSecrets(t *testing.T) {
 	fixture, err := testfixture.LoadRendezvous()
 	if err != nil {

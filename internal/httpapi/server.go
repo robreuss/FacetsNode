@@ -21,6 +21,7 @@ import (
 const maximumRequestByteCount = ((rendezvous.MaximumCiphertextByteCount + 2) / 3 * 4) + 16_384
 
 type Server struct {
+	serviceIdentity        string
 	store                  rendezvous.Store
 	relayStore             relay.Store
 	blobContentStore       relay.BlobContentStore
@@ -41,12 +42,19 @@ func New(store rendezvous.Store, logger *slog.Logger) *Server {
 		panic(err)
 	}
 	return &Server{
+		serviceIdentity: "facets-server",
 		store:           store,
 		logger:          logger,
 		metrics:         &Metrics{},
 		now:             time.Now,
 		relayWakeBroker: newRelayWakeBroker(),
 		traffic:         controller,
+	}
+}
+
+func (s *Server) SetServiceIdentity(identity string) {
+	if identity = strings.TrimSpace(identity); identity != "" {
+		s.serviceIdentity = identity
 	}
 }
 
@@ -253,7 +261,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleLive(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "live"})
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "live", "service": s.serviceIdentity})
 }
 
 func (s *Server) handleReady(writer http.ResponseWriter, request *http.Request) {
@@ -264,7 +272,7 @@ func (s *Server) handleReady(writer http.ResponseWriter, request *http.Request) 
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready", "service": s.serviceIdentity})
 }
 
 func (s *Server) handleMetrics(writer http.ResponseWriter, _ *http.Request) {

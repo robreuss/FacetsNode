@@ -19,10 +19,10 @@ import (
 // retryable after response loss. The relay only receives authorization digests;
 // client tokens remain client-side bearer material.
 func TestLiveReplicaRelayAuthorityLifecycle(t *testing.T) {
-	baseURL := strings.TrimRight(os.Getenv("FACETS_NODE_TEST_BASE_URL"), "/")
-	operatorToken := os.Getenv("FACETS_NODE_TEST_OPERATOR_TOKEN")
+	baseURL := strings.TrimRight(os.Getenv("FACETS_SERVER_TEST_BASE_URL"), "/")
+	operatorToken := os.Getenv("FACETS_SERVER_TEST_OPERATOR_TOKEN")
 	if baseURL == "" || operatorToken == "" {
-		t.Skip("FACETS_NODE_TEST_BASE_URL and FACETS_NODE_TEST_OPERATOR_TOKEN are required")
+		t.Skip("FACETS_SERVER_TEST_BASE_URL and FACETS_SERVER_TEST_OPERATOR_TOKEN are required")
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	domain := provisionLiveRelayDomain(t, client, baseURL, operatorToken)

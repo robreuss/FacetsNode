@@ -37,11 +37,11 @@ type swiftRelayLiveAccess struct {
 // path outside the source tree. It is an operations gate for the Swift live
 // contract test, not part of the ordinary integration suite.
 func TestLiveProvisionSwiftRelayAccess(t *testing.T) {
-	baseURL := strings.TrimRight(os.Getenv("FACETS_NODE_TEST_BASE_URL"), "/")
-	operatorToken := os.Getenv("FACETS_NODE_TEST_OPERATOR_TOKEN")
-	outputPath := os.Getenv("FACETS_NODE_TEST_SWIFT_ACCESS_OUTPUT_PATH")
+	baseURL := strings.TrimRight(os.Getenv("FACETS_SERVER_TEST_BASE_URL"), "/")
+	operatorToken := os.Getenv("FACETS_SERVER_TEST_OPERATOR_TOKEN")
+	outputPath := os.Getenv("FACETS_SERVER_TEST_SWIFT_ACCESS_OUTPUT_PATH")
 	if baseURL == "" || operatorToken == "" || outputPath == "" {
-		t.Skip("FACETS_NODE_TEST_BASE_URL, FACETS_NODE_TEST_OPERATOR_TOKEN, and FACETS_NODE_TEST_SWIFT_ACCESS_OUTPUT_PATH are required")
+		t.Skip("FACETS_SERVER_TEST_BASE_URL, FACETS_SERVER_TEST_OPERATOR_TOKEN, and FACETS_SERVER_TEST_SWIFT_ACCESS_OUTPUT_PATH are required")
 	}
 	validateHighVolumeStatePath(t, outputPath)
 	client := &http.Client{Timeout: 15 * time.Second}

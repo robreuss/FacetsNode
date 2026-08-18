@@ -32,34 +32,34 @@ into a Docker build context, and remove it after the verify phase.
 
 Run against a disposable deployment. The scenario makes more than 20,000 relay
 message-surface requests. For this gate only, set the following Node/Compose
-overrides before recreating the Node container:
+overrides before recreating the Device Sync Server container:
 
 ```sh
-FACETS_NODE_TRAFFIC_RELAY_MESSAGE_RATE_PER_MINUTE=60000
-FACETS_NODE_TRAFFIC_RELAY_MESSAGE_BURST=10000
-FACETS_NODE_TRAFFIC_RELAY_MESSAGE_CONNECTION_RATE_PER_MINUTE=60000
-FACETS_NODE_TRAFFIC_RELAY_MESSAGE_CONNECTION_BURST=10000
+FACETS_DEVICE_SYNC_TRAFFIC_RELAY_MESSAGE_RATE_PER_MINUTE=60000
+FACETS_DEVICE_SYNC_TRAFFIC_RELAY_MESSAGE_BURST=10000
+FACETS_DEVICE_SYNC_TRAFFIC_RELAY_MESSAGE_CONNECTION_RATE_PER_MINUTE=60000
+FACETS_DEVICE_SYNC_TRAFFIC_RELAY_MESSAGE_CONNECTION_BURST=10000
 ```
 
 These are the documented bounded operator controls, not a product bypass. The
 test retries `429` only when
-`FACETS_NODE_TEST_HIGH_VOLUME_RETRY_429=1` is explicitly set, requires an
+`FACETS_SERVER_TEST_HIGH_VOLUME_RETRY_429=1` is explicitly set, requires an
 integer `Retry-After`, and gives up after two minutes for any one request.
 Restore normal hosted limits after the gate.
 
 Choose a new path that does not exist yet:
 
 ```sh
-STATE_DIRECTORY="$(mktemp -d /tmp/facets-node-high-volume.XXXXXX)"
+STATE_DIRECTORY="$(mktemp -d /tmp/facets-device-sync-high-volume.XXXXXX)"
 chmod 700 "$STATE_DIRECTORY"
 STATE_PATH="$STATE_DIRECTORY/state.json"
 
-FACETS_NODE_TEST_HIGH_VOLUME=1 \
-FACETS_NODE_TEST_HIGH_VOLUME_PHASE=prepare \
-FACETS_NODE_TEST_HIGH_VOLUME_RETRY_429=1 \
-FACETS_NODE_TEST_HIGH_VOLUME_STATE_PATH="$STATE_PATH" \
-FACETS_NODE_TEST_BASE_URL='http://127.0.0.1:8080' \
-FACETS_NODE_TEST_OPERATOR_TOKEN='<private operator token>' \
+FACETS_SERVER_TEST_HIGH_VOLUME=1 \
+FACETS_SERVER_TEST_HIGH_VOLUME_PHASE=prepare \
+FACETS_SERVER_TEST_HIGH_VOLUME_RETRY_429=1 \
+FACETS_SERVER_TEST_HIGH_VOLUME_STATE_PATH="$STATE_PATH" \
+FACETS_SERVER_TEST_BASE_URL='http://127.0.0.1:8080' \
+FACETS_SERVER_TEST_OPERATOR_TOKEN='<private operator token>' \
 go test ./integration \
   -run '^TestLiveReplicaRelayHighVolumeCheckpointRestart$' \
   -count=1 -timeout=30m -v
@@ -81,11 +81,11 @@ docker compose up -d --force-recreate postgres node ingress
 docker compose ps
 curl --fail --silent http://127.0.0.1:8080/readyz
 
-FACETS_NODE_TEST_HIGH_VOLUME=1 \
-FACETS_NODE_TEST_HIGH_VOLUME_PHASE=verify \
-FACETS_NODE_TEST_HIGH_VOLUME_RETRY_429=1 \
-FACETS_NODE_TEST_HIGH_VOLUME_STATE_PATH="$STATE_PATH" \
-FACETS_NODE_TEST_BASE_URL='http://127.0.0.1:8080' \
+FACETS_SERVER_TEST_HIGH_VOLUME=1 \
+FACETS_SERVER_TEST_HIGH_VOLUME_PHASE=verify \
+FACETS_SERVER_TEST_HIGH_VOLUME_RETRY_429=1 \
+FACETS_SERVER_TEST_HIGH_VOLUME_STATE_PATH="$STATE_PATH" \
+FACETS_SERVER_TEST_BASE_URL='http://127.0.0.1:8080' \
 go test ./integration \
   -run '^TestLiveReplicaRelayHighVolumeCheckpointRestart$' \
   -count=1 -timeout=10m -v

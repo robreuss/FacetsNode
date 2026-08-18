@@ -852,7 +852,7 @@ func TestRelayAdmissionIsOneTimeRetrySafeAndSecretRedacted(t *testing.T) {
 	}
 
 	// Response-loss recovery uses the same candidate-generated member secret;
-	// no plaintext member credential must be retained by the Node.
+	// no plaintext member credential must be retained by the server.
 	nowMilliseconds = 3_000
 	claimRetry := performRelayJSON(
 		t,

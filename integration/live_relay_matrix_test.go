@@ -48,10 +48,10 @@ type liveRelayFetchPage struct {
 // envelope timestamps and ciphertext as opaque client material and relies only
 // on relay-assigned sequence and message identity for catch-up.
 func TestLiveReplicaRelayDeliveryMatrix(t *testing.T) {
-	baseURL := strings.TrimRight(os.Getenv("FACETS_NODE_TEST_BASE_URL"), "/")
-	operatorToken := os.Getenv("FACETS_NODE_TEST_OPERATOR_TOKEN")
+	baseURL := strings.TrimRight(os.Getenv("FACETS_SERVER_TEST_BASE_URL"), "/")
+	operatorToken := os.Getenv("FACETS_SERVER_TEST_OPERATOR_TOKEN")
 	if baseURL == "" || operatorToken == "" {
-		t.Skip("FACETS_NODE_TEST_BASE_URL and FACETS_NODE_TEST_OPERATOR_TOKEN are required")
+		t.Skip("FACETS_SERVER_TEST_BASE_URL and FACETS_SERVER_TEST_OPERATOR_TOKEN are required")
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	domain := provisionLiveRelayDomain(t, client, baseURL, operatorToken)

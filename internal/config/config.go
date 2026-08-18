@@ -11,6 +11,7 @@ import (
 )
 
 type Config struct {
+	Service            Service
 	ListenAddress      string
 	DatabaseURL        string
 	ShutdownPeriod     time.Duration
@@ -25,23 +26,61 @@ type Config struct {
 	TrafficLimits      traffic.Limits
 }
 
-func Load() (Config, error) {
+type Service string
+
+const (
+	DeviceSync   Service = "facets-device-sync-server"
+	SharedSpaces Service = "facets-shared-spaces-server"
+)
+
+func (service Service) EnvironmentPrefix() (string, error) {
+	switch service {
+	case DeviceSync:
+		return "FACETS_DEVICE_SYNC", nil
+	case SharedSpaces:
+		return "FACETS_SHARED_SPACES", nil
+	default:
+		return "", fmt.Errorf("unsupported Facets server service %q", service)
+	}
+}
+
+func (service Service) BlobRoot() (string, error) {
+	switch service {
+	case DeviceSync:
+		return "/var/lib/facets-device-sync/blobs", nil
+	case SharedSpaces:
+		return "/var/lib/facets-shared-spaces/blobs", nil
+	default:
+		return "", fmt.Errorf("unsupported Facets server service %q", service)
+	}
+}
+
+func Load(service Service) (Config, error) {
+	prefix, err := service.EnvironmentPrefix()
+	if err != nil {
+		return Config{}, err
+	}
+	defaultBlobRoot, err := service.BlobRoot()
+	if err != nil {
+		return Config{}, err
+	}
 	configuration := Config{
-		ListenAddress:      environment("FACETS_NODE_LISTEN_ADDR", ":8080"),
-		DatabaseURL:        os.Getenv("FACETS_NODE_DATABASE_URL"),
+		Service:            service,
+		ListenAddress:      environment(prefix+"_LISTEN_ADDR", ":8080"),
+		DatabaseURL:        os.Getenv(prefix + "_DATABASE_URL"),
 		ShutdownPeriod:     10 * time.Second,
 		CleanupPeriod:      time.Minute,
 		TransferPeriod:     10 * time.Minute,
 		DatabaseConns:      10,
-		OperatorToken:      os.Getenv("FACETS_NODE_OPERATOR_TOKEN"),
-		BlobRoot:           environment("FACETS_NODE_BLOB_ROOT", "/var/lib/facets-node/blobs"),
+		OperatorToken:      os.Getenv(prefix + "_OPERATOR_TOKEN"),
+		BlobRoot:           environment(prefix+"_BLOB_ROOT", defaultBlobRoot),
 		BlobUploadTTL:      7 * 24 * time.Hour,
 		BlobOrphanGrace:    24 * time.Hour,
 		CheckpointFenceTTL: 2 * time.Hour,
 		TrafficLimits:      traffic.DefaultLimits(),
 	}
 	if configuration.DatabaseURL == "" {
-		return Config{}, fmt.Errorf("FACETS_NODE_DATABASE_URL is required")
+		return Config{}, fmt.Errorf("%s_DATABASE_URL is required", prefix)
 	}
 	if configuration.OperatorToken != "" {
 		decoded, err := base64.RawURLEncoding.Strict().DecodeString(
@@ -50,62 +89,62 @@ func Load() (Config, error) {
 		if err != nil || len(decoded) != 32 ||
 			base64.RawURLEncoding.EncodeToString(decoded) != configuration.OperatorToken {
 			return Config{}, fmt.Errorf(
-				"FACETS_NODE_OPERATOR_TOKEN must be 32-byte unpadded base64url",
+				"%s_OPERATOR_TOKEN must be 32-byte unpadded base64url", prefix,
 			)
 		}
 	}
-	if value := os.Getenv("FACETS_NODE_SHUTDOWN_PERIOD"); value != "" {
+	if value := os.Getenv(prefix + "_SHUTDOWN_PERIOD"); value != "" {
 		period, err := time.ParseDuration(value)
 		if err != nil || period <= 0 {
-			return Config{}, fmt.Errorf("FACETS_NODE_SHUTDOWN_PERIOD must be a positive duration")
+			return Config{}, fmt.Errorf("%s_SHUTDOWN_PERIOD must be a positive duration", prefix)
 		}
 		configuration.ShutdownPeriod = period
 	}
-	if value := os.Getenv("FACETS_NODE_CLEANUP_PERIOD"); value != "" {
+	if value := os.Getenv(prefix + "_CLEANUP_PERIOD"); value != "" {
 		period, err := time.ParseDuration(value)
 		if err != nil || period <= 0 {
-			return Config{}, fmt.Errorf("FACETS_NODE_CLEANUP_PERIOD must be a positive duration")
+			return Config{}, fmt.Errorf("%s_CLEANUP_PERIOD must be a positive duration", prefix)
 		}
 		configuration.CleanupPeriod = period
 	}
-	if value := os.Getenv("FACETS_NODE_HTTP_TRANSFER_PERIOD"); value != "" {
+	if value := os.Getenv(prefix + "_HTTP_TRANSFER_PERIOD"); value != "" {
 		period, err := time.ParseDuration(value)
 		if err != nil || period <= 0 || period > time.Hour {
 			return Config{}, fmt.Errorf(
-				"FACETS_NODE_HTTP_TRANSFER_PERIOD must be positive and no more than one hour",
+				"%s_HTTP_TRANSFER_PERIOD must be positive and no more than one hour", prefix,
 			)
 		}
 		configuration.TransferPeriod = period
 	}
-	if value := os.Getenv("FACETS_NODE_BLOB_UPLOAD_TTL"); value != "" {
+	if value := os.Getenv(prefix + "_BLOB_UPLOAD_TTL"); value != "" {
 		period, err := time.ParseDuration(value)
 		if err != nil || period <= 0 {
-			return Config{}, fmt.Errorf("FACETS_NODE_BLOB_UPLOAD_TTL must be a positive duration")
+			return Config{}, fmt.Errorf("%s_BLOB_UPLOAD_TTL must be a positive duration", prefix)
 		}
 		configuration.BlobUploadTTL = period
 	}
-	if value := os.Getenv("FACETS_NODE_BLOB_ORPHAN_GRACE"); value != "" {
+	if value := os.Getenv(prefix + "_BLOB_ORPHAN_GRACE"); value != "" {
 		period, err := time.ParseDuration(value)
 		if err != nil || period <= 0 {
-			return Config{}, fmt.Errorf("FACETS_NODE_BLOB_ORPHAN_GRACE must be a positive duration")
+			return Config{}, fmt.Errorf("%s_BLOB_ORPHAN_GRACE must be a positive duration", prefix)
 		}
 		configuration.BlobOrphanGrace = period
 	}
-	if value := os.Getenv("FACETS_NODE_CHECKPOINT_FENCE_TTL"); value != "" {
+	if value := os.Getenv(prefix + "_CHECKPOINT_FENCE_TTL"); value != "" {
 		period, err := time.ParseDuration(value)
 		if err != nil || period < 5*time.Minute || period > 24*time.Hour {
-			return Config{}, fmt.Errorf("FACETS_NODE_CHECKPOINT_FENCE_TTL must be between 5 minutes and 24 hours")
+			return Config{}, fmt.Errorf("%s_CHECKPOINT_FENCE_TTL must be between 5 minutes and 24 hours", prefix)
 		}
 		configuration.CheckpointFenceTTL = period
 	}
-	if value := os.Getenv("FACETS_NODE_DATABASE_CONNS"); value != "" {
+	if value := os.Getenv(prefix + "_DATABASE_CONNS"); value != "" {
 		count, err := strconv.ParseInt(value, 10, 32)
 		if err != nil || count <= 0 || count > 100 {
-			return Config{}, fmt.Errorf("FACETS_NODE_DATABASE_CONNS must be between 1 and 100")
+			return Config{}, fmt.Errorf("%s_DATABASE_CONNS must be between 1 and 100", prefix)
 		}
 		configuration.DatabaseConns = int32(count)
 	}
-	if err := loadTrafficLimits(&configuration); err != nil {
+	if err := loadTrafficLimits(&configuration, prefix); err != nil {
 		return Config{}, err
 	}
 	return configuration, nil
@@ -119,9 +158,9 @@ var trafficSurfaceEnvironmentNames = map[traffic.Surface]string{
 	traffic.SurfaceManagement:      "MANAGEMENT",
 }
 
-func loadTrafficLimits(configuration *Config) error {
+func loadTrafficLimits(configuration *Config, servicePrefix string) error {
 	for _, surface := range traffic.Surfaces() {
-		prefix := "FACETS_NODE_TRAFFIC_" + trafficSurfaceEnvironmentNames[surface]
+		prefix := servicePrefix + "_TRAFFIC_" + trafficSurfaceEnvironmentNames[surface]
 		limit := configuration.TrafficLimits[surface]
 		values := []struct {
 			name        string

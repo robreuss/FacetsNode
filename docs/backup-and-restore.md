@@ -1,14 +1,14 @@
 # Coordinated encrypted backup and restore
 
-Facets Node's PostgreSQL database and opaque blob volume are one recovery unit.
+Facets Device Sync Server's PostgreSQL database and opaque blob volume are one recovery unit.
 The database holds authority and quota facts for the filesystem bytes, so a
 backup of either side alone is invalid.
 
 The first self-hosted operations profile creates a quiesced PostgreSQL custom
 dump and snapshots that dump, its manifest, and the exact blob tree into an
-encrypted Restic repository. The Node process is stopped during capture so no
+encrypted Restic repository. The Device Sync Server process is stopped during capture so no
 writer can cross the database/blob checkpoint boundary; PostgreSQL remains
-running. The script restarts the Node and requires `/readyz` before reporting
+running. The script restarts the Device Sync Server and requires `/readyz` before reporting
 success.
 
 The operations image is pinned by tag and multi-platform image digest. Updating
@@ -29,18 +29,18 @@ Generate a dedicated password file outside the repository, then pass absolute
 paths:
 
 ```sh
-install -d -m 0700 /srv/facets-node-backup
-openssl rand -base64 48 > /secure/location/facets-node-restic-password
-chmod 0600 /secure/location/facets-node-restic-password
+install -d -m 0700 /srv/facets-device-sync-backup
+openssl rand -base64 48 > /secure/location/facets-device-sync-restic-password
+chmod 0600 /secure/location/facets-device-sync-restic-password
 
-FACETS_NODE_CHECKPOINT_REVISION=<40-character-committed-revision> \
+FACETS_DEVICE_SYNC_CHECKPOINT_REVISION=<40-character-committed-revision> \
   ./scripts/backup-checkpoint.sh \
-  /srv/facets-node-backup \
-  /secure/location/facets-node-restic-password
+  /srv/facets-device-sync-backup \
+  /secure/location/facets-device-sync-restic-password
 ```
 
 The first run initializes the repository. Later runs add deduplicated snapshots
-tagged `facets-node-checkpoint`. The script refuses a nonempty directory that
+tagged `facets-device-sync-checkpoint`. The script refuses a nonempty directory that
 is not already a Restic repository. It also refuses to capture while an
 interrupted blob remains in the staging directory. Temporary plaintext dump
 and manifest files live in a mode-0700 `mktemp` directory and are removed by a
@@ -51,7 +51,7 @@ source stack. Expect a bounded service interruption whose duration depends on
 database and blob size. Retention pruning is deliberately not automated yet;
 adopt and test a retention policy before scheduling unattended backups.
 
-`FACETS_NODE_CHECKPOINT_REVISION` takes precedence over local Git state and
+`FACETS_DEVICE_SYNC_CHECKPOINT_REVISION` takes precedence over local Git state and
 must be a full 40-character lowercase commit ID when supplied. This is required
 for the source-copy deployment, whose directory intentionally may not contain
 `.git`. The script rejects malformed explicit values rather than recording a
@@ -65,14 +65,14 @@ attestation chain.
 ## Restore without overwriting the source
 
 Restore always requires a new Compose project name. The script rejects the
-canonical `facets-node` project and any target that already has containers or
+canonical `facets-device-sync` project and any target that already has containers or
 database/blob volumes:
 
 ```sh
 ./scripts/restore-checkpoint.sh \
-  /srv/facets-node-backup \
-  /secure/location/facets-node-restic-password \
-  facets-node-recovery-20260805 \
+  /srv/facets-device-sync-backup \
+  /secure/location/facets-device-sync-restic-password \
+  facets-device-sync-recovery-20260805 \
   18081
 ```
 
@@ -80,7 +80,7 @@ Restic authenticates and decrypts the latest tagged checkpoint into a temporary
 directory. The operation then verifies the database dump checksum and the
 complete sorted blob digest inventory before it creates a fresh PostgreSQL
 volume, restores the database in one transaction, copies blobs into a fresh
-blob volume, restores the unprivileged runtime ownership declared by the Node
+blob volume, restores the unprivileged runtime ownership declared by the Device Sync Server
 image, and starts that same image on the requested loopback port. The source
 stack is never a restore target.
 
@@ -95,7 +95,7 @@ the isolated target project in place for diagnosis. Remove it only after the
 exact project name has been confirmed:
 
 ```sh
-docker compose -p facets-node-recovery-20260805 -f compose.yaml down --volumes
+docker compose -p facets-device-sync-recovery-20260805 -f compose.yaml down --volumes
 ```
 
 That command irreversibly removes only the named recovery stack and its fresh

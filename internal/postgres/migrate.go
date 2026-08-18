@@ -29,7 +29,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}()
 
 	if _, err := connection.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS facets_node_schema_migrations (
+		CREATE TABLE IF NOT EXISTS facets_server_schema_migrations (
 			name text PRIMARY KEY,
 			applied_at timestamptz NOT NULL DEFAULT now()
 		)
@@ -49,7 +49,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		var alreadyApplied bool
 		err := connection.QueryRow(
 			ctx,
-			"SELECT EXISTS (SELECT 1 FROM facets_node_schema_migrations WHERE name = $1)",
+			"SELECT EXISTS (SELECT 1 FROM facets_server_schema_migrations WHERE name = $1)",
 			entry.Name(),
 		).Scan(&alreadyApplied)
 		if err != nil {
@@ -72,7 +72,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 		if _, err := transaction.Exec(
 			ctx,
-			"INSERT INTO facets_node_schema_migrations (name) VALUES ($1)",
+			"INSERT INTO facets_server_schema_migrations (name) VALUES ($1)",
 			entry.Name(),
 		); err != nil {
 			_ = transaction.Rollback(ctx)

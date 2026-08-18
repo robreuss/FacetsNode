@@ -9,17 +9,17 @@ services:
         umask 077
         pg_dump \
           --host=postgres \
-          --username=facets \
-          --dbname=facets \
+          --username=facets_device_sync \
+          --dbname=facets_device_sync \
           --format=custom \
           --file=/checkpoint/database.dump
         sha256sum /checkpoint/database.dump | sed 's#  /checkpoint/#  #' \
           > /checkpoint/database.sha256
     environment:
-      PGPASSWORD: ${FACETS_NODE_POSTGRES_PASSWORD:?Set FACETS_NODE_POSTGRES_PASSWORD in .env}
+      PGPASSWORD: ${FACETS_DEVICE_SYNC_POSTGRES_PASSWORD:?Set FACETS_DEVICE_SYNC_POSTGRES_PASSWORD in .env}
     volumes:
       - type: bind
-        source: ${FACETS_NODE_CHECKPOINT_DIRECTORY:?Set FACETS_NODE_CHECKPOINT_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY:?Set FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY}
         target: /checkpoint
     networks:
       - private
@@ -47,7 +47,7 @@ services:
           '{' \
           '  "formatVersion": 1,' \
           "  \"createdAt\": \"$${created_at}\"," \
-          "  \"sourceRevision\": \"$${FACETS_NODE_CHECKPOINT_REVISION}\"," \
+          "  \"sourceRevision\": \"$${FACETS_DEVICE_SYNC_CHECKPOINT_REVISION}\"," \
           '  "databaseFormat": "postgresql-custom",' \
           "  \"blobCount\": $${blob_count}," \
           "  \"blobByteCount\": $${blob_bytes}" \
@@ -55,12 +55,12 @@ services:
           > /checkpoint/manifest.json
         chmod 0600 /checkpoint/*
     environment:
-      FACETS_NODE_CHECKPOINT_REVISION: ${FACETS_NODE_CHECKPOINT_REVISION:-unknown}
+      FACETS_DEVICE_SYNC_CHECKPOINT_REVISION: ${FACETS_DEVICE_SYNC_CHECKPOINT_REVISION:-unknown}
     volumes:
       - type: bind
-        source: ${FACETS_NODE_CHECKPOINT_DIRECTORY:?Set FACETS_NODE_CHECKPOINT_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY:?Set FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY}
         target: /checkpoint
-      - facets-node-blobs:/blobs:ro
+      - facets-device-sync-blobs:/blobs:ro
     network_mode: none
 
   repository:
@@ -71,20 +71,20 @@ services:
       RESTIC_PASSWORD_FILE: /run/secrets/restic-password
     volumes:
       - type: bind
-        source: ${FACETS_NODE_BACKUP_REPOSITORY:?Set FACETS_NODE_BACKUP_REPOSITORY}
+        source: ${FACETS_DEVICE_SYNC_BACKUP_REPOSITORY:?Set FACETS_DEVICE_SYNC_BACKUP_REPOSITORY}
         target: /repository
       - type: bind
-        source: ${FACETS_NODE_BACKUP_PASSWORD_FILE:?Set FACETS_NODE_BACKUP_PASSWORD_FILE}
+        source: ${FACETS_DEVICE_SYNC_BACKUP_PASSWORD_FILE:?Set FACETS_DEVICE_SYNC_BACKUP_PASSWORD_FILE}
         target: /run/secrets/restic-password
         read_only: true
       - type: bind
-        source: ${FACETS_NODE_CHECKPOINT_DIRECTORY:?Set FACETS_NODE_CHECKPOINT_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY:?Set FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY}
         target: /checkpoint
         read_only: true
       - type: bind
-        source: ${FACETS_NODE_RESTORE_DIRECTORY:?Set FACETS_NODE_RESTORE_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_RESTORE_DIRECTORY:?Set FACETS_DEVICE_SYNC_RESTORE_DIRECTORY}
         target: /restore
-      - facets-node-blobs:/blobs:ro
+      - facets-device-sync-blobs:/blobs:ro
     network_mode: none
 
   checkpoint-verify:
@@ -107,7 +107,7 @@ services:
         diff -u /restore/checkpoint/blob-digests.sha256 /tmp/restored-blob-digests.sha256
     volumes:
       - type: bind
-        source: ${FACETS_NODE_RESTORE_DIRECTORY:?Set FACETS_NODE_RESTORE_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_RESTORE_DIRECTORY:?Set FACETS_DEVICE_SYNC_RESTORE_DIRECTORY}
         target: /restore
         read_only: true
     network_mode: none
@@ -121,18 +121,18 @@ services:
       - |
         pg_restore \
           --host=postgres \
-          --username=facets \
-          --dbname=facets \
+          --username=facets_device_sync \
+          --dbname=facets_device_sync \
           --exit-on-error \
           --single-transaction \
           --no-owner \
           --no-privileges \
           /restore/checkpoint/database.dump
     environment:
-      PGPASSWORD: ${FACETS_NODE_POSTGRES_PASSWORD:?Set FACETS_NODE_POSTGRES_PASSWORD in .env}
+      PGPASSWORD: ${FACETS_DEVICE_SYNC_POSTGRES_PASSWORD:?Set FACETS_DEVICE_SYNC_POSTGRES_PASSWORD in .env}
     volumes:
       - type: bind
-        source: ${FACETS_NODE_RESTORE_DIRECTORY:?Set FACETS_NODE_RESTORE_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_RESTORE_DIRECTORY:?Set FACETS_DEVICE_SYNC_RESTORE_DIRECTORY}
         target: /restore
         read_only: true
     networks:
@@ -148,21 +148,21 @@ services:
         test -z "$(find /blobs -mindepth 1 -maxdepth 1 -print -quit)"
         cp -a /restore/blobs/. /blobs/
         mkdir -p /blobs/.staging
-        runtime_uid="$${FACETS_NODE_RUNTIME_UID}"
+        runtime_uid="$${FACETS_DEVICE_SYNC_RUNTIME_UID}"
         case "$${runtime_uid}" in
-          ''|*[!0-9]*) echo "invalid Facets Node runtime UID" >&2; exit 1 ;;
+          ''|*[!0-9]*) echo "invalid Facets Device Sync runtime UID" >&2; exit 1 ;;
         esac
         chown -R "$${runtime_uid}:$${runtime_uid}" /blobs
         chmod 0755 /blobs
         chmod 0700 /blobs/.staging
     environment:
-      FACETS_NODE_RUNTIME_UID: ${FACETS_NODE_RUNTIME_UID:-65532}
+      FACETS_DEVICE_SYNC_RUNTIME_UID: ${FACETS_DEVICE_SYNC_RUNTIME_UID:-65532}
     volumes:
       - type: bind
-        source: ${FACETS_NODE_RESTORE_DIRECTORY:?Set FACETS_NODE_RESTORE_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_RESTORE_DIRECTORY:?Set FACETS_DEVICE_SYNC_RESTORE_DIRECTORY}
         target: /restore
         read_only: true
-      - facets-node-blobs:/blobs
+      - facets-device-sync-blobs:/blobs
     network_mode: none
 
   temporary-cleanup:
@@ -176,9 +176,9 @@ services:
         find /restore -mindepth 1 -delete
     volumes:
       - type: bind
-        source: ${FACETS_NODE_CHECKPOINT_DIRECTORY:?Set FACETS_NODE_CHECKPOINT_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY:?Set FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY}
         target: /checkpoint
       - type: bind
-        source: ${FACETS_NODE_RESTORE_DIRECTORY:?Set FACETS_NODE_RESTORE_DIRECTORY}
+        source: ${FACETS_DEVICE_SYNC_RESTORE_DIRECTORY:?Set FACETS_DEVICE_SYNC_RESTORE_DIRECTORY}
         target: /restore
     network_mode: none

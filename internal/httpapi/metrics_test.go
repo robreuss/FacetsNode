@@ -27,7 +27,7 @@ func TestMetricsFixedSurfaceSnapshot(t *testing.T) {
 	}
 	snapshot := output.String()
 	digest := sha256.Sum256([]byte(snapshot))
-	const expectedSHA256 = "1738aeec306daa4bd62714de69c31d69917c11302c0cfd81d079e7bfd97c4d50"
+	const expectedSHA256 = "66998e8e1750f192824bfa06b64b2c305d2f395cd80a36cef8e1b6738a5dd59b"
 	if got := fmt.Sprintf("%x", digest); got != expectedSHA256 {
 		t.Fatalf("metrics snapshot SHA-256=%s", got)
 	}
@@ -38,6 +38,7 @@ func TestMetricsFixedSurfaceSnapshot(t *testing.T) {
 	}
 	for _, obsoleteOrProtected := range []string{
 		"facets_node_rendezvous_acceptances_total",
+		"facets_node_http_surface_requests_total",
 		"tenantID", "memberID", "messageID", "client_ip", "ciphertext", "token",
 	} {
 		if strings.Contains(snapshot, obsoleteOrProtected) {

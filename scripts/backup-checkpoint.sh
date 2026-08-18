@@ -18,30 +18,30 @@ source "$script_directory/revision-attestation.sh"
 
 mkdir -p -- "$repository_path"
 chmod 0700 -- "$repository_path"
-checkpoint_directory=$(mktemp -d "${TMPDIR:-/tmp}/facets-node-checkpoint.XXXXXX")
-restore_placeholder=$(mktemp -d "${TMPDIR:-/tmp}/facets-node-restore-placeholder.XXXXXX")
+checkpoint_directory=$(mktemp -d "${TMPDIR:-/tmp}/facets-device-sync-checkpoint.XXXXXX")
+restore_placeholder=$(mktemp -d "${TMPDIR:-/tmp}/facets-device-sync-restore-placeholder.XXXXXX")
 chmod 0700 -- "$checkpoint_directory" "$restore_placeholder"
 
-export FACETS_NODE_BACKUP_REPOSITORY=$repository_path
-export FACETS_NODE_BACKUP_PASSWORD_FILE=$password_file
-export FACETS_NODE_CHECKPOINT_DIRECTORY=$checkpoint_directory
-export FACETS_NODE_RESTORE_DIRECTORY=$restore_placeholder
-export FACETS_NODE_CHECKPOINT_REVISION
-FACETS_NODE_CHECKPOINT_REVISION=$(facets_node_resolve_checkpoint_revision)
+export FACETS_DEVICE_SYNC_BACKUP_REPOSITORY=$repository_path
+export FACETS_DEVICE_SYNC_BACKUP_PASSWORD_FILE=$password_file
+export FACETS_DEVICE_SYNC_CHECKPOINT_DIRECTORY=$checkpoint_directory
+export FACETS_DEVICE_SYNC_RESTORE_DIRECTORY=$restore_placeholder
+export FACETS_DEVICE_SYNC_CHECKPOINT_REVISION
+FACETS_DEVICE_SYNC_CHECKPOINT_REVISION=$(facets_device_sync_resolve_checkpoint_revision)
 
 compose=(docker compose -f compose.yaml -f compose.backup.yaml)
 source_was_running=false
-if [[ -n $("${compose[@]}" ps --status running -q node) ]]; then
+if [[ -n $("${compose[@]}" ps --status running -q server) ]]; then
   source_was_running=true
 fi
 
 restart_source() {
   if [[ $source_was_running == true ]]; then
-    "${compose[@]}" up -d node >/dev/null
+    "${compose[@]}" up -d server >/dev/null
     source_ready=false
     for _ in {1..30}; do
       if curl --fail --silent \
-        "http://127.0.0.1:${FACETS_NODE_PUBLISHED_PORT:-8080}/readyz" \
+        "http://127.0.0.1:${FACETS_DEVICE_SYNC_MANAGEMENT_PORT:-8080}/readyz" \
         >/dev/null; then
         source_ready=true
         break
@@ -49,7 +49,7 @@ restart_source() {
       sleep 1
     done
     [[ $source_ready == true ]] || {
-      echo "source Facets Node did not become ready after checkpoint" >&2
+      echo "source Facets Device Sync Server did not become ready after checkpoint" >&2
       return 1
     }
     source_was_running=false
@@ -64,7 +64,7 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ $source_was_running == true ]]; then
-  "${compose[@]}" stop node >/dev/null
+  "${compose[@]}" stop server >/dev/null
 fi
 
 "${compose[@]}" run --rm --no-deps checkpoint-database
@@ -79,14 +79,14 @@ if [[ ! -f $repository_path/config ]]; then
 fi
 
 "${compose[@]}" run --rm --no-deps repository backup \
-  --host facets-node \
-  --tag facets-node-checkpoint \
+  --host facets-device-sync \
+  --tag facets-device-sync-checkpoint \
   --exclude /blobs/.staging \
   /checkpoint /blobs
 
 restart_source
 "${compose[@]}" run --rm --no-deps repository check
 "${compose[@]}" run --rm --no-deps repository snapshots \
-  --host facets-node \
-  --tag facets-node-checkpoint \
+  --host facets-device-sync \
+  --tag facets-device-sync-checkpoint \
   --latest 1

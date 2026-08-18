@@ -1,6 +1,6 @@
 # Replica relay data plane v1
 
-Facets Node is a content-blind carrier for Personal Sync and future Shared
+The Facets server data plane is a content-blind carrier for Personal Sync and future Shared
 Spaces. It stores opaque routing identifiers, authorization digests, encrypted
 Envelope V1 bytes, and encrypted blobs. It does not parse FEF, principal,
 Persona, device, or Space semantics and never receives a domain content key.
@@ -20,7 +20,7 @@ The adjacent lock records the Swift contract input and Envelope schema V1.
   subscription.
 
 All bearer tokens are independently generated canonical unpadded base64url
-encodings of 32 random bytes. The Node stores only domain-separated SHA-256
+encodings of 32 random bytes. The server stores only domain-separated SHA-256
 digests. Member requests additionally send `X-Facets-Member-ID`.
 
 The tenant digest is lowercase SHA-256 over the bytes
@@ -173,7 +173,7 @@ recipient. Multiple agents serving one subscription may fetch idempotently.
 Any authorized agent may advance them. `applied` requires an existing
 `accepted`; an older retry after `applied` returns the higher durable fact.
 Periodic cursor fetch is authoritative; wake is only an acceleration hint.
-Each Node instance keeps the process-local broker used by connected waiters and
+Each server instance keeps the process-local broker used by connected waiters and
 also owns a dedicated PostgreSQL `LISTEN` connection on the fixed
 `facets_relay_wake_v1` channel. After an accepted publication commits, the
 serving instance wakes its local broker and best-effort publishes a hint whose
@@ -213,8 +213,8 @@ at the boundary so a recipient cannot skip the suffix before it becomes
 visible. Activation reveals the complete revalidated suffix atomically and
 emits a wake hint. Acquisition and abort are exact-retry safe.
 
-The Node supplies the boundary cursor and expiry in the acquisition response.
-Expiry uses server receipt time. `FACETS_NODE_CHECKPOINT_FENCE_TTL` defaults to
+The server supplies the boundary cursor and expiry in the acquisition response.
+Expiry uses server receipt time. the service-specific `CHECKPOINT_FENCE_TTL` setting defaults to
 two hours and is operator-configurable from five minutes through 24 hours. A
 longer value gives large encrypted checkpoint uploads more time, but also
 extends the maximum foreign-writer pause after a crashed holder. Abort or
@@ -240,7 +240,7 @@ sorted complete retained-message and retained-blob ID sets, and a creation
 time. Retained messages must be exactly every holder-subscription publication
 after the boundary through staging; activation revalidates the same suffix
 under the domain lock. Retained blobs must exist but remain opaque and
-client-declared. The Node does not interpret checkpoint ciphertext or
+client-declared. The server does not interpret checkpoint ciphertext or
 application state. Staging is exact-retry safe.
 
 Domain administration controls activation and collection:
@@ -325,9 +325,9 @@ Defaults are:
 Tenant and domain reserved blob counts and bytes advance atomically at upload
 creation, preventing concurrent quota oversubscription. Finalization converts
 them to published counters. Inactive uploads expire after
-`FACETS_NODE_BLOB_UPLOAD_TTL` (seven days by default); physical upload staging
+the service-specific `BLOB_UPLOAD_TTL` setting (seven days by default); physical upload staging
 and unreferenced final files are deleted only after
-`FACETS_NODE_BLOB_ORPHAN_GRACE` (24 hours by default) and a fresh authority
+the service-specific `BLOB_ORPHAN_GRACE` setting (24 hours by default) and a fresh authority
 check.
 
 ## Current limits

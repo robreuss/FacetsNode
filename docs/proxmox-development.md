@@ -13,17 +13,17 @@ Copy the repository to the VM, then create the uncommitted environment file:
 ```sh
 cp .env.example .env
 openssl rand -hex 32
-# Put that output after FACETS_NODE_POSTGRES_PASSWORD= in .env.
+# Put that output after FACETS_DEVICE_SYNC_POSTGRES_PASSWORD= in .env.
 openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
-# Put this separate value after FACETS_NODE_OPERATOR_TOKEN= in .env.
+# Put this separate value after FACETS_DEVICE_SYNC_OPERATOR_TOKEN= in .env.
 install -d -m 700 deploy/tls
 # Install the certificate and private key for the public DNS name as
 # deploy/tls/server.crt and deploy/tls/server.key.
 chmod 600 .env
 REV=<40-character-committed-revision>
 TREE=<40-character-committed-tree>
-FACETS_NODE_SOURCE_REVISION="$REV" \
-FACETS_NODE_SOURCE_TREE="$TREE" \
+FACETS_SERVER_SOURCE_REVISION="$REV" \
+FACETS_SERVER_SOURCE_TREE="$TREE" \
   docker compose build
 docker compose up --no-build -d
 docker compose ps
@@ -46,17 +46,17 @@ pass the two values to the build, and verify the immutable image labels plus
 the running container image ID:
 
 ```sh
-test "$(docker image inspect facets-node-node:latest \
+test "$(docker image inspect facets-device-sync-server:latest \
   --format '{{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.source-tree"}}')" = \
   "$REV $TREE"
-test "$(docker image inspect facets-node-node:latest --format '{{.Id}}')" = \
-  "$(docker inspect facets-node-node-1 --format '{{.Image}}')"
+test "$(docker image inspect facets-device-sync-server:latest --format '{{.Id}}')" = \
+  "$(docker inspect facets-device-sync-server-1 --format '{{.Image}}')"
 ```
 
 An `unknown` label is acceptable for local iteration but fails the persistent
 deployment gate.
 
-The plaintext Node API binds only to the VM's loopback interface. It is the
+The plaintext Device Sync Server API binds only to the VM's loopback interface. It is the
 private management ingress, including readiness, metrics, and operator domain
 provisioning. For development from another machine, use an SSH tunnel rather
 than opening a LAN or public firewall rule:
@@ -79,14 +79,14 @@ The persistent integration gate is:
 
 ```sh
 # One-time disposable integration database:
-docker compose exec postgres createdb -U facets facets_test
+docker compose exec postgres createdb -U facets_device_sync facets_device_sync_test
 
-FACETS_NODE_TEST_DATABASE_URL='postgres://facets:<password>@postgres:5432/facets_test?sslmode=disable' \
+FACETS_SERVER_TEST_DATABASE_URL='postgres://facets_device_sync:<password>@postgres:5432/facets_device_sync_test?sslmode=disable' \
   go test ./internal/postgres \
     -run 'TestPostgres(StorePersistsOpaqueMailbox|Relay(PersistsSequences|TenantProvisioning|SerializesOutstandingAdmissionLimit)|SubscriptionExactRetry)' -v
 
-FACETS_NODE_TEST_BASE_URL='http://node:8080' \
-FACETS_NODE_TEST_OPERATOR_TOKEN='<same operator value from .env>' \
+FACETS_SERVER_TEST_BASE_URL='http://server:8080' \
+FACETS_SERVER_TEST_OPERATOR_TOKEN='<same operator value from .env>' \
   go test ./integration -run 'TestLive(Pairing|ReplicaRelay)' -v
 
 # Use the CA required by the installed certificate; never use curl -k.
@@ -100,13 +100,13 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
 ```
 
 Run these from an ephemeral Go container attached to the corresponding Compose
-network, or through a development tunnel. `facets_test` is disposable; the
+network, or through a development tunnel. `facets_device_sync_test` is disposable; the
 PostgreSQL suite truncates its relay tables and must never target the running
 service database. The Proxmox gate also tears down both
 containers without deleting the named volume, starts the same image again,
 verifies pairing routes plus replica domains/messages/blob metadata remain, and
 confirms `/readyz`. The same checkpoint records the sorted SHA-256 digest list
-from every regular file in the `facets-node-blobs` volume before and after
+from every regular file in the `facets-device-sync-blobs` volume before and after
 recreation and requires an exact match. Never add `--volumes` to this
 persistence check.
 
@@ -133,7 +133,7 @@ restart, and rejects the wrong tenant secret. The live provisioning/wake gate
 creates a child domain through HTTP, retries it, publishes before starting the wake request,
 and requires the wake endpoint to find the already-durable PostgreSQL message
 without relying on a process-local signal. The disposable-PostgreSQL suite also
-starts two independent pools and Node server objects, proves that publication
+starts two independent pools and server objects, proves that publication
 through one wakes a waiter on the other through `LISTEN`/`NOTIFY`, then stops
 the listener and proves a missed hint is recovered by the authoritative cursor
 fetch. These tests are skipped when their explicit disposable-database or
@@ -148,7 +148,7 @@ outside the supported operational workflow.
 
 The coordinated recovery gate uses the checked-in operations Compose file and
 scripts documented in [backup-and-restore.md](backup-and-restore.md). The first
-Proxmox proof stopped the Node writer, encrypted one PostgreSQL dump plus the
+Proxmox proof stopped the Device Sync Server writer, encrypted one PostgreSQL dump plus the
 exact blob tree into a Restic snapshot, and restored it into a different
 Compose project and fresh named volumes on another loopback port. All relay
 table counts, blob paths and digests, and both `/readyz` results matched. This
@@ -164,7 +164,7 @@ For a source-copy deployment, create the checkpoint with the same value shown
 by the running image label:
 
 ```sh
-FACETS_NODE_CHECKPOINT_REVISION=<40-character-committed-revision> \
+FACETS_DEVICE_SYNC_CHECKPOINT_REVISION=<40-character-committed-revision> \
   ./scripts/backup-checkpoint.sh \
   /absolute/off-host-restic-repository \
   /absolute/protected-restic-password-file

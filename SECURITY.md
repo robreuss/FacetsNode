@@ -1,6 +1,6 @@
 # Security policy
 
-Facets Node carries high-value encrypted state and authorization capabilities.
+Facets Device Sync Server and Facets Shared Spaces Server carry high-value encrypted state and authorization capabilities.
 Please do not disclose a suspected vulnerability in a public issue. Until a
 dedicated security address is published, contact the project owner privately
 through the repository hosting account.
@@ -48,7 +48,7 @@ Supported production deployments must:
 - checkpoint PostgreSQL and the opaque-blob volume together so metadata cannot
   point at missing content or retained files lose their authority records;
 - retain host/edge-level request and distributed rate limits in addition to
-  the Node's bounded per-process fixed-surface controls;
+  the server's bounded per-process fixed-surface controls;
 - collect logs without authorization headers, request bodies, ciphertext, or
   client IP addresses;
 - run the container as an unprivileged user with a read-only root filesystem;
@@ -80,5 +80,5 @@ policy.
 The checked-in Caddy policy is a boundary test, not an authentication layer: it
 returns `404` for private management paths and forwards the two versioned
 application families. Tenant-scoped relay endpoints still enforce their bearer
-capabilities in the Node. The loopback management listener contains both route
+capabilities in either service. The loopback management listener contains both route
 families and must not be published to a LAN or the internet.

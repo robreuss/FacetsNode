@@ -264,7 +264,7 @@ func TestTrafficLogsDoNotContainCredentialAddressOrDigest(t *testing.T) {
 	)))
 	secret := "private-rate-limit-secret"
 	address := "192.0.2.99"
-	var digest = sha256.Sum256([]byte("facets-node-traffic-credential-v1\x00" + secret))
+	var digest = sha256.Sum256([]byte("facets-server-traffic-credential-v1\x00" + secret))
 	for range 2 {
 		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 		req.Pattern = "GET /metrics"

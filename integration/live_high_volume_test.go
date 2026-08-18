@@ -58,36 +58,36 @@ type highVolumeHTTPClient struct {
 // TestLiveReplicaRelayHighVolumeCheckpointRestart is deliberately opt-in. The
 // prepare phase proves the complete high-volume checkpoint/collection path and
 // writes only explicitly requested, mode-0600 recovery state outside the
-// repository. The verify phase consumes that authority after the Node and
+// repository. The verify phase consumes that authority after the server and
 // PostgreSQL containers have been recreated and proves continued delivery
 // without provisioning another tenant or domain.
 func TestLiveReplicaRelayHighVolumeCheckpointRestart(t *testing.T) {
-	if os.Getenv("FACETS_NODE_TEST_HIGH_VOLUME") != "1" {
-		t.Skip("FACETS_NODE_TEST_HIGH_VOLUME=1 is required")
+	if os.Getenv("FACETS_SERVER_TEST_HIGH_VOLUME") != "1" {
+		t.Skip("FACETS_SERVER_TEST_HIGH_VOLUME=1 is required")
 	}
-	baseURL := strings.TrimRight(os.Getenv("FACETS_NODE_TEST_BASE_URL"), "/")
-	statePath := os.Getenv("FACETS_NODE_TEST_HIGH_VOLUME_STATE_PATH")
+	baseURL := strings.TrimRight(os.Getenv("FACETS_SERVER_TEST_BASE_URL"), "/")
+	statePath := os.Getenv("FACETS_SERVER_TEST_HIGH_VOLUME_STATE_PATH")
 	if baseURL == "" || statePath == "" {
-		t.Fatal("FACETS_NODE_TEST_BASE_URL and FACETS_NODE_TEST_HIGH_VOLUME_STATE_PATH are required")
+		t.Fatal("FACETS_SERVER_TEST_BASE_URL and FACETS_SERVER_TEST_HIGH_VOLUME_STATE_PATH are required")
 	}
 	validateHighVolumeStatePath(t, statePath)
 	httpClient := &highVolumeHTTPClient{
 		t:                   t,
 		client:              &http.Client{Timeout: 45 * time.Second},
-		retryRateLimited:    os.Getenv("FACETS_NODE_TEST_HIGH_VOLUME_RETRY_429") == "1",
+		retryRateLimited:    os.Getenv("FACETS_SERVER_TEST_HIGH_VOLUME_RETRY_429") == "1",
 		maximumRetryElapsed: 2 * time.Minute,
 	}
-	switch phase := os.Getenv("FACETS_NODE_TEST_HIGH_VOLUME_PHASE"); phase {
+	switch phase := os.Getenv("FACETS_SERVER_TEST_HIGH_VOLUME_PHASE"); phase {
 	case "prepare":
-		operatorToken := os.Getenv("FACETS_NODE_TEST_OPERATOR_TOKEN")
+		operatorToken := os.Getenv("FACETS_SERVER_TEST_OPERATOR_TOKEN")
 		if operatorToken == "" {
-			t.Fatal("FACETS_NODE_TEST_OPERATOR_TOKEN is required for the prepare phase")
+			t.Fatal("FACETS_SERVER_TEST_OPERATOR_TOKEN is required for the prepare phase")
 		}
 		prepareHighVolumeRelayState(t, httpClient, baseURL, operatorToken, statePath)
 	case "verify":
 		verifyHighVolumeRelayState(t, httpClient, baseURL, statePath)
 	default:
-		t.Fatalf("FACETS_NODE_TEST_HIGH_VOLUME_PHASE=%q; want prepare or verify", phase)
+		t.Fatalf("FACETS_SERVER_TEST_HIGH_VOLUME_PHASE=%q; want prepare or verify", phase)
 	}
 }
 
@@ -672,7 +672,7 @@ func uploadHighVolumeSnapshot(
 }
 
 func highVolumeSnapshotBytes() []byte {
-	pattern := []byte("facets-node-opaque-retained-snapshot-v1\x00")
+	pattern := []byte("facets-server-opaque-retained-snapshot-v1\x00")
 	result := make([]byte, 768*1_024+317)
 	for offset := 0; offset < len(result); offset += len(pattern) {
 		copy(result[offset:], pattern)
@@ -863,7 +863,7 @@ func highVolumeToken(t *testing.T) string {
 func validateHighVolumeStatePath(t *testing.T, path string) {
 	t.Helper()
 	if !filepath.IsAbs(path) {
-		t.Fatal("FACETS_NODE_TEST_HIGH_VOLUME_STATE_PATH must be absolute")
+		t.Fatal("FACETS_SERVER_TEST_HIGH_VOLUME_STATE_PATH must be absolute")
 	}
 	workingDirectory, err := os.Getwd()
 	if err != nil {
@@ -897,7 +897,7 @@ func validateHighVolumeStatePath(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	if relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		t.Fatal("FACETS_NODE_TEST_HIGH_VOLUME_STATE_PATH must be outside the repository")
+		t.Fatal("FACETS_SERVER_TEST_HIGH_VOLUME_STATE_PATH must be outside the repository")
 	}
 }
 

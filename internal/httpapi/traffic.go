@@ -108,7 +108,7 @@ func requestTrafficIdentityKey(request *http.Request, surface traffic.Surface) t
 	authorization := request.Header.Get("Authorization")
 	if strings.HasPrefix(authorization, "Bearer ") && len(authorization) > len("Bearer ") {
 		return traffic.Key(sha256.Sum256([]byte(
-			"facets-node-traffic-credential-v1\x00" + strings.TrimPrefix(authorization, "Bearer "),
+			"facets-server-traffic-credential-v1\x00" + strings.TrimPrefix(authorization, "Bearer "),
 		)))
 	}
 	scope := surface.Name() + "\x00" + request.Pattern
@@ -116,13 +116,13 @@ func requestTrafficIdentityKey(request *http.Request, surface traffic.Surface) t
 		scope = "route\x00" + routeID.String()
 	}
 	return traffic.Key(sha256.Sum256([]byte(
-		"facets-node-traffic-route-v1\x00" + trustedConnectionAddress(request.RemoteAddr) + "\x00" + scope,
+		"facets-server-traffic-route-v1\x00" + trustedConnectionAddress(request.RemoteAddr) + "\x00" + scope,
 	)))
 }
 
 func requestTrafficConnectionKey(request *http.Request) traffic.Key {
 	return traffic.Key(sha256.Sum256([]byte(
-		"facets-node-traffic-address-v1\x00" + trustedConnectionAddress(request.RemoteAddr),
+		"facets-server-traffic-address-v1\x00" + trustedConnectionAddress(request.RemoteAddr),
 	)))
 }
 
