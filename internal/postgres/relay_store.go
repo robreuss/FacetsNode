@@ -655,6 +655,168 @@ func (s *RelayStore) RevokeMember(
 	return relay.AcceptanceAccepted, nil
 }
 
+func (s *RelayStore) ChangeMemberCapabilities(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	change relay.MemberCapabilityChange,
+	nowMilliseconds int64,
+) (relay.MemberCapabilityChangeResult, error) {
+	if err := change.Validate(); err != nil {
+		return relay.MemberCapabilityChangeResult{}, err
+	}
+	transaction, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.MemberCapabilityChangeResult{}, fmt.Errorf("begin relay member capability change: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	result, err := s.changeMemberCapabilitiesInTransaction(
+		ctx, transaction, credential, change, nowMilliseconds,
+	)
+	if err != nil {
+		return relay.MemberCapabilityChangeResult{}, err
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return relay.MemberCapabilityChangeResult{}, fmt.Errorf("commit relay member capability change: %w", err)
+	}
+	return result, nil
+}
+
+func (s *RelayStore) changeMemberCapabilitiesInTransaction(
+	ctx context.Context,
+	transaction pgx.Tx,
+	credential relay.AdministrationCredential,
+	change relay.MemberCapabilityChange,
+	nowMilliseconds int64,
+) (relay.MemberCapabilityChangeResult, error) {
+	if err := change.Validate(); err != nil {
+		return relay.MemberCapabilityChangeResult{}, err
+	}
+	domain, _, _, _, _, _, err := loadRelayDomain(
+		ctx, transaction, credential.TenantID, credential.DomainID, "FOR SHARE",
+	)
+	if err != nil {
+		return relay.MemberCapabilityChangeResult{}, err
+	}
+	if err := domain.Authorize(credential); err != nil {
+		return relay.MemberCapabilityChangeResult{}, err
+	}
+	var existingVersion int
+	var existingMemberID uuid.UUID
+	var existingPrevious, existingNext []string
+	var existingChangedAt int64
+	err = transaction.QueryRow(ctx, `
+		SELECT version,member_id,previous_capabilities,next_capabilities,changed_at_milliseconds
+		FROM relay_member_capability_changes
+		WHERE tenant_id=$1 AND domain_id=$2 AND retry_id=$3
+		FOR UPDATE
+	`, credential.TenantID, credential.DomainID, change.RetryID).Scan(
+		&existingVersion, &existingMemberID, &existingPrevious, &existingNext, &existingChangedAt,
+	)
+	if err == nil {
+		previous := relayCapabilities(existingPrevious)
+		next := relayCapabilities(existingNext)
+		if existingVersion != change.Version || existingMemberID != change.MemberID ||
+			existingChangedAt != change.ChangedAtMilliseconds ||
+			!relayCapabilitiesEqual(previous, change.PreviousCapabilities) ||
+			!relayCapabilitiesEqual(next, change.NextCapabilities) {
+			return relay.MemberCapabilityChangeResult{}, relay.NewProtocolError(
+				relay.CodeMemberCapabilityCollision, "member capability retry ID was reused",
+			)
+		}
+		return relay.MemberCapabilityChangeResult{
+			Acceptance: relay.AcceptanceDuplicate, RetryID: change.RetryID, MemberID: change.MemberID,
+			PreviousCapabilities: previous, CurrentCapabilities: next,
+			ChangedAtMilliseconds: existingChangedAt,
+		}, nil
+	}
+	if err != pgx.ErrNoRows {
+		return relay.MemberCapabilityChangeResult{}, fmt.Errorf("load relay member capability change: %w", err)
+	}
+	member, found, err := loadRelayMember(
+		ctx, transaction, credential.TenantID, credential.DomainID, change.MemberID, "FOR UPDATE",
+	)
+	if err != nil {
+		return relay.MemberCapabilityChangeResult{}, err
+	}
+	if !found {
+		return relay.MemberCapabilityChangeResult{}, relay.NewProtocolError(
+			relay.CodeMemberNotFound, "member was not found",
+		)
+	}
+	if member.RevokedAtMilliseconds != nil && nowMilliseconds >= *member.RevokedAtMilliseconds {
+		return relay.MemberCapabilityChangeResult{}, relay.NewProtocolError(
+			relay.CodeMemberRevoked, "member is revoked",
+		)
+	}
+	if nowMilliseconds < member.CreatedAtMilliseconds ||
+		(member.ExpiresAtMilliseconds != nil && nowMilliseconds >= *member.ExpiresAtMilliseconds) {
+		return relay.MemberCapabilityChangeResult{}, relay.NewProtocolError(
+			relay.CodeMemberExpired, "member is not active",
+		)
+	}
+	if change.ChangedAtMilliseconds > nowMilliseconds ||
+		change.ChangedAtMilliseconds < member.CreatedAtMilliseconds {
+		return relay.MemberCapabilityChangeResult{}, relay.NewProtocolError(
+			relay.CodeInvalidMember, "member capability change time is invalid",
+		)
+	}
+	if !relayCapabilitiesEqual(member.Capabilities, change.PreviousCapabilities) {
+		return relay.MemberCapabilityChangeResult{}, relay.NewProtocolError(
+			relay.CodeMemberCapabilityCollision, "member capabilities changed concurrently",
+		)
+	}
+	if _, err := transaction.Exec(ctx, `
+		INSERT INTO relay_member_capability_changes (
+			tenant_id,domain_id,retry_id,member_id,version,previous_capabilities,
+			next_capabilities,changed_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, credential.TenantID, credential.DomainID, change.RetryID, change.MemberID,
+		change.Version, capabilityStrings(change.PreviousCapabilities),
+		capabilityStrings(change.NextCapabilities), change.ChangedAtMilliseconds); err != nil {
+		return relay.MemberCapabilityChangeResult{}, fmt.Errorf("record relay member capability change: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `
+		UPDATE relay_members
+		SET capabilities=$4,updated_at=now()
+		WHERE tenant_id=$1 AND domain_id=$2 AND member_id=$3
+	`, credential.TenantID, credential.DomainID, change.MemberID,
+		capabilityStrings(change.NextCapabilities)); err != nil {
+		return relay.MemberCapabilityChangeResult{}, fmt.Errorf("change relay member capabilities: %w", err)
+	}
+	if err := insertRelayAudit(
+		ctx, transaction, credential.TenantID, credential.DomainID,
+		&change.MemberID, nil, "member_capabilities_changed", change.ChangedAtMilliseconds,
+	); err != nil {
+		return relay.MemberCapabilityChangeResult{}, err
+	}
+	return relay.MemberCapabilityChangeResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: change.RetryID, MemberID: change.MemberID,
+		PreviousCapabilities:  append([]relay.Capability(nil), change.PreviousCapabilities...),
+		CurrentCapabilities:   append([]relay.Capability(nil), change.NextCapabilities...),
+		ChangedAtMilliseconds: change.ChangedAtMilliseconds,
+	}, nil
+}
+
+func relayCapabilities(values []string) []relay.Capability {
+	result := make([]relay.Capability, len(values))
+	for index, value := range values {
+		result[index] = relay.Capability(value)
+	}
+	return result
+}
+
+func relayCapabilitiesEqual(left, right []relay.Capability) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *RelayStore) Publish(
 	ctx context.Context,
 	credential relay.Credential,

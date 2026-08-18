@@ -102,6 +102,12 @@ type Store interface {
 		memberID uuid.UUID,
 		nowMilliseconds int64,
 	) (Acceptance, error)
+	ChangeMemberCapabilities(
+		ctx context.Context,
+		credential AdministrationCredential,
+		change MemberCapabilityChange,
+		nowMilliseconds int64,
+	) (MemberCapabilityChangeResult, error)
 	Publish(
 		ctx context.Context,
 		credential Credential,

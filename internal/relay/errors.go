@@ -47,6 +47,7 @@ const (
 	CodeAdmissionCollision          ErrorCode = "admission_collision"
 	CodeAdmissionClaimed            ErrorCode = "admission_claimed"
 	CodeCredentialRotationCollision ErrorCode = "credential_rotation_collision"
+	CodeMemberCapabilityCollision   ErrorCode = "member_capability_collision"
 	CodeCredentialReuse             ErrorCode = "credential_reuse"
 	CodeMessageCollision            ErrorCode = "message_collision"
 	CodeBlobCollision               ErrorCode = "blob_collision"

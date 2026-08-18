@@ -268,6 +268,60 @@ type MemberRegistration struct {
 	RevokedAtMilliseconds *int64       `json:"revokedAtMilliseconds,omitempty"`
 }
 
+// MemberCapabilityChange atomically replaces one active member's relay
+// capabilities. RetryID makes the authority operation idempotent; the caller
+// must supply the exact previous capability set so stale role changes cannot
+// silently overwrite a newer decision.
+type MemberCapabilityChange struct {
+	Version               int          `json:"version"`
+	RetryID               uuid.UUID    `json:"retryID"`
+	MemberID              uuid.UUID    `json:"memberID"`
+	PreviousCapabilities  []Capability `json:"previousCapabilities"`
+	NextCapabilities      []Capability `json:"nextCapabilities"`
+	ChangedAtMilliseconds int64        `json:"changedAtMilliseconds"`
+}
+
+func (c MemberCapabilityChange) Validate() error {
+	if c.Version != SchemaVersion || c.RetryID == uuid.Nil || c.MemberID == uuid.Nil ||
+		c.ChangedAtMilliseconds < 0 || len(c.PreviousCapabilities) == 0 ||
+		len(c.NextCapabilities) == 0 ||
+		!validCapabilities(c.PreviousCapabilities) || !validCapabilities(c.NextCapabilities) ||
+		capabilitiesEqual(c.PreviousCapabilities, c.NextCapabilities) {
+		return protocolError(CodeInvalidMember, "member capability change fields are invalid")
+	}
+	return nil
+}
+
+type MemberCapabilityChangeResult struct {
+	Acceptance            Acceptance   `json:"acceptance"`
+	RetryID               uuid.UUID    `json:"retryID"`
+	MemberID              uuid.UUID    `json:"memberID"`
+	PreviousCapabilities  []Capability `json:"previousCapabilities"`
+	CurrentCapabilities   []Capability `json:"currentCapabilities"`
+	ChangedAtMilliseconds int64        `json:"changedAtMilliseconds"`
+}
+
+func validCapabilities(capabilities []Capability) bool {
+	for index, capability := range capabilities {
+		if !capability.Valid() || (index > 0 && capabilities[index-1] >= capability) {
+			return false
+		}
+	}
+	return true
+}
+
+func capabilitiesEqual(left, right []Capability) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 type MemberAdmission struct {
 	Version                     int          `json:"version"`
 	TenantID                    uuid.UUID    `json:"tenantID"`

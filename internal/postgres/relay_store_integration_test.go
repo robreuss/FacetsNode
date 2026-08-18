@@ -475,6 +475,63 @@ func TestPostgresRelayPersistsSequencesAcknowledgmentsAndRevocation(t *testing.T
 	}
 }
 
+func TestPostgresRelayReplacesMemberCapabilitiesIdempotently(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_SERVER_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
+	pool := openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `TRUNCATE relay_tenants CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := testfixture.LoadRelayCarrier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := relay.AdministrationCredential{
+		TenantID: fixture.Envelope.TenantID, DomainID: fixture.Envelope.DomainID,
+		Token: postgresRelayToken(212),
+	}
+	adminDigest, err := relay.AdministrationDigest(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := relay.DomainRegistration{
+		Version: relay.SchemaVersion, TenantID: admin.TenantID, DomainID: admin.DomainID,
+		AdministrationDigest: adminDigest, CreatedAtMilliseconds: 1_000,
+		MaximumMessageCount: 10, MaximumMessageByteCount: 1_000_000,
+		MaximumBlobCount: 10, MaximumBlobByteCount: 1_000_000,
+	}
+	if _, acceptance, err := postgresProvisionTenant(ctx, postgresstore.NewRelayStore(pool), domain, fixture.PublisherRegistration, uuid.New(), 213); err != nil || acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("provision tenant acceptance=%q err=%v", acceptance, err)
+	}
+	store := postgresstore.NewRelayStore(pool)
+	change := relay.MemberCapabilityChange{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), MemberID: fixture.PublisherRegistration.MemberID,
+		PreviousCapabilities:  fixture.PublisherRegistration.Capabilities,
+		NextCapabilities:      []relay.Capability{relay.CapabilityFetchMessage},
+		ChangedAtMilliseconds: 1_200,
+	}
+	changed, err := store.ChangeMemberCapabilities(ctx, admin, change, 1_200)
+	if err != nil || changed.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("change=%+v err=%v", changed, err)
+	}
+	retried, err := store.ChangeMemberCapabilities(ctx, admin, change, 1_201)
+	if err != nil || retried.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("retry=%+v err=%v", retried, err)
+	}
+	if _, err := store.Publish(ctx, fixture.PublisherAccess.Credential(), fixture.Envelope, 1_201); !relay.ErrorHasCode(err, relay.CodeMissingCapability) {
+		t.Fatalf("publish after demotion err=%v", err)
+	}
+}
+
 func TestPostgresResumableBlobReservationsRetriesAndExpiry(t *testing.T) {
 	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
 	if databaseURL == "" {

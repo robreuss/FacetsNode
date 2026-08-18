@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ type memoryDomain struct {
 	messageByID             map[uuid.UUID]*memoryMessage
 	blobs                   map[string]BlobMetadata
 	rotations               map[uuid.UUID]memoryCredentialRotation
+	capabilityChanges       map[uuid.UUID]memoryMemberCapabilityChange
 	nextSequence            uint64
 	messageBytes            int64
 	blobBytes               int64
@@ -88,6 +90,11 @@ type memoryCredentialRotation struct {
 	previousAuthorizationDigest string
 	newAuthorizationDigest      string
 	rotatedAtMilliseconds       int64
+}
+
+type memoryMemberCapabilityChange struct {
+	request MemberCapabilityChange
+	result  MemberCapabilityChangeResult
 }
 
 const (
@@ -275,6 +282,7 @@ func (s *MemoryStore) createDomainLocked(
 		messageByID:             make(map[uuid.UUID]*memoryMessage),
 		blobs:                   make(map[string]BlobMetadata),
 		rotations:               make(map[uuid.UUID]memoryCredentialRotation),
+		capabilityChanges:       make(map[uuid.UUID]memoryMemberCapabilityChange),
 		checkpoints:             make(map[uuid.UUID]*memoryCheckpoint),
 		checkpointStageRetries:  make(map[uuid.UUID]uuid.UUID),
 		checkpointActivations:   make(map[uuid.UUID]memoryCheckpointActivation),
@@ -1022,6 +1030,64 @@ func (s *MemoryStore) RevokeMember(
 	member.RevokedAtMilliseconds = &nowMilliseconds
 	domain.members[memberID] = member
 	return AcceptanceAccepted, nil
+}
+
+func (s *MemoryStore) ChangeMemberCapabilities(
+	_ context.Context,
+	credential AdministrationCredential,
+	change MemberCapabilityChange,
+	nowMilliseconds int64,
+) (MemberCapabilityChangeResult, error) {
+	if err := change.Validate(); err != nil {
+		return MemberCapabilityChangeResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedDomain(credential)
+	if err != nil {
+		return MemberCapabilityChangeResult{}, err
+	}
+	if existing, found := domain.capabilityChanges[change.RetryID]; found {
+		if !reflect.DeepEqual(existing.request, change) {
+			return MemberCapabilityChangeResult{}, protocolError(
+				CodeMemberCapabilityCollision, "member capability retry ID was reused",
+			)
+		}
+		result := existing.result
+		result.Acceptance = AcceptanceDuplicate
+		return result, nil
+	}
+	member, found := domain.members[change.MemberID]
+	if !found {
+		return MemberCapabilityChangeResult{}, protocolError(CodeMemberNotFound, "member was not found")
+	}
+	if !memberActiveAt(member, nowMilliseconds) {
+		if member.RevokedAtMilliseconds != nil && nowMilliseconds >= *member.RevokedAtMilliseconds {
+			return MemberCapabilityChangeResult{}, protocolError(CodeMemberRevoked, "member is revoked")
+		}
+		return MemberCapabilityChangeResult{}, protocolError(CodeMemberExpired, "member is not active")
+	}
+	if change.ChangedAtMilliseconds > nowMilliseconds ||
+		change.ChangedAtMilliseconds < member.CreatedAtMilliseconds {
+		return MemberCapabilityChangeResult{}, protocolError(CodeInvalidMember, "member capability change time is invalid")
+	}
+	if !capabilitiesEqual(member.Capabilities, change.PreviousCapabilities) {
+		return MemberCapabilityChangeResult{}, protocolError(
+			CodeMemberCapabilityCollision, "member capabilities changed concurrently",
+		)
+	}
+	member.Capabilities = append([]Capability(nil), change.NextCapabilities...)
+	domain.members[member.MemberID] = member
+	result := MemberCapabilityChangeResult{
+		Acceptance: AcceptanceAccepted, RetryID: change.RetryID, MemberID: change.MemberID,
+		PreviousCapabilities:  append([]Capability(nil), change.PreviousCapabilities...),
+		CurrentCapabilities:   append([]Capability(nil), change.NextCapabilities...),
+		ChangedAtMilliseconds: change.ChangedAtMilliseconds,
+	}
+	domain.capabilityChanges[change.RetryID] = memoryMemberCapabilityChange{
+		request: change, result: result,
+	}
+	return result, nil
 }
 
 func (s *MemoryStore) CreateSubscription(
