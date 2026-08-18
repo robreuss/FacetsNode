@@ -23,8 +23,11 @@ bootstrap boundary: an operator-issued, one-time admission atomically creates
 an isolated Device Sync principal, relay tenant, protected control domain, and
 initial device. It can enroll additional devices, provision opaque per-Space
 domains, report a content-blind transport inventory, and atomically revoke a
-device from its control and Space memberships. Shared Spaces membership remains
-a later implementation gate.
+device from its control and Space memberships. The Shared Spaces executable
+implements the first product authority boundary: an operator provisions an
+isolated Space and initial host, the host issues bounded participant
+invitations, invitees claim relay membership, and the host can inspect or
+revoke participants atomically.
 
 ## Implemented shared foundation
 
@@ -50,6 +53,11 @@ The initial Device Sync account bootstrap is specified in
 [the Device Sync bootstrap contract](docs/device-sync-bootstrap.md). The
 bootstrap authorizes service use and relay scopes only. Device-generated
 content keys never pass through the operator credential or account admission.
+
+The first Shared Spaces authority lifecycle is specified in
+[the Shared Spaces bootstrap contract](docs/shared-spaces-bootstrap.md).
+Participant roles authorize relay operations only; E2EE content keys remain a
+client concern and never pass through the Shared Spaces operator credential.
 
 ## Development
 
@@ -110,7 +118,11 @@ curl --fail http://127.0.0.1:8081/readyz
 
 Shared Spaces uses its own PostgreSQL and blob volumes. Running both Compose
 applications on one host is supported, but they remain separate services with
-no cross-service table joins or replicated membership database.
+no cross-service table joins or replicated membership database. Exact Space
+provisioning is operator-authorized and remains on the loopback management
+listener. Participant invitation claims, authenticated Space status, and
+participant administration are available through the reviewed HTTPS
+application allowlist on port 9443.
 
 ## Configuration and provenance
 
