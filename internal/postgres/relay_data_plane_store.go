@@ -30,6 +30,22 @@ func (s *RelayStore) ProvisionTenant(
 		return relay.TenantProvisioningResult{}, fmt.Errorf("begin tenant provisioning: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.provisionTenantTx(ctx, tx, tenant, initial)
+	if err != nil {
+		return relay.TenantProvisioningResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.TenantProvisioningResult{}, fmt.Errorf("commit tenant provisioning: %w", err)
+	}
+	return result, nil
+}
+
+func (s *RelayStore) provisionTenantTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenant relay.TenantRegistration,
+	initial relay.DomainProvisioning,
+) (relay.TenantProvisioningResult, error) {
 	result, err := tx.Exec(ctx, `
 		INSERT INTO relay_tenants (
 			tenant_id, version, provisioning_retry_id,
@@ -81,9 +97,6 @@ func (s *RelayStore) ProvisionTenant(
 	}
 	if err := auditProvisionedDomain(ctx, tx, initial); err != nil {
 		return relay.TenantProvisioningResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return relay.TenantProvisioningResult{}, fmt.Errorf("commit tenant provisioning: %w", err)
 	}
 	return postgresTenantProvisioningResult(tenant, initial, relay.AcceptanceAccepted), nil
 }

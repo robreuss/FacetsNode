@@ -85,34 +85,10 @@ func (s *Server) handleProvisionRelayTenant(writer http.ResponseWriter, request 
 		s.writeError(writer, err)
 		return
 	}
-	tenantCredential := relay.TenantCredential{
-		TenantID: input.TenantProvisioningCredential.TenantID,
-		Token:    input.TenantProvisioningCredential.AuthorizationToken,
-	}
-	tenantDigest, err := relay.TenantAuthorizationDigest(tenantCredential)
+	tenant, provisioning, err := relayTenantAndDomainProvisioning(input)
 	if err != nil {
 		s.writeError(writer, err)
 		return
-	}
-	provisioning, err := relayDomainProvisioning(input.InitialDomain)
-	if err != nil {
-		s.writeError(writer, err)
-		return
-	}
-	if input.Version != relay.SchemaVersion || input.RetryID == uuid.Nil ||
-		tenantCredential.TenantID != provisioning.Registration.TenantID {
-		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidTenant, "tenant provisioning request is invalid"))
-		return
-	}
-	tenant := relay.TenantRegistration{
-		Version: relay.SchemaVersion, RetryID: input.RetryID,
-		TenantID: tenantCredential.TenantID, AuthorizationDigest: tenantDigest,
-		CreatedAtMilliseconds:            provisioning.Registration.CreatedAtMilliseconds,
-		MaximumDomainCount:               relay.DefaultMaximumDomainCountPerTenant,
-		MaximumAggregateMessageCount:     relay.DefaultMaximumMessageCountPerTenant,
-		MaximumAggregateMessageByteCount: relay.DefaultMaximumMessageBytesPerTenant,
-		MaximumAggregateBlobCount:        relay.DefaultMaximumBlobCountPerTenant,
-		MaximumAggregateBlobByteCount:    relay.DefaultMaximumBlobBytesPerTenant,
 	}
 	result, err := s.relayStore.ProvisionTenant(request.Context(), tenant, provisioning)
 	if err != nil {
@@ -121,6 +97,37 @@ func (s *Server) handleProvisionRelayTenant(writer http.ResponseWriter, request 
 	}
 	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func relayTenantAndDomainProvisioning(input relayTenantProvisioningInput) (relay.TenantRegistration, relay.DomainProvisioning, error) {
+	tenantCredential := relay.TenantCredential{
+		TenantID: input.TenantProvisioningCredential.TenantID,
+		Token:    input.TenantProvisioningCredential.AuthorizationToken,
+	}
+	tenantDigest, err := relay.TenantAuthorizationDigest(tenantCredential)
+	if err != nil {
+		return relay.TenantRegistration{}, relay.DomainProvisioning{}, err
+	}
+	provisioning, err := relayDomainProvisioning(input.InitialDomain)
+	if err != nil {
+		return relay.TenantRegistration{}, relay.DomainProvisioning{}, err
+	}
+	if input.Version != relay.SchemaVersion || input.RetryID == uuid.Nil ||
+		tenantCredential.TenantID != provisioning.Registration.TenantID {
+		return relay.TenantRegistration{}, relay.DomainProvisioning{}, relay.NewProtocolError(
+			relay.CodeInvalidTenant, "tenant provisioning request is invalid",
+		)
+	}
+	return relay.TenantRegistration{
+		Version: relay.SchemaVersion, RetryID: input.RetryID,
+		TenantID: tenantCredential.TenantID, AuthorizationDigest: tenantDigest,
+		CreatedAtMilliseconds:            provisioning.Registration.CreatedAtMilliseconds,
+		MaximumDomainCount:               relay.DefaultMaximumDomainCountPerTenant,
+		MaximumAggregateMessageCount:     relay.DefaultMaximumMessageCountPerTenant,
+		MaximumAggregateMessageByteCount: relay.DefaultMaximumMessageBytesPerTenant,
+		MaximumAggregateBlobCount:        relay.DefaultMaximumBlobCountPerTenant,
+		MaximumAggregateBlobByteCount:    relay.DefaultMaximumBlobBytesPerTenant,
+	}, provisioning, nil
 }
 
 func (s *Server) handleProvisionRelayDomain(writer http.ResponseWriter, request *http.Request) {

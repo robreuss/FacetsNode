@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/traffic"
@@ -24,6 +25,7 @@ type Server struct {
 	serviceIdentity        string
 	store                  rendezvous.Store
 	relayStore             relay.Store
+	deviceSyncStore        devicesync.Store
 	blobContentStore       relay.BlobContentStore
 	blobUploadContentStore relay.BlobUploadContentStore
 	relayWakeBroker        *relayWakeBroker
@@ -56,6 +58,13 @@ func (s *Server) SetServiceIdentity(identity string) {
 	if identity = strings.TrimSpace(identity); identity != "" {
 		s.serviceIdentity = identity
 	}
+}
+
+// SetDeviceSyncStore enables the product-level Device Sync admission routes.
+// Shared Spaces intentionally leaves this unset even though it reuses the
+// underlying opaque relay implementation.
+func (s *Server) SetDeviceSyncStore(store devicesync.Store) {
+	s.deviceSyncStore = store
 }
 
 func NewWithRelay(
@@ -257,6 +266,20 @@ func (s *Server) Handler() http.Handler {
 			)
 		}
 	}
+	if s.deviceSyncStore != nil {
+		if s.operatorProvisioningOn {
+			register(
+				"POST /v1/device-sync/account-admissions",
+				traffic.SurfaceManagement,
+				s.handleCreateDeviceSyncAccountAdmission,
+			)
+		}
+		register(
+			"POST /v1/device-sync/account-admissions/{admissionID}/claim",
+			traffic.SurfaceManagement,
+			s.handleClaimDeviceSyncAccountAdmission,
+		)
+	}
 	return s.securityHeaders(s.requestLog(mux))
 }
 
@@ -438,6 +461,33 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			status = http.StatusTooManyRequests
 		}
 	} else {
+		var deviceSyncProtocol *devicesync.ProtocolError
+		if errors.As(err, &deviceSyncProtocol) {
+			code = string(deviceSyncProtocol.Code)
+			message = "The Device Sync request was rejected."
+			switch deviceSyncProtocol.Code {
+			case devicesync.CodeInvalidAdmission, devicesync.CodeInvalidPrincipal,
+				devicesync.CodeWrongScope:
+				status = http.StatusBadRequest
+			case devicesync.CodeUnauthorized, devicesync.CodeAdmissionNotFound:
+				status = http.StatusUnauthorized
+			case devicesync.CodeAdmissionExpired:
+				status = http.StatusGone
+			case devicesync.CodeAdmissionClaimed, devicesync.CodeAdmissionCollision,
+				devicesync.CodePrincipalCollision:
+				status = http.StatusConflict
+			}
+			writeJSON(writer, status, struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}{Error: struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}{Code: code, Message: message}})
+			return
+		}
 		var relayProtocol *relay.ProtocolError
 		if errors.As(err, &relayProtocol) {
 			code = string(relayProtocol.Code)

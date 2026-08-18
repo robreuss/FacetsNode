@@ -77,6 +77,9 @@ func Main(service config.Service) {
 		os.Exit(1)
 	}
 	api.SetServiceIdentity(string(service))
+	if service == config.DeviceSync {
+		api.SetDeviceSyncStore(relayStore)
+	}
 	if err := api.SetTrafficLimits(configuration.TrafficLimits); err != nil {
 		logger.Error("traffic limits rejected", "error", err)
 		os.Exit(1)

@@ -18,9 +18,10 @@ The currently implemented server foundation is content-blind. It stores opaque
 routing identifiers, capability digests, bounded metadata, client-encrypted
 envelopes, and encrypted blobs. It does not parse FEF, principal, Persona,
 device, or Space semantics and never receives a domain content key. The
-product-specific Device Sync enrollment and Shared Spaces membership layers
-are the next implementation gates; the executable split does not claim those
-features are complete.
+Device Sync executable additionally exposes the first product-level account
+bootstrap boundary: an operator-issued, one-time admission atomically creates
+an isolated Device Sync principal, relay tenant, protected control domain, and
+initial device. Shared Spaces membership remains a later implementation gate.
 
 ## Implemented shared foundation
 
@@ -41,6 +42,11 @@ Current relay limits are 16 MiB of decoded ciphertext per message, 256 MiB per
 encrypted blob, 100 messages per fetch page, and a 25-second maximum wake wait.
 See [the data-plane contract](docs/replica-relay-api.md) for the complete limits
 and authority model.
+
+The initial Device Sync account bootstrap is specified in
+[the Device Sync bootstrap contract](docs/device-sync-bootstrap.md). The
+bootstrap authorizes service use and relay scopes only. Device-generated
+content keys never pass through the operator credential or account admission.
 
 ## Development
 
