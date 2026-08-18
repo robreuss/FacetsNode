@@ -3,6 +3,7 @@ package devicesync
 import (
 	"context"
 	"reflect"
+	"sort"
 	"sync"
 
 	"github.com/google/uuid"
@@ -444,4 +445,85 @@ func spaceProvisioningResult(
 		Acceptance: acceptance, PrincipalID: provisioning.PrincipalID,
 		SpaceID: provisioning.SpaceID, Domain: relayResult,
 	}
+}
+
+func (s *MemoryStore) GetPrincipalStatus(
+	ctx context.Context,
+	credential relay.TenantCredential,
+) (PrincipalStatus, error) {
+	if _, err := s.relay.GetTenantStatus(ctx, credential); err != nil {
+		return PrincipalStatus{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	principal, found := s.principals[credential.TenantID]
+	if !found {
+		return PrincipalStatus{}, NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
+	}
+	status := PrincipalStatus{
+		Version: SchemaVersion, PrincipalID: credential.TenantID,
+		ControlDomainID: principal.provisioning.ControlDomain.Registration.DomainID,
+		Spaces:          []SpaceStatus{},
+		Devices: []DeviceStatus{{
+			DeviceID:              principal.provisioning.InitialDeviceID,
+			ControlSubscriptionID: principal.provisioning.ControlDomain.Subscription.SubscriptionID,
+			ControlMemberID:       principal.provisioning.ControlDomain.InitialMember.MemberID,
+			CreatedAtMilliseconds: principal.provisioning.CreatedAtMilliseconds,
+			RevokedAtMilliseconds: principal.provisioning.ControlDomain.InitialMember.RevokedAtMilliseconds,
+		}},
+	}
+	for _, record := range s.deviceAdmissions {
+		if record.result == nil || record.admission.PrincipalID != credential.TenantID {
+			continue
+		}
+		status.Devices = append(status.Devices, DeviceStatus{
+			DeviceID:              record.result.DeviceID,
+			ControlSubscriptionID: record.result.Member.SubscriptionID,
+			ControlMemberID:       record.result.Member.MemberRegistration.MemberID,
+			CreatedAtMilliseconds: record.result.Member.MemberRegistration.CreatedAtMilliseconds,
+			RevokedAtMilliseconds: record.result.Member.MemberRegistration.RevokedAtMilliseconds,
+		})
+	}
+	for _, space := range s.spaces {
+		if space.provisioning.PrincipalID != credential.TenantID {
+			continue
+		}
+		spaceStatus := SpaceStatus{
+			SpaceID:               space.provisioning.SpaceID,
+			DomainID:              space.provisioning.Domain.Registration.DomainID,
+			InitialDeviceID:       space.provisioning.InitialDeviceID,
+			CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
+			Devices: []SpaceDeviceStatus{{
+				DeviceID:              space.provisioning.InitialDeviceID,
+				SubscriptionID:        space.provisioning.Domain.Subscription.SubscriptionID,
+				MemberID:              space.provisioning.Domain.InitialMember.MemberID,
+				CreatedAtMilliseconds: space.provisioning.Domain.InitialMember.CreatedAtMilliseconds,
+				RevokedAtMilliseconds: space.provisioning.Domain.InitialMember.RevokedAtMilliseconds,
+			}},
+		}
+		for _, record := range s.spaceDeviceAdmissions {
+			if record.result == nil || record.admission.PrincipalID != credential.TenantID ||
+				record.admission.SpaceID != space.provisioning.SpaceID {
+				continue
+			}
+			spaceStatus.Devices = append(spaceStatus.Devices, SpaceDeviceStatus{
+				DeviceID:              record.result.DeviceID,
+				SubscriptionID:        record.result.Member.SubscriptionID,
+				MemberID:              record.result.Member.MemberRegistration.MemberID,
+				CreatedAtMilliseconds: record.result.Member.MemberRegistration.CreatedAtMilliseconds,
+				RevokedAtMilliseconds: record.result.Member.MemberRegistration.RevokedAtMilliseconds,
+			})
+		}
+		sort.Slice(spaceStatus.Devices, func(left, right int) bool {
+			return spaceStatus.Devices[left].DeviceID.String() < spaceStatus.Devices[right].DeviceID.String()
+		})
+		status.Spaces = append(status.Spaces, spaceStatus)
+	}
+	sort.Slice(status.Devices, func(left, right int) bool {
+		return status.Devices[left].DeviceID.String() < status.Devices[right].DeviceID.String()
+	})
+	sort.Slice(status.Spaces, func(left, right int) bool {
+		return status.Spaces[left].SpaceID.String() < status.Spaces[right].SpaceID.String()
+	})
+	return status, nil
 }

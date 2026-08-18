@@ -338,6 +338,41 @@ type SpaceDeviceAdmissionClaimResult struct {
 	Member      relay.SubscriptionMemberRegistration `json:"member"`
 }
 
+// PrincipalStatus is a content-blind inventory of one Device Sync principal's
+// transport registrations. Space names, content keys, FEF graphs, and payload
+// metadata never enter this status surface.
+type PrincipalStatus struct {
+	Version         int            `json:"version"`
+	PrincipalID     uuid.UUID      `json:"principalID"`
+	ControlDomainID uuid.UUID      `json:"controlDomainID"`
+	Devices         []DeviceStatus `json:"devices"`
+	Spaces          []SpaceStatus  `json:"spaces"`
+}
+
+type DeviceStatus struct {
+	DeviceID              uuid.UUID `json:"deviceID"`
+	ControlSubscriptionID uuid.UUID `json:"controlSubscriptionID"`
+	ControlMemberID       uuid.UUID `json:"controlMemberID"`
+	CreatedAtMilliseconds int64     `json:"createdAtMilliseconds"`
+	RevokedAtMilliseconds *int64    `json:"revokedAtMilliseconds,omitempty"`
+}
+
+type SpaceStatus struct {
+	SpaceID               uuid.UUID           `json:"spaceID"`
+	DomainID              uuid.UUID           `json:"domainID"`
+	InitialDeviceID       uuid.UUID           `json:"initialDeviceID"`
+	CreatedAtMilliseconds int64               `json:"createdAtMilliseconds"`
+	Devices               []SpaceDeviceStatus `json:"devices"`
+}
+
+type SpaceDeviceStatus struct {
+	DeviceID              uuid.UUID `json:"deviceID"`
+	SubscriptionID        uuid.UUID `json:"subscriptionID"`
+	MemberID              uuid.UUID `json:"memberID"`
+	CreatedAtMilliseconds int64     `json:"createdAtMilliseconds"`
+	RevokedAtMilliseconds *int64    `json:"revokedAtMilliseconds,omitempty"`
+}
+
 func validDigest(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size

@@ -11,6 +11,139 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
+func (s *RelayStore) GetPrincipalStatus(
+	ctx context.Context,
+	credential relay.TenantCredential,
+) (devicesync.PrincipalStatus, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return devicesync.PrincipalStatus{}, fmt.Errorf("begin Device Sync principal status: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tenant, err := loadRelayTenant(ctx, tx, credential.TenantID, "")
+	if err != nil {
+		return devicesync.PrincipalStatus{}, err
+	}
+	if err := tenant.Authorize(credential); err != nil {
+		return devicesync.PrincipalStatus{}, err
+	}
+	status := devicesync.PrincipalStatus{
+		Version: devicesync.SchemaVersion, PrincipalID: credential.TenantID,
+		Devices: []devicesync.DeviceStatus{}, Spaces: []devicesync.SpaceStatus{},
+	}
+	if err := tx.QueryRow(ctx, `
+		SELECT control_domain_id
+		FROM device_sync_principals
+		WHERE principal_id=$1 AND tenant_id=$1
+	`, credential.TenantID).Scan(&status.ControlDomainID); err == pgx.ErrNoRows {
+		return devicesync.PrincipalStatus{}, devicesync.NewProtocolError(
+			devicesync.CodeUnauthorized, "Device Sync principal was not found",
+		)
+	} else if err != nil {
+		return devicesync.PrincipalStatus{}, fmt.Errorf("load Device Sync principal status: %w", err)
+	}
+	deviceRows, err := tx.Query(ctx, `
+		SELECT d.device_id,m.subscription_id,d.control_member_id,
+			d.created_at_milliseconds,m.revoked_at_milliseconds
+		FROM device_sync_devices d
+		JOIN relay_members m
+		  ON m.tenant_id=d.tenant_id AND m.domain_id=d.control_domain_id
+		 AND m.member_id=d.control_member_id
+		WHERE d.principal_id=$1
+		ORDER BY d.device_id
+	`, credential.TenantID)
+	if err != nil {
+		return devicesync.PrincipalStatus{}, fmt.Errorf("query Device Sync device status: %w", err)
+	}
+	for deviceRows.Next() {
+		var device devicesync.DeviceStatus
+		if err := deviceRows.Scan(
+			&device.DeviceID, &device.ControlSubscriptionID,
+			&device.ControlMemberID, &device.CreatedAtMilliseconds,
+			&device.RevokedAtMilliseconds,
+		); err != nil {
+			deviceRows.Close()
+			return devicesync.PrincipalStatus{}, fmt.Errorf("scan Device Sync device status: %w", err)
+		}
+		status.Devices = append(status.Devices, device)
+	}
+	if err := deviceRows.Err(); err != nil {
+		deviceRows.Close()
+		return devicesync.PrincipalStatus{}, fmt.Errorf("iterate Device Sync device status: %w", err)
+	}
+	deviceRows.Close()
+	spaceRows, err := tx.Query(ctx, `
+		SELECT space_id,domain_id,initial_device_id,created_at_milliseconds
+		FROM device_sync_spaces
+		WHERE principal_id=$1
+		ORDER BY space_id
+	`, credential.TenantID)
+	if err != nil {
+		return devicesync.PrincipalStatus{}, fmt.Errorf("query Device Sync Space status: %w", err)
+	}
+	spaceIndexes := make(map[uuid.UUID]int)
+	for spaceRows.Next() {
+		var space devicesync.SpaceStatus
+		space.Devices = []devicesync.SpaceDeviceStatus{}
+		if err := spaceRows.Scan(
+			&space.SpaceID, &space.DomainID, &space.InitialDeviceID,
+			&space.CreatedAtMilliseconds,
+		); err != nil {
+			spaceRows.Close()
+			return devicesync.PrincipalStatus{}, fmt.Errorf("scan Device Sync Space status: %w", err)
+		}
+		spaceIndexes[space.SpaceID] = len(status.Spaces)
+		status.Spaces = append(status.Spaces, space)
+	}
+	if err := spaceRows.Err(); err != nil {
+		spaceRows.Close()
+		return devicesync.PrincipalStatus{}, fmt.Errorf("iterate Device Sync Space status: %w", err)
+	}
+	spaceRows.Close()
+	spaceDeviceRows, err := tx.Query(ctx, `
+		SELECT sd.space_id,sd.device_id,sd.subscription_id,sd.member_id,
+			sd.created_at_milliseconds,m.revoked_at_milliseconds
+		FROM device_sync_space_devices sd
+		JOIN relay_members m
+		  ON m.tenant_id=sd.principal_id AND m.domain_id=sd.domain_id
+		 AND m.member_id=sd.member_id
+		WHERE sd.principal_id=$1
+		ORDER BY sd.space_id,sd.device_id
+	`, credential.TenantID)
+	if err != nil {
+		return devicesync.PrincipalStatus{}, fmt.Errorf("query Device Sync Space device status: %w", err)
+	}
+	for spaceDeviceRows.Next() {
+		var spaceID uuid.UUID
+		var device devicesync.SpaceDeviceStatus
+		if err := spaceDeviceRows.Scan(
+			&spaceID, &device.DeviceID, &device.SubscriptionID,
+			&device.MemberID, &device.CreatedAtMilliseconds,
+			&device.RevokedAtMilliseconds,
+		); err != nil {
+			spaceDeviceRows.Close()
+			return devicesync.PrincipalStatus{}, fmt.Errorf("scan Device Sync Space device status: %w", err)
+		}
+		index, found := spaceIndexes[spaceID]
+		if !found {
+			spaceDeviceRows.Close()
+			return devicesync.PrincipalStatus{}, fmt.Errorf("Device Sync Space device references unknown Space %s", spaceID)
+		}
+		status.Spaces[index].Devices = append(status.Spaces[index].Devices, device)
+	}
+	if err := spaceDeviceRows.Err(); err != nil {
+		spaceDeviceRows.Close()
+		return devicesync.PrincipalStatus{}, fmt.Errorf("iterate Device Sync Space device status: %w", err)
+	}
+	spaceDeviceRows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return devicesync.PrincipalStatus{}, fmt.Errorf("commit Device Sync principal status: %w", err)
+	}
+	return status, nil
+}
+
 func (s *RelayStore) CreateAccountAdmission(
 	ctx context.Context,
 	admission devicesync.AccountAdmission,

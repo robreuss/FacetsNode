@@ -280,6 +280,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleClaimDeviceSyncAccountAdmission,
 		)
 		register(
+			"GET /v1/device-sync/principals/{principalID}/status",
+			traffic.SurfaceManagement,
+			s.handleGetDeviceSyncPrincipalStatus,
+		)
+		register(
 			"POST /v1/device-sync/principals/{principalID}/control-domains/{domainID}/device-admissions",
 			traffic.SurfaceManagement,
 			s.handleCreateDeviceSyncDeviceAdmission,

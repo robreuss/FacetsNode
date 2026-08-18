@@ -359,6 +359,45 @@ func TestDeviceSyncPrincipalProvisionsOpaqueSpaceDomainExactlyOnce(t *testing.T)
 	_ = changed.Body.Close()
 }
 
+func TestDeviceSyncPrincipalStatusIsAuthenticatedAndContentBlind(t *testing.T) {
+	const now = int64(4_500)
+	const tenantSeed = byte(7)
+	relayStore := relay.NewMemoryStore()
+	deviceSyncStore := devicesync.NewMemoryStore(relayStore)
+	controlDomain := newRelayDomainProvisioningRequest(now, 8, 9)
+	principalID := controlDomain.AdministrationCredential.TenantID
+	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, controlDomain, tenantSeed)
+	server := newRelayTestServer(t, relayStore, relayTestToken(10))
+	server.SetDeviceSyncStore(deviceSyncStore)
+	handler := server.Handler()
+	path := "/v1/device-sync/principals/" + principalID.String() + "/status"
+
+	response := performRelayJSON(
+		t, handler, http.MethodGet, path, nil, relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusOK)
+	var status devicesync.PrincipalStatus
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if status.Version != devicesync.SchemaVersion || status.PrincipalID != principalID ||
+		status.ControlDomainID != controlDomain.AdministrationCredential.DomainID ||
+		len(status.Devices) != 1 || len(status.Spaces) != 0 {
+		t.Fatalf("unexpected principal status: %+v", status)
+	}
+	if status.Devices[0].DeviceID != controlDomain.MemberCredential.MemberID ||
+		status.Devices[0].ControlSubscriptionID != controlDomain.SubscriptionID {
+		t.Fatalf("unexpected device status: %+v", status.Devices[0])
+	}
+
+	wrong := performRelayJSON(
+		t, handler, http.MethodGet, path, nil, relayTestToken(11), uuid.Nil,
+	)
+	requireStatus(t, wrong, http.StatusUnauthorized)
+	_ = wrong.Body.Close()
+}
+
 func TestDeviceSyncSpaceProvisioningRejectsUnenrolledInitialDevice(t *testing.T) {
 	const now = int64(5_000)
 	const tenantSeed = byte(253)
@@ -509,6 +548,13 @@ func TestDeviceSyncRoutesAreAbsentFromSharedSpacesSurface(t *testing.T) {
 	)
 	requireStatus(t, response, http.StatusNotFound)
 	_ = response.Body.Close()
+	statusResponse := performRelayJSON(
+		t, server.Handler(), http.MethodGet,
+		"/v1/device-sync/principals/"+uuid.NewString()+"/status",
+		nil, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, statusResponse, http.StatusNotFound)
+	_ = statusResponse.Body.Close()
 	deviceResponse := performRelayJSON(
 		t, server.Handler(), http.MethodPost,
 		"/v1/device-sync/principals/"+uuid.NewString()+"/control-domains/"+uuid.NewString()+"/device-admissions",

@@ -232,6 +232,57 @@ func TestMemoryStoreAdmitsEnrolledDeviceToSpaceExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreReportsContentBlindPrincipalStatus(t *testing.T) {
+	ctx := context.Background()
+	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
+	principal := bootstrapMemoryPrincipal(t, store, 5_000)
+	deviceID := enrollMemoryDevice(t, store, principal, 5_200)
+	credential, space := testSpaceProvisioning(t, principal, 5_400)
+	if _, err := store.ProvisionSpace(ctx, credential, space, 5_400); err != nil {
+		t.Fatal(err)
+	}
+	enrollMemoryDeviceInSpace(t, store, space, deviceID, 5_500)
+
+	status, err := store.GetPrincipalStatus(ctx, credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Version != devicesync.SchemaVersion ||
+		status.PrincipalID != principal.PrincipalID ||
+		status.ControlDomainID != principal.ControlDomain.Registration.DomainID {
+		t.Fatalf("unexpected principal status: %+v", status)
+	}
+	if len(status.Devices) != 2 {
+		t.Fatalf("device status count=%d status=%+v", len(status.Devices), status)
+	}
+	if status.Devices[0].DeviceID.String() > status.Devices[1].DeviceID.String() {
+		t.Fatalf("device status is not deterministic: %+v", status.Devices)
+	}
+	if status.Devices[0].ControlSubscriptionID == status.Devices[1].ControlSubscriptionID {
+		t.Fatalf("devices share a control subscription: %+v", status.Devices)
+	}
+	if status.Devices[0].RevokedAtMilliseconds != nil || status.Devices[1].RevokedAtMilliseconds != nil {
+		t.Fatalf("new devices unexpectedly revoked: %+v", status.Devices)
+	}
+	if len(status.Spaces) != 1 || status.Spaces[0].SpaceID != space.SpaceID ||
+		status.Spaces[0].DomainID != space.Domain.Registration.DomainID ||
+		len(status.Spaces[0].Devices) != 2 {
+		t.Fatalf("unexpected Space status: %+v", status.Spaces)
+	}
+	if status.Spaces[0].Devices[0].DeviceID.String() > status.Spaces[0].Devices[1].DeviceID.String() {
+		t.Fatalf("Space device status is not deterministic: %+v", status.Spaces[0].Devices)
+	}
+	if status.Spaces[0].Devices[0].SubscriptionID == status.Spaces[0].Devices[1].SubscriptionID {
+		t.Fatalf("Space devices share a subscription: %+v", status.Spaces[0].Devices)
+	}
+
+	wrong := credential
+	wrong.Token = testToken(0x7f)
+	if _, err := store.GetPrincipalStatus(ctx, wrong); !relay.ErrorHasCode(err, relay.CodeUnauthorized) {
+		t.Fatalf("wrong principal credential err=%v", err)
+	}
+}
+
 func TestMemoryStoreRejectsSpaceAdmissionForUnenrolledDeviceAndWrongDomain(t *testing.T) {
 	ctx := context.Background()
 	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
@@ -315,6 +366,45 @@ func enrollMemoryDevice(
 		t.Fatal(err)
 	}
 	return admission.DeviceID
+}
+
+func enrollMemoryDeviceInSpace(
+	t *testing.T,
+	store *devicesync.MemoryStore,
+	space devicesync.SpaceProvisioning,
+	deviceID uuid.UUID,
+	createdAt int64,
+) {
+	t.Helper()
+	credential, admission := testSpaceDeviceAdmission(t, space, deviceID, createdAt)
+	admin := relay.AdministrationCredential{
+		TenantID: space.PrincipalID,
+		DomainID: space.Domain.Registration.DomainID,
+		Token:    testToken(0x41),
+	}
+	if _, err := store.CreateSpaceDeviceAdmission(
+		context.Background(), admin, admission, createdAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	digest := testDigest(t, relay.Credential{
+		TenantID: space.PrincipalID, DomainID: admin.DomainID,
+		MemberID: deviceID, Token: testToken(0x74),
+	})
+	if _, err := store.ClaimSpaceDeviceAdmission(
+		context.Background(), credential,
+		devicesync.SpaceDeviceAdmissionClaim{
+			Version: devicesync.SchemaVersion, PrincipalID: space.PrincipalID,
+			SpaceID: space.SpaceID, DeviceID: deviceID,
+			RelayClaim: relay.MemberAdmissionClaim{
+				MemberID: deviceID, AuthorizationDigest: digest,
+			},
+			ClaimedAtMilliseconds: createdAt + 100,
+		},
+		createdAt+100,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testAdmission(t *testing.T, createdAt int64) (devicesync.AdmissionCredential, devicesync.AccountAdmission) {

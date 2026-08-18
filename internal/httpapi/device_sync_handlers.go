@@ -53,6 +53,30 @@ type deviceSyncSpaceProvisioningInput struct {
 	Domain          relayDomainProvisioningInput `json:"domain"`
 }
 
+func (s *Server) handleGetDeviceSyncPrincipalStatus(writer http.ResponseWriter, request *http.Request) {
+	principalID, err := parseUUID(request.PathValue("principalID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidPrincipal, err.Error()))
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(
+			devicesync.CodeUnauthorized, "Device Sync principal credential is missing",
+		))
+		return
+	}
+	status, err := s.deviceSyncStore.GetPrincipalStatus(
+		request.Context(),
+		relay.TenantCredential{TenantID: principalID, Token: token},
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, status)
+}
+
 func (s *Server) handleCreateDeviceSyncAccountAdmission(writer http.ResponseWriter, request *http.Request) {
 	if err := s.authorizeOperator(request); err != nil {
 		s.writeError(writer, err)

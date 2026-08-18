@@ -114,6 +114,23 @@ and key material through the encrypted principal control channel. Until that
 client-side step succeeds, the admitted device cannot decrypt or authorize
 Device Sync content.
 
+## Inspect content-blind principal status
+
+An authenticated principal can inspect its transport inventory without
+exposing Space names, keys, FEF graphs, or payload metadata:
+
+```http
+GET /v1/device-sync/principals/<principal-id>/status
+Authorization: Bearer <principal-tenant-token>
+```
+
+The deterministic response contains only the principal and control-domain IDs,
+registered device IDs with their independent control subscriptions, opaque
+Space and domain IDs, per-Space device subscriptions, creation times, and any
+revocation times. The server reads the inventory in one consistent database
+snapshot. This endpoint supports diagnostics and eventual client sync status;
+it does not grant transport, content, or decryption authority.
+
 ## Provision an opaque Space domain
 
 An enrolled device provisions one isolated relay domain for each Space selected
