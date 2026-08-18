@@ -73,6 +73,28 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	fence, err := relayStore.CreateCheckpointFence(ctx, hostCredential, relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: 1_350,
+	}, 1_350)
+	if err != nil {
+		t.Fatalf("checkpoint fence err=%v", err)
+	}
+	stagedBeforeRotation := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: provisioning.SpaceID,
+		DomainID:                provisioning.Domain.Registration.DomainID,
+		PublisherSubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
+		KeyEpoch:                sharedspaces.InitialKeyEpoch,
+		CoveredThroughCursor:    fence.BoundaryCursor,
+		CreatedAtMilliseconds:   1_351,
+	}
+	if _, err := store.StageCheckpoint(ctx, hostCredential, stagedBeforeRotation, 1_351); err != nil {
+		t.Fatalf("stage checkpoint before rotation err=%v", err)
+	}
 
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
@@ -94,13 +116,36 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, 1_500); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked relay credential err=%v", err)
 	}
+	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: stagedBeforeRotation.CheckpointID,
+		ActivatedAtMilliseconds: 1_500,
+	}, 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
+		t.Fatalf("stale checkpoint activation err=%v", err)
+	}
+	staleCandidate := stagedBeforeRotation
+	staleCandidate.RetryID = uuid.New()
+	staleCandidate.CheckpointID = uuid.New()
+	staleCandidate.CreatedAtMilliseconds = 1_501
+	if _, err := store.StageCheckpoint(ctx, hostCredential, staleCandidate, 1_501); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
+		t.Fatalf("stale checkpoint stage err=%v", err)
+	}
+	currentCandidate := staleCandidate
+	currentCandidate.RetryID = uuid.New()
+	currentCandidate.CheckpointID = uuid.New()
+	currentCandidate.KeyEpoch = sharedspaces.InitialKeyEpoch + 1
+	currentCandidate.CreatedAtMilliseconds = 1_502
+	if _, err := store.StageCheckpoint(ctx, hostCredential, currentCandidate, 1_502); err != nil {
+		t.Fatalf("current checkpoint stage err=%v", err)
+	}
+	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: currentCandidate.CheckpointID,
+		ActivatedAtMilliseconds: 1_503,
+	}, 1_503); err != nil {
+		t.Fatalf("current checkpoint activation err=%v", err)
+	}
 	status, err = store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("status after revocation=%+v err=%v", status, err)
-	}
-	hostCredential := relay.Credential{
-		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
-		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
 	}
 	staleEnvelope := testSharedEnvelope(provisioning, sharedspaces.InitialKeyEpoch, 1_600)
 	if _, err := store.PublishEnvelope(ctx, hostCredential, staleEnvelope, 1_600); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {

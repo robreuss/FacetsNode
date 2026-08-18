@@ -101,7 +101,7 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 			return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "retained blob is missing")
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO relay_checkpoints (tenant_id,domain_id,checkpoint_id,stage_retry_id,candidate_digest,version,publisher_subscription_id,publisher_member_id,covered_through_sequence,created_at_milliseconds,fence_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, candidate.TenantID, candidate.DomainID, candidate.CheckpointID, candidate.RetryID, relay.CheckpointCandidateDigest(candidate), candidate.Version, candidate.PublisherSubscriptionID, credential.MemberID, int64(covered), candidate.CreatedAtMilliseconds, candidate.FenceID)
+	_, err = tx.Exec(ctx, `INSERT INTO relay_checkpoints (tenant_id,domain_id,checkpoint_id,stage_retry_id,candidate_digest,version,publisher_subscription_id,publisher_member_id,covered_through_sequence,created_at_milliseconds,fence_id,key_epoch) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, candidate.TenantID, candidate.DomainID, candidate.CheckpointID, candidate.RetryID, relay.CheckpointCandidateDigest(candidate), candidate.Version, candidate.PublisherSubscriptionID, credential.MemberID, int64(covered), candidate.CreatedAtMilliseconds, candidate.FenceID, candidate.KeyEpoch)
 	if err != nil {
 		return relay.CheckpointStageResponse{}, fmt.Errorf("insert checkpoint: %w", err)
 	}

@@ -105,7 +105,7 @@ func TestMemoryCheckpointFenceBlocksOnlyNewForeignWritesAndExpiresByServerTime(t
 	if _, err := store.GetBlobMetadata(ctx, reader, holderUpload.RelayBlobID, 1_403); !relay.ErrorHasCode(err, relay.CodeBlobNotFound) {
 		t.Fatalf("quarantined blob fetch err=%v", err)
 	}
-	candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID, PublisherSubscriptionID: holder.MemberID, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{holderSuffix.MessageID}, CreatedAtMilliseconds: 1_404}
+	candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID, PublisherSubscriptionID: holder.MemberID, KeyEpoch: 1, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{holderSuffix.MessageID}, CreatedAtMilliseconds: 1_404}
 	if _, err := store.StageCheckpoint(ctx, holder, candidate, 1_404); err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestMemoryCheckpointActivationUsesServerTimeNotClientClock(t *testing.T) {
 	ctx := context.Background()
 	store, admin, holder, _, template, _ := checkpointMemoryFixture(t)
 	fence, suffix := acquireMemoryFenceAndPublishSuffix(t, store, holder, template, 1_400)
-	candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID, PublisherSubscriptionID: holder.MemberID, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID}, CreatedAtMilliseconds: 1_402}
+	candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID, PublisherSubscriptionID: holder.MemberID, KeyEpoch: 1, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID}, CreatedAtMilliseconds: 1_402}
 	if _, err := store.StageCheckpoint(ctx, holder, candidate, 1_402); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestMemoryCheckpointFenceSerializesHolderPublishAndActivation(t *testing.T)
 		store, admin, holder, _, template, _ := checkpointMemoryFixture(t)
 		acquiredAt := int64(1_400 + iteration*10)
 		fence, suffix := acquireMemoryFenceAndPublishSuffix(t, store, holder, template, acquiredAt)
-		candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID, PublisherSubscriptionID: holder.MemberID, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID}, CreatedAtMilliseconds: acquiredAt + 2}
+		candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID, PublisherSubscriptionID: holder.MemberID, KeyEpoch: 1, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID}, CreatedAtMilliseconds: acquiredAt + 2}
 		if _, err := store.StageCheckpoint(ctx, holder, candidate, acquiredAt+2); err != nil {
 			t.Fatal(err)
 		}
@@ -228,6 +228,7 @@ func TestMemoryCheckpointFreezesCustodyCollectsAndPreservesSequence(t *testing.T
 		FenceID:  fence.FenceID,
 		TenantID: admin.TenantID, DomainID: admin.DomainID,
 		PublisherSubscriptionID: publisher.MemberID,
+		KeyEpoch:                1,
 		CoveredThroughCursor:    fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{retained.MessageID},
 		CreatedAtMilliseconds: 1_402,
 	}
@@ -299,7 +300,7 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	ctx := context.Background()
 	store, admin, publisher, recipient, first, _ := checkpointMemoryFixture(t)
 	fence, retained := acquireMemoryFenceAndPublishSuffix(t, store, publisher, first, 1_400)
-	candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID, PublisherSubscriptionID: publisher.MemberID, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{retained.MessageID}, CreatedAtMilliseconds: 1_402}
+	candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID, PublisherSubscriptionID: publisher.MemberID, KeyEpoch: 1, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{retained.MessageID}, CreatedAtMilliseconds: 1_402}
 	if _, err := store.StageCheckpoint(ctx, publisher, candidate, 1_402); err != nil {
 		t.Fatal(err)
 	}
@@ -354,6 +355,7 @@ func TestMemoryCheckpointProtectsPreviousActivatedRetainedSet(t *testing.T) {
 			FenceID:  fence.FenceID,
 			TenantID: admin.TenantID, DomainID: admin.DomainID,
 			PublisherSubscriptionID: publisher.MemberID,
+			KeyEpoch:                1,
 			CoveredThroughCursor:    fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID},
 			RetainedBlobIDs: []string{}, CreatedAtMilliseconds: created + 2,
 		}

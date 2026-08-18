@@ -1128,6 +1128,7 @@ func TestRelayCheckpointHTTPStagesActivatesPlansAndCollects(t *testing.T) {
 		FenceID:  fence.FenceID,
 		TenantID: authority.Domain.TenantID, DomainID: authority.Domain.DomainID,
 		PublisherSubscriptionID: authority.SubscriptionID,
+		KeyEpoch:                1,
 		CoveredThroughCursor:    fence.BoundaryCursor,
 		RetainedMessageIDs:      []uuid.UUID{}, RetainedBlobIDs: []string{},
 		CreatedAtMilliseconds: nowMilliseconds,

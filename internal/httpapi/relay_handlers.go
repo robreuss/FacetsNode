@@ -507,7 +507,12 @@ func (s *Server) handleStageRelayCheckpoint(writer http.ResponseWriter, request 
 		s.writeError(writer, relay.NewProtocolError(relay.CodeWrongScope, "checkpoint path and body differ"))
 		return
 	}
-	result, err := s.relayStore.StageCheckpoint(request.Context(), credential, candidate, s.nowMilliseconds())
+	var result relay.CheckpointStageResponse
+	if s.sharedSpacesStore != nil {
+		result, err = s.sharedSpacesStore.StageCheckpoint(request.Context(), credential, candidate, s.nowMilliseconds())
+	} else {
+		result, err = s.relayStore.StageCheckpoint(request.Context(), credential, candidate, s.nowMilliseconds())
+	}
 	if err != nil {
 		s.writeError(writer, err)
 		return
@@ -531,7 +536,12 @@ func (s *Server) handleActivateRelayCheckpoint(writer http.ResponseWriter, reque
 		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "checkpoint activation path or time is invalid"))
 		return
 	}
-	result, err := s.relayStore.ActivateCheckpoint(request.Context(), credential, input, s.nowMilliseconds())
+	var result relay.CheckpointActivationResponse
+	if s.sharedSpacesStore != nil {
+		result, err = s.sharedSpacesStore.ActivateCheckpoint(request.Context(), credential, input, s.nowMilliseconds())
+	} else {
+		result, err = s.relayStore.ActivateCheckpoint(request.Context(), credential, input, s.nowMilliseconds())
+	}
 	if err != nil {
 		s.writeError(writer, err)
 		return

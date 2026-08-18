@@ -218,6 +218,7 @@ func TestLiveDeviceSyncVerticalSlice(t *testing.T) {
 		FenceID: fence.FenceID, TenantID: principalID,
 		DomainID:                spaceDomain.AdministrationCredential.DomainID,
 		PublisherSubscriptionID: spaceResult.Domain.SubscriptionID,
+		KeyEpoch:                1,
 		CoveredThroughCursor:    fence.BoundaryCursor,
 		RetainedMessageIDs:      []uuid.UUID{bootstrapCheckpoint.MessageID},
 		RetainedBlobIDs:         []string{relay.BlobID(blobBytes)},

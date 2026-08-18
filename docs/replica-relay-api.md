@@ -7,7 +7,7 @@ Persona, device, or Space semantics and never receives a domain content key.
 
 The canonical portable contract is
 `internal/testfixture/replica-relay-data-plane-portable-v1.json`. Its exact
-SHA-256 is `e156cf31918a9a9b3a1c9ea156cb11cbb0c58fda036d29d6133807aa5be603e3`.
+SHA-256 is `2589536870fe6bbca5b81a1924077c86ff69e2b088bd8be2057bb81739b8be84`.
 The adjacent lock records the Swift contract input and Envelope schema V1.
 
 ## Authority and routing scopes
@@ -235,9 +235,12 @@ POST .../checkpoints/candidates
 ```
 
 The candidate contains the fence ID, client-generated `retryID` and
-`checkpointID`, its publisher subscription, the exact fence boundary cursor,
-sorted complete retained-message and retained-blob ID sets, and a creation
-time. Retained messages must be exactly every holder-subscription publication
+`checkpointID`, its publisher subscription, content-key epoch, the exact fence
+boundary cursor, sorted complete retained-message and retained-blob ID sets,
+and a creation time. The generic relay treats `keyEpoch` as opaque authority
+metadata. Shared Spaces requires it to equal the Space's current key epoch at
+both staging and activation so revocation cannot publish a stale bootstrap.
+Retained messages must be exactly every holder-subscription publication
 after the boundary through staging; activation revalidates the same suffix
 under the domain lock. Retained blobs must exist but remain opaque and
 client-declared. The server does not interpret checkpoint ciphertext or

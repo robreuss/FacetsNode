@@ -661,6 +661,110 @@ func (s *SharedSpacesStore) PublishEnvelope(
 	return result, nil
 }
 
+func (s *SharedSpacesStore) StageCheckpoint(
+	ctx context.Context,
+	credential relay.Credential,
+	candidate relay.CheckpointCandidate,
+	nowMilliseconds int64,
+) (relay.CheckpointStageResponse, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.CheckpointStageResponse{}, fmt.Errorf("begin Shared Space checkpoint staging: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	domainID, currentKeyEpoch, err := loadSharedSpaceCheckpointAuthority(ctx, tx, credential.TenantID)
+	if err != nil {
+		return relay.CheckpointStageResponse{}, err
+	}
+	if credential.DomainID != domainID || candidate.TenantID != credential.TenantID ||
+		candidate.DomainID != credential.DomainID {
+		return relay.CheckpointStageResponse{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "checkpoint belongs to another Shared Space",
+		)
+	}
+	if candidate.KeyEpoch != currentKeyEpoch {
+		return relay.CheckpointStageResponse{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongKeyEpoch, "checkpoint key epoch is not current",
+		)
+	}
+	result, err := s.relay.StageCheckpoint(ctx, credential, candidate, nowMilliseconds)
+	if err != nil {
+		return relay.CheckpointStageResponse{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.CheckpointStageResponse{}, fmt.Errorf("commit Shared Space checkpoint staging: %w", err)
+	}
+	return result, nil
+}
+
+func (s *SharedSpacesStore) ActivateCheckpoint(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	request relay.CheckpointActivationRequest,
+	nowMilliseconds int64,
+) (relay.CheckpointActivationResponse, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.CheckpointActivationResponse{}, fmt.Errorf("begin Shared Space checkpoint activation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	domainID, currentKeyEpoch, err := loadSharedSpaceCheckpointAuthority(ctx, tx, credential.TenantID)
+	if err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	if credential.DomainID != domainID {
+		return relay.CheckpointActivationResponse{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "checkpoint belongs to another Shared Space",
+		)
+	}
+	var checkpointKeyEpoch uint64
+	if err := tx.QueryRow(ctx, `
+		SELECT key_epoch FROM relay_checkpoints
+		WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3
+	`, credential.TenantID, credential.DomainID, request.CheckpointID).Scan(&checkpointKeyEpoch); err == pgx.ErrNoRows {
+		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(
+			relay.CodeCheckpointNotFound, "checkpoint was not found",
+		)
+	} else if err != nil {
+		return relay.CheckpointActivationResponse{}, fmt.Errorf("load Shared Space checkpoint epoch: %w", err)
+	}
+	if checkpointKeyEpoch != currentKeyEpoch {
+		return relay.CheckpointActivationResponse{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongKeyEpoch, "checkpoint key epoch is not current",
+		)
+	}
+	result, err := s.relay.ActivateCheckpoint(ctx, credential, request, nowMilliseconds)
+	if err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.CheckpointActivationResponse{}, fmt.Errorf("commit Shared Space checkpoint activation: %w", err)
+	}
+	return result, nil
+}
+
+func loadSharedSpaceCheckpointAuthority(
+	ctx context.Context,
+	tx pgx.Tx,
+	spaceID uuid.UUID,
+) (uuid.UUID, uint64, error) {
+	var domainID uuid.UUID
+	var currentKeyEpoch uint64
+	if err := tx.QueryRow(ctx, `
+		SELECT domain_id,current_key_epoch FROM shared_spaces
+		WHERE space_id=$1 FOR SHARE
+	`, spaceID).Scan(&domainID, &currentKeyEpoch); err == pgx.ErrNoRows {
+		return uuid.Nil, 0, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	} else if err != nil {
+		return uuid.Nil, 0, fmt.Errorf("load Shared Space checkpoint authority: %w", err)
+	}
+	return domainID, currentKeyEpoch, nil
+}
+
 func loadSharedSpaceKeyEpoch(ctx context.Context, tx pgx.Tx, spaceID uuid.UUID) (uint64, error) {
 	var keyEpoch uint64
 	if err := tx.QueryRow(ctx, `

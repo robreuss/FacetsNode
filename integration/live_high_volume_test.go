@@ -229,6 +229,7 @@ func prepareHighVolumeRelayState(
 		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID,
 		TenantID: domain.Domain.TenantID, DomainID: domain.Domain.DomainID,
 		PublisherSubscriptionID: domain.SubscriptionID,
+		KeyEpoch:                1,
 		CoveredThroughCursor:    fence.BoundaryCursor, RetainedMessageIDs: retainedMessageIDs,
 		RetainedBlobIDs: []string{snapshotBlobID}, CreatedAtMilliseconds: time.Now().UnixMilli(),
 	}

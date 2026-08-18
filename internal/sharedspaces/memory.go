@@ -32,6 +32,7 @@ type MemoryStore struct {
 	invitationRetries   map[uuid.UUID]uuid.UUID
 	revocationRequests  map[uuid.UUID]ParticipantRevocation
 	revocationResponses map[uuid.UUID]ParticipantRevocationResult
+	checkpointEpochs    map[uuid.UUID]uint64
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
@@ -42,6 +43,7 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		invitationRetries:   make(map[uuid.UUID]uuid.UUID),
 		revocationRequests:  make(map[uuid.UUID]ParticipantRevocation),
 		revocationResponses: make(map[uuid.UUID]ParticipantRevocationResult),
+		checkpointEpochs:    make(map[uuid.UUID]uint64),
 	}
 }
 
@@ -332,4 +334,52 @@ func (s *MemoryStore) PublishEnvelope(
 		return relay.PublishResult{}, NewProtocolError(CodeWrongKeyEpoch, "envelope key epoch is not current")
 	}
 	return s.relay.Publish(ctx, credential, envelope, nowMilliseconds)
+}
+
+func (s *MemoryStore) StageCheckpoint(
+	ctx context.Context,
+	credential relay.Credential,
+	candidate relay.CheckpointCandidate,
+	nowMilliseconds int64,
+) (relay.CheckpointStageResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return relay.CheckpointStageResponse{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID ||
+		candidate.TenantID != credential.TenantID || candidate.DomainID != credential.DomainID {
+		return relay.CheckpointStageResponse{}, NewProtocolError(CodeWrongScope, "checkpoint belongs to another Shared Space")
+	}
+	if candidate.KeyEpoch != space.keyEpoch {
+		return relay.CheckpointStageResponse{}, NewProtocolError(CodeWrongKeyEpoch, "checkpoint key epoch is not current")
+	}
+	result, err := s.relay.StageCheckpoint(ctx, credential, candidate, nowMilliseconds)
+	if err != nil {
+		return relay.CheckpointStageResponse{}, err
+	}
+	s.checkpointEpochs[candidate.CheckpointID] = candidate.KeyEpoch
+	return result, nil
+}
+
+func (s *MemoryStore) ActivateCheckpoint(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	request relay.CheckpointActivationRequest,
+	nowMilliseconds int64,
+) (relay.CheckpointActivationResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return relay.CheckpointActivationResponse{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return relay.CheckpointActivationResponse{}, NewProtocolError(CodeWrongScope, "checkpoint belongs to another Shared Space")
+	}
+	if s.checkpointEpochs[request.CheckpointID] != space.keyEpoch {
+		return relay.CheckpointActivationResponse{}, NewProtocolError(CodeWrongKeyEpoch, "checkpoint key epoch is not current")
+	}
+	return s.relay.ActivateCheckpoint(ctx, credential, request, nowMilliseconds)
 }

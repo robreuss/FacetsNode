@@ -95,6 +95,7 @@ type CheckpointCandidate struct {
 	TenantID                uuid.UUID   `json:"tenantID"`
 	DomainID                uuid.UUID   `json:"domainID"`
 	PublisherSubscriptionID uuid.UUID   `json:"publisherSubscriptionID"`
+	KeyEpoch                uint64      `json:"keyEpoch"`
 	CoveredThroughCursor    string      `json:"coveredThroughCursor"`
 	RetainedMessageIDs      []uuid.UUID `json:"retainedMessageIDs"`
 	RetainedBlobIDs         []string    `json:"retainedBlobIDs"`
@@ -104,7 +105,7 @@ type CheckpointCandidate struct {
 func (c CheckpointCandidate) Validate() error {
 	if c.Version != SchemaVersion || c.RetryID == uuid.Nil ||
 		c.CheckpointID == uuid.Nil || c.FenceID == uuid.Nil || c.TenantID == uuid.Nil ||
-		c.DomainID == uuid.Nil || c.PublisherSubscriptionID == uuid.Nil ||
+		c.DomainID == uuid.Nil || c.PublisherSubscriptionID == uuid.Nil || c.KeyEpoch == 0 ||
 		c.CreatedAtMilliseconds < 0 || ValidateOpaqueCursor(c.CoveredThroughCursor) != nil {
 		return protocolError(CodeInvalidCheckpoint, "checkpoint candidate fields are invalid")
 	}
@@ -133,6 +134,8 @@ func CheckpointCandidateDigest(candidate CheckpointCandidate) string {
 	_, _ = hash.Write(candidate.TenantID[:])
 	_, _ = hash.Write(candidate.DomainID[:])
 	_, _ = hash.Write(candidate.PublisherSubscriptionID[:])
+	binary.BigEndian.PutUint64(number[:], candidate.KeyEpoch)
+	_, _ = hash.Write(number[:])
 	checkpointDigestString(hash, candidate.CoveredThroughCursor, &number)
 	binary.BigEndian.PutUint64(number[:], uint64(len(candidate.RetainedMessageIDs)))
 	_, _ = hash.Write(number[:])

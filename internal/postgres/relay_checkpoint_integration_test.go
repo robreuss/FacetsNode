@@ -170,6 +170,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
 		FenceID:  fence.FenceID,
 		TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID,
+		KeyEpoch:             1,
 		CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{retainedSuffix.MessageID},
 		RetainedBlobIDs: retainedBlobIDs, CreatedAtMilliseconds: 1_200,
 	}
@@ -278,6 +279,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 			Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
 			FenceID:  fence.FenceID,
 			TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID,
+			KeyEpoch:             1,
 			CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID},
 			RetainedBlobIDs: []string{blobTwoID}, CreatedAtMilliseconds: int64(1_450 + index*100),
 		}
@@ -334,7 +336,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		if _, err := store.Publish(ctx, publisher, suffix, at+1); err != nil {
 			t.Fatal(err)
 		}
-		candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID}, RetainedBlobIDs: []string{}, CreatedAtMilliseconds: at + 2}
+		candidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: fence.FenceID, TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID, KeyEpoch: 1, CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{suffix.MessageID}, RetainedBlobIDs: []string{}, CreatedAtMilliseconds: at + 2}
 		if _, err := store.StageCheckpoint(ctx, publisher, candidate, at+2); err != nil {
 			t.Fatal(err)
 		}
@@ -368,7 +370,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	if _, err := store.Publish(ctx, publisher, activeSuffix, activeSuffix.CreatedAtMilliseconds); err != nil {
 		t.Fatal(err)
 	}
-	activeCandidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: activeFence.FenceID, TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID, CoveredThroughCursor: activeFence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{activeSuffix.MessageID}, RetainedBlobIDs: []string{}, CreatedAtMilliseconds: activeFenceRequest.RequestedAtMilliseconds + 2}
+	activeCandidate := relay.CheckpointCandidate{Version: 1, RetryID: uuid.New(), CheckpointID: uuid.New(), FenceID: activeFence.FenceID, TenantID: tenantID, DomainID: domainID, PublisherSubscriptionID: publisher.MemberID, KeyEpoch: 1, CoveredThroughCursor: activeFence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{activeSuffix.MessageID}, RetainedBlobIDs: []string{}, CreatedAtMilliseconds: activeFenceRequest.RequestedAtMilliseconds + 2}
 	if _, err := store.StageCheckpoint(ctx, publisher, activeCandidate, activeCandidate.CreatedAtMilliseconds); err != nil {
 		t.Fatal(err)
 	}

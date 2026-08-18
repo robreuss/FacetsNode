@@ -13,7 +13,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
-const dataPlaneFixtureSHA256 = "e156cf31918a9a9b3a1c9ea156cb11cbb0c58fda036d29d6133807aa5be603e3"
+const dataPlaneFixtureSHA256 = "2589536870fe6bbca5b81a1924077c86ff69e2b088bd8be2057bb81739b8be84"
 
 func TestReplicaRelayDataPlaneFixtureIsExactFrozenSwiftContract(t *testing.T) {
 	path := filepath.Join("replica-relay-data-plane-portable-v1.json")
