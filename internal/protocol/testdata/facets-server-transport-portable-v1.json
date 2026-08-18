@@ -1,0 +1,93 @@
+{
+  "format": "facets.server-transport-fixture.v1",
+  "envelopes": [
+    {
+      "version": 1,
+      "kind": "fef_checkpoint",
+      "messageID": "10000000-0000-4000-8000-000000000001",
+      "createdAtMilliseconds": 1710000000001,
+      "payloadContentType": "application/vnd.facets.fef+json",
+      "payloadSHA256": "784602d9430aefaac767cbe711edfcd21289a0d14c9907d81781e22985b8824f",
+      "payloadBase64URL": "eyJtb2RlIjoic25hcHNob3QiLCJ2ZXJzaW9uIjoxfQ",
+      "dependencyMessageIDs": [],
+      "blobReferences": []
+    },
+    {
+      "version": 1,
+      "kind": "fef_mutation_batch",
+      "messageID": "10000000-0000-4000-8000-000000000002",
+      "createdAtMilliseconds": 1710000000002,
+      "payloadContentType": "application/vnd.facets.fef+json",
+      "payloadSHA256": "5a630c59a743a90a69ab195db8331071191bc1b8da4e72866cc8c0e3930b9f9e",
+      "payloadBase64URL": "eyJtb2RlIjoibXV0YXRpb25fYmF0Y2giLCJ2ZXJzaW9uIjoxfQ",
+      "dependencyMessageIDs": ["10000000-0000-4000-8000-000000000001"],
+      "blobReferences": []
+    },
+    {
+      "version": 1,
+      "kind": "control_message",
+      "messageID": "10000000-0000-4000-8000-000000000003",
+      "createdAtMilliseconds": 1710000000003,
+      "payloadContentType": "application/json",
+      "payloadSHA256": "453b2bca6b711cd9eb48f0ec2ad85079ec8968cbd81f11f54d614120c8ab15df",
+      "payloadBase64URL": "eyJraW5kIjoiZGV2aWNlX3Jldm9rZWQifQ",
+      "dependencyMessageIDs": [],
+      "blobReferences": []
+    },
+    {
+      "version": 1,
+      "kind": "blob_manifest",
+      "messageID": "10000000-0000-4000-8000-000000000004",
+      "createdAtMilliseconds": 1710000000004,
+      "payloadContentType": "application/json",
+      "payloadSHA256": "ca8cb80d98e70eece9bc4be5f6c3056149ef0524e3a2f679e7985c074f4a8d3f",
+      "payloadBase64URL": "eyJibG9iSURzIjpbInNoYTI1NjphYmMiXX0",
+      "dependencyMessageIDs": [],
+      "blobReferences": [{"blobID":"blob-1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byteCount":4,"contentType":"application/octet-stream"}]
+    },
+    {
+      "version": 1,
+      "kind": "delivery_receipt",
+      "messageID": "10000000-0000-4000-8000-000000000005",
+      "createdAtMilliseconds": 1710000000005,
+      "payloadContentType": "application/json",
+      "payloadSHA256": "b0ec6f0fdc131b24f80dd6bd95ba40148cb0d1f6e6be23de5a805333ff492f3d",
+      "payloadBase64URL": "eyJzdGFnZSI6ImNhbm9uaWNhbF9hcHBsaWVkIn0",
+      "dependencyMessageIDs": [],
+      "blobReferences": []
+    },
+    {
+      "version": 1,
+      "kind": "correction_receipt",
+      "messageID": "10000000-0000-4000-8000-000000000006",
+      "createdAtMilliseconds": 1710000000006,
+      "payloadContentType": "application/json",
+      "payloadSHA256": "93d505c734af0de8381a4161e1ba695bcbc22c339cb717b58efe0398c0122dfa",
+      "payloadBase64URL": "eyJjb2RlIjoibWlzc2luZ19kZXBlbmRlbmN5In0",
+      "dependencyMessageIDs": ["10000000-0000-4000-8000-000000000002"],
+      "blobReferences": []
+    },
+    {
+      "version": 1,
+      "kind": "ai_job_request",
+      "messageID": "10000000-0000-4000-8000-000000000007",
+      "createdAtMilliseconds": 1710000000007,
+      "payloadContentType": "application/json",
+      "payloadSHA256": "7a47ab3f06c1c360621b9034f849bec4fc9988fbb217ad6103be2e27dc7fd9ee",
+      "payloadBase64URL": "eyJqb2JJRCI6ImpvYi0xIiwicHJvbXB0IjoiaGVsbG8ifQ",
+      "dependencyMessageIDs": [],
+      "blobReferences": []
+    },
+    {
+      "version": 1,
+      "kind": "ai_job_result",
+      "messageID": "10000000-0000-4000-8000-000000000008",
+      "createdAtMilliseconds": 1710000000008,
+      "payloadContentType": "application/json",
+      "payloadSHA256": "16119e47f0ff5ea20fc4bb209093e3296afa5e32c5590969c23754e31a2274e2",
+      "payloadBase64URL": "eyJqb2JJRCI6ImpvYi0xIiwic3RhdHVzIjoiY29tcGxldGVkIn0",
+      "dependencyMessageIDs": [],
+      "blobReferences": []
+    }
+  ]
+}
