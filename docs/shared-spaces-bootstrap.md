@@ -2,11 +2,13 @@
 
 Status: first authority vertical slice
 
-This contract creates a durable Shared Space authority without giving the
-server access to FEF content or content-encryption keys. One Shared Space owns
-one relay tenant and one relay domain. The Space authority, participant
-records, invitations, subscriptions, relay admissions, and relay membership
-changes commit atomically in PostgreSQL.
+This contract creates a durable Shared Space authority with an explicit
+security-mode boundary. The service cannot decrypt E2EE Space content. For a
+managed Space, it owns the content-key epoch and encrypts each content key at
+rest under the deployment key-encryption key. One Shared Space owns one relay
+tenant and one relay domain. The Space authority, participant records,
+invitations, subscriptions, relay admissions, relay membership, and managed
+key changes commit atomically in PostgreSQL.
 
 ## Authority boundaries
 
@@ -46,8 +48,9 @@ input is rejected.
 The service supports two immutable v1 security modes:
 
 - `e2ee`: the service stores only encrypted envelopes and encrypted blobs;
-- `managed`: later server-side policy may process content under an explicit
-  managed-Space contract.
+- `managed`: the service generates and distributes the Space content key under
+  an explicit managed-Space contract. Semantic inspection and moderation
+  policy remain a later gate.
 
 Changing security mode requires creating a new Space.
 
@@ -79,6 +82,8 @@ For an E2EE Space, the invitation also carries an opaque, participant-specific
 grant for the current content-key epoch. The server validates its signed
 metadata and stores the ciphertext atomically with the invitation, but never
 receives the group content key in plaintext. Managed Spaces reject key grants.
+Their current service-managed content key is instead released only after the
+participant has successfully claimed membership and authenticates bootstrap.
 
 The invited client claims it at:
 
@@ -127,6 +132,13 @@ and new grants commit atomically. A current member may retrieve only its own
 current grant through its relay credential. The server cannot decrypt a grant
 or manufacture a missing one.
 
+For managed Spaces, the service generates the next content key and stores its
+wrapped form in the same transaction as participant and relay revocation. A
+remaining active participant receives that new key only through authenticated
+bootstrap. The revoked participant cannot retrieve it. Rotation stops future
+updates from being readable with the old key; it does not erase content or keys
+already obtained by that participant.
+
 ## Participant recovery status
 
 An active participant should recover its complete current bootstrap authority
@@ -134,11 +146,12 @@ after relaunch with one atomic request at:
 
 `GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/bootstrap`
 
-The response contains the participant status described below and, for an E2EE
-Space, the caller's opaque current key grant from the exact same repeatable-read
-snapshot. Managed Spaces omit the key-grant field. This prevents a key rotation
-from producing a status for one epoch and a separately fetched grant for
-another. The server still cannot decrypt the grant or any Space content.
+The response contains the participant status described below and exactly one
+mode-appropriate key result from the same repeatable-read snapshot: an opaque
+participant grant for an E2EE Space, or the current raw content key for a
+managed Space. This prevents a key rotation from producing status for one epoch
+and key authority for another. A managed key is returned only to the active
+participant whose authenticated member identifier matches the path.
 
 The status-only projection remains available at:
 
@@ -153,10 +166,12 @@ for both E2EE and managed Spaces. The separate current-key-grant endpoint is
 retained for a focused key refresh, but clients should use the atomic bootstrap
 endpoint for relaunch and recovery.
 
-This participant-scoped response never exposes the roster, other participants,
+The status-only response never exposes the roster, other participants,
 invitations, administration authority, bearer tokens, FEF content, or content
-key material. Role changes and checkpoint/key-epoch changes are visible on the
-next authenticated read. Revoked participants cannot retrieve status.
+key material. The atomic bootstrap response adds only the caller's
+mode-appropriate key result. Role changes and checkpoint/key-epoch changes are
+visible on the next authenticated read. Revoked participants cannot retrieve
+status or bootstrap.
 
 ## Public ingress
 

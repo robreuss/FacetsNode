@@ -1,9 +1,11 @@
 # Replica relay data plane v1
 
-The Facets server data plane is a content-blind carrier for Personal Sync and future Shared
-Spaces. It stores opaque routing identifiers, authorization digests, encrypted
-Envelope V1 bytes, and encrypted blobs. It does not parse FEF, principal,
-Persona, device, or Space semantics and never receives a domain content key.
+The Facets server data plane is a content-blind carrier for Device Sync and
+Shared Spaces. It stores opaque routing identifiers, authorization digests,
+encrypted Envelope V1 bytes, and encrypted blobs. The relay package does not
+parse FEF, principal, Persona, device, or Space semantics and never receives a
+domain content key. Managed Shared Space key custody belongs to the product
+authority above this relay boundary.
 
 The canonical portable contract is
 `internal/testfixture/replica-relay-data-plane-portable-v1.json`. Its exact

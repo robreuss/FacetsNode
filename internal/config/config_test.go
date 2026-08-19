@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -112,6 +114,8 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	t.Setenv("FACETS_DEVICE_SYNC_LISTEN_ADDR", ":8081")
 	t.Setenv("FACETS_SHARED_SPACES_DATABASE_URL", "postgres://example.invalid/shared_spaces")
 	t.Setenv("FACETS_SHARED_SPACES_LISTEN_ADDR", ":8082")
+	managedKey := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	t.Setenv("FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY", managedKey)
 
 	deviceSync, err := config.Load(config.DeviceSync)
 	if err != nil {
@@ -126,6 +130,38 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	}
 	if sharedSpaces.Service != config.SharedSpaces || sharedSpaces.ListenAddress != ":8082" || sharedSpaces.BlobRoot != "/var/lib/facets-shared-spaces/blobs" {
 		t.Fatalf("shared spaces configuration=%+v", sharedSpaces)
+	}
+	if !bytes.Equal(sharedSpaces.ManagedKeyEncryptionKey, bytes.Repeat([]byte{0x42}, 32)) {
+		t.Fatal("Shared Spaces managed key-encryption key was not decoded")
+	}
+}
+
+func TestSharedSpacesRequiresStrictManagedKeyEncryptionKey(t *testing.T) {
+	t.Setenv("FACETS_SHARED_SPACES_DATABASE_URL", "postgres://example.invalid/shared_spaces")
+	for _, value := range []string{
+		"",
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 31)),
+		base64.URLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32)),
+		"not-base64url",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY", value)
+			if _, err := config.Load(config.SharedSpaces); err == nil {
+				t.Fatal("invalid managed key-encryption key accepted")
+			}
+		})
+	}
+}
+
+func TestDeviceSyncDoesNotConsumeSharedSpacesManagedKey(t *testing.T) {
+	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/device_sync")
+	t.Setenv("FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY", "invalid")
+	configuration, err := config.Load(config.DeviceSync)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.ManagedKeyEncryptionKey != nil {
+		t.Fatal("Device Sync consumed Shared Spaces key custody configuration")
 	}
 }
 

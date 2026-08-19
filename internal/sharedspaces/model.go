@@ -21,6 +21,7 @@ const (
 	InitialKeyEpoch                               = uint64(1)
 	ParticipantKeyGrantAlgorithm                  = "P256-HKDF-SHA256+A256GCM"
 	ParticipantKeyGrantSignatureAlgorithm         = "ES256"
+	ManagedContentKeyAlgorithm                    = "A256GCM"
 	MaximumParticipantKeyGrantCiphertextByteCount = 16 * 1_024
 	MaximumAuthorityEventPageSize                 = 100
 )
@@ -717,14 +718,37 @@ func (s ParticipantStatus) Validate() error {
 	return nil
 }
 
+// ManagedContentKey is a server-owned managed-Space content key delivered only
+// to an authenticated, active participant. It is not participant authority and
+// it is never used by E2EE Spaces.
+type ManagedContentKey struct {
+	Version       int       `json:"version"`
+	SpaceID       uuid.UUID `json:"spaceID"`
+	ParticipantID uuid.UUID `json:"participantID"`
+	KeyEpoch      uint64    `json:"keyEpoch"`
+	Algorithm     string    `json:"algorithm"`
+	KeyMaterial   string    `json:"keyMaterial"`
+}
+
+func (k ManagedContentKey) Validate() error {
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(k.KeyMaterial)
+	if k.Version != SchemaVersion || k.SpaceID == uuid.Nil || k.ParticipantID == uuid.Nil ||
+		k.KeyEpoch == 0 || k.Algorithm != ManagedContentKeyAlgorithm || err != nil ||
+		len(decoded) != 32 || base64.RawURLEncoding.EncodeToString(decoded) != k.KeyMaterial {
+		return NewProtocolError(CodeInvalidParticipant, "managed Shared Space content key is invalid")
+	}
+	return nil
+}
+
 // ParticipantBootstrap is an atomic participant-scoped recovery snapshot. An
-// E2EE Space includes the caller's opaque grant for the same key epoch reported
-// by Status. Managed Spaces omit KeyGrant because the server owns their content
-// policy and no participant content-key grant exists.
+// E2EE Space includes the caller's opaque participant grant. A managed Space
+// includes the service-owned content key. Exactly one key form must match the
+// security mode and key epoch reported by Status.
 type ParticipantBootstrap struct {
-	Version  int                        `json:"version"`
-	Status   ParticipantStatus          `json:"status"`
-	KeyGrant *ParticipantKeyGrantResult `json:"keyGrant,omitempty"`
+	Version           int                        `json:"version"`
+	Status            ParticipantStatus          `json:"status"`
+	KeyGrant          *ParticipantKeyGrantResult `json:"keyGrant,omitempty"`
+	ManagedContentKey *ManagedContentKey         `json:"managedContentKey,omitempty"`
 }
 
 func (b ParticipantBootstrap) Validate() error {
@@ -735,12 +759,15 @@ func (b ParticipantBootstrap) Validate() error {
 		return err
 	}
 	if b.Status.SecurityMode == SecurityModeManaged {
-		if b.KeyGrant != nil {
-			return NewProtocolError(CodeInvalidParticipant, "managed Shared Space participant bootstrap has a key grant")
+		if b.KeyGrant != nil || b.ManagedContentKey == nil ||
+			b.ManagedContentKey.SpaceID != b.Status.SpaceID ||
+			b.ManagedContentKey.ParticipantID != b.Status.Participant.ParticipantID ||
+			b.ManagedContentKey.KeyEpoch != b.Status.CurrentKeyEpoch {
+			return NewProtocolError(CodeInvalidParticipant, "managed Shared Space participant bootstrap key is inconsistent")
 		}
-		return nil
+		return b.ManagedContentKey.Validate()
 	}
-	if b.KeyGrant == nil || b.KeyGrant.Version != SchemaVersion ||
+	if b.ManagedContentKey != nil || b.KeyGrant == nil || b.KeyGrant.Version != SchemaVersion ||
 		b.KeyGrant.SpaceID != b.Status.SpaceID ||
 		b.KeyGrant.ParticipantID != b.Status.Participant.ParticipantID ||
 		b.KeyGrant.CurrentKeyEpoch != b.Status.CurrentKeyEpoch ||

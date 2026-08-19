@@ -1,6 +1,7 @@
 package sharedspaces_test
 
 import (
+	"encoding/base64"
 	"reflect"
 	"sort"
 	"testing"
@@ -237,5 +238,77 @@ func TestParticipantRevocationRequiresCompleteE2EEGrantSet(t *testing.T) {
 		sharedspaces.SecurityModeManaged, participants, 3_200,
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
 		t.Fatalf("managed grant set err=%v", err)
+	}
+}
+
+func TestParticipantBootstrapRequiresExactlyOneModeAppropriateKey(t *testing.T) {
+	_, provisioning, _ := testSpaceProvisioning(t, 3_500, sharedspaces.SecurityModeManaged)
+	participant := sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID:  provisioning.InitialParticipantID,
+		SubscriptionID: provisioning.InitialParticipantID,
+		Kind:           sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
+	}
+	status := sharedspaces.ParticipantStatus{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		DomainID:              provisioning.Domain.Registration.DomainID,
+		SecurityMode:          sharedspaces.SecurityModeManaged,
+		InteractionMode:       provisioning.InteractionMode,
+		CurrentKeyEpoch:       sharedspaces.InitialKeyEpoch,
+		Participant:           participant,
+		Capabilities:          sharedspaces.RoleHost.Capabilities(provisioning.InteractionMode),
+		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
+	}
+	bootstrap := sharedspaces.ParticipantBootstrap{
+		Version: sharedspaces.SchemaVersion, Status: status,
+		ManagedContentKey: &sharedspaces.ManagedContentKey{
+			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+			ParticipantID: provisioning.InitialParticipantID,
+			KeyEpoch:      sharedspaces.InitialKeyEpoch,
+			Algorithm:     sharedspaces.ManagedContentKeyAlgorithm,
+			KeyMaterial:   base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		},
+	}
+	if err := bootstrap.Validate(); err != nil {
+		t.Fatalf("valid managed participant bootstrap: %v", err)
+	}
+
+	wrongScope := bootstrap
+	wrongScope.ManagedContentKey = &sharedspaces.ManagedContentKey{
+		Version: sharedspaces.SchemaVersion, SpaceID: uuid.New(),
+		ParticipantID: provisioning.InitialParticipantID,
+		KeyEpoch:      sharedspaces.InitialKeyEpoch,
+		Algorithm:     sharedspaces.ManagedContentKeyAlgorithm,
+		KeyMaterial:   base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	}
+	if err := wrongScope.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("wrong-scope managed key err=%v", err)
+	}
+
+	mixed := bootstrap
+	mixed.KeyGrant = &sharedspaces.ParticipantKeyGrantResult{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID:   provisioning.InitialParticipantID,
+		CurrentKeyEpoch: sharedspaces.InitialKeyEpoch,
+		KeyGrant: *testParticipantKeyGrant(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID,
+			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch, 3_500,
+		),
+	}
+	if err := mixed.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("mixed managed and E2EE keys err=%v", err)
+	}
+
+	e2ee := bootstrap
+	e2ee.Status.SecurityMode = sharedspaces.SecurityModeE2EE
+	e2ee.ManagedContentKey = nil
+	e2ee.KeyGrant = mixed.KeyGrant
+	if err := e2ee.Validate(); err != nil {
+		t.Fatalf("valid E2EE participant bootstrap: %v", err)
+	}
+	e2ee.ManagedContentKey = bootstrap.ManagedContentKey
+	if err := e2ee.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("E2EE bootstrap with managed key err=%v", err)
 	}
 }

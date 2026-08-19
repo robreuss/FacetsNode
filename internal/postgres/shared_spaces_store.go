@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/robreuss/FacetsNode/internal/keycustody"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 )
@@ -18,12 +20,22 @@ import (
 // SharedSpacesStore owns Shared Spaces product authority while delegating
 // opaque delivery custody to the relay tables in the same transaction.
 type SharedSpacesStore struct {
-	pool  *pgxpool.Pool
-	relay *RelayStore
+	pool               *pgxpool.Pool
+	relay              *RelayStore
+	managedContentKeys *keycustody.ManagedContentKeys
 }
 
-func NewSharedSpacesStore(pool *pgxpool.Pool) *SharedSpacesStore {
-	return &SharedSpacesStore{pool: pool, relay: NewRelayStore(pool)}
+func NewSharedSpacesStore(
+	pool *pgxpool.Pool,
+	custodians ...*keycustody.ManagedContentKeys,
+) *SharedSpacesStore {
+	var custodian *keycustody.ManagedContentKeys
+	if len(custodians) > 0 {
+		custodian = custodians[0]
+	}
+	return &SharedSpacesStore{
+		pool: pool, relay: NewRelayStore(pool), managedContentKeys: custodian,
+	}
 }
 
 type storedSpaceProvisioning struct {
@@ -96,6 +108,20 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	if err != pgx.ErrNoRows {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("load Shared Space provisioning: %w", err)
 	}
+	var managedWrappedKey []byte
+	if provisioning.SecurityMode == sharedspaces.SecurityModeManaged {
+		if s.managedContentKeys == nil {
+			return sharedspaces.SpaceProvisioningResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidSpace, "managed content-key custody is not configured",
+			)
+		}
+		_, managedWrappedKey, err = s.managedContentKeys.Generate(
+			provisioning.SpaceID, sharedspaces.InitialKeyEpoch,
+		)
+		if err != nil {
+			return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("generate initial managed content key: %w", err)
+		}
+	}
 
 	relayResult, err := s.relay.provisionTenantTx(ctx, tx, provisioning.Tenant, provisioning.Domain)
 	if err != nil {
@@ -124,6 +150,14 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	}
 	if err := insertSharedSpaceParticipant(ctx, tx, initial); err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, err
+	}
+	if managedWrappedKey != nil {
+		if err := insertSharedSpaceManagedContentKey(
+			ctx, tx, provisioning.SpaceID, sharedspaces.InitialKeyEpoch,
+			managedWrappedKey, provisioning.CreatedAtMilliseconds,
+		); err != nil {
+			return sharedspaces.SpaceProvisioningResult{}, err
+		}
 	}
 	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
 		EventID: provisioning.RetryID, SpaceID: provisioning.SpaceID,
@@ -1146,6 +1180,20 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, err
 	}
+	var managedWrappedKey []byte
+	if provisioning.SecurityMode == sharedspaces.SecurityModeManaged {
+		if s.managedContentKeys == nil {
+			return sharedspaces.ParticipantRevocationResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidSpace, "managed content-key custody is not configured",
+			)
+		}
+		_, managedWrappedKey, err = s.managedContentKeys.Generate(
+			revocation.SpaceID, revocation.NextKeyEpoch,
+		)
+		if err != nil {
+			return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("rotate managed content key: %w", err)
+		}
+	}
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE relay_members
@@ -1180,6 +1228,14 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	}
 	for _, grant := range revocation.KeyGrants {
 		if err := insertSharedSpaceParticipantKeyGrant(ctx, tx, grant); err != nil {
+			return sharedspaces.ParticipantRevocationResult{}, err
+		}
+	}
+	if managedWrappedKey != nil {
+		if err := insertSharedSpaceManagedContentKey(
+			ctx, tx, revocation.SpaceID, revocation.NextKeyEpoch,
+			managedWrappedKey, nowMilliseconds,
+		); err != nil {
 			return sharedspaces.ParticipantRevocationResult{}, err
 		}
 	}
@@ -1454,6 +1510,30 @@ func (s *SharedSpacesStore) getParticipantBootstrap(
 			return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
 				sharedspaces.CodeKeyGrantNotFound, "current participant key grant was not found",
 			)
+		}
+	} else if includeKeyGrant && securityMode == sharedspaces.SecurityModeManaged {
+		wrapped, err := loadSharedSpaceManagedContentKey(
+			ctx, tx, credential.TenantID, currentKeyEpoch,
+		)
+		if err != nil {
+			return sharedspaces.ParticipantBootstrap{}, err
+		}
+		if s.managedContentKeys == nil {
+			return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeKeyGrantNotFound, "managed content-key custody is not configured",
+			)
+		}
+		plaintext, err := s.managedContentKeys.Unwrap(
+			credential.TenantID, currentKeyEpoch, wrapped,
+		)
+		if err != nil {
+			return sharedspaces.ParticipantBootstrap{}, fmt.Errorf("unwrap managed content key: %w", err)
+		}
+		result.ManagedContentKey = &sharedspaces.ManagedContentKey{
+			Version: sharedspaces.SchemaVersion, SpaceID: credential.TenantID,
+			ParticipantID: credential.MemberID, KeyEpoch: currentKeyEpoch,
+			Algorithm:   sharedspaces.ManagedContentKeyAlgorithm,
+			KeyMaterial: base64.RawURLEncoding.EncodeToString(plaintext),
 		}
 	}
 	if includeKeyGrant {
@@ -1758,6 +1838,46 @@ func insertSharedSpaceParticipantKeyGrant(
 		return fmt.Errorf("insert Shared Space participant key grant: %w", err)
 	}
 	return nil
+}
+
+func insertSharedSpaceManagedContentKey(
+	ctx context.Context,
+	tx pgx.Tx,
+	spaceID uuid.UUID,
+	keyEpoch uint64,
+	wrappedKey []byte,
+	createdAtMilliseconds int64,
+) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_managed_content_keys (
+			space_id,key_epoch,algorithm,wrapped_key,created_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5)
+	`, spaceID, keyEpoch, sharedspaces.ManagedContentKeyAlgorithm,
+		wrappedKey, createdAtMilliseconds); err != nil {
+		return fmt.Errorf("insert Shared Space managed content key: %w", err)
+	}
+	return nil
+}
+
+func loadSharedSpaceManagedContentKey(
+	ctx context.Context,
+	tx pgx.Tx,
+	spaceID uuid.UUID,
+	keyEpoch uint64,
+) ([]byte, error) {
+	var wrapped []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT wrapped_key
+		FROM shared_space_managed_content_keys
+		WHERE space_id=$1 AND key_epoch=$2
+	`, spaceID, keyEpoch).Scan(&wrapped); err == pgx.ErrNoRows {
+		return nil, sharedspaces.NewProtocolError(
+			sharedspaces.CodeKeyGrantNotFound, "current managed content key was not found",
+		)
+	} else if err != nil {
+		return nil, fmt.Errorf("load Shared Space managed content key: %w", err)
+	}
+	return wrapped, nil
 }
 
 func insertSharedSpaceAuthorityEvent(

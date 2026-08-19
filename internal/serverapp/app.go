@@ -16,6 +16,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/httpapi"
+	"github.com/robreuss/FacetsNode/internal/keycustody"
 	"github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
@@ -89,7 +90,14 @@ func Main(service config.Service) {
 		api.SetDeviceSyncStore(relayStore)
 	}
 	if service == config.SharedSpaces {
-		api.SetSharedSpacesStore(postgres.NewSharedSpacesStore(pool))
+		managedContentKeys, err := keycustody.NewManagedContentKeys(
+			configuration.ManagedKeyEncryptionKey,
+		)
+		if err != nil {
+			logger.Error("managed content-key custody rejected", "error", err)
+			os.Exit(1)
+		}
+		api.SetSharedSpacesStore(postgres.NewSharedSpacesStore(pool, managedContentKeys))
 	}
 	if err := api.SetTrafficLimits(configuration.TrafficLimits); err != nil {
 		logger.Error("traffic limits rejected", "error", err)

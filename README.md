@@ -14,11 +14,14 @@ and storage interfaces. They do not share a deployment lifecycle, database
 credentials, database namespace, blob namespace, quotas, or authority data.
 Installing one service does not expose the other product.
 
-The currently implemented server foundation is content-blind. It stores opaque
-routing identifiers, capability digests, bounded metadata, client-encrypted
-envelopes, and encrypted blobs. It does not parse FEF, principal, Persona,
-device, or Space semantics and never receives a domain content key. The
-Device Sync executable additionally exposes the first product-level account
+The shared relay foundation is content-blind. It stores opaque routing
+identifiers, capability digests, bounded metadata, encrypted envelopes, and
+encrypted blobs without parsing FEF content. Device Sync and E2EE Shared
+Spaces never give the service a domain content key. Managed Shared Spaces use
+a distinct boundary: the service generates the Space content key, encrypts it
+at rest under a deployment-owned key-encryption key, rotates it with
+participant revocation, and releases it only through participant-authenticated
+bootstrap. The Device Sync executable additionally exposes the first product-level account
 bootstrap boundary: an operator-issued, one-time admission atomically creates
 an isolated Device Sync principal, relay tenant, protected control domain, and
 initial device. It can enroll additional devices, provision opaque per-Space
@@ -65,7 +68,10 @@ key grants and advances key epochs on revocation, but plaintext content keys
 remain a client concern and never pass through the Shared Spaces operator
 credential. Authenticated participants can recover their own current role,
 derived capabilities, key epoch, and bootstrap readiness after relaunch without
-receiving the Space roster or using a Space administration credential.
+receiving the Space roster or using a Space administration credential. For
+managed Spaces, that same atomic bootstrap includes the current service-managed
+content key. The key is never returned by status, roster, invitation, operator,
+or Space-administration endpoints.
 
 ## Development
 
@@ -112,6 +118,8 @@ plaintext management port or disable certificate verification.
 ```sh
 cp deploy/shared-spaces/.env.example deploy/shared-spaces/.env
 # Set independent Shared Spaces PostgreSQL and operator secrets.
+# Generate a separate managed-Space key-encryption key with:
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 
 REV=$(git rev-parse --verify HEAD)
 TREE=$(git rev-parse --verify 'HEAD^{tree}')
@@ -159,6 +167,9 @@ Operator, tenant-provisioning, relay-administration, admission, and member
 credentials are independent high-entropy secrets. Send bearer credentials only
 in the `Authorization` header over TLS. The server does not log authorization
 headers, request bodies, ciphertext, bearer values, or client IP addresses.
+The Shared Spaces deployment key-encryption key is a separate 32-byte secret;
+it must not be reused as a bearer credential, committed, or stored in the
+database or blob volume.
 See [SECURITY.md](SECURITY.md) for reporting and deployment requirements.
 
 FEF remains the semantic interchange format inside encrypted payloads; it is

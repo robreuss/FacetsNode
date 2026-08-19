@@ -2,12 +2,14 @@ package sharedspaces
 
 import (
 	"context"
+	"encoding/base64"
 	"reflect"
 	"sort"
 	"sync"
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/keycustody"
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
@@ -16,6 +18,7 @@ type memorySpace struct {
 	result                relay.TenantProvisioningResult
 	participants          map[uuid.UUID]Participant
 	keyGrants             map[uint64]map[uuid.UUID]ParticipantKeyGrant
+	managedContentKeys    map[uint64][]byte
 	keyEpoch              uint64
 	activeCheckpointEpoch uint64
 }
@@ -42,9 +45,16 @@ type MemoryStore struct {
 	checkpointEpochs                map[uuid.UUID]uint64
 	authorityEvents                 map[uuid.UUID][]AuthorityEvent
 	nextAuthoritySequences          map[uuid.UUID]uint64
+	managedContentKeys              *keycustody.ManagedContentKeys
 }
 
-func NewMemoryStore(relayStore relay.Store) *MemoryStore {
+func NewMemoryStore(relayStore relay.Store, custodians ...*keycustody.ManagedContentKeys) *MemoryStore {
+	var custodian *keycustody.ManagedContentKeys
+	if len(custodians) > 0 {
+		custodian = custodians[0]
+	} else {
+		custodian, _ = keycustody.NewEphemeralManagedContentKeys()
+	}
 	return &MemoryStore{
 		relay: relayStore, spaces: make(map[uuid.UUID]*memorySpace),
 		spaceRetries:                    make(map[uuid.UUID]uuid.UUID),
@@ -59,6 +69,7 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		checkpointEpochs:                make(map[uuid.UUID]uint64),
 		authorityEvents:                 make(map[uuid.UUID][]AuthorityEvent),
 		nextAuthoritySequences:          make(map[uuid.UUID]uint64),
+		managedContentKeys:              custodian,
 	}
 }
 
@@ -88,6 +99,17 @@ func (s *MemoryStore) ProvisionSpace(
 		}
 		return SpaceProvisioningResult{}, NewProtocolError(CodeSpaceCollision, "Shared Space ID was reused")
 	}
+	var managedWrappedKey []byte
+	if provisioning.SecurityMode == SecurityModeManaged {
+		if s.managedContentKeys == nil {
+			return SpaceProvisioningResult{}, NewProtocolError(CodeInvalidSpace, "managed Shared Space key custody is unavailable")
+		}
+		_, generatedWrappedKey, generateErr := s.managedContentKeys.Generate(provisioning.SpaceID, InitialKeyEpoch)
+		if generateErr != nil {
+			return SpaceProvisioningResult{}, generateErr
+		}
+		managedWrappedKey = generatedWrappedKey
+	}
 	relayResult, err := s.relay.ProvisionTenant(ctx, provisioning.Tenant, provisioning.Domain)
 	if err != nil {
 		return SpaceProvisioningResult{}, err
@@ -101,9 +123,13 @@ func (s *MemoryStore) ProvisionSpace(
 	}
 	space := &memorySpace{
 		provisioning: provisioning, result: relayResult,
-		participants: map[uuid.UUID]Participant{participant.ParticipantID: participant},
-		keyGrants:    make(map[uint64]map[uuid.UUID]ParticipantKeyGrant),
-		keyEpoch:     InitialKeyEpoch,
+		participants:       map[uuid.UUID]Participant{participant.ParticipantID: participant},
+		keyGrants:          make(map[uint64]map[uuid.UUID]ParticipantKeyGrant),
+		managedContentKeys: make(map[uint64][]byte),
+		keyEpoch:           InitialKeyEpoch,
+	}
+	if managedWrappedKey != nil {
+		space.managedContentKeys[InitialKeyEpoch] = managedWrappedKey
 	}
 	s.spaces[provisioning.SpaceID] = space
 	s.spaceRetries[provisioning.RetryID] = provisioning.SpaceID
@@ -626,6 +652,17 @@ func (s *MemoryStore) RevokeParticipant(
 	); err != nil {
 		return ParticipantRevocationResult{}, err
 	}
+	var managedWrappedKey []byte
+	if space.provisioning.SecurityMode == SecurityModeManaged {
+		if s.managedContentKeys == nil {
+			return ParticipantRevocationResult{}, NewProtocolError(CodeInvalidSpace, "managed Shared Space key custody is unavailable")
+		}
+		_, generatedWrappedKey, generateErr := s.managedContentKeys.Generate(revocation.SpaceID, revocation.NextKeyEpoch)
+		if generateErr != nil {
+			return ParticipantRevocationResult{}, generateErr
+		}
+		managedWrappedKey = generatedWrappedKey
+	}
 	acceptance, err := s.relay.RevokeMember(ctx, credential, revocation.ParticipantID, nowMilliseconds)
 	if err != nil {
 		return ParticipantRevocationResult{}, err
@@ -633,7 +670,9 @@ func (s *MemoryStore) RevokeParticipant(
 	participant.RevokedAtMilliseconds = &nowMilliseconds
 	space.participants[participant.ParticipantID] = participant
 	space.keyEpoch = revocation.NextKeyEpoch
-	if len(revocation.KeyGrants) > 0 {
+	if managedWrappedKey != nil {
+		space.managedContentKeys[revocation.NextKeyEpoch] = managedWrappedKey
+	} else if len(revocation.KeyGrants) > 0 {
 		space.keyGrants[revocation.NextKeyEpoch] = make(map[uuid.UUID]ParticipantKeyGrant, len(revocation.KeyGrants))
 		for _, grant := range revocation.KeyGrants {
 			space.keyGrants[revocation.NextKeyEpoch][grant.ParticipantID] = grant
@@ -772,6 +811,21 @@ func (s *MemoryStore) GetParticipantBootstrap(
 			Version: SchemaVersion, SpaceID: credential.TenantID,
 			ParticipantID: credential.MemberID, CurrentKeyEpoch: space.keyEpoch,
 			KeyGrant: grant,
+		}
+	} else {
+		wrapped, found := space.managedContentKeys[space.keyEpoch]
+		if !found || s.managedContentKeys == nil {
+			return ParticipantBootstrap{}, NewProtocolError(CodeKeyGrantNotFound, "current managed content key was not found")
+		}
+		plaintext, err := s.managedContentKeys.Unwrap(space.provisioning.SpaceID, space.keyEpoch, wrapped)
+		if err != nil {
+			return ParticipantBootstrap{}, err
+		}
+		result.ManagedContentKey = &ManagedContentKey{
+			Version: SchemaVersion, SpaceID: credential.TenantID,
+			ParticipantID: credential.MemberID, KeyEpoch: space.keyEpoch,
+			Algorithm:   ManagedContentKeyAlgorithm,
+			KeyMaterial: base64.RawURLEncoding.EncodeToString(plaintext),
 		}
 	}
 	if err := result.Validate(); err != nil {

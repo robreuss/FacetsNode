@@ -5,12 +5,15 @@ Please do not disclose a suspected vulnerability in a public issue. Until a
 dedicated security address is published, contact the project owner privately
 through the repository hosting account.
 
-The Node is an opaque transport, not a key server. Clients encrypt replica
-messages with a separate domain content key. The operator, domain
+The relay is an opaque transport, not a key server. Device Sync and E2EE Shared
+Space clients encrypt replica messages with a separate domain content key that
+the service never receives. A managed Shared Space is the explicit exception:
+the Shared Spaces authority generates its content keys and stores only their
+authenticated, deployment-key-wrapped form. The operator, domain
 tenant provisioning, domain administration, member admission, and member
 bearer credentials authorize distinct routing operations and must never be
-reused as content-encryption keys. The Node stores only their domain-separated
-digests and cannot recover the content key from them.
+reused as content-encryption or key-encryption keys. The relay stores only
+their domain-separated digests and cannot recover a content key from them.
 Relay blob IDs are hashes of encrypted bytes, so clients must use randomized,
 domain-bound authenticated encryption and must not reuse identical blob
 ciphertext across domains; domain-scoped storage does not hide identical IDs
@@ -29,6 +32,9 @@ Supported production deployments must:
   path: its payload contains only tenant/domain routing UUIDs, and durable fetch
   remains authoritative if a hint is forged, duplicated, or lost;
 - store database credentials in an operator-managed secret, not an image;
+- store the Shared Spaces managed key-encryption key outside PostgreSQL, blob
+  storage, images, and coordinated data backups; preserve the exact key through
+  restore and never reuse it as a credential;
 - keep `.env`, TLS material, and live-test access credentials out of both Git
   and the Docker build context;
 - isolate and rotate the operator provisioning credential, and do not expose

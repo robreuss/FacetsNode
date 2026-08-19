@@ -11,20 +11,21 @@ import (
 )
 
 type Config struct {
-	Service            Service
-	ListenAddress      string
-	DatabaseURL        string
-	ShutdownPeriod     time.Duration
-	CleanupPeriod      time.Duration
-	TransferPeriod     time.Duration
-	DatabaseConns      int32
-	OperatorToken      string
-	PublicURL          string
-	BlobRoot           string
-	BlobUploadTTL      time.Duration
-	BlobOrphanGrace    time.Duration
-	CheckpointFenceTTL time.Duration
-	TrafficLimits      traffic.Limits
+	Service                 Service
+	ListenAddress           string
+	DatabaseURL             string
+	ShutdownPeriod          time.Duration
+	CleanupPeriod           time.Duration
+	TransferPeriod          time.Duration
+	DatabaseConns           int32
+	OperatorToken           string
+	ManagedKeyEncryptionKey []byte
+	PublicURL               string
+	BlobRoot                string
+	BlobUploadTTL           time.Duration
+	BlobOrphanGrace         time.Duration
+	CheckpointFenceTTL      time.Duration
+	TrafficLimits           traffic.Limits
 }
 
 type Service string
@@ -94,6 +95,16 @@ func Load(service Service) (Config, error) {
 				"%s_OPERATOR_TOKEN must be 32-byte unpadded base64url", prefix,
 			)
 		}
+	}
+	if service == SharedSpaces {
+		name := prefix + "_MANAGED_KEY_ENCRYPTION_KEY"
+		encoded := os.Getenv(name)
+		decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+		if err != nil || len(decoded) != 32 ||
+			base64.RawURLEncoding.EncodeToString(decoded) != encoded {
+			return Config{}, fmt.Errorf("%s must be 32-byte unpadded base64url", name)
+		}
+		configuration.ManagedKeyEncryptionKey = decoded
 	}
 	if value := os.Getenv(prefix + "_SHUTDOWN_PERIOD"); value != "" {
 		period, err := time.ParseDuration(value)

@@ -2,8 +2,17 @@
 
 Facets Shared Spaces Server's PostgreSQL database and opaque blob volume form
 one recovery unit. PostgreSQL holds Space authority, participant state, relay
-custody, key-grant ciphertext, quotas, receipts, and references to the encrypted
-blob bytes. A backup of only the database or only the blob volume is invalid.
+custody, E2EE key-grant ciphertext, wrapped managed-Space content keys, quotas,
+receipts, and references to the encrypted blob bytes. A backup of only the
+database or only the blob volume is invalid.
+
+The deployment key-encryption key is deliberately absent from PostgreSQL, the
+blob volume, and the Restic snapshot. Preserve
+`FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY` separately with the same rigor
+as the Restic password. A recovered service must use the exact same key before
+it starts. Losing or substituting it makes every managed-Space content key in
+the backup unrecoverable. Deployment-key rotation and bulk rewrapping are not
+implemented yet.
 
 The checked-in operations profile stops only the Shared Spaces server writer,
 creates a PostgreSQL custom dump, inventories the exact non-staging blob tree,
@@ -67,7 +76,8 @@ temporary directory. The workflow verifies the database checksum and complete
 sorted blob digest inventory before creating fresh volumes, restoring the
 database in one transaction, restoring the blob tree and unprivileged runtime
 ownership, and starting the recovered server on the requested loopback port.
-It does not start public ingress.
+It does not start public ingress. Ensure the target environment supplies the
+original managed-Space key-encryption key before running the restore command.
 
 After independent authority, relay, key-grant, and blob verification, an
 operator may switch ingress using a reviewed incident procedure. Do not expose
@@ -91,5 +101,6 @@ Shared Spaces database/blob bindings, revision rules, restore target guards,
 and shell syntax. It does not claim a real backup drill. Before production,
 run an exact-image backup and fresh-host restore, compare every Shared Spaces
 authority and relay table plus every blob digest, test key-grant retrieval and
-participant revocation after recovery, measure realistic duration/capacity,
-and adopt monitored off-host retention and pruning.
+managed participant bootstrap, and participant revocation after recovery,
+measure realistic duration/capacity, and adopt monitored off-host retention and
+pruning.

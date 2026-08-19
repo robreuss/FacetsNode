@@ -23,6 +23,7 @@ func TestServiceApplicationsHaveIndependentOperationalNamespaces(t *testing.T) {
 		"name: facets-shared-spaces",
 		"target: shared-spaces",
 		"FACETS_SHARED_SPACES_DATABASE_URL:",
+		"FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY:",
 		"facets-shared-spaces-postgres:",
 		"facets-shared-spaces-blobs:",
 		`["CMD", "/facets-shared-spaces-server"`,

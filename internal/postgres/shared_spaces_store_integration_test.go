@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/keycustody"
 	postgresstore "github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
@@ -328,6 +330,162 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 			participantCount, relayMemberCount, revokedSubscriptionCount,
 			cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount, keyGrantCount,
 		)
+	}
+}
+
+func TestPostgresManagedSharedSpaceKeyCustodyIsAtomicWithAuthority(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_SERVER_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
+	pool := openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `TRUNCATE relay_tenants CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+
+	custodian, err := keycustody.NewManagedContentKeys(bytes.Repeat([]byte{0xa5}, keycustody.ContentKeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := postgresstore.NewSharedSpacesStore(pool, custodian)
+	const now = int64(20_000)
+	provisioning, admin := postgresSharedSpaceProvisioning(t, now)
+	provisioning.SecurityMode = sharedspaces.SecurityModeManaged
+	created, err := store.ProvisionSpace(ctx, provisioning, now)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted ||
+		created.SecurityMode != sharedspaces.SecurityModeManaged {
+		t.Fatalf("managed provision=%+v err=%v", created, err)
+	}
+
+	relayStore := postgresstore.NewRelayStore(pool)
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: postgresRelayToken(0x31),
+	}
+	activatePostgresSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, admin, hostCredential, now+50,
+	)
+
+	invitation, invitationCredential := postgresSharedSpaceInvitation(t, provisioning, admin, now+100)
+	if invitation.KeyGrant != nil {
+		t.Fatalf("managed invitation unexpectedly includes E2EE grant=%+v", invitation.KeyGrant)
+	}
+	if _, err := store.CreateInvitation(ctx, admin, invitation, now+100); err != nil {
+		t.Fatalf("managed invitation: %v", err)
+	}
+	memberCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: admin.DomainID,
+		MemberID: invitation.ParticipantID, Token: postgresRelayToken(0x61),
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := sharedspaces.InvitationClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID: invitation.ParticipantID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: invitation.ParticipantID, AuthorizationDigest: memberDigest,
+		},
+		ClaimedAtMilliseconds: now + 200,
+	}
+	claimed, err := store.ClaimInvitation(ctx, invitationCredential, claim, now+200)
+	if err != nil || claimed.Acceptance != relay.AcceptanceAccepted || claimed.KeyGrant != nil {
+		t.Fatalf("managed claim=%+v err=%v", claimed, err)
+	}
+
+	hostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, now+210)
+	if err != nil {
+		t.Fatalf("managed host bootstrap: %v", err)
+	}
+	memberBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, now+211)
+	if err != nil {
+		t.Fatalf("managed member bootstrap: %v", err)
+	}
+	if hostBootstrap.ManagedContentKey == nil || memberBootstrap.ManagedContentKey == nil ||
+		hostBootstrap.KeyGrant != nil || memberBootstrap.KeyGrant != nil ||
+		hostBootstrap.ManagedContentKey.KeyMaterial != memberBootstrap.ManagedContentKey.KeyMaterial ||
+		hostBootstrap.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch ||
+		memberBootstrap.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("managed bootstraps host=%+v member=%+v", hostBootstrap, memberBootstrap)
+	}
+	previousKeyMaterial := hostBootstrap.ManagedContentKey.KeyMaterial
+
+	revocation := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		SpaceID: provisioning.SpaceID, ParticipantID: invitation.ParticipantID,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 1,
+	}
+	revoked, err := store.RevokeParticipant(ctx, admin, revocation, now+300)
+	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("managed revoke=%+v err=%v", revoked, err)
+	}
+	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+		t.Fatalf("revoked managed participant bootstrap err=%v", err)
+	}
+	rotatedHostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, now+302)
+	if err != nil || rotatedHostBootstrap.ManagedContentKey == nil ||
+		rotatedHostBootstrap.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
+		rotatedHostBootstrap.ManagedContentKey.KeyMaterial == previousKeyMaterial ||
+		rotatedHostBootstrap.Status.BootstrapReady {
+		t.Fatalf("rotated managed host bootstrap=%+v err=%v", rotatedHostBootstrap, err)
+	}
+
+	var managedKeyCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM shared_space_managed_content_keys
+		WHERE space_id=$1
+	`, provisioning.SpaceID).Scan(&managedKeyCount); err != nil {
+		t.Fatal(err)
+	}
+	if managedKeyCount != 2 {
+		t.Fatalf("managed content-key count=%d want=2", managedKeyCount)
+	}
+}
+
+func activatePostgresSharedSpaceCheckpoint(
+	t *testing.T,
+	ctx context.Context,
+	relayStore *postgresstore.RelayStore,
+	store *postgresstore.SharedSpacesStore,
+	provisioning sharedspaces.SpaceProvisioning,
+	admin relay.AdministrationCredential,
+	hostCredential relay.Credential,
+	now int64,
+) {
+	t.Helper()
+	fence, err := relayStore.CreateCheckpointFence(ctx, hostCredential, relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: now,
+	}, now)
+	if err != nil {
+		t.Fatalf("managed bootstrap fence: %v", err)
+	}
+	checkpoint := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: provisioning.SpaceID,
+		DomainID:                provisioning.Domain.Registration.DomainID,
+		PublisherSubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
+		KeyEpoch:                sharedspaces.InitialKeyEpoch,
+		CoveredThroughCursor:    fence.BoundaryCursor,
+		CreatedAtMilliseconds:   now,
+	}
+	if _, err := store.StageCheckpoint(ctx, hostCredential, checkpoint, now); err != nil {
+		t.Fatalf("managed bootstrap stage: %v", err)
+	}
+	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: checkpoint.CheckpointID,
+		ActivatedAtMilliseconds: now,
+	}, now); err != nil {
+		t.Fatalf("managed bootstrap activation: %v", err)
 	}
 }
 

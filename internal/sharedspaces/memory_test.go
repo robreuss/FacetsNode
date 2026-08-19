@@ -530,7 +530,19 @@ func TestMemoryStoreRejectsCrossSpaceAuthorityAndInitialHostRevocation(t *testin
 		t.Fatalf("managed participant status=%+v err=%v", participantStatus, err)
 	}
 	participantBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, 3_001)
-	if err != nil || !reflect.DeepEqual(participantBootstrap.Status, participantStatus) || participantBootstrap.KeyGrant != nil {
+	var managedKey []byte
+	var decodeErr error
+	if participantBootstrap.ManagedContentKey != nil {
+		managedKey, decodeErr = base64.RawURLEncoding.Strict().DecodeString(
+			participantBootstrap.ManagedContentKey.KeyMaterial,
+		)
+	}
+	if err != nil || decodeErr != nil || !reflect.DeepEqual(participantBootstrap.Status, participantStatus) ||
+		participantBootstrap.KeyGrant != nil || participantBootstrap.ManagedContentKey == nil ||
+		participantBootstrap.ManagedContentKey.SpaceID != provisioning.SpaceID ||
+		participantBootstrap.ManagedContentKey.ParticipantID != provisioning.InitialParticipantID ||
+		participantBootstrap.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch ||
+		len(managedKey) != 32 {
 		t.Fatalf("managed participant bootstrap=%+v err=%v", participantBootstrap, err)
 	}
 	invitation, _ := testInvitation(t, provisioning, admin, 3_100, sharedspaces.RoleReader)
@@ -546,6 +558,87 @@ func TestMemoryStoreRejectsCrossSpaceAuthorityAndInitialHostRevocation(t *testin
 	}
 	if _, err := store.RevokeParticipant(ctx, admin, revocation, 3_200); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInitialHost) {
 		t.Fatalf("initial host revocation err=%v", err)
+	}
+}
+
+func TestMemoryStoreRotatesManagedContentKeyOnParticipantRevocation(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 6_000, sharedspaces.SecurityModeManaged)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 6_000); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, hostCredential, admin,
+		sharedspaces.InitialKeyEpoch, 6_050,
+	)
+	invitation, invitationCredential := testInvitation(
+		t, provisioning, admin, 6_100, sharedspaces.RoleParticipant,
+	)
+	if invitation.KeyGrant != nil {
+		t.Fatal("managed invitation unexpectedly contains an E2EE key grant")
+	}
+	if _, err := store.CreateInvitation(ctx, admin, invitation, 6_100); err != nil {
+		t.Fatal(err)
+	}
+	memberCredential := relay.Credential{
+		TenantID: invitation.SpaceID, DomainID: invitation.RelayAdmission.DomainID,
+		MemberID: invitation.ParticipantID, Token: testToken(0x71),
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimInvitation(ctx, invitationCredential, sharedspaces.InvitationClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: invitation.ParticipantID, AuthorizationDigest: memberDigest,
+		},
+		ClaimedAtMilliseconds: 6_200,
+	}, 6_200); err != nil {
+		t.Fatal(err)
+	}
+
+	hostBefore, err := store.GetParticipantBootstrap(ctx, hostCredential, 6_201)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberBefore, err := store.GetParticipantBootstrap(ctx, memberCredential, 6_201)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostBefore.ManagedContentKey == nil || memberBefore.ManagedContentKey == nil ||
+		hostBefore.ManagedContentKey.KeyMaterial != memberBefore.ManagedContentKey.KeyMaterial ||
+		hostBefore.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("initial managed bootstrap host=%+v member=%+v", hostBefore, memberBefore)
+	}
+
+	revocation := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+	}
+	if _, err := store.RevokeParticipant(ctx, admin, revocation, 6_300); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, 6_301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+		t.Fatalf("revoked managed participant bootstrap err=%v", err)
+	}
+	hostAfter, err := store.GetParticipantBootstrap(ctx, hostCredential, 6_301)
+	if err != nil || hostAfter.ManagedContentKey == nil ||
+		hostAfter.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
+		hostAfter.ManagedContentKey.KeyMaterial == hostBefore.ManagedContentKey.KeyMaterial ||
+		hostAfter.Status.BootstrapReady {
+		t.Fatalf("rotated managed bootstrap=%+v err=%v", hostAfter, err)
+	}
+	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, 6_301); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("revoked managed relay access err=%v", err)
 	}
 }
 

@@ -505,6 +505,156 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	_ = invalidAuthorityEvents.Body.Close()
 }
 
+func TestSharedSpacesAPIManagedBootstrapDistributesAndRotatesServiceKey(t *testing.T) {
+	const nowMilliseconds = int64(30_000)
+	operatorToken := relayTestToken(0x12)
+	relayStore := relay.NewMemoryStore()
+	server := newRelayTestServer(t, relayStore, operatorToken)
+	server.SetSharedSpacesStore(sharedspaces.NewMemoryStore(relayStore))
+	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
+	handler := server.Handler()
+
+	domain := newRelayDomainProvisioningRequest(nowMilliseconds, 0x22, 0x32)
+	spaceID := domain.AdministrationCredential.TenantID
+	domainID := domain.AdministrationCredential.DomainID
+	provisioning := sharedSpaceProvisioningInput{
+		Version:                sharedspaces.SchemaVersion,
+		RetryID:                uuid.New(),
+		SpaceID:                spaceID,
+		SecurityMode:           sharedspaces.SecurityModeManaged,
+		InteractionMode:        sharedspaces.InteractionModeCollaborative,
+		InitialParticipantID:   domain.MemberCredential.MemberID,
+		InitialParticipantKind: sharedspaces.ParticipantPerson,
+		TenantProvisioning:     newRelayTenantProvisioningRequest(domain, relayTestToken(0x42)),
+	}
+	created := performRelayJSON(
+		t, handler, http.MethodPost, "/v1/shared-spaces",
+		provisioning, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, created, http.StatusCreated)
+	_ = created.Body.Close()
+	publishSharedSpaceBootstrapCheckpointHTTP(t, handler, domain, nowMilliseconds)
+
+	participantID := uuid.New()
+	invitationID := uuid.New()
+	invitationToken := relayTestToken(0x52)
+	invitation := sharedSpaceInvitationCreateInput{
+		Version:         sharedspaces.SchemaVersion,
+		RetryID:         uuid.New(),
+		ParticipantID:   participantID,
+		SubscriptionID:  uuid.New(),
+		Kind:            sharedspaces.ParticipantPerson,
+		Role:            sharedspaces.RoleParticipant,
+		InteractionMode: provisioning.InteractionMode,
+		InvitationCredential: sharedSpaceInvitationCredential{
+			InvitationID:       invitationID,
+			AuthorizationToken: invitationToken,
+		},
+		ExpiresAtMilliseconds: nowMilliseconds + 60_000,
+		CreatedAtMilliseconds: nowMilliseconds,
+	}
+	spaceRoot := "/v1/shared-spaces/" + spaceID.String() + "/domains/" + domainID.String()
+	issued := performRelayJSON(
+		t, handler, http.MethodPost, spaceRoot+"/invitations",
+		invitation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, issued, http.StatusCreated)
+	_ = issued.Body.Close()
+
+	memberToken := relayTestToken(0x62)
+	claim := sharedSpaceInvitationClaimInput{
+		Version:       sharedspaces.SchemaVersion,
+		ParticipantID: participantID,
+		MemberCredential: relayMemberCredential{
+			TenantID: spaceID, DomainID: domainID, MemberID: participantID,
+			AuthorizationToken: memberToken,
+		},
+		ClaimedAtMilliseconds: nowMilliseconds,
+	}
+	claimPath := spaceRoot + "/invitations/" + invitationID.String() + "/claim"
+	claimed := performRelayJSON(
+		t, handler, http.MethodPost, claimPath, claim, invitationToken, uuid.Nil,
+	)
+	requireStatus(t, claimed, http.StatusCreated)
+	var claimResult sharedspaces.InvitationClaimResult
+	if err := json.NewDecoder(claimed.Body).Decode(&claimResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = claimed.Body.Close()
+	if claimResult.KeyGrant != nil {
+		t.Fatalf("managed claim unexpectedly exposed E2EE grant=%+v", claimResult.KeyGrant)
+	}
+
+	hostBootstrapPath := spaceRoot + "/participants/" + provisioning.InitialParticipantID.String() + "/bootstrap"
+	memberBootstrapPath := spaceRoot + "/participants/" + participantID.String() + "/bootstrap"
+	hostBootstrap := fetchSharedSpaceParticipantBootstrap(
+		t, handler, hostBootstrapPath, domain.MemberCredential.AuthorizationToken,
+		provisioning.InitialParticipantID,
+	)
+	memberBootstrap := fetchSharedSpaceParticipantBootstrap(
+		t, handler, memberBootstrapPath, memberToken, participantID,
+	)
+	if hostBootstrap.KeyGrant != nil || memberBootstrap.KeyGrant != nil ||
+		hostBootstrap.ManagedContentKey == nil || memberBootstrap.ManagedContentKey == nil ||
+		hostBootstrap.ManagedContentKey.KeyMaterial != memberBootstrap.ManagedContentKey.KeyMaterial ||
+		hostBootstrap.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch ||
+		memberBootstrap.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("managed bootstraps host=%+v member=%+v", hostBootstrap, memberBootstrap)
+	}
+	previousKeyMaterial := hostBootstrap.ManagedContentKey.KeyMaterial
+
+	revocation := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		SpaceID: spaceID, ParticipantID: participantID,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 1,
+	}
+	revoked := performRelayJSON(
+		t, handler, http.MethodPost,
+		spaceRoot+"/participants/"+participantID.String()+"/revocation",
+		revocation, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, revoked, http.StatusCreated)
+	_ = revoked.Body.Close()
+
+	rotatedHostBootstrap := fetchSharedSpaceParticipantBootstrap(
+		t, handler, hostBootstrapPath, domain.MemberCredential.AuthorizationToken,
+		provisioning.InitialParticipantID,
+	)
+	if rotatedHostBootstrap.ManagedContentKey == nil ||
+		rotatedHostBootstrap.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
+		rotatedHostBootstrap.ManagedContentKey.KeyMaterial == previousKeyMaterial ||
+		rotatedHostBootstrap.Status.BootstrapReady {
+		t.Fatalf("rotated host bootstrap=%+v", rotatedHostBootstrap)
+	}
+	revokedMemberBootstrap := performRelayJSON(
+		t, handler, http.MethodGet, memberBootstrapPath, nil, memberToken, participantID,
+	)
+	requireStatus(t, revokedMemberBootstrap, http.StatusConflict)
+	_ = revokedMemberBootstrap.Body.Close()
+}
+
+func fetchSharedSpaceParticipantBootstrap(
+	t *testing.T,
+	handler http.Handler,
+	path string,
+	token string,
+	participantID uuid.UUID,
+) sharedspaces.ParticipantBootstrap {
+	t.Helper()
+	response := performRelayJSON(t, handler, http.MethodGet, path, nil, token, participantID)
+	requireStatus(t, response, http.StatusOK)
+	var bootstrap sharedspaces.ParticipantBootstrap
+	if err := json.NewDecoder(response.Body).Decode(&bootstrap); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if err := bootstrap.Validate(); err != nil {
+		t.Fatalf("invalid participant bootstrap: %v", err)
+	}
+	return bootstrap
+}
+
 func sharedSpaceParticipantKeyGrant(
 	t *testing.T,
 	spaceID uuid.UUID,
