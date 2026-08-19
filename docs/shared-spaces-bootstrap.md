@@ -133,7 +133,12 @@ This vertical slice intentionally does not yet implement:
 - managed-mode content inspection or moderation policy;
 - billing, Stripe Connect, hosting entitlements, or identity verification;
 - Space-bound compute capabilities;
-- bounded history and production backup/restore for Shared Spaces.
+- a completed production backup/restore drill and retention policy.
 
 Those gates build on this authority lifecycle without changing the rule that
 all canonical content enters Facets through the standard FEF importer.
+
+The checked-in coordinated PostgreSQL/blob recovery workflow is documented in
+[Shared Spaces backup and restore](shared-spaces-backup-and-restore.md). Its
+source-level contracts are tested; an exact-image, fresh-host recovery drill is
+still required before production deployment.

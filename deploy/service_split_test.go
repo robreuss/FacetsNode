@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,57 @@ func TestServiceApplicationsHaveIndependentOperationalNamespaces(t *testing.T) {
 	}
 	if strings.Contains(sharedSpaces, "FACETS_DEVICE_SYNC_") {
 		t.Fatal("Shared Spaces Compose consumes Device Sync configuration")
+	}
+}
+
+func TestSharedSpacesOperationsUseOnlySharedSpacesAuthority(t *testing.T) {
+	backupCompose := readDeploymentFile(t, "shared-spaces/compose.backup.yaml")
+	backupScript := readDeploymentFile(t, "shared-spaces/scripts/backup-checkpoint.sh")
+	restoreScript := readDeploymentFile(t, "shared-spaces/scripts/restore-checkpoint.sh")
+
+	assertContainsAll(t, "Shared Spaces backup Compose", backupCompose, []string{
+		"--username=facets_shared_spaces",
+		"--dbname=facets_shared_spaces",
+		"FACETS_SHARED_SPACES_POSTGRES_PASSWORD:",
+		"FACETS_SHARED_SPACES_CHECKPOINT_REVISION:",
+		"facets-shared-spaces-blobs:/blobs:ro",
+		"FACETS_SHARED_SPACES_RUNTIME_UID:",
+	})
+	assertContainsAll(t, "Shared Spaces backup script", backupScript, []string{
+		"facets_shared_spaces_resolve_checkpoint_revision",
+		"--host facets-shared-spaces",
+		"--tag facets-shared-spaces-checkpoint",
+		"source Facets Shared Spaces Server did not become ready after checkpoint",
+	})
+	assertContainsAll(t, "Shared Spaces restore script", restoreScript, []string{
+		"target_project != facets-shared-spaces",
+		"${target_project}_facets-shared-spaces-${volume_name}",
+		"pg_isready -U facets_shared_spaces -d facets_shared_spaces",
+		"restored Facets Shared Spaces Server did not become ready",
+	})
+
+	for name, contents := range map[string]string{
+		"backup Compose": backupCompose,
+		"backup script":  backupScript,
+		"restore script": restoreScript,
+	} {
+		if strings.Contains(contents, "FACETS_DEVICE_SYNC_") ||
+			strings.Contains(contents, "facets-device-sync") {
+			t.Errorf("Shared Spaces %s references Device Sync deployment authority", name)
+		}
+	}
+}
+
+func TestSharedSpacesOperationsScriptsParse(t *testing.T) {
+	for _, path := range []string{
+		"shared-spaces/scripts/revision-attestation.sh",
+		"shared-spaces/scripts/backup-checkpoint.sh",
+		"shared-spaces/scripts/restore-checkpoint.sh",
+	} {
+		command := exec.Command("bash", "-n", path)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Errorf("bash -n %s: %v\n%s", path, err, output)
+		}
 	}
 }
 

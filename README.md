@@ -41,7 +41,8 @@ revoke participants atomically.
 - Resumable content-addressed encrypted blob uploads
 - Opaque checkpoint fences, staging, activation, and bounded collection
 - Fixed-surface traffic controls, redacted structured logs, health, and metrics
-- Coordinated PostgreSQL/blob backup and fresh-project restore for Device Sync
+- Independent coordinated PostgreSQL/blob backup and fresh-project restore for
+  Device Sync and Shared Spaces
 - Cross-language Swift/Go transport fixtures
 
 Current relay limits are 16 MiB of decoded ciphertext per message, 256 MiB per
@@ -142,12 +143,11 @@ does not pass the deployment gate.
 
 ## Backup and restore
 
-The checked-in operations profile currently targets the root Device Sync
-Compose application. PostgreSQL metadata and opaque blob bytes are one recovery
-unit. The scripts create an encrypted Restic checkpoint and restore only into a
-fresh Compose project; see [backup and restore](docs/backup-and-restore.md).
-Shared Spaces requires an equivalent independent operations profile before its
-deployment can be considered recoverable.
+Each service has an independent operations profile because PostgreSQL metadata
+and opaque blob bytes form a service-specific recovery unit. The scripts create
+encrypted Restic checkpoints and restore only into fresh Compose projects. See
+[Device Sync backup and restore](docs/backup-and-restore.md) and
+[Shared Spaces backup and restore](docs/shared-spaces-backup-and-restore.md).
 
 ## Security boundary
 
