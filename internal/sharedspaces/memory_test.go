@@ -121,6 +121,10 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID:    invitation.ParticipantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{*testParticipantKeyGrant(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID,
+			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, 1_400,
+		)},
 	}
 	revoked, err := store.RevokeParticipant(ctx, admin, revocation, 1_400)
 	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
@@ -129,6 +133,12 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if revoked.PreviousKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		revoked.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("revocation did not rotate key epoch: %+v", revoked)
+	}
+	hostGrant, err := store.GetParticipantKeyGrant(ctx, hostCredential, 1_401)
+	if err != nil || hostGrant.ParticipantID != provisioning.InitialParticipantID ||
+		hostGrant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
+		hostGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("host key grant=%+v err=%v", hostGrant, err)
 	}
 	revokedRetry, err := store.RevokeParticipant(ctx, admin, revocation, 1_500)
 	if err != nil || revokedRetry.Acceptance != relay.AcceptanceDuplicate {
@@ -408,6 +418,66 @@ func TestMemoryStoreRejectsCrossSpaceAuthorityAndInitialHostRevocation(t *testin
 	}
 	if _, err := store.RevokeParticipant(ctx, admin, revocation, 3_200); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInitialHost) {
 		t.Fatalf("initial host revocation err=%v", err)
+	}
+}
+
+func TestMemoryStoreRejectsIncompleteE2EERevocationWithoutChangingAuthority(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 5_000, sharedspaces.SecurityModeE2EE)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 5_000); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, hostCredential, admin,
+		sharedspaces.InitialKeyEpoch, 5_050,
+	)
+	invitation, invitationCredential := testInvitation(
+		t, provisioning, admin, 5_100, sharedspaces.RoleParticipant,
+	)
+	if _, err := store.CreateInvitation(ctx, admin, invitation, 5_100); err != nil {
+		t.Fatal(err)
+	}
+	memberCredential := relay.Credential{
+		TenantID: invitation.SpaceID, DomainID: invitation.RelayAdmission.DomainID,
+		MemberID: invitation.ParticipantID, Token: testToken(0x71),
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimInvitation(ctx, invitationCredential, sharedspaces.InvitationClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: invitation.ParticipantID, AuthorizationDigest: memberDigest,
+		},
+		ClaimedAtMilliseconds: 5_200,
+	}, 5_200); err != nil {
+		t.Fatal(err)
+	}
+
+	incomplete := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID:    invitation.ParticipantID,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 1,
+	}
+	if _, err := store.RevokeParticipant(ctx, admin, incomplete, 5_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("incomplete revocation err=%v", err)
+	}
+	status, err := store.GetSpaceStatus(ctx, admin)
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
+		t.Fatalf("authority changed after rejected revocation status=%+v err=%v", status, err)
+	}
+	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, 5_301); err != nil {
+		t.Fatalf("member authority changed after rejected revocation: %v", err)
 	}
 }
 

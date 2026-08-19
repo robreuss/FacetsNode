@@ -166,6 +166,11 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		invitationStates[cancelledInvitation.InvitationID].CancelledAtMilliseconds == nil {
 		t.Fatalf("invitation list=%+v", invitationList)
 	}
+	memberKeyGrant, err := store.GetParticipantKeyGrant(ctx, memberCredential, now+210)
+	if err != nil || memberKeyGrant.KeyGrant.ParticipantID != invitation.ParticipantID ||
+		memberKeyGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("member key grant=%+v err=%v", memberKeyGrant, err)
+	}
 	demotion := sharedspaces.ParticipantRoleChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleParticipant,
@@ -202,6 +207,10 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: invitation.SpaceID, ParticipantID: invitation.ParticipantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{*postgresParticipantKeyGrant(
+			t, invitation.SpaceID, provisioning.InitialParticipantID,
+			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, now+300,
+		)},
 	}
 	revoked, err := store.RevokeParticipant(ctx, admin, revocation, now+300)
 	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
@@ -210,6 +219,11 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	revokedRetry, err := store.RevokeParticipant(ctx, admin, revocation, now+301)
 	if err != nil || revokedRetry.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("revoke retry=%+v err=%v", revokedRetry, err)
+	}
+	hostKeyGrant, err := store.GetParticipantKeyGrant(ctx, hostCredential, now+301)
+	if err != nil || hostKeyGrant.KeyGrant.ParticipantID != provisioning.InitialParticipantID ||
+		hostKeyGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("host key grant=%+v err=%v", hostKeyGrant, err)
 	}
 	status, err = store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
@@ -227,7 +241,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 
 	var participantCount, relayMemberCount, revokedSubscriptionCount int
-	var cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount int
+	var cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount, keyGrantCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			(SELECT count(*) FROM shared_space_participants
@@ -241,21 +255,24 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 			(SELECT count(*) FROM relay_member_admissions
 			 WHERE tenant_id=$1 AND domain_id=$4 AND admission_id=$6 AND revoked_at_milliseconds=$7),
 			(SELECT count(*) FROM relay_subscriptions
-			 WHERE tenant_id=$1 AND domain_id=$4 AND subscription_id=$8 AND status='revoked')
+			 WHERE tenant_id=$1 AND domain_id=$4 AND subscription_id=$8 AND status='revoked'),
+			(SELECT count(*) FROM shared_space_participant_key_grants
+			 WHERE space_id=$1)
 	`, invitation.SpaceID, invitation.ParticipantID, revoked.RevokedAtMilliseconds,
 		admin.DomainID, invitation.SubscriptionID, cancelledInvitation.InvitationID,
 		cancellation.CancelledAtMilliseconds, cancelledInvitation.SubscriptionID).Scan(
 		&participantCount, &relayMemberCount, &revokedSubscriptionCount,
-		&cancellationCount, &revokedAdmissionCount, &cancelledSubscriptionCount,
+		&cancellationCount, &revokedAdmissionCount, &cancelledSubscriptionCount, &keyGrantCount,
 	); err != nil {
 		t.Fatal(err)
 	}
 	if participantCount != 1 || relayMemberCount != 1 || revokedSubscriptionCount != 1 ||
-		cancellationCount != 1 || revokedAdmissionCount != 1 || cancelledSubscriptionCount != 1 {
+		cancellationCount != 1 || revokedAdmissionCount != 1 || cancelledSubscriptionCount != 1 ||
+		keyGrantCount != 2 {
 		t.Fatalf(
-			"product=%d member=%d subscription=%d cancellation=%d admission=%d cancelled subscription=%d",
+			"product=%d member=%d subscription=%d cancellation=%d admission=%d cancelled subscription=%d key grants=%d",
 			participantCount, relayMemberCount, revokedSubscriptionCount,
-			cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount,
+			cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount, keyGrantCount,
 		)
 	}
 }

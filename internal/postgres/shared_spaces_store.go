@@ -385,9 +385,19 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	if err := json.Unmarshal(payload, &invitation); err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("decode Shared Space invitation: %w", err)
 	}
-	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, claim.SpaceID)
-	if err != nil {
-		return sharedspaces.InvitationClaimResult{}, err
+	var currentKeyEpoch uint64
+	var securityMode sharedspaces.SecurityMode
+	if err := tx.QueryRow(ctx, `
+		SELECT current_key_epoch,security_mode
+		FROM shared_spaces
+		WHERE space_id=$1
+		FOR UPDATE
+	`, claim.SpaceID).Scan(&currentKeyEpoch, &securityMode); err == pgx.ErrNoRows {
+		return sharedspaces.InvitationClaimResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	} else if err != nil {
+		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("load Shared Space invitation claim authority: %w", err)
 	}
 
 	if claimedAt != nil && claimedMemberID != nil {
@@ -415,12 +425,6 @@ func (s *SharedSpacesStore) ClaimInvitation(
 			},
 		}, nil
 	}
-	var securityMode sharedspaces.SecurityMode
-	if err := tx.QueryRow(ctx, `
-		SELECT security_mode FROM shared_spaces WHERE space_id=$1
-	`, claim.SpaceID).Scan(&securityMode); err != nil {
-		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("load Shared Space security mode: %w", err)
-	}
 	if err := invitation.ValidateKeyGrant(securityMode, currentKeyEpoch); err != nil {
 		return sharedspaces.InvitationClaimResult{}, err
 	}
@@ -440,6 +444,11 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	}
 	if err := insertSharedSpaceParticipant(ctx, tx, participant); err != nil {
 		return sharedspaces.InvitationClaimResult{}, err
+	}
+	if invitation.KeyGrant != nil {
+		if err := insertSharedSpaceParticipantKeyGrant(ctx, tx, *invitation.KeyGrant); err != nil {
+			return sharedspaces.InvitationClaimResult{}, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE shared_space_invitations
@@ -888,9 +897,19 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		&existingNextKeyEpoch, &existingRevokedAt,
 	)
 	if err == nil {
-		if existingVersion != revocation.Version || existingParticipantID != revocation.ParticipantID ||
-			existingPreviousKeyEpoch != revocation.PreviousKeyEpoch ||
-			existingNextKeyEpoch != revocation.NextKeyEpoch {
+		existingKeyGrants, err := loadSharedSpaceParticipantKeyGrants(
+			ctx, tx, revocation.SpaceID, existingNextKeyEpoch,
+		)
+		if err != nil {
+			return sharedspaces.ParticipantRevocationResult{}, err
+		}
+		existing := sharedspaces.ParticipantRevocation{
+			Version: existingVersion, RetryID: revocation.RetryID,
+			SpaceID: revocation.SpaceID, ParticipantID: existingParticipantID,
+			PreviousKeyEpoch: existingPreviousKeyEpoch, NextKeyEpoch: existingNextKeyEpoch,
+			KeyGrants: existingKeyGrants,
+		}
+		if !existing.Equivalent(revocation) {
 			return sharedspaces.ParticipantRevocationResult{}, sharedspaces.NewProtocolError(
 				sharedspaces.CodeParticipantCollision, "participant revocation retry ID was reused",
 			)
@@ -959,6 +978,15 @@ func (s *SharedSpacesStore) RevokeParticipant(
 			sharedspaces.CodeParticipantRevoked, "participant relay authority is already revoked",
 		)
 	}
+	participants, err := loadSharedSpaceParticipants(ctx, tx, revocation.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, err
+	}
+	if err := revocation.ValidateKeyGrants(
+		provisioning.SecurityMode, participants, nowMilliseconds,
+	); err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, err
+	}
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE relay_members
@@ -991,6 +1019,11 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		nowMilliseconds); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("revoke Shared Space participant: %w", err)
 	}
+	for _, grant := range revocation.KeyGrants {
+		if err := insertSharedSpaceParticipantKeyGrant(ctx, tx, grant); err != nil {
+			return sharedspaces.ParticipantRevocationResult{}, err
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE shared_spaces
 		SET current_key_epoch=$2
@@ -1017,6 +1050,95 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		PreviousKeyEpoch: revocation.PreviousKeyEpoch, CurrentKeyEpoch: revocation.NextKeyEpoch,
 		RevokedAtMilliseconds: nowMilliseconds,
 	}, nil
+}
+
+func (s *SharedSpacesStore) GetParticipantKeyGrant(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) (sharedspaces.ParticipantKeyGrantResult, error) {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+		return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant key grant credential scope is invalid",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return sharedspaces.ParticipantKeyGrantResult{}, fmt.Errorf("begin Shared Space participant key grant fetch: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var domainID uuid.UUID
+	var securityMode sharedspaces.SecurityMode
+	var currentKeyEpoch uint64
+	if err := tx.QueryRow(ctx, `
+		SELECT domain_id,security_mode,current_key_epoch
+		FROM shared_spaces
+		WHERE space_id=$1
+	`, credential.TenantID).Scan(&domainID, &securityMode, &currentKeyEpoch); err == pgx.ErrNoRows {
+		return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	} else if err != nil {
+		return sharedspaces.ParticipantKeyGrantResult{}, fmt.Errorf("load Shared Space participant key grant authority: %w", err)
+	}
+	if credential.DomainID != domainID {
+		return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant key grant belongs to another Shared Space",
+		)
+	}
+	participant, err := loadSharedSpaceParticipant(
+		ctx, tx, credential.TenantID, credential.MemberID, "",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantKeyGrantResult{}, err
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	member, found, err := loadRelayMember(
+		ctx, tx, credential.TenantID, domainID, credential.MemberID, "",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantKeyGrantResult{}, err
+	}
+	if !found {
+		return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantNotFound, "participant relay member was not found",
+		)
+	}
+	if err := member.VerifyCredential(credential, nowMilliseconds); err != nil {
+		return sharedspaces.ParticipantKeyGrantResult{}, err
+	}
+	if securityMode != sharedspaces.SecurityModeE2EE {
+		return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeKeyGrantNotFound, "managed Shared Spaces do not have participant key grants",
+		)
+	}
+	grants, err := loadSharedSpaceParticipantKeyGrants(
+		ctx, tx, credential.TenantID, currentKeyEpoch,
+	)
+	if err != nil {
+		return sharedspaces.ParticipantKeyGrantResult{}, err
+	}
+	for _, grant := range grants {
+		if grant.ParticipantID != credential.MemberID {
+			continue
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return sharedspaces.ParticipantKeyGrantResult{}, fmt.Errorf("commit Shared Space participant key grant fetch: %w", err)
+		}
+		return sharedspaces.ParticipantKeyGrantResult{
+			Version: sharedspaces.SchemaVersion, SpaceID: credential.TenantID,
+			ParticipantID: credential.MemberID, CurrentKeyEpoch: currentKeyEpoch,
+			KeyGrant: grant,
+		}, nil
+	}
+	return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
+		sharedspaces.CodeKeyGrantNotFound, "current participant key grant was not found",
+	)
 }
 
 func (s *SharedSpacesStore) PublishEnvelope(
@@ -1288,4 +1410,66 @@ func loadSharedSpaceParticipants(
 		return participants[left].ParticipantID.String() < participants[right].ParticipantID.String()
 	})
 	return participants, nil
+}
+
+func insertSharedSpaceParticipantKeyGrant(
+	ctx context.Context,
+	tx pgx.Tx,
+	grant sharedspaces.ParticipantKeyGrant,
+) error {
+	payload, err := json.Marshal(grant)
+	if err != nil {
+		return fmt.Errorf("encode Shared Space participant key grant: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_participant_key_grants (
+			space_id,key_epoch,participant_id,issuer_participant_id,
+			version,grant_payload,created_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+	`, grant.SpaceID, grant.KeyEpoch, grant.ParticipantID,
+		grant.IssuerParticipantID, grant.Version, payload,
+		grant.CreatedAtMilliseconds); err != nil {
+		return fmt.Errorf("insert Shared Space participant key grant: %w", err)
+	}
+	return nil
+}
+
+func loadSharedSpaceParticipantKeyGrants(
+	ctx context.Context,
+	querier relayQuerier,
+	spaceID uuid.UUID,
+	keyEpoch uint64,
+) ([]sharedspaces.ParticipantKeyGrant, error) {
+	rows, err := querier.Query(ctx, `
+		SELECT grant_payload
+		FROM shared_space_participant_key_grants
+		WHERE space_id=$1 AND key_epoch=$2
+		ORDER BY participant_id
+	`, spaceID, keyEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("query Shared Space participant key grants: %w", err)
+	}
+	defer rows.Close()
+	grants := []sharedspaces.ParticipantKeyGrant{}
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("scan Shared Space participant key grant: %w", err)
+		}
+		var grant sharedspaces.ParticipantKeyGrant
+		if err := json.Unmarshal(payload, &grant); err != nil {
+			return nil, fmt.Errorf("decode Shared Space participant key grant: %w", err)
+		}
+		if err := grant.Validate(); err != nil {
+			return nil, fmt.Errorf("stored Shared Space participant key grant failed validation: %v", err)
+		}
+		if grant.SpaceID != spaceID || grant.KeyEpoch != keyEpoch {
+			return nil, fmt.Errorf("stored Shared Space participant key grant scope differs")
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate Shared Space participant key grants: %w", err)
+	}
+	return grants, nil
 }

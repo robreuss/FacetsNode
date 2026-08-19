@@ -15,6 +15,7 @@ type Store interface {
 	GetSpaceStatus(context.Context, relay.AdministrationCredential) (SpaceStatus, error)
 	ChangeParticipantRole(context.Context, relay.AdministrationCredential, ParticipantRoleChange, int64) (ParticipantRoleChangeResult, error)
 	RevokeParticipant(context.Context, relay.AdministrationCredential, ParticipantRevocation, int64) (ParticipantRevocationResult, error)
+	GetParticipantKeyGrant(context.Context, relay.Credential, int64) (ParticipantKeyGrantResult, error)
 	PublishEnvelope(context.Context, relay.Credential, relay.Envelope, int64) (relay.PublishResult, error)
 	StageCheckpoint(context.Context, relay.Credential, relay.CheckpointCandidate, int64) (relay.CheckpointStageResponse, error)
 	ActivateCheckpoint(context.Context, relay.AdministrationCredential, relay.CheckpointActivationRequest, int64) (relay.CheckpointActivationResponse, error)

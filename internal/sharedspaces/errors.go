@@ -26,6 +26,7 @@ const (
 	CodeUnauthorized                    ErrorCode = "shared_space_unauthorized"
 	CodeWrongScope                      ErrorCode = "shared_space_wrong_scope"
 	CodeWrongKeyEpoch                   ErrorCode = "shared_space_wrong_key_epoch"
+	CodeKeyGrantNotFound                ErrorCode = "shared_space_key_grant_not_found"
 	CodeBootstrapNotReady               ErrorCode = "shared_space_bootstrap_not_ready"
 )
 

@@ -196,6 +196,26 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, claimRetry, http.StatusOK)
 	_ = claimRetry.Body.Close()
+	keyGrantPath := spaceRoot + "/participants/" + participantID.String() + "/key-grant"
+	currentMemberGrantResponse := performRelayJSON(
+		t, handler, http.MethodGet, keyGrantPath, nil, memberToken, participantID,
+	)
+	requireStatus(t, currentMemberGrantResponse, http.StatusOK)
+	var currentMemberGrant sharedspaces.ParticipantKeyGrantResult
+	if err := json.NewDecoder(currentMemberGrantResponse.Body).Decode(&currentMemberGrant); err != nil {
+		t.Fatal(err)
+	}
+	_ = currentMemberGrantResponse.Body.Close()
+	if currentMemberGrant.KeyGrant.ParticipantID != participantID ||
+		currentMemberGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("member key grant=%+v", currentMemberGrant)
+	}
+	wrongMemberGrantResponse := performRelayJSON(
+		t, handler, http.MethodGet, keyGrantPath, nil,
+		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
+	)
+	requireStatus(t, wrongMemberGrantResponse, http.StatusBadRequest)
+	_ = wrongMemberGrantResponse.Body.Close()
 
 	invitationListResponse := performRelayJSON(
 		t, handler, http.MethodGet, spaceRoot+"/invitations", nil,
@@ -283,6 +303,10 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: spaceID, ParticipantID: participantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{*sharedSpaceParticipantKeyGrant(
+			t, spaceID, provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+			sharedspaces.InitialKeyEpoch+1, nowMilliseconds,
+		)},
 	}
 	revoked := performRelayJSON(
 		t, handler, http.MethodPost,
@@ -298,6 +322,21 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	if revokedResult.PreviousKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		revokedResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("revoked=%+v", revokedResult)
+	}
+	hostKeyGrantPath := spaceRoot + "/participants/" + provisioning.InitialParticipantID.String() + "/key-grant"
+	currentHostGrantResponse := performRelayJSON(
+		t, handler, http.MethodGet, hostKeyGrantPath, nil,
+		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
+	)
+	requireStatus(t, currentHostGrantResponse, http.StatusOK)
+	var currentHostGrant sharedspaces.ParticipantKeyGrantResult
+	if err := json.NewDecoder(currentHostGrantResponse.Body).Decode(&currentHostGrant); err != nil {
+		t.Fatal(err)
+	}
+	_ = currentHostGrantResponse.Body.Close()
+	if currentHostGrant.KeyGrant.ParticipantID != provisioning.InitialParticipantID ||
+		currentHostGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("host key grant=%+v", currentHostGrant)
 	}
 	staleEnvelope := relay.Envelope{
 		Version: relay.SchemaVersion, Algorithm: relay.EnvelopeAlgorithm,

@@ -424,12 +424,13 @@ type InvitationList struct {
 }
 
 type ParticipantRevocation struct {
-	Version          int       `json:"version"`
-	RetryID          uuid.UUID `json:"retryID"`
-	SpaceID          uuid.UUID `json:"spaceID"`
-	ParticipantID    uuid.UUID `json:"participantID"`
-	PreviousKeyEpoch uint64    `json:"previousKeyEpoch"`
-	NextKeyEpoch     uint64    `json:"nextKeyEpoch"`
+	Version          int                   `json:"version"`
+	RetryID          uuid.UUID             `json:"retryID"`
+	SpaceID          uuid.UUID             `json:"spaceID"`
+	ParticipantID    uuid.UUID             `json:"participantID"`
+	PreviousKeyEpoch uint64                `json:"previousKeyEpoch"`
+	NextKeyEpoch     uint64                `json:"nextKeyEpoch"`
+	KeyGrants        []ParticipantKeyGrant `json:"keyGrants,omitempty"`
 }
 
 func (r ParticipantRevocation) Validate() error {
@@ -441,6 +442,95 @@ func (r ParticipantRevocation) Validate() error {
 	return nil
 }
 
+// ValidateKeyGrants enforces an atomic E2EE epoch rotation. A revocation may
+// advance the Space epoch only when every participant that remains active has
+// one valid opaque grant for the next epoch. The server validates authority
+// and coverage without learning the wrapped content key.
+func (r ParticipantRevocation) ValidateKeyGrants(
+	mode SecurityMode,
+	participants []Participant,
+	nowMilliseconds int64,
+) error {
+	if mode == SecurityModeManaged {
+		if len(r.KeyGrants) != 0 {
+			return NewProtocolError(CodeInvalidParticipant, "managed Shared Space revocations cannot carry E2EE key grants")
+		}
+		return nil
+	}
+	if mode != SecurityModeE2EE {
+		return NewProtocolError(CodeInvalidSpace, "Shared Space security mode is invalid")
+	}
+
+	active := make(map[uuid.UUID]Participant)
+	authorizedIssuers := make(map[uuid.UUID]struct{})
+	for _, participant := range participants {
+		if participant.SpaceID != r.SpaceID {
+			return NewProtocolError(CodeWrongScope, "Shared Space participant belongs to another Space")
+		}
+		if participant.RevokedAtMilliseconds != nil || participant.ParticipantID == r.ParticipantID {
+			continue
+		}
+		active[participant.ParticipantID] = participant
+		if participant.Role == RoleHost || participant.Role == RoleModerator {
+			authorizedIssuers[participant.ParticipantID] = struct{}{}
+		}
+	}
+	if len(r.KeyGrants) != len(active) {
+		return NewProtocolError(CodeInvalidParticipant, "E2EE participant revocation does not grant the next key epoch to every remaining participant")
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(r.KeyGrants))
+	for _, grant := range r.KeyGrants {
+		if err := grant.Validate(); err != nil {
+			return err
+		}
+		if grant.SpaceID != r.SpaceID || grant.ParticipantID == r.ParticipantID {
+			return NewProtocolError(CodeWrongScope, "Shared Space revocation key grant scope differs")
+		}
+		if grant.KeyEpoch != r.NextKeyEpoch {
+			return NewProtocolError(CodeWrongKeyEpoch, "Shared Space revocation key grant is not for the next key epoch")
+		}
+		if grant.CreatedAtMilliseconds > nowMilliseconds {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space revocation key grant was created in the future")
+		}
+		if _, found := active[grant.ParticipantID]; !found {
+			return NewProtocolError(CodeWrongScope, "Shared Space revocation key grant targets an inactive participant")
+		}
+		if _, found := authorizedIssuers[grant.IssuerParticipantID]; !found {
+			return NewProtocolError(CodeUnauthorized, "Shared Space revocation key grant issuer is not an active host or moderator")
+		}
+		if _, found := seen[grant.ParticipantID]; found {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space revocation contains duplicate participant key grants")
+		}
+		seen[grant.ParticipantID] = struct{}{}
+	}
+	return nil
+}
+
+// Equivalent compares a retry request independently of grant ordering. A
+// caller may safely resend the same atomic rotation with canonical or original
+// participant order without creating a retry collision.
+func (r ParticipantRevocation) Equivalent(other ParticipantRevocation) bool {
+	if r.Version != other.Version || r.RetryID != other.RetryID || r.SpaceID != other.SpaceID ||
+		r.ParticipantID != other.ParticipantID || r.PreviousKeyEpoch != other.PreviousKeyEpoch ||
+		r.NextKeyEpoch != other.NextKeyEpoch || len(r.KeyGrants) != len(other.KeyGrants) {
+		return false
+	}
+	grants := make(map[uuid.UUID]ParticipantKeyGrant, len(r.KeyGrants))
+	for _, grant := range r.KeyGrants {
+		if _, found := grants[grant.ParticipantID]; found {
+			return false
+		}
+		grants[grant.ParticipantID] = grant
+	}
+	for _, grant := range other.KeyGrants {
+		if existing, found := grants[grant.ParticipantID]; !found || existing != grant {
+			return false
+		}
+	}
+	return true
+}
+
 type ParticipantRevocationResult struct {
 	Acceptance            relay.Acceptance `json:"acceptance"`
 	RetryID               uuid.UUID        `json:"retryID"`
@@ -449,6 +539,14 @@ type ParticipantRevocationResult struct {
 	PreviousKeyEpoch      uint64           `json:"previousKeyEpoch"`
 	CurrentKeyEpoch       uint64           `json:"currentKeyEpoch"`
 	RevokedAtMilliseconds int64            `json:"revokedAtMilliseconds"`
+}
+
+type ParticipantKeyGrantResult struct {
+	Version         int                 `json:"version"`
+	SpaceID         uuid.UUID           `json:"spaceID"`
+	ParticipantID   uuid.UUID           `json:"participantID"`
+	CurrentKeyEpoch uint64              `json:"currentKeyEpoch"`
+	KeyGrant        ParticipantKeyGrant `json:"keyGrant"`
 }
 
 type ParticipantRoleChange struct {

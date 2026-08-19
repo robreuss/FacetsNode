@@ -367,6 +367,11 @@ func (s *Server) Handler() http.Handler {
 			traffic.SurfaceManagement,
 			s.handleRevokeSharedSpaceParticipant,
 		)
+		register(
+			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/key-grant",
+			traffic.SurfaceManagement,
+			s.handleGetSharedSpaceParticipantKeyGrant,
+		)
 	}
 	return s.securityHeaders(s.requestLog(mux))
 }
@@ -592,7 +597,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			case sharedspaces.CodeUnauthorized:
 				status = http.StatusUnauthorized
 			case sharedspaces.CodeSpaceNotFound, sharedspaces.CodeInvitationNotFound,
-				sharedspaces.CodeParticipantNotFound:
+				sharedspaces.CodeParticipantNotFound, sharedspaces.CodeKeyGrantNotFound:
 				status = http.StatusNotFound
 			case sharedspaces.CodeInvitationCancelled:
 				status = http.StatusGone

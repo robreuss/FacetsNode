@@ -86,3 +86,53 @@ func TestParticipantRevocationRejectsInvalidKeyEpochTransition(t *testing.T) {
 		t.Fatalf("invalid key epoch transition err=%v", err)
 	}
 }
+
+func TestParticipantRevocationRequiresCompleteE2EEGrantSet(t *testing.T) {
+	_, provisioning, _ := testSpaceProvisioning(t, 3_000, sharedspaces.SecurityModeE2EE)
+	participantID := uuid.New()
+	participants := []sharedspaces.Participant{
+		{
+			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+			ParticipantID: provisioning.InitialParticipantID,
+			Kind:          sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+			CreatedAtMilliseconds: 3_000,
+		},
+		{
+			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+			ParticipantID: participantID, Kind: sharedspaces.ParticipantPerson,
+			Role: sharedspaces.RoleParticipant, CreatedAtMilliseconds: 3_100,
+		},
+	}
+	revocation := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: participantID, PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+	}
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeE2EE, participants, 3_200,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("missing grant set err=%v", err)
+	}
+	hostGrant := testParticipantKeyGrant(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		provisioning.InitialParticipantID, revocation.NextKeyEpoch, 3_200,
+	)
+	revocation.KeyGrants = []sharedspaces.ParticipantKeyGrant{*hostGrant}
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeE2EE, participants, 3_200,
+	); err != nil {
+		t.Fatalf("complete grant set err=%v", err)
+	}
+	revocation.KeyGrants = append(revocation.KeyGrants, *hostGrant)
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeE2EE, participants, 3_200,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("duplicate grant recipient err=%v", err)
+	}
+	revocation.KeyGrants = []sharedspaces.ParticipantKeyGrant{*hostGrant}
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeManaged, participants, 3_200,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("managed grant set err=%v", err)
+	}
+}

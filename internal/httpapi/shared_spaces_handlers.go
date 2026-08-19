@@ -366,6 +366,38 @@ func (s *Server) handleRevokeSharedSpaceParticipant(writer http.ResponseWriter, 
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
+func (s *Server) handleGetSharedSpaceParticipantKeyGrant(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	participantID, err := parseSharedSpacesUUID(request.PathValue("participantID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if credential.MemberID != participantID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "Shared Space participant key grant path and credential differ",
+		))
+		return
+	}
+	result, err := s.sharedSpacesStore.GetParticipantKeyGrant(
+		request.Context(), credential, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func readSharedSpacesJSON(writer http.ResponseWriter, request *http.Request, destination any) error {
 	return decodeJSONWithLimit(
 		writer, request, destination, maximumRequestByteCount,

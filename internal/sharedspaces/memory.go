@@ -15,6 +15,7 @@ type memorySpace struct {
 	provisioning          SpaceProvisioning
 	result                relay.TenantProvisioningResult
 	participants          map[uuid.UUID]Participant
+	keyGrants             map[uint64]map[uuid.UUID]ParticipantKeyGrant
 	keyEpoch              uint64
 	activeCheckpointEpoch uint64
 }
@@ -97,6 +98,7 @@ func (s *MemoryStore) ProvisionSpace(
 	space := &memorySpace{
 		provisioning: provisioning, result: relayResult,
 		participants: map[uuid.UUID]Participant{participant.ParticipantID: participant},
+		keyGrants:    make(map[uint64]map[uuid.UUID]ParticipantKeyGrant),
 		keyEpoch:     InitialKeyEpoch,
 	}
 	s.spaces[provisioning.SpaceID] = space
@@ -247,6 +249,12 @@ func (s *MemoryStore) ClaimInvitation(
 		Role: record.invitation.Role, CreatedAtMilliseconds: nowMilliseconds,
 	}
 	space.participants[participant.ParticipantID] = participant
+	if record.invitation.KeyGrant != nil {
+		if space.keyGrants[space.keyEpoch] == nil {
+			space.keyGrants[space.keyEpoch] = make(map[uuid.UUID]ParticipantKeyGrant)
+		}
+		space.keyGrants[space.keyEpoch][participant.ParticipantID] = *record.invitation.KeyGrant
+	}
 	result := InvitationClaimResult{
 		Acceptance: relayResult.Acceptance, CurrentKeyEpoch: space.keyEpoch,
 		KeyGrant: record.invitation.KeyGrant, Participant: participant, Member: relayResult.Member,
@@ -509,7 +517,7 @@ func (s *MemoryStore) RevokeParticipant(
 		return ParticipantRevocationResult{}, NewProtocolError(CodeInitialHost, "initial host cannot be revoked")
 	}
 	if existing, found := s.revocationResponses[revocation.RetryID]; found {
-		if s.revocationRequests[revocation.RetryID] == revocation {
+		if s.revocationRequests[revocation.RetryID].Equivalent(revocation) {
 			existing.Acceptance = relay.AcceptanceDuplicate
 			return existing, nil
 		}
@@ -525,6 +533,15 @@ func (s *MemoryStore) RevokeParticipant(
 	if participant.RevokedAtMilliseconds != nil {
 		return ParticipantRevocationResult{}, NewProtocolError(CodeParticipantRevoked, "participant is already revoked")
 	}
+	participants := make([]Participant, 0, len(space.participants))
+	for _, candidate := range space.participants {
+		participants = append(participants, candidate)
+	}
+	if err := revocation.ValidateKeyGrants(
+		space.provisioning.SecurityMode, participants, nowMilliseconds,
+	); err != nil {
+		return ParticipantRevocationResult{}, err
+	}
 	acceptance, err := s.relay.RevokeMember(ctx, credential, revocation.ParticipantID, nowMilliseconds)
 	if err != nil {
 		return ParticipantRevocationResult{}, err
@@ -532,6 +549,12 @@ func (s *MemoryStore) RevokeParticipant(
 	participant.RevokedAtMilliseconds = &nowMilliseconds
 	space.participants[participant.ParticipantID] = participant
 	space.keyEpoch = revocation.NextKeyEpoch
+	if len(revocation.KeyGrants) > 0 {
+		space.keyGrants[revocation.NextKeyEpoch] = make(map[uuid.UUID]ParticipantKeyGrant, len(revocation.KeyGrants))
+		for _, grant := range revocation.KeyGrants {
+			space.keyGrants[revocation.NextKeyEpoch][grant.ParticipantID] = grant
+		}
+	}
 	result := ParticipantRevocationResult{
 		Acceptance: acceptance, RetryID: revocation.RetryID, SpaceID: revocation.SpaceID,
 		ParticipantID:         revocation.ParticipantID,
@@ -542,6 +565,47 @@ func (s *MemoryStore) RevokeParticipant(
 	s.revocationRequests[revocation.RetryID] = revocation
 	s.revocationResponses[revocation.RetryID] = result
 	return result, nil
+}
+
+func (s *MemoryStore) GetParticipantKeyGrant(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) (ParticipantKeyGrantResult, error) {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+		return ParticipantKeyGrantResult{}, NewProtocolError(CodeWrongScope, "participant key grant credential scope is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return ParticipantKeyGrantResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ParticipantKeyGrantResult{}, NewProtocolError(CodeWrongScope, "participant key grant belongs to another Shared Space")
+	}
+	participant, found := space.participants[credential.MemberID]
+	if !found {
+		return ParticipantKeyGrantResult{}, NewProtocolError(CodeParticipantNotFound, "participant was not found")
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ParticipantKeyGrantResult{}, NewProtocolError(CodeParticipantRevoked, "participant is revoked")
+	}
+	if space.provisioning.SecurityMode != SecurityModeE2EE {
+		return ParticipantKeyGrantResult{}, NewProtocolError(CodeKeyGrantNotFound, "managed Shared Spaces do not have participant key grants")
+	}
+	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {
+		return ParticipantKeyGrantResult{}, err
+	}
+	grant, found := space.keyGrants[space.keyEpoch][credential.MemberID]
+	if !found {
+		return ParticipantKeyGrantResult{}, NewProtocolError(CodeKeyGrantNotFound, "current participant key grant was not found")
+	}
+	return ParticipantKeyGrantResult{
+		Version: SchemaVersion, SpaceID: credential.TenantID,
+		ParticipantID: credential.MemberID, CurrentKeyEpoch: space.keyEpoch,
+		KeyGrant: grant,
+	}, nil
 }
 
 func (s *MemoryStore) PublishEnvelope(
