@@ -2,7 +2,12 @@ package integration_test
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"os"
 	"strings"
@@ -36,6 +41,7 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	provisioning := liveSharedSpaceProvisioningInput{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: spaceID, SecurityMode: sharedspaces.SecurityModeE2EE,
+		InteractionMode:      sharedspaces.InteractionModeCollaborative,
 		InitialParticipantID: hostID, InitialParticipantKind: sharedspaces.ParticipantPerson,
 		TenantProvisioning: liveRelayTenantProvisioningRequest{
 			Version: relay.SchemaVersion, RetryID: uuid.New(),
@@ -53,6 +59,7 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	var createdResult sharedspaces.SpaceProvisioningResult
 	decodeLiveJSON(t, created, &createdResult)
 	if createdResult.SpaceID != spaceID ||
+		createdResult.InteractionMode != sharedspaces.InteractionModeCollaborative ||
 		createdResult.InitialParticipant.ParticipantID != hostID ||
 		createdResult.InitialParticipant.Role != sharedspaces.RoleHost ||
 		createdResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
@@ -70,12 +77,16 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		ParticipantID: participantID, SubscriptionID: uuid.New(),
 		Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleReader,
+		InteractionMode: sharedspaces.InteractionModeCollaborative,
 		InvitationCredential: liveSharedSpaceInvitationCredential{
 			InvitationID: invitationID, AuthorizationToken: invitationToken,
 		},
 		ExpiresAtMilliseconds: now + int64(time.Hour/time.Millisecond),
 		CreatedAtMilliseconds: now,
 	}
+	invitation.KeyGrant = liveSharedSpaceParticipantKeyGrant(
+		t, spaceID, participantID, hostID, sharedspaces.InitialKeyEpoch, now,
+	)
 	spaceRoot := baseURL + "/v1/shared-spaces/" + spaceID.String() +
 		"/domains/" + domainID.String()
 	relayRoot := baseURL + "/v1/relay/tenants/" + spaceID.String() +
@@ -115,6 +126,7 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	var status sharedspaces.SpaceStatus
 	decodeLiveJSON(t, statusResponse, &status)
 	if status.SpaceID != spaceID || len(status.Participants) != 2 ||
+		status.InteractionMode != sharedspaces.InteractionModeCollaborative ||
 		status.Relay.ActiveSubscriptionCount != 2 ||
 		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch || !status.BootstrapReady ||
 		status.ActiveCheckpointEpoch == nil || *status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch {
@@ -160,6 +172,9 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: spaceID, ParticipantID: participantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{*liveSharedSpaceParticipantKeyGrant(
+			t, spaceID, hostID, hostID, sharedspaces.InitialKeyEpoch+1, now,
+		)},
 	}
 	revokedResponse := requestRelayJSON(
 		t, client, http.MethodPost,
@@ -250,6 +265,7 @@ type liveSharedSpaceProvisioningInput struct {
 	RetryID                uuid.UUID                          `json:"retryID"`
 	SpaceID                uuid.UUID                          `json:"spaceID"`
 	SecurityMode           sharedspaces.SecurityMode          `json:"securityMode"`
+	InteractionMode        sharedspaces.InteractionMode       `json:"interactionMode"`
 	InitialParticipantID   uuid.UUID                          `json:"initialParticipantID"`
 	InitialParticipantKind sharedspaces.ParticipantKind       `json:"initialParticipantKind"`
 	TenantProvisioning     liveRelayTenantProvisioningRequest `json:"tenantProvisioning"`
@@ -267,10 +283,60 @@ type liveSharedSpaceInvitationCreateInput struct {
 	SubscriptionID              uuid.UUID                           `json:"subscriptionID"`
 	Kind                        sharedspaces.ParticipantKind        `json:"kind"`
 	Role                        sharedspaces.Role                   `json:"role"`
+	InteractionMode             sharedspaces.InteractionMode        `json:"interactionMode"`
+	KeyGrant                    *sharedspaces.ParticipantKeyGrant   `json:"keyGrant,omitempty"`
 	InvitationCredential        liveSharedSpaceInvitationCredential `json:"invitationCredential"`
 	ExpiresAtMilliseconds       int64                               `json:"expiresAtMilliseconds"`
 	MemberExpiresAtMilliseconds *int64                              `json:"memberExpiresAtMilliseconds,omitempty"`
 	CreatedAtMilliseconds       int64                               `json:"createdAtMilliseconds"`
+}
+
+func liveSharedSpaceParticipantKeyGrant(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	issuerParticipantID uuid.UUID,
+	keyEpoch uint64,
+	now int64,
+) *sharedspaces.ParticipantKeyGrant {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
+	signingFingerprint := sha256.Sum256(publicKey)
+	recipientFingerprint := sha256.Sum256([]byte("live recipient agreement key"))
+	grant := sharedspaces.ParticipantKeyGrant{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
+		ParticipantID: participantID, IssuerParticipantID: issuerParticipantID,
+		KeyEpoch: keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
+		RecipientAgreementKeyFingerprint: hex.EncodeToString(recipientFingerprint[:]),
+		EphemeralAgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
+		Nonce:                            base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
+		Ciphertext:                       base64.RawURLEncoding.EncodeToString([]byte("opaque wrapped content key")),
+		AuthenticationTag:                base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+		CreatedAtMilliseconds:            now,
+		Signature: sharedspaces.ParticipantKeyGrantSignature{
+			Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
+			SigningKeyFingerprint: hex.EncodeToString(signingFingerprint[:]),
+		},
+	}
+	payload, err := grant.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return &grant
 }
 
 type liveSharedSpaceInvitationClaimInput struct {

@@ -36,6 +36,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		RetryID:                uuid.New(),
 		SpaceID:                spaceID,
 		SecurityMode:           sharedspaces.SecurityModeE2EE,
+		InteractionMode:        sharedspaces.InteractionModeCollaborative,
 		InitialParticipantID:   domain.MemberCredential.MemberID,
 		InitialParticipantKind: sharedspaces.ParticipantPerson,
 		TenantProvisioning: newRelayTenantProvisioningRequest(
@@ -55,6 +56,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	_ = created.Body.Close()
 	if createdResult.Acceptance != relay.AcceptanceAccepted ||
 		createdResult.InitialParticipant.Role != sharedspaces.RoleHost ||
+		createdResult.InteractionMode != sharedspaces.InteractionModeCollaborative ||
 		createdResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("created=%+v", createdResult)
 	}
@@ -70,12 +72,13 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	subscriptionID := uuid.New()
 	invitationToken := relayTestToken(0x51)
 	invitation := sharedSpaceInvitationCreateInput{
-		Version:        sharedspaces.SchemaVersion,
-		RetryID:        uuid.New(),
-		ParticipantID:  participantID,
-		SubscriptionID: subscriptionID,
-		Kind:           sharedspaces.ParticipantPerson,
-		Role:           sharedspaces.RoleReader,
+		Version:         sharedspaces.SchemaVersion,
+		RetryID:         uuid.New(),
+		ParticipantID:   participantID,
+		SubscriptionID:  subscriptionID,
+		Kind:            sharedspaces.ParticipantPerson,
+		Role:            sharedspaces.RoleReader,
+		InteractionMode: provisioning.InteractionMode,
 		InvitationCredential: sharedSpaceInvitationCredential{
 			InvitationID:       invitationID,
 			AuthorizationToken: invitationToken,
@@ -102,6 +105,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		ParticipantID: cancelledParticipantID, SubscriptionID: uuid.New(),
 		Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleReader,
+		InteractionMode: provisioning.InteractionMode,
 		InvitationCredential: sharedSpaceInvitationCredential{
 			InvitationID: cancelledInvitationID, AuthorizationToken: cancelledToken,
 		},
@@ -163,7 +167,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	}
 	_ = issued.Body.Close()
 	if issuedResult.Invitation.Role != sharedspaces.RoleReader ||
-		len(issuedResult.Invitation.RelayAdmission.Capabilities) != len(sharedspaces.RoleReader.Capabilities()) {
+		issuedResult.Invitation.InteractionMode != provisioning.InteractionMode ||
+		len(issuedResult.Invitation.RelayAdmission.Capabilities) != len(sharedspaces.RoleReader.Capabilities(provisioning.InteractionMode)) {
 		t.Fatalf("issued=%+v", issuedResult)
 	}
 
@@ -232,6 +237,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		states[status.InvitationID] = status
 	}
 	if len(states) != 2 || states[invitationID].State != sharedspaces.InvitationClaimed ||
+		states[invitationID].InteractionMode != provisioning.InteractionMode ||
 		states[invitationID].ClaimedAtMilliseconds == nil ||
 		states[cancelledInvitationID].State != sharedspaces.InvitationCancelled ||
 		states[cancelledInvitationID].CancelledAtMilliseconds == nil {
@@ -292,10 +298,16 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		t.Fatal(err)
 	}
 	_ = statusResponse.Body.Close()
+	participantRoles := map[uuid.UUID]sharedspaces.Role{}
+	for _, participant := range status.Participants {
+		participantRoles[participant.ParticipantID] = participant.Role
+	}
 	if len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 ||
+		status.InteractionMode != provisioning.InteractionMode ||
 		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch || !status.BootstrapReady ||
 		status.ActiveCheckpointEpoch == nil || *status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
-		status.Participants[1].Role != sharedspaces.RoleReader {
+		participantRoles[participantID] != sharedspaces.RoleReader ||
+		participantRoles[provisioning.InitialParticipantID] != sharedspaces.RoleHost {
 		t.Fatalf("status=%+v", status)
 	}
 

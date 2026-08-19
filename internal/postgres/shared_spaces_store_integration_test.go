@@ -304,7 +304,9 @@ func postgresSharedSpaceProvisioning(
 	}
 	provisioning := sharedspaces.SpaceProvisioning{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
-		SecurityMode: sharedspaces.SecurityModeE2EE, InitialParticipantID: hostID,
+		SecurityMode:           sharedspaces.SecurityModeE2EE,
+		InteractionMode:        sharedspaces.InteractionModeCollaborative,
+		InitialParticipantID:   hostID,
 		InitialParticipantKind: sharedspaces.ParticipantPerson,
 		Tenant: relay.TenantRegistration{
 			Version: relay.SchemaVersion, RetryID: uuid.New(), TenantID: spaceID,
@@ -335,7 +337,8 @@ func postgresSharedSpaceProvisioning(
 		InitialMember: relay.MemberRegistration{
 			Version: relay.SchemaVersion, TenantID: spaceID, DomainID: domainID,
 			MemberID: hostID, AuthorizationDigest: hostDigest,
-			Capabilities: sharedspaces.RoleHost.Capabilities(), CreatedAtMilliseconds: now,
+			Capabilities:          sharedspaces.RoleHost.Capabilities(provisioning.InteractionMode),
+			CreatedAtMilliseconds: now,
 		},
 	}
 	return provisioning, admin
@@ -364,11 +367,11 @@ func postgresSharedSpaceInvitation(
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: space.SpaceID,
 		InvitationID: invitationID, ParticipantID: uuid.New(), SubscriptionID: uuid.New(),
 		Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleParticipant,
-		CreatedAtMilliseconds: now,
+		InteractionMode: space.InteractionMode, CreatedAtMilliseconds: now,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: space.SpaceID, DomainID: admin.DomainID,
 			AdmissionID: invitationID, AuthorizationDigest: digest,
-			Capabilities:          sharedspaces.RoleParticipant.Capabilities(),
+			Capabilities:          sharedspaces.RoleParticipant.Capabilities(space.InteractionMode),
 			CreatedAtMilliseconds: now, ExpiresAtMilliseconds: now + 60*60*1_000,
 		},
 	}

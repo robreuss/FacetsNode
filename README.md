@@ -56,8 +56,11 @@ content keys never pass through the operator credential or account admission.
 
 The first Shared Spaces authority lifecycle is specified in
 [the Shared Spaces bootstrap contract](docs/shared-spaces-bootstrap.md).
-Participant roles authorize relay operations only; E2EE content keys remain a
-client concern and never pass through the Shared Spaces operator credential.
+Immutable interaction modes and participant roles derive relay operations.
+For E2EE Spaces, the service atomically stores participant-specific encrypted
+key grants and advances key epochs on revocation, but plaintext content keys
+remain a client concern and never pass through the Shared Spaces operator
+credential.
 
 ## Development
 

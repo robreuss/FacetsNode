@@ -15,6 +15,7 @@ type sharedSpaceProvisioningInput struct {
 	RetryID                uuid.UUID                    `json:"retryID"`
 	SpaceID                uuid.UUID                    `json:"spaceID"`
 	SecurityMode           sharedspaces.SecurityMode    `json:"securityMode"`
+	InteractionMode        sharedspaces.InteractionMode `json:"interactionMode"`
 	InitialParticipantID   uuid.UUID                    `json:"initialParticipantID"`
 	InitialParticipantKind sharedspaces.ParticipantKind `json:"initialParticipantKind"`
 	TenantProvisioning     relayTenantProvisioningInput `json:"tenantProvisioning"`
@@ -32,6 +33,7 @@ type sharedSpaceInvitationCreateInput struct {
 	SubscriptionID              uuid.UUID                         `json:"subscriptionID"`
 	Kind                        sharedspaces.ParticipantKind      `json:"kind"`
 	Role                        sharedspaces.Role                 `json:"role"`
+	InteractionMode             sharedspaces.InteractionMode      `json:"interactionMode"`
 	KeyGrant                    *sharedspaces.ParticipantKeyGrant `json:"keyGrant,omitempty"`
 	InvitationCredential        sharedSpaceInvitationCredential   `json:"invitationCredential"`
 	ExpiresAtMilliseconds       int64                             `json:"expiresAtMilliseconds"`
@@ -70,6 +72,7 @@ func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request 
 	provisioning := sharedspaces.SpaceProvisioning{
 		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
 		SpaceID: input.SpaceID, SecurityMode: input.SecurityMode,
+		InteractionMode:        input.InteractionMode,
 		InitialParticipantID:   input.InitialParticipantID,
 		InitialParticipantKind: input.InitialParticipantKind,
 		Tenant:                 tenant, Domain: domain,
@@ -143,12 +146,13 @@ func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, r
 		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
 		SpaceID: spaceID, InvitationID: invitationCredential.AdmissionID,
 		ParticipantID: input.ParticipantID, SubscriptionID: input.SubscriptionID,
-		Kind: input.Kind, Role: input.Role, KeyGrant: input.KeyGrant,
+		Kind: input.Kind, Role: input.Role, InteractionMode: input.InteractionMode,
+		KeyGrant: input.KeyGrant,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: spaceID, DomainID: domainID,
 			AdmissionID:                 invitationCredential.AdmissionID,
 			AuthorizationDigest:         authorizationDigest,
-			Capabilities:                input.Role.Capabilities(),
+			Capabilities:                input.Role.Capabilities(input.InteractionMode),
 			CreatedAtMilliseconds:       input.CreatedAtMilliseconds,
 			ExpiresAtMilliseconds:       input.ExpiresAtMilliseconds,
 			MemberExpiresAtMilliseconds: input.MemberExpiresAtMilliseconds,

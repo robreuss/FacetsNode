@@ -35,6 +35,27 @@ func (m SecurityMode) Valid() bool {
 	return m == SecurityModeE2EE || m == SecurityModeManaged
 }
 
+// InteractionMode defines which participant roles may publish into a Shared
+// Space. It is immutable for the lifetime of a v1 Space. Relay capabilities
+// are derived from this mode and a participant role rather than accepted as
+// caller-selected authority.
+type InteractionMode string
+
+const (
+	InteractionModeBroadcast     InteractionMode = "broadcast"
+	InteractionModeCommunity     InteractionMode = "community"
+	InteractionModeCollaborative InteractionMode = "collaborative"
+)
+
+func (m InteractionMode) Valid() bool {
+	switch m {
+	case InteractionModeBroadcast, InteractionModeCommunity, InteractionModeCollaborative:
+		return true
+	default:
+		return false
+	}
+}
+
 type ParticipantKind string
 
 const (
@@ -64,23 +85,35 @@ func (r Role) Valid() bool {
 	}
 }
 
-func (r Role) Capabilities() []relay.Capability {
+func (r Role) Capabilities(mode InteractionMode) []relay.Capability {
+	readCapabilities := []relay.Capability{
+		relay.CapabilityAcknowledgeMessage,
+		relay.CapabilityFetchBlob,
+		relay.CapabilityFetchMessage,
+	}
+	allCapabilities := append([]relay.Capability{}, readCapabilities...)
+	allCapabilities = append(allCapabilities,
+		relay.CapabilityPublishBlob,
+		relay.CapabilityPublishCheckpoint,
+		relay.CapabilityPublishMessage,
+	)
+
 	var capabilities []relay.Capability
-	if r == RoleReader {
-		capabilities = []relay.Capability{
-			relay.CapabilityAcknowledgeMessage,
-			relay.CapabilityFetchBlob,
-			relay.CapabilityFetchMessage,
-		}
-	} else {
-		capabilities = []relay.Capability{
-			relay.CapabilityAcknowledgeMessage,
-			relay.CapabilityFetchBlob,
-			relay.CapabilityFetchMessage,
+	switch {
+	case !r.Valid() || !mode.Valid():
+		return nil
+	case r == RoleHost || r == RoleModerator:
+		capabilities = allCapabilities
+	case r == RoleReader || mode == InteractionModeBroadcast:
+		capabilities = readCapabilities
+	case mode == InteractionModeCommunity:
+		capabilities = append([]relay.Capability{}, readCapabilities...)
+		capabilities = append(capabilities,
 			relay.CapabilityPublishBlob,
-			relay.CapabilityPublishCheckpoint,
 			relay.CapabilityPublishMessage,
-		}
+		)
+	case mode == InteractionModeCollaborative:
+		capabilities = allCapabilities
 	}
 	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
 	return capabilities
@@ -91,6 +124,7 @@ type SpaceProvisioning struct {
 	RetryID                uuid.UUID                `json:"retryID"`
 	SpaceID                uuid.UUID                `json:"spaceID"`
 	SecurityMode           SecurityMode             `json:"securityMode"`
+	InteractionMode        InteractionMode          `json:"interactionMode"`
 	InitialParticipantID   uuid.UUID                `json:"initialParticipantID"`
 	InitialParticipantKind ParticipantKind          `json:"initialParticipantKind"`
 	Tenant                 relay.TenantRegistration `json:"tenant"`
@@ -100,7 +134,7 @@ type SpaceProvisioning struct {
 
 func (p SpaceProvisioning) Validate() error {
 	if p.Version != SchemaVersion || p.RetryID == uuid.Nil || p.SpaceID == uuid.Nil ||
-		!p.SecurityMode.Valid() || p.InitialParticipantID == uuid.Nil ||
+		!p.SecurityMode.Valid() || !p.InteractionMode.Valid() || p.InitialParticipantID == uuid.Nil ||
 		!p.InitialParticipantKind.Valid() || p.CreatedAtMilliseconds < 0 {
 		return NewProtocolError(CodeInvalidSpace, "Shared Space provisioning fields are invalid")
 	}
@@ -117,7 +151,7 @@ func (p SpaceProvisioning) Validate() error {
 		p.CreatedAtMilliseconds != p.Domain.Registration.CreatedAtMilliseconds {
 		return NewProtocolError(CodeWrongScope, "Shared Space, relay tenant, domain, and initial host scopes differ")
 	}
-	if !sameCapabilities(p.Domain.InitialMember.Capabilities, RoleHost.Capabilities()) {
+	if !sameCapabilities(p.Domain.InitialMember.Capabilities, RoleHost.Capabilities(p.InteractionMode)) {
 		return NewProtocolError(CodeWrongScope, "initial host relay capabilities are invalid")
 	}
 	return nil
@@ -149,6 +183,7 @@ type SpaceProvisioningResult struct {
 	RetryID            uuid.UUID                      `json:"retryID"`
 	SpaceID            uuid.UUID                      `json:"spaceID"`
 	SecurityMode       SecurityMode                   `json:"securityMode"`
+	InteractionMode    InteractionMode                `json:"interactionMode"`
 	CurrentKeyEpoch    uint64                         `json:"currentKeyEpoch"`
 	InitialParticipant Participant                    `json:"initialParticipant"`
 	Relay              relay.TenantProvisioningResult `json:"relay"`
@@ -163,6 +198,7 @@ type Invitation struct {
 	SubscriptionID        uuid.UUID             `json:"subscriptionID"`
 	Kind                  ParticipantKind       `json:"kind"`
 	Role                  Role                  `json:"role"`
+	InteractionMode       InteractionMode       `json:"interactionMode"`
 	KeyGrant              *ParticipantKeyGrant  `json:"keyGrant,omitempty"`
 	RelayAdmission        relay.MemberAdmission `json:"relayAdmission"`
 	CreatedAtMilliseconds int64                 `json:"createdAtMilliseconds"`
@@ -171,7 +207,7 @@ type Invitation struct {
 func (i Invitation) Validate() error {
 	if i.Version != SchemaVersion || i.RetryID == uuid.Nil || i.SpaceID == uuid.Nil ||
 		i.InvitationID == uuid.Nil || i.ParticipantID == uuid.Nil || i.SubscriptionID == uuid.Nil ||
-		!i.Kind.Valid() || !i.Role.Valid() || i.CreatedAtMilliseconds < 0 {
+		!i.Kind.Valid() || !i.Role.Valid() || !i.InteractionMode.Valid() || i.CreatedAtMilliseconds < 0 {
 		return NewProtocolError(CodeInvalidInvitation, "Shared Space invitation fields are invalid")
 	}
 	if err := i.RelayAdmission.Validate(); err != nil {
@@ -186,7 +222,7 @@ func (i Invitation) Validate() error {
 		i.CreatedAtMilliseconds != i.RelayAdmission.CreatedAtMilliseconds ||
 		i.RelayAdmission.ClaimedAtMilliseconds != nil || i.RelayAdmission.ClaimedMemberID != nil ||
 		i.RelayAdmission.RevokedAtMilliseconds != nil ||
-		!sameCapabilities(i.RelayAdmission.Capabilities, i.Role.Capabilities()) {
+		!sameCapabilities(i.RelayAdmission.Capabilities, i.Role.Capabilities(i.InteractionMode)) {
 		return NewProtocolError(CodeWrongScope, "Shared Space invitation and relay admission scopes differ")
 	}
 	return nil
@@ -410,6 +446,7 @@ type InvitationStatus struct {
 	SubscriptionID          uuid.UUID       `json:"subscriptionID"`
 	Kind                    ParticipantKind `json:"kind"`
 	Role                    Role            `json:"role"`
+	InteractionMode         InteractionMode `json:"interactionMode"`
 	State                   InvitationState `json:"state"`
 	CreatedAtMilliseconds   int64           `json:"createdAtMilliseconds"`
 	ExpiresAtMilliseconds   int64           `json:"expiresAtMilliseconds"`
@@ -582,6 +619,7 @@ type SpaceStatus struct {
 	Version               int                `json:"version"`
 	SpaceID               uuid.UUID          `json:"spaceID"`
 	SecurityMode          SecurityMode       `json:"securityMode"`
+	InteractionMode       InteractionMode    `json:"interactionMode"`
 	CurrentKeyEpoch       uint64             `json:"currentKeyEpoch"`
 	BootstrapReady        bool               `json:"bootstrapReady"`
 	ActiveCheckpointEpoch *uint64            `json:"activeCheckpointEpoch,omitempty"`

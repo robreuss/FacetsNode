@@ -265,6 +265,39 @@ func TestMemoryStoreCancelsUnclaimedInvitation(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRejectsInvitationForAnotherInteractionModeAtomically(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 2_700, sharedspaces.SecurityModeE2EE)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 2_700); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(t, ctx, relayStore, store, provisioning, hostCredential, admin, sharedspaces.InitialKeyEpoch, 2_750)
+
+	invitation, _ := testInvitation(t, provisioning, admin, 2_800, sharedspaces.RoleParticipant)
+	invitation.InteractionMode = sharedspaces.InteractionModeCommunity
+	invitation.RelayAdmission.Capabilities = invitation.Role.Capabilities(invitation.InteractionMode)
+	if err := invitation.Validate(); err != nil {
+		t.Fatalf("cross-mode invitation fixture: %v", err)
+	}
+	if _, err := store.CreateInvitation(ctx, admin, invitation, 2_800); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
+		t.Fatalf("cross-mode invitation err=%v", err)
+	}
+	listed, err := store.ListInvitations(ctx, admin, 2_800)
+	if err != nil || len(listed.Invitations) != 0 {
+		t.Fatalf("rejected invitation mutated authority state list=%+v err=%v", listed, err)
+	}
+	status, err := store.GetSpaceStatus(ctx, admin)
+	if err != nil || len(status.Participants) != 1 || status.Relay.ActiveSubscriptionCount != 1 {
+		t.Fatalf("rejected invitation mutated Space or relay status=%+v err=%v", status, err)
+	}
+}
+
 func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
@@ -510,7 +543,8 @@ func testSpaceProvisioning(
 	}
 	provisioning := sharedspaces.SpaceProvisioning{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
-		SecurityMode: mode, InitialParticipantID: hostID,
+		SecurityMode: mode, InteractionMode: sharedspaces.InteractionModeCollaborative,
+		InitialParticipantID:   hostID,
 		InitialParticipantKind: sharedspaces.ParticipantPerson,
 		Tenant: relay.TenantRegistration{
 			Version: relay.SchemaVersion, RetryID: uuid.New(), TenantID: spaceID,
@@ -541,7 +575,8 @@ func testSpaceProvisioning(
 		InitialMember: relay.MemberRegistration{
 			Version: relay.SchemaVersion, TenantID: spaceID, DomainID: domainID,
 			MemberID: hostID, AuthorizationDigest: hostDigest,
-			Capabilities: sharedspaces.RoleHost.Capabilities(), CreatedAtMilliseconds: now,
+			Capabilities:          sharedspaces.RoleHost.Capabilities(provisioning.InteractionMode),
+			CreatedAtMilliseconds: now,
 		},
 	}
 	return tenantCredential, provisioning, admin
@@ -586,11 +621,12 @@ func testInvitation(
 	invitation := sharedspaces.Invitation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: space.SpaceID,
 		InvitationID: invitationID, ParticipantID: uuid.New(), SubscriptionID: uuid.New(),
-		Kind: sharedspaces.ParticipantPerson, Role: role, CreatedAtMilliseconds: now,
+		Kind: sharedspaces.ParticipantPerson, Role: role,
+		InteractionMode: space.InteractionMode, CreatedAtMilliseconds: now,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: space.SpaceID, DomainID: admin.DomainID,
 			AdmissionID: invitationID, AuthorizationDigest: digest,
-			Capabilities: role.Capabilities(), CreatedAtMilliseconds: now,
+			Capabilities: role.Capabilities(space.InteractionMode), CreatedAtMilliseconds: now,
 			ExpiresAtMilliseconds: now + 60*60*1_000,
 		},
 	}

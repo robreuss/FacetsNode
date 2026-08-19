@@ -111,6 +111,7 @@ func spaceProvisioningResult(space *memorySpace, acceptance relay.Acceptance) Sp
 	return SpaceProvisioningResult{
 		Acceptance: acceptance, RetryID: space.provisioning.RetryID,
 		SpaceID: space.provisioning.SpaceID, SecurityMode: space.provisioning.SecurityMode,
+		InteractionMode:    space.provisioning.InteractionMode,
 		CurrentKeyEpoch:    space.keyEpoch,
 		InitialParticipant: initial, Relay: space.result,
 	}
@@ -139,6 +140,9 @@ func (s *MemoryStore) CreateInvitation(
 		credential.DomainID != space.provisioning.Domain.Registration.DomainID ||
 		invitation.RelayAdmission.DomainID != credential.DomainID {
 		return InvitationCreateResult{}, NewProtocolError(CodeWrongScope, "invitation belongs to another Shared Space")
+	}
+	if invitation.InteractionMode != space.provisioning.InteractionMode {
+		return InvitationCreateResult{}, NewProtocolError(CodeInvalidInvitation, "invitation interaction mode differs from its Shared Space")
 	}
 	if invitationID, found := s.invitationRetries[invitation.RetryID]; found {
 		existing := s.invitations[invitationID]
@@ -371,7 +375,7 @@ func (s *MemoryStore) ListInvitations(
 			Version: record.invitation.Version, SpaceID: record.invitation.SpaceID,
 			InvitationID: record.invitation.InvitationID, ParticipantID: record.invitation.ParticipantID,
 			SubscriptionID: record.invitation.SubscriptionID, Kind: record.invitation.Kind,
-			Role: record.invitation.Role, State: state,
+			Role: record.invitation.Role, InteractionMode: record.invitation.InteractionMode, State: state,
 			CreatedAtMilliseconds: record.invitation.CreatedAtMilliseconds,
 			ExpiresAtMilliseconds: record.invitation.RelayAdmission.ExpiresAtMilliseconds,
 			ClaimedAtMilliseconds: claimedAt, CancelledAtMilliseconds: cancelledAt,
@@ -415,6 +419,7 @@ func (s *MemoryStore) GetSpaceStatus(
 	return SpaceStatus{
 		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
 		SecurityMode:          space.provisioning.SecurityMode,
+		InteractionMode:       space.provisioning.InteractionMode,
 		CurrentKeyEpoch:       space.keyEpoch,
 		BootstrapReady:        space.activeCheckpointEpoch == space.keyEpoch,
 		ActiveCheckpointEpoch: activeCheckpointEpoch,
@@ -475,8 +480,8 @@ func (s *MemoryStore) ChangeParticipantRole(
 	}
 	relayResult, err := s.relay.ChangeMemberCapabilities(ctx, credential, relay.MemberCapabilityChange{
 		Version: relay.SchemaVersion, RetryID: change.RetryID, MemberID: change.ParticipantID,
-		PreviousCapabilities:  change.PreviousRole.Capabilities(),
-		NextCapabilities:      change.NextRole.Capabilities(),
+		PreviousCapabilities:  change.PreviousRole.Capabilities(space.provisioning.InteractionMode),
+		NextCapabilities:      change.NextRole.Capabilities(space.provisioning.InteractionMode),
 		ChangedAtMilliseconds: change.ChangedAtMilliseconds,
 	}, nowMilliseconds)
 	if err != nil {

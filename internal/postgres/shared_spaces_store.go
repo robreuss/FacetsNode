@@ -110,12 +110,13 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_spaces (
-			space_id,provisioning_retry_id,version,security_mode,domain_id,
+			space_id,provisioning_retry_id,version,security_mode,interaction_mode,domain_id,
 			initial_participant_id,initial_subscription_id,initial_participant_kind,
 			provisioning_payload,created_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 	`, provisioning.SpaceID, provisioning.RetryID, provisioning.Version,
-		string(provisioning.SecurityMode), provisioning.Domain.Registration.DomainID,
+		string(provisioning.SecurityMode), string(provisioning.InteractionMode),
+		provisioning.Domain.Registration.DomainID,
 		provisioning.InitialParticipantID, initial.SubscriptionID,
 		string(provisioning.InitialParticipantKind), payload,
 		provisioning.CreatedAtMilliseconds); err != nil {
@@ -130,6 +131,7 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	return sharedspaces.SpaceProvisioningResult{
 		Acceptance: relayResult.Acceptance, RetryID: provisioning.RetryID,
 		SpaceID: provisioning.SpaceID, SecurityMode: provisioning.SecurityMode,
+		InteractionMode:    provisioning.InteractionMode,
 		CurrentKeyEpoch:    sharedspaces.InitialKeyEpoch,
 		InitialParticipant: initial, Relay: relayResult,
 	}, nil
@@ -150,6 +152,7 @@ func postgresSharedSpaceProvisioningResult(
 	return sharedspaces.SpaceProvisioningResult{
 		Acceptance: acceptance, RetryID: provisioning.RetryID,
 		SpaceID: provisioning.SpaceID, SecurityMode: provisioning.SecurityMode,
+		InteractionMode:    provisioning.InteractionMode,
 		CurrentKeyEpoch:    currentKeyEpoch,
 		InitialParticipant: initial,
 		Relay:              postgresTenantProvisioningResult(provisioning.Tenant, provisioning.Domain, acceptance),
@@ -199,6 +202,12 @@ func (s *SharedSpacesStore) CreateInvitation(
 	if invitation.RelayAdmission.DomainID != domainID || credential.TenantID != invitation.SpaceID {
 		return sharedspaces.InvitationCreateResult{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeWrongScope, "invitation belongs to another Shared Space",
+		)
+	}
+	if invitation.InteractionMode != provisioning.InteractionMode {
+		return sharedspaces.InvitationCreateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidInvitation,
+			"invitation interaction mode differs from the Shared Space",
 		)
 	}
 
@@ -385,19 +394,29 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	if err := json.Unmarshal(payload, &invitation); err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("decode Shared Space invitation: %w", err)
 	}
+	if err := invitation.Validate(); err != nil {
+		return sharedspaces.InvitationClaimResult{}, err
+	}
 	var currentKeyEpoch uint64
 	var securityMode sharedspaces.SecurityMode
+	var interactionMode sharedspaces.InteractionMode
 	if err := tx.QueryRow(ctx, `
-		SELECT current_key_epoch,security_mode
+		SELECT current_key_epoch,security_mode,interaction_mode
 		FROM shared_spaces
 		WHERE space_id=$1
 		FOR UPDATE
-	`, claim.SpaceID).Scan(&currentKeyEpoch, &securityMode); err == pgx.ErrNoRows {
+	`, claim.SpaceID).Scan(&currentKeyEpoch, &securityMode, &interactionMode); err == pgx.ErrNoRows {
 		return sharedspaces.InvitationClaimResult{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
 		)
 	} else if err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("load Shared Space invitation claim authority: %w", err)
+	}
+	if invitation.InteractionMode != interactionMode {
+		return sharedspaces.InvitationClaimResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidInvitation,
+			"invitation interaction mode differs from the Shared Space",
+		)
 	}
 
 	if claimedAt != nil && claimedMemberID != nil {
@@ -656,7 +675,7 @@ func (s *SharedSpacesStore) ListInvitations(
 			Version: invitation.Version, SpaceID: invitation.SpaceID,
 			InvitationID: invitation.InvitationID, ParticipantID: invitation.ParticipantID,
 			SubscriptionID: invitation.SubscriptionID, Kind: invitation.Kind,
-			Role: invitation.Role, State: state,
+			Role: invitation.Role, InteractionMode: invitation.InteractionMode, State: state,
 			CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
 			ExpiresAtMilliseconds: invitation.RelayAdmission.ExpiresAtMilliseconds,
 			ClaimedAtMilliseconds: claimedAt, CancelledAtMilliseconds: cancelledAt,
@@ -721,7 +740,8 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	}
 	return sharedspaces.SpaceStatus{
 		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
-		SecurityMode: provisioning.SecurityMode, DomainID: domainID,
+		SecurityMode: provisioning.SecurityMode, InteractionMode: provisioning.InteractionMode,
+		DomainID:              domainID,
 		CurrentKeyEpoch:       currentKeyEpoch,
 		BootstrapReady:        activeCheckpointEpoch != nil && *activeCheckpointEpoch == currentKeyEpoch,
 		ActiveCheckpointEpoch: activeCheckpointEpoch,
@@ -815,8 +835,8 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 	if _, err := s.relay.changeMemberCapabilitiesInTransaction(
 		ctx, tx, credential, relay.MemberCapabilityChange{
 			Version: relay.SchemaVersion, RetryID: change.RetryID, MemberID: change.ParticipantID,
-			PreviousCapabilities:  change.PreviousRole.Capabilities(),
-			NextCapabilities:      change.NextRole.Capabilities(),
+			PreviousCapabilities:  change.PreviousRole.Capabilities(provisioning.InteractionMode),
+			NextCapabilities:      change.NextRole.Capabilities(provisioning.InteractionMode),
 			ChangedAtMilliseconds: change.ChangedAtMilliseconds,
 		}, nowMilliseconds,
 	); err != nil {
