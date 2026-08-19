@@ -185,6 +185,15 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		) {
 		t.Fatalf("member participant status=%+v err=%v", participantStatus, err)
 	}
+	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, now+212)
+	if err != nil || participantBootstrap.Status.Participant.ParticipantID != invitation.ParticipantID ||
+		participantBootstrap.Status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		participantBootstrap.KeyGrant == nil ||
+		participantBootstrap.KeyGrant.ParticipantID != invitation.ParticipantID ||
+		participantBootstrap.KeyGrant.CurrentKeyEpoch != participantBootstrap.Status.CurrentKeyEpoch ||
+		participantBootstrap.KeyGrant.KeyGrant.KeyEpoch != participantBootstrap.Status.CurrentKeyEpoch {
+		t.Fatalf("member participant bootstrap=%+v err=%v", participantBootstrap, err)
+	}
 	demotion := sharedspaces.ParticipantRoleChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleParticipant,
@@ -255,6 +264,9 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 	if _, err := store.GetParticipantStatus(ctx, memberCredential, now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked participant status err=%v", err)
+	}
+	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+		t.Fatalf("revoked participant bootstrap err=%v", err)
 	}
 	authorityEvents, err := store.ListAuthorityEvents(ctx, admin, 0, 100)
 	if err != nil || len(authorityEvents.Events) != 8 || authorityEvents.NextSequence == 0 {

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
@@ -97,6 +98,14 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		) {
 		t.Fatalf("participant status=%+v err=%v", participantStatus, err)
 	}
+	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, 1_301)
+	if err != nil || !reflect.DeepEqual(participantBootstrap.Status, participantStatus) ||
+		participantBootstrap.KeyGrant == nil ||
+		participantBootstrap.KeyGrant.ParticipantID != invitation.ParticipantID ||
+		participantBootstrap.KeyGrant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		participantBootstrap.KeyGrant.KeyGrant.KeyEpoch != participantBootstrap.Status.CurrentKeyEpoch {
+		t.Fatalf("participant bootstrap=%+v err=%v", participantBootstrap, err)
+	}
 	wrongStatusCredential := memberCredential
 	wrongStatusCredential.DomainID = uuid.New()
 	if _, err := store.GetParticipantStatus(ctx, wrongStatusCredential, 1_301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongScope) {
@@ -171,6 +180,9 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if _, err := store.GetParticipantStatus(ctx, memberCredential, 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked participant status err=%v", err)
 	}
+	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+		t.Fatalf("revoked participant bootstrap err=%v", err)
+	}
 	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
 		RetryID: uuid.New(), CheckpointID: stagedBeforeRotation.CheckpointID,
 		ActivatedAtMilliseconds: 1_500,
@@ -189,6 +201,12 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		hostStatus.Participant.ParticipantID != provisioning.InitialParticipantID ||
 		hostStatus.Participant.Role != sharedspaces.RoleHost {
 		t.Fatalf("host participant status awaiting rotated checkpoint=%+v err=%v", hostStatus, err)
+	}
+	hostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, 1_500)
+	if err != nil || !reflect.DeepEqual(hostBootstrap.Status, hostStatus) || hostBootstrap.KeyGrant == nil ||
+		hostBootstrap.KeyGrant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
+		hostBootstrap.KeyGrant.KeyGrant.KeyEpoch != hostBootstrap.Status.CurrentKeyEpoch {
+		t.Fatalf("host participant bootstrap awaiting rotated checkpoint=%+v err=%v", hostBootstrap, err)
 	}
 	staleCandidate := stagedBeforeRotation
 	staleCandidate.RetryID = uuid.New()
@@ -510,6 +528,10 @@ func TestMemoryStoreRejectsCrossSpaceAuthorityAndInitialHostRevocation(t *testin
 		participantStatus.BootstrapReady || participantStatus.ActiveCheckpointEpoch != nil ||
 		participantStatus.Participant.Role != sharedspaces.RoleHost {
 		t.Fatalf("managed participant status=%+v err=%v", participantStatus, err)
+	}
+	participantBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, 3_001)
+	if err != nil || !reflect.DeepEqual(participantBootstrap.Status, participantStatus) || participantBootstrap.KeyGrant != nil {
+		t.Fatalf("managed participant bootstrap=%+v err=%v", participantBootstrap, err)
 	}
 	invitation, _ := testInvitation(t, provisioning, admin, 3_100, sharedspaces.RoleReader)
 	wrong := admin

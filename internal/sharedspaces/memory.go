@@ -720,6 +720,66 @@ func (s *MemoryStore) GetParticipantStatus(
 	return status, nil
 }
 
+func (s *MemoryStore) GetParticipantBootstrap(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) (ParticipantBootstrap, error) {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+		return ParticipantBootstrap{}, NewProtocolError(CodeWrongScope, "participant bootstrap credential scope is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return ParticipantBootstrap{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ParticipantBootstrap{}, NewProtocolError(CodeWrongScope, "participant bootstrap belongs to another Shared Space")
+	}
+	participant, found := space.participants[credential.MemberID]
+	if !found {
+		return ParticipantBootstrap{}, NewProtocolError(CodeParticipantNotFound, "participant was not found")
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ParticipantBootstrap{}, NewProtocolError(CodeParticipantRevoked, "participant is revoked")
+	}
+	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {
+		return ParticipantBootstrap{}, err
+	}
+	var activeCheckpointEpoch *uint64
+	if space.activeCheckpointEpoch != 0 {
+		epoch := space.activeCheckpointEpoch
+		activeCheckpointEpoch = &epoch
+	}
+	status := ParticipantStatus{
+		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
+		DomainID: credential.DomainID, SecurityMode: space.provisioning.SecurityMode,
+		InteractionMode: space.provisioning.InteractionMode, CurrentKeyEpoch: space.keyEpoch,
+		BootstrapReady:        activeCheckpointEpoch != nil && *activeCheckpointEpoch == space.keyEpoch,
+		ActiveCheckpointEpoch: activeCheckpointEpoch,
+		Participant:           participant,
+		Capabilities:          participant.Role.Capabilities(space.provisioning.InteractionMode),
+		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
+	}
+	result := ParticipantBootstrap{Version: SchemaVersion, Status: status}
+	if space.provisioning.SecurityMode == SecurityModeE2EE {
+		grant, found := space.keyGrants[space.keyEpoch][credential.MemberID]
+		if !found {
+			return ParticipantBootstrap{}, NewProtocolError(CodeKeyGrantNotFound, "current participant key grant was not found")
+		}
+		result.KeyGrant = &ParticipantKeyGrantResult{
+			Version: SchemaVersion, SpaceID: credential.TenantID,
+			ParticipantID: credential.MemberID, CurrentKeyEpoch: space.keyEpoch,
+			KeyGrant: grant,
+		}
+	}
+	if err := result.Validate(); err != nil {
+		return ParticipantBootstrap{}, err
+	}
+	return result, nil
+}
+
 func (s *MemoryStore) GetParticipantKeyGrant(
 	ctx context.Context,
 	credential relay.Credential,

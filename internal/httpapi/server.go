@@ -378,6 +378,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleGetSharedSpaceParticipantStatus,
 		)
 		register(
+			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/bootstrap",
+			traffic.SurfaceManagement,
+			s.handleGetSharedSpaceParticipantBootstrap,
+		)
+		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/key-grant",
 			traffic.SurfaceManagement,
 			s.handleGetSharedSpaceParticipantKeyGrant,

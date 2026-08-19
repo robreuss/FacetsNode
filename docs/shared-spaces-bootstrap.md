@@ -129,7 +129,18 @@ or manufacture a missing one.
 
 ## Participant recovery status
 
-An active participant can recover its current authority view after relaunch at:
+An active participant should recover its complete current bootstrap authority
+after relaunch with one atomic request at:
+
+`GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/bootstrap`
+
+The response contains the participant status described below and, for an E2EE
+Space, the caller's opaque current key grant from the exact same repeatable-read
+snapshot. Managed Spaces omit the key-grant field. This prevents a key rotation
+from producing a status for one epoch and a separately fetched grant for
+another. The server still cannot decrypt the grant or any Space content.
+
+The status-only projection remains available at:
 
 `GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/status`
 
@@ -138,8 +149,9 @@ identifier must equal the participant in the path. The response contains the
 immutable Space security and interaction modes, current key epoch, bootstrap
 readiness, active checkpoint epoch, the caller's own participant record, and
 the exact relay capabilities derived from the caller's current role. It works
-for both E2EE and managed Spaces; E2EE key ciphertext remains available only
-through the separate current-key-grant endpoint.
+for both E2EE and managed Spaces. The separate current-key-grant endpoint is
+retained for a focused key refresh, but clients should use the atomic bootstrap
+endpoint for relaunch and recovery.
 
 This participant-scoped response never exposes the roster, other participants,
 invitations, administration authority, bearer tokens, FEF content, or content

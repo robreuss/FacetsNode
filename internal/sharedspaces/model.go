@@ -717,6 +717,44 @@ func (s ParticipantStatus) Validate() error {
 	return nil
 }
 
+// ParticipantBootstrap is an atomic participant-scoped recovery snapshot. An
+// E2EE Space includes the caller's opaque grant for the same key epoch reported
+// by Status. Managed Spaces omit KeyGrant because the server owns their content
+// policy and no participant content-key grant exists.
+type ParticipantBootstrap struct {
+	Version  int                        `json:"version"`
+	Status   ParticipantStatus          `json:"status"`
+	KeyGrant *ParticipantKeyGrantResult `json:"keyGrant,omitempty"`
+}
+
+func (b ParticipantBootstrap) Validate() error {
+	if b.Version != SchemaVersion {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant bootstrap version is invalid")
+	}
+	if err := b.Status.Validate(); err != nil {
+		return err
+	}
+	if b.Status.SecurityMode == SecurityModeManaged {
+		if b.KeyGrant != nil {
+			return NewProtocolError(CodeInvalidParticipant, "managed Shared Space participant bootstrap has a key grant")
+		}
+		return nil
+	}
+	if b.KeyGrant == nil || b.KeyGrant.Version != SchemaVersion ||
+		b.KeyGrant.SpaceID != b.Status.SpaceID ||
+		b.KeyGrant.ParticipantID != b.Status.Participant.ParticipantID ||
+		b.KeyGrant.CurrentKeyEpoch != b.Status.CurrentKeyEpoch ||
+		b.KeyGrant.KeyGrant.SpaceID != b.Status.SpaceID ||
+		b.KeyGrant.KeyGrant.ParticipantID != b.Status.Participant.ParticipantID ||
+		b.KeyGrant.KeyGrant.KeyEpoch != b.Status.CurrentKeyEpoch {
+		return NewProtocolError(CodeInvalidParticipant, "E2EE Shared Space participant bootstrap key grant is inconsistent")
+	}
+	if err := b.KeyGrant.KeyGrant.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
 type ParticipantRoleChange struct {
 	Version               int       `json:"version"`
 	RetryID               uuid.UUID `json:"retryID"`

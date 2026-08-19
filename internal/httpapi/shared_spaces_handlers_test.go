@@ -311,12 +311,36 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		) {
 		t.Fatalf("participant status=%+v", participantStatus)
 	}
+	participantBootstrapPath := spaceRoot + "/participants/" + participantID.String() + "/bootstrap"
+	participantBootstrapResponse := performRelayJSON(
+		t, handler, http.MethodGet, participantBootstrapPath, nil, memberToken, participantID,
+	)
+	requireStatus(t, participantBootstrapResponse, http.StatusOK)
+	var participantBootstrap sharedspaces.ParticipantBootstrap
+	if err := json.NewDecoder(participantBootstrapResponse.Body).Decode(&participantBootstrap); err != nil {
+		t.Fatal(err)
+	}
+	_ = participantBootstrapResponse.Body.Close()
+	if participantBootstrap.Status.Participant.ParticipantID != participantID ||
+		participantBootstrap.Status.Participant.Role != sharedspaces.RoleReader ||
+		participantBootstrap.KeyGrant == nil ||
+		participantBootstrap.KeyGrant.ParticipantID != participantID ||
+		participantBootstrap.KeyGrant.CurrentKeyEpoch != participantBootstrap.Status.CurrentKeyEpoch ||
+		participantBootstrap.KeyGrant.KeyGrant.KeyEpoch != participantBootstrap.Status.CurrentKeyEpoch {
+		t.Fatalf("participant bootstrap=%+v", participantBootstrap)
+	}
 	wrongParticipantStatusResponse := performRelayJSON(
 		t, handler, http.MethodGet, participantStatusPath, nil,
 		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
 	)
 	requireStatus(t, wrongParticipantStatusResponse, http.StatusBadRequest)
 	_ = wrongParticipantStatusResponse.Body.Close()
+	wrongParticipantBootstrapResponse := performRelayJSON(
+		t, handler, http.MethodGet, participantBootstrapPath, nil,
+		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
+	)
+	requireStatus(t, wrongParticipantBootstrapResponse, http.StatusBadRequest)
+	_ = wrongParticipantBootstrapResponse.Body.Close()
 
 	statusPath := spaceRoot + "/status"
 	statusResponse := performRelayJSON(
@@ -371,6 +395,11 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, revokedParticipantStatusResponse, http.StatusConflict)
 	_ = revokedParticipantStatusResponse.Body.Close()
+	revokedParticipantBootstrapResponse := performRelayJSON(
+		t, handler, http.MethodGet, participantBootstrapPath, nil, memberToken, participantID,
+	)
+	requireStatus(t, revokedParticipantBootstrapResponse, http.StatusConflict)
+	_ = revokedParticipantBootstrapResponse.Body.Close()
 	hostKeyGrantPath := spaceRoot + "/participants/" + provisioning.InitialParticipantID.String() + "/key-grant"
 	currentHostGrantResponse := performRelayJSON(
 		t, handler, http.MethodGet, hostKeyGrantPath, nil,

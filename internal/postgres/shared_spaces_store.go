@@ -1315,16 +1315,37 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 	credential relay.Credential,
 	nowMilliseconds int64,
 ) (sharedspaces.ParticipantStatus, error) {
+	bootstrap, err := s.getParticipantBootstrap(ctx, credential, nowMilliseconds, false)
+	if err != nil {
+		return sharedspaces.ParticipantStatus{}, err
+	}
+	return bootstrap.Status, nil
+}
+
+func (s *SharedSpacesStore) GetParticipantBootstrap(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) (sharedspaces.ParticipantBootstrap, error) {
+	return s.getParticipantBootstrap(ctx, credential, nowMilliseconds, true)
+}
+
+func (s *SharedSpacesStore) getParticipantBootstrap(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+	includeKeyGrant bool,
+) (sharedspaces.ParticipantBootstrap, error) {
 	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
-		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
-			sharedspaces.CodeWrongScope, "participant status credential scope is invalid",
+		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant bootstrap credential scope is invalid",
 		)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
 	})
 	if err != nil {
-		return sharedspaces.ParticipantStatus{}, fmt.Errorf("begin Shared Space participant status fetch: %w", err)
+		return sharedspaces.ParticipantBootstrap{}, fmt.Errorf("begin Shared Space participant bootstrap fetch: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -1340,29 +1361,29 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 	`, credential.TenantID).Scan(
 		&domainID, &securityMode, &interactionMode, &currentKeyEpoch, &provisioningPayload,
 	); err == pgx.ErrNoRows {
-		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
 		)
 	} else if err != nil {
-		return sharedspaces.ParticipantStatus{}, fmt.Errorf("load Shared Space participant status authority: %w", err)
+		return sharedspaces.ParticipantBootstrap{}, fmt.Errorf("load Shared Space participant bootstrap authority: %w", err)
 	}
 	if credential.DomainID != domainID {
-		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
-			sharedspaces.CodeWrongScope, "participant status belongs to another Shared Space",
+		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant bootstrap belongs to another Shared Space",
 		)
 	}
 	provisioning, err := decodeSpaceProvisioning(provisioningPayload)
 	if err != nil {
-		return sharedspaces.ParticipantStatus{}, fmt.Errorf("decode Shared Space participant status authority: %w", err)
+		return sharedspaces.ParticipantBootstrap{}, fmt.Errorf("decode Shared Space participant bootstrap authority: %w", err)
 	}
 	participant, err := loadSharedSpaceParticipant(
 		ctx, tx, credential.TenantID, credential.MemberID, "",
 	)
 	if err != nil {
-		return sharedspaces.ParticipantStatus{}, err
+		return sharedspaces.ParticipantBootstrap{}, err
 	}
 	if participant.RevokedAtMilliseconds != nil {
-		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeParticipantRevoked, "participant is revoked",
 		)
 	}
@@ -1370,19 +1391,19 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 		ctx, tx, credential.TenantID, domainID, credential.MemberID, "",
 	)
 	if err != nil {
-		return sharedspaces.ParticipantStatus{}, err
+		return sharedspaces.ParticipantBootstrap{}, err
 	}
 	if !found {
-		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeParticipantNotFound, "participant relay member was not found",
 		)
 	}
 	if err := member.VerifyCredential(credential, nowMilliseconds); err != nil {
-		return sharedspaces.ParticipantStatus{}, err
+		return sharedspaces.ParticipantBootstrap{}, err
 	}
 	expectedCapabilities := participant.Role.Capabilities(interactionMode)
 	if !reflect.DeepEqual(member.Capabilities, expectedCapabilities) {
-		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeInvalidParticipant, "participant relay capabilities do not match Shared Space authority",
 		)
 	}
@@ -1392,7 +1413,7 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 		WHERE tenant_id=$1 AND domain_id=$2 AND state='activated'
 		ORDER BY activation_ordinal DESC LIMIT 1
 	`, credential.TenantID, domainID).Scan(&activeCheckpointEpochValue); err != nil && err != pgx.ErrNoRows {
-		return sharedspaces.ParticipantStatus{}, fmt.Errorf("load Shared Space participant bootstrap epoch: %w", err)
+		return sharedspaces.ParticipantBootstrap{}, fmt.Errorf("load Shared Space participant bootstrap epoch: %w", err)
 	}
 	var activeCheckpointEpoch *uint64
 	if activeCheckpointEpochValue != nil {
@@ -1409,12 +1430,41 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	if err := status.Validate(); err != nil {
-		return sharedspaces.ParticipantStatus{}, err
+		return sharedspaces.ParticipantBootstrap{}, err
+	}
+	result := sharedspaces.ParticipantBootstrap{Version: sharedspaces.SchemaVersion, Status: status}
+	if includeKeyGrant && securityMode == sharedspaces.SecurityModeE2EE {
+		grants, err := loadSharedSpaceParticipantKeyGrants(
+			ctx, tx, credential.TenantID, currentKeyEpoch,
+		)
+		if err != nil {
+			return sharedspaces.ParticipantBootstrap{}, err
+		}
+		for _, grant := range grants {
+			if grant.ParticipantID == credential.MemberID {
+				result.KeyGrant = &sharedspaces.ParticipantKeyGrantResult{
+					Version: sharedspaces.SchemaVersion, SpaceID: credential.TenantID,
+					ParticipantID: credential.MemberID, CurrentKeyEpoch: currentKeyEpoch,
+					KeyGrant: grant,
+				}
+				break
+			}
+		}
+		if result.KeyGrant == nil {
+			return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeKeyGrantNotFound, "current participant key grant was not found",
+			)
+		}
+	}
+	if includeKeyGrant {
+		if err := result.Validate(); err != nil {
+			return sharedspaces.ParticipantBootstrap{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return sharedspaces.ParticipantStatus{}, fmt.Errorf("commit Shared Space participant status fetch: %w", err)
+		return sharedspaces.ParticipantBootstrap{}, fmt.Errorf("commit Shared Space participant bootstrap fetch: %w", err)
 	}
-	return status, nil
+	return result, nil
 }
 
 func (s *SharedSpacesStore) PublishEnvelope(
