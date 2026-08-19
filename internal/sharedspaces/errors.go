@@ -34,6 +34,9 @@ const (
 	CodeInvalidComputePool               ErrorCode = "invalid_shared_space_compute_pool"
 	CodeComputePoolCollision             ErrorCode = "shared_space_compute_pool_collision"
 	CodeComputePoolNotFound              ErrorCode = "shared_space_compute_pool_not_found"
+	CodeInvalidComputeCapability         ErrorCode = "invalid_shared_space_compute_capability"
+	CodeComputeCapabilityUnauthorized    ErrorCode = "shared_space_compute_capability_unauthorized"
+	CodeComputeCapabilityExpired         ErrorCode = "shared_space_compute_capability_expired"
 )
 
 type ProtocolError struct {
