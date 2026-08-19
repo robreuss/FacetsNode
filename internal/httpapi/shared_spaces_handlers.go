@@ -478,6 +478,55 @@ func (s *Server) handleGetSharedSpaceParticipantStatus(writer http.ResponseWrite
 	writeJSON(writer, http.StatusOK, result)
 }
 
+func (s *Server) handleUpdateSharedSpaceParticipantPresentation(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	participantID, err := parseSharedSpacesUUID(request.PathValue("participantID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if credential.MemberID != participantID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope,
+			"Shared Space participant presentation path and credential differ",
+		))
+		return
+	}
+	var update sharedspaces.ParticipantPresentationUpdate
+	if err := readSharedSpacesJSON(writer, request, &update); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if update.SpaceID != spaceID || update.ParticipantID != participantID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope,
+			"Shared Space participant presentation body and path differ",
+		))
+		return
+	}
+	result, err := s.sharedSpacesStore.UpdateParticipantPresentation(
+		request.Context(), credential, update, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
 func (s *Server) handleGetSharedSpaceParticipantBootstrap(writer http.ResponseWriter, request *http.Request) {
 	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
 	if err != nil {

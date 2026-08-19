@@ -71,7 +71,10 @@ derived capabilities, key epoch, and bootstrap readiness after relaunch without
 receiving the Space roster or using a Space administration credential. For
 managed Spaces, that same atomic bootstrap includes the current service-managed
 content key. The key is never returned by status, roster, invitation, operator,
-or Space-administration endpoints.
+or Space-administration endpoints. Participants may maintain a revisioned
+display name for their own active membership. This recognition metadata is
+returned by status/bootstrap reads but never grants authority or asserts a
+verified Persona.
 
 ## Development
 

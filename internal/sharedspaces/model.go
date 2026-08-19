@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -24,6 +25,8 @@ const (
 	ManagedContentKeyAlgorithm                    = "A256GCM"
 	MaximumParticipantKeyGrantCiphertextByteCount = 16 * 1_024
 	MaximumAuthorityEventPageSize                 = 100
+	MaximumParticipantDisplayNameBytes            = 512
+	MaximumParticipantDisplayNameRunes            = 128
 )
 
 type AuthorityEventType string
@@ -271,6 +274,65 @@ func (p Participant) Validate() error {
 		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant fields are invalid")
 	}
 	return nil
+}
+
+// ParticipantPresentation is mutable recognition metadata for one participant.
+// It is deliberately separate from membership authority: relay credentials,
+// participant IDs, roles, and revocation remain the only access controls.
+type ParticipantPresentation struct {
+	Version               int       `json:"version"`
+	SpaceID               uuid.UUID `json:"spaceID"`
+	ParticipantID         uuid.UUID `json:"participantID"`
+	DisplayName           string    `json:"displayName"`
+	Revision              uint64    `json:"revision"`
+	UpdatedAtMilliseconds int64     `json:"updatedAtMilliseconds"`
+}
+
+func (p ParticipantPresentation) Validate() error {
+	if p.Version != SchemaVersion || p.SpaceID == uuid.Nil || p.ParticipantID == uuid.Nil ||
+		p.Revision == 0 || p.UpdatedAtMilliseconds < 0 ||
+		!validParticipantDisplayName(p.DisplayName) {
+		return NewProtocolError(
+			CodeInvalidParticipantPresentation,
+			"Shared Space participant presentation fields are invalid",
+		)
+	}
+	return nil
+}
+
+type ParticipantPresentationUpdate struct {
+	Version               int       `json:"version"`
+	RetryID               uuid.UUID `json:"retryID"`
+	SpaceID               uuid.UUID `json:"spaceID"`
+	ParticipantID         uuid.UUID `json:"participantID"`
+	PreviousRevision      uint64    `json:"previousRevision"`
+	DisplayName           string    `json:"displayName"`
+	UpdatedAtMilliseconds int64     `json:"updatedAtMilliseconds"`
+}
+
+func (u ParticipantPresentationUpdate) Validate() error {
+	if u.Version != SchemaVersion || u.RetryID == uuid.Nil || u.SpaceID == uuid.Nil ||
+		u.ParticipantID == uuid.Nil || u.UpdatedAtMilliseconds < 0 ||
+		!validParticipantDisplayName(u.DisplayName) {
+		return NewProtocolError(
+			CodeInvalidParticipantPresentation,
+			"Shared Space participant presentation update fields are invalid",
+		)
+	}
+	return nil
+}
+
+type ParticipantPresentationUpdateResult struct {
+	Acceptance   relay.Acceptance        `json:"acceptance"`
+	RetryID      uuid.UUID               `json:"retryID"`
+	Presentation ParticipantPresentation `json:"presentation"`
+}
+
+func validParticipantDisplayName(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return utf8.ValidString(value) && trimmed == value && trimmed != "" &&
+		len(value) <= MaximumParticipantDisplayNameBytes &&
+		utf8.RuneCountInString(value) <= MaximumParticipantDisplayNameRunes
 }
 
 type SpaceProvisioningResult struct {
@@ -686,17 +748,18 @@ type ParticipantKeyGrantResult struct {
 // administration authority, and content key material. The relay credential is
 // the sole authorization for retrieving this record.
 type ParticipantStatus struct {
-	Version               int                `json:"version"`
-	SpaceID               uuid.UUID          `json:"spaceID"`
-	DomainID              uuid.UUID          `json:"domainID"`
-	SecurityMode          SecurityMode       `json:"securityMode"`
-	InteractionMode       InteractionMode    `json:"interactionMode"`
-	CurrentKeyEpoch       uint64             `json:"currentKeyEpoch"`
-	BootstrapReady        bool               `json:"bootstrapReady"`
-	ActiveCheckpointEpoch *uint64            `json:"activeCheckpointEpoch,omitempty"`
-	Participant           Participant        `json:"participant"`
-	Capabilities          []relay.Capability `json:"capabilities"`
-	CreatedAtMilliseconds int64              `json:"createdAtMilliseconds"`
+	Version               int                      `json:"version"`
+	SpaceID               uuid.UUID                `json:"spaceID"`
+	DomainID              uuid.UUID                `json:"domainID"`
+	SecurityMode          SecurityMode             `json:"securityMode"`
+	InteractionMode       InteractionMode          `json:"interactionMode"`
+	CurrentKeyEpoch       uint64                   `json:"currentKeyEpoch"`
+	BootstrapReady        bool                     `json:"bootstrapReady"`
+	ActiveCheckpointEpoch *uint64                  `json:"activeCheckpointEpoch,omitempty"`
+	Participant           Participant              `json:"participant"`
+	Presentation          *ParticipantPresentation `json:"presentation,omitempty"`
+	Capabilities          []relay.Capability       `json:"capabilities"`
+	CreatedAtMilliseconds int64                    `json:"createdAtMilliseconds"`
 }
 
 func (s ParticipantStatus) Validate() error {
@@ -708,6 +771,18 @@ func (s ParticipantStatus) Validate() error {
 	}
 	if err := s.Participant.Validate(); err != nil {
 		return err
+	}
+	if s.Presentation != nil {
+		if err := s.Presentation.Validate(); err != nil {
+			return err
+		}
+		if s.Presentation.SpaceID != s.SpaceID ||
+			s.Presentation.ParticipantID != s.Participant.ParticipantID {
+			return NewProtocolError(
+				CodeInvalidParticipantPresentation,
+				"Shared Space participant presentation scope is invalid",
+			)
+		}
 	}
 	if !sameCapabilities(s.Capabilities, s.Participant.Role.Capabilities(s.InteractionMode)) {
 		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant status capabilities are invalid")
@@ -812,18 +887,19 @@ type ParticipantRoleChangeResult struct {
 }
 
 type SpaceStatus struct {
-	Version               int                `json:"version"`
-	SpaceID               uuid.UUID          `json:"spaceID"`
-	SecurityMode          SecurityMode       `json:"securityMode"`
-	InteractionMode       InteractionMode    `json:"interactionMode"`
-	CurrentKeyEpoch       uint64             `json:"currentKeyEpoch"`
-	BootstrapReady        bool               `json:"bootstrapReady"`
-	ActiveCheckpointEpoch *uint64            `json:"activeCheckpointEpoch,omitempty"`
-	DomainID              uuid.UUID          `json:"domainID"`
-	InitialParticipantID  uuid.UUID          `json:"initialParticipantID"`
-	Participants          []Participant      `json:"participants"`
-	Relay                 relay.DomainStatus `json:"relay"`
-	CreatedAtMilliseconds int64              `json:"createdAtMilliseconds"`
+	Version               int                       `json:"version"`
+	SpaceID               uuid.UUID                 `json:"spaceID"`
+	SecurityMode          SecurityMode              `json:"securityMode"`
+	InteractionMode       InteractionMode           `json:"interactionMode"`
+	CurrentKeyEpoch       uint64                    `json:"currentKeyEpoch"`
+	BootstrapReady        bool                      `json:"bootstrapReady"`
+	ActiveCheckpointEpoch *uint64                   `json:"activeCheckpointEpoch,omitempty"`
+	DomainID              uuid.UUID                 `json:"domainID"`
+	InitialParticipantID  uuid.UUID                 `json:"initialParticipantID"`
+	Participants          []Participant             `json:"participants"`
+	Presentations         []ParticipantPresentation `json:"presentations"`
+	Relay                 relay.DomainStatus        `json:"relay"`
+	CreatedAtMilliseconds int64                     `json:"createdAtMilliseconds"`
 }
 
 func sameCapabilities(left, right []relay.Capability) bool {

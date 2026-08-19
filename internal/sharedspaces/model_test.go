@@ -122,6 +122,52 @@ func TestAuthorityEventRequiresFieldsForItsTransition(t *testing.T) {
 	}
 }
 
+func TestParticipantPresentationValidatesRecognitionMetadataAndStatusScope(t *testing.T) {
+	spaceID := uuid.New()
+	participantID := uuid.New()
+	presentation := sharedspaces.ParticipantPresentation{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
+		ParticipantID: participantID, DisplayName: "Ada Lovelace",
+		Revision: 1, UpdatedAtMilliseconds: 1_000,
+	}
+	if err := presentation.Validate(); err != nil {
+		t.Fatalf("valid participant presentation: %v", err)
+	}
+
+	invalidName := presentation
+	invalidName.DisplayName = " Ada Lovelace "
+	if err := invalidName.Validate(); !sharedspaces.ErrorHasCode(
+		err, sharedspaces.CodeInvalidParticipantPresentation,
+	) {
+		t.Fatalf("untrimmed participant display name err=%v", err)
+	}
+
+	_, provisioning, _ := testSpaceProvisioning(t, 1_000, sharedspaces.SecurityModeE2EE)
+	status := sharedspaces.ParticipantStatus{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		DomainID:     provisioning.Domain.Registration.DomainID,
+		SecurityMode: provisioning.SecurityMode, InteractionMode: provisioning.InteractionMode,
+		CurrentKeyEpoch: sharedspaces.InitialKeyEpoch,
+		Participant: sharedspaces.Participant{
+			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+			ParticipantID:  provisioning.InitialParticipantID,
+			SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
+			Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
+			CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
+		},
+		Capabilities:          sharedspaces.RoleHost.Capabilities(provisioning.InteractionMode),
+		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
+	}
+	wrongScope := presentation
+	wrongScope.SpaceID = provisioning.SpaceID
+	status.Presentation = &wrongScope
+	if err := status.Validate(); !sharedspaces.ErrorHasCode(
+		err, sharedspaces.CodeInvalidParticipantPresentation,
+	) {
+		t.Fatalf("cross-participant presentation err=%v", err)
+	}
+}
+
 func sortedCapabilities(capabilities []relay.Capability) []relay.Capability {
 	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
 	return capabilities

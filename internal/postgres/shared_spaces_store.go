@@ -790,6 +790,10 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	if err != nil {
 		return sharedspaces.SpaceStatus{}, err
 	}
+	presentations, err := loadSharedSpaceParticipantPresentations(ctx, tx, credential.TenantID)
+	if err != nil {
+		return sharedspaces.SpaceStatus{}, err
+	}
 	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, credential.TenantID)
 	if err != nil {
 		return sharedspaces.SpaceStatus{}, err
@@ -822,7 +826,7 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 		BootstrapReady:        activeCheckpointEpoch != nil && *activeCheckpointEpoch == currentKeyEpoch,
 		ActiveCheckpointEpoch: activeCheckpointEpoch,
 		InitialParticipantID:  provisioning.InitialParticipantID,
-		Participants:          participants, Relay: relayStatus,
+		Participants:          participants, Presentations: presentations, Relay: relayStatus,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}, nil
 }
@@ -1378,6 +1382,175 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 	return bootstrap.Status, nil
 }
 
+func (s *SharedSpacesStore) UpdateParticipantPresentation(
+	ctx context.Context,
+	credential relay.Credential,
+	update sharedspaces.ParticipantPresentationUpdate,
+	nowMilliseconds int64,
+) (sharedspaces.ParticipantPresentationUpdateResult, error) {
+	if err := update.Validate(); err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, err
+	}
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil ||
+		credential.MemberID == uuid.Nil || credential.TenantID != update.SpaceID ||
+		credential.MemberID != update.ParticipantID {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant presentation belongs to another participant",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, fmt.Errorf(
+			"begin Shared Space participant presentation update: %w", err,
+		)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var domainID uuid.UUID
+	var interactionMode sharedspaces.InteractionMode
+	if err := tx.QueryRow(ctx, `
+		SELECT domain_id,interaction_mode
+		FROM shared_spaces
+		WHERE space_id=$1
+		FOR SHARE
+	`, update.SpaceID).Scan(&domainID, &interactionMode); err == pgx.ErrNoRows {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	} else if err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, fmt.Errorf(
+			"load Shared Space participant presentation authority: %w", err,
+		)
+	}
+	if credential.DomainID != domainID {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant presentation belongs to another Shared Space",
+		)
+	}
+	participant, err := loadSharedSpaceParticipant(
+		ctx, tx, update.SpaceID, update.ParticipantID, "FOR UPDATE",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, err
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	member, found, err := loadRelayMember(
+		ctx, tx, update.SpaceID, domainID, update.ParticipantID, "",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, err
+	}
+	if !found {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantNotFound, "participant relay member was not found",
+		)
+	}
+	if err := member.VerifyCredential(credential, nowMilliseconds); err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, err
+	}
+	if !reflect.DeepEqual(member.Capabilities, participant.Role.Capabilities(interactionMode)) {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant,
+			"participant relay capabilities do not match Shared Space authority",
+		)
+	}
+
+	var existingPayload []byte
+	var existingPresentation sharedspaces.ParticipantPresentation
+	err = tx.QueryRow(ctx, `
+		SELECT request_payload,version,space_id,participant_id,display_name,revision,
+		       updated_at_milliseconds
+		FROM shared_space_participant_presentations
+		WHERE retry_id=$1
+	`, update.RetryID).Scan(
+		&existingPayload, &existingPresentation.Version, &existingPresentation.SpaceID,
+		&existingPresentation.ParticipantID, &existingPresentation.DisplayName,
+		&existingPresentation.Revision, &existingPresentation.UpdatedAtMilliseconds,
+	)
+	if err == nil {
+		var existingUpdate sharedspaces.ParticipantPresentationUpdate
+		if decodeErr := json.Unmarshal(existingPayload, &existingUpdate); decodeErr != nil {
+			return sharedspaces.ParticipantPresentationUpdateResult{}, fmt.Errorf(
+				"decode Shared Space participant presentation update: %w", decodeErr,
+			)
+		}
+		if !reflect.DeepEqual(existingUpdate, update) {
+			return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeParticipantPresentationCollision,
+				"participant presentation retry ID was reused",
+			)
+		}
+		return sharedspaces.ParticipantPresentationUpdateResult{
+			Acceptance: relay.AcceptanceDuplicate, RetryID: update.RetryID,
+			Presentation: existingPresentation,
+		}, nil
+	}
+	if err != pgx.ErrNoRows {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, fmt.Errorf(
+			"load Shared Space participant presentation retry: %w", err,
+		)
+	}
+	if update.UpdatedAtMilliseconds > nowMilliseconds ||
+		update.UpdatedAtMilliseconds < participant.CreatedAtMilliseconds {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipantPresentation,
+			"participant presentation update time is invalid",
+		)
+	}
+	currentRevision := uint64(0)
+	current, err := loadSharedSpaceParticipantPresentation(
+		ctx, tx, update.SpaceID, update.ParticipantID,
+	)
+	if err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, err
+	}
+	if current != nil {
+		currentRevision = current.Revision
+	}
+	if update.PreviousRevision != currentRevision {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantPresentationCollision,
+			"participant presentation changed concurrently",
+		)
+	}
+	presentation := sharedspaces.ParticipantPresentation{
+		Version: sharedspaces.SchemaVersion, SpaceID: update.SpaceID,
+		ParticipantID: update.ParticipantID, DisplayName: update.DisplayName,
+		Revision: currentRevision + 1, UpdatedAtMilliseconds: update.UpdatedAtMilliseconds,
+	}
+	payload, err := json.Marshal(update)
+	if err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, fmt.Errorf(
+			"encode Shared Space participant presentation update: %w", err,
+		)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_participant_presentations (
+			space_id,participant_id,revision,retry_id,version,request_payload,
+			display_name,updated_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, presentation.SpaceID, presentation.ParticipantID, presentation.Revision,
+		update.RetryID, presentation.Version, payload, presentation.DisplayName,
+		presentation.UpdatedAtMilliseconds); err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, fmt.Errorf(
+			"record Shared Space participant presentation update: %w", err,
+		)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ParticipantPresentationUpdateResult{}, fmt.Errorf(
+			"commit Shared Space participant presentation update: %w", err,
+		)
+	}
+	return sharedspaces.ParticipantPresentationUpdateResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: update.RetryID,
+		Presentation: presentation,
+	}, nil
+}
+
 func (s *SharedSpacesStore) GetParticipantBootstrap(
 	ctx context.Context,
 	credential relay.Credential,
@@ -1485,6 +1658,13 @@ func (s *SharedSpacesStore) getParticipantBootstrap(
 		Capabilities:          member.Capabilities,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
+	presentation, err := loadSharedSpaceParticipantPresentation(
+		ctx, tx, credential.TenantID, credential.MemberID,
+	)
+	if err != nil {
+		return sharedspaces.ParticipantBootstrap{}, err
+	}
+	status.Presentation = presentation
 	if err := status.Validate(); err != nil {
 		return sharedspaces.ParticipantBootstrap{}, err
 	}
@@ -1816,6 +1996,70 @@ func loadSharedSpaceParticipants(
 		return participants[left].ParticipantID.String() < participants[right].ParticipantID.String()
 	})
 	return participants, nil
+}
+
+func loadSharedSpaceParticipantPresentation(
+	ctx context.Context,
+	tx pgx.Tx,
+	spaceID, participantID uuid.UUID,
+) (*sharedspaces.ParticipantPresentation, error) {
+	var presentation sharedspaces.ParticipantPresentation
+	if err := tx.QueryRow(ctx, `
+		SELECT version,space_id,participant_id,display_name,revision,updated_at_milliseconds
+		FROM shared_space_participant_presentations
+		WHERE space_id=$1 AND participant_id=$2
+		ORDER BY revision DESC
+		LIMIT 1
+	`, spaceID, participantID).Scan(
+		&presentation.Version, &presentation.SpaceID, &presentation.ParticipantID,
+		&presentation.DisplayName, &presentation.Revision,
+		&presentation.UpdatedAtMilliseconds,
+	); err == pgx.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("load Shared Space participant presentation: %w", err)
+	}
+	if err := presentation.Validate(); err != nil {
+		return nil, fmt.Errorf("stored Shared Space participant presentation failed validation: %v", err)
+	}
+	return &presentation, nil
+}
+
+func loadSharedSpaceParticipantPresentations(
+	ctx context.Context,
+	tx pgx.Tx,
+	spaceID uuid.UUID,
+) ([]sharedspaces.ParticipantPresentation, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT ON (participant_id)
+		       version,space_id,participant_id,display_name,revision,updated_at_milliseconds
+		FROM shared_space_participant_presentations
+		WHERE space_id=$1
+		ORDER BY participant_id,revision DESC
+	`, spaceID)
+	if err != nil {
+		return nil, fmt.Errorf("query Shared Space participant presentations: %w", err)
+	}
+	defer rows.Close()
+	presentations := []sharedspaces.ParticipantPresentation{}
+	for rows.Next() {
+		var presentation sharedspaces.ParticipantPresentation
+		if err := rows.Scan(
+			&presentation.Version, &presentation.SpaceID, &presentation.ParticipantID,
+			&presentation.DisplayName, &presentation.Revision,
+			&presentation.UpdatedAtMilliseconds,
+		); err != nil {
+			return nil, fmt.Errorf("scan Shared Space participant presentation: %w", err)
+		}
+		if err := presentation.Validate(); err != nil {
+			return nil, fmt.Errorf("stored Shared Space participant presentation failed validation: %v", err)
+		}
+		presentations = append(presentations, presentation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate Shared Space participant presentations: %w", err)
+	}
+	return presentations, nil
 }
 
 func insertSharedSpaceParticipantKeyGrant(

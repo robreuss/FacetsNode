@@ -287,6 +287,47 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, demoted, http.StatusCreated)
 	_ = demoted.Body.Close()
+	presentationPath := spaceRoot + "/participants/" + participantID.String() + "/presentation"
+	presentationUpdate := sharedspaces.ParticipantPresentationUpdate{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		ParticipantID: participantID, PreviousRevision: 0, DisplayName: "Ada Lovelace",
+		UpdatedAtMilliseconds: nowMilliseconds,
+	}
+	presentationResponse := performRelayJSON(
+		t, handler, http.MethodPost, presentationPath, presentationUpdate,
+		memberToken, participantID,
+	)
+	requireStatus(t, presentationResponse, http.StatusCreated)
+	var presentationResult sharedspaces.ParticipantPresentationUpdateResult
+	if err := json.NewDecoder(presentationResponse.Body).Decode(&presentationResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = presentationResponse.Body.Close()
+	if presentationResult.Presentation.Revision != 1 ||
+		presentationResult.Presentation.DisplayName != "Ada Lovelace" {
+		t.Fatalf("presentation=%+v", presentationResult)
+	}
+	presentationRetry := performRelayJSON(
+		t, handler, http.MethodPost, presentationPath, presentationUpdate,
+		memberToken, participantID,
+	)
+	requireStatus(t, presentationRetry, http.StatusOK)
+	_ = presentationRetry.Body.Close()
+	presentationCollision := presentationUpdate
+	presentationCollision.RetryID = uuid.New()
+	presentationCollision.DisplayName = "Countess of Lovelace"
+	presentationCollisionResponse := performRelayJSON(
+		t, handler, http.MethodPost, presentationPath, presentationCollision,
+		memberToken, participantID,
+	)
+	requireStatus(t, presentationCollisionResponse, http.StatusConflict)
+	_ = presentationCollisionResponse.Body.Close()
+	wrongParticipantPresentationResponse := performRelayJSON(
+		t, handler, http.MethodPost, presentationPath, presentationUpdate,
+		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
+	)
+	requireStatus(t, wrongParticipantPresentationResponse, http.StatusBadRequest)
+	_ = wrongParticipantPresentationResponse.Body.Close()
 	participantStatusPath := spaceRoot + "/participants/" + participantID.String() + "/status"
 	participantStatusResponse := performRelayJSON(
 		t, handler, http.MethodGet, participantStatusPath, nil, memberToken, participantID,
@@ -305,6 +346,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		*participantStatus.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
 		participantStatus.Participant.ParticipantID != participantID ||
 		participantStatus.Participant.Role != sharedspaces.RoleReader ||
+		participantStatus.Presentation == nil ||
+		participantStatus.Presentation.DisplayName != "Ada Lovelace" ||
 		!sameRelayCapabilities(
 			participantStatus.Capabilities,
 			sharedspaces.RoleReader.Capabilities(provisioning.InteractionMode),
@@ -323,6 +366,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	_ = participantBootstrapResponse.Body.Close()
 	if participantBootstrap.Status.Participant.ParticipantID != participantID ||
 		participantBootstrap.Status.Participant.Role != sharedspaces.RoleReader ||
+		participantBootstrap.Status.Presentation == nil ||
+		participantBootstrap.Status.Presentation.DisplayName != "Ada Lovelace" ||
 		participantBootstrap.KeyGrant == nil ||
 		participantBootstrap.KeyGrant.ParticipantID != participantID ||
 		participantBootstrap.KeyGrant.CurrentKeyEpoch != participantBootstrap.Status.CurrentKeyEpoch ||
@@ -358,6 +403,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		participantRoles[participant.ParticipantID] = participant.Role
 	}
 	if len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 ||
+		len(status.Presentations) != 1 ||
+		status.Presentations[0].ParticipantID != participantID ||
+		status.Presentations[0].DisplayName != "Ada Lovelace" ||
 		status.InteractionMode != provisioning.InteractionMode ||
 		status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch || !status.BootstrapReady ||
 		status.ActiveCheckpointEpoch == nil || *status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
@@ -400,6 +448,12 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, revokedParticipantBootstrapResponse, http.StatusConflict)
 	_ = revokedParticipantBootstrapResponse.Body.Close()
+	revokedParticipantPresentationResponse := performRelayJSON(
+		t, handler, http.MethodPost, presentationPath, presentationUpdate,
+		memberToken, participantID,
+	)
+	requireStatus(t, revokedParticipantPresentationResponse, http.StatusConflict)
+	_ = revokedParticipantPresentationResponse.Body.Close()
 	hostKeyGrantPath := spaceRoot + "/participants/" + provisioning.InitialParticipantID.String() + "/key-grant"
 	currentHostGrantResponse := performRelayJSON(
 		t, handler, http.MethodGet, hostKeyGrantPath, nil,

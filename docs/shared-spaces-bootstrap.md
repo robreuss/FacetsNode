@@ -27,6 +27,8 @@ key changes commit atomically in PostgreSQL.
   Persona, payment, AI compute, or content-key authority.
 - The server never derives participant identity from email, payment identity,
   a display name, or relay routing metadata.
+- A participant may publish recognition metadata for its own active membership.
+  That presentation is not authority, verified identity, or a Persona claim.
 
 All bearer values must be generated with cryptographically secure randomness,
 sent only in the `Authorization` header over TLS, and excluded from logs.
@@ -173,6 +175,25 @@ mode-appropriate key result. Role changes and checkpoint/key-epoch changes are
 visible on the next authenticated read. Revoked participants cannot retrieve
 status or bootstrap.
 
+## Participant recognition metadata
+
+An active participant may set the display name shown for its own membership at:
+
+`POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/presentation`
+
+The request uses that participant's relay credential, and its authenticated
+member identifier must equal the participant in the path and body. Presentation
+records are append-only and revisioned. A client supplies a retry identifier and
+the latest revision it observed; exact retries return the prior result, while a
+stale revision or a retry identifier reused with different input is rejected.
+
+The latest presentation appears in the participant's status and atomic bootstrap
+response. Space-administrator status contains the latest presentation roster.
+Display names never select a role, expand relay capabilities, authorize a member,
+assert an email or payment identity, or prove a Facets Persona. Updating a
+presentation therefore does not append an authority event. Revoked participants
+cannot update their presentation.
+
 ## Public ingress
 
 The HTTPS ingress allows `/v1/shared-spaces/*` participant and Space-authority
@@ -189,7 +210,7 @@ configuration, databases, blob namespaces, quotas, credentials, and lifecycle.
 
 This vertical slice intentionally does not yet implement:
 
-- client Persona presentation and invitation UX;
+- client Persona binding and invitation UX;
 - managed-mode content inspection or moderation policy;
 - billing, Stripe Connect, hosting entitlements, or identity verification;
 - Space-bound compute capabilities;

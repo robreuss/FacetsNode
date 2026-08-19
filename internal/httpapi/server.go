@@ -378,6 +378,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleGetSharedSpaceParticipantStatus,
 		)
 		register(
+			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/presentation",
+			traffic.SurfaceManagement,
+			s.handleUpdateSharedSpaceParticipantPresentation,
+		)
+		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/bootstrap",
 			traffic.SurfaceManagement,
 			s.handleGetSharedSpaceParticipantBootstrap,
@@ -607,7 +612,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			message = "The Shared Spaces request was rejected."
 			switch sharedSpacesProtocol.Code {
 			case sharedspaces.CodeInvalidSpace, sharedspaces.CodeInvalidInvitation,
-				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeInvalidAuthorityEvent,
+				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeInvalidParticipantPresentation,
+				sharedspaces.CodeInvalidAuthorityEvent,
 				sharedspaces.CodeWrongScope:
 				status = http.StatusBadRequest
 			case sharedspaces.CodeUnauthorized:
@@ -620,6 +626,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			case sharedspaces.CodeSpaceCollision, sharedspaces.CodeInvitationCollision,
 				sharedspaces.CodeInvitationClaimed, sharedspaces.CodeParticipantCollision,
 				sharedspaces.CodeInvitationCancellationCollision,
+				sharedspaces.CodeParticipantPresentationCollision,
 				sharedspaces.CodeParticipantRoleCollision,
 				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost,
 				sharedspaces.CodeWrongKeyEpoch, sharedspaces.CodeBootstrapNotReady:

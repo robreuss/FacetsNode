@@ -82,6 +82,34 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		claimRetry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch || claimRetry.KeyGrant == nil {
 		t.Fatalf("claim retry=%+v err=%v", claimRetry, err)
 	}
+	presentationUpdate := sharedspaces.ParticipantPresentationUpdate{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		SpaceID: provisioning.SpaceID, ParticipantID: invitation.ParticipantID,
+		PreviousRevision: 0, DisplayName: "Ada Lovelace", UpdatedAtMilliseconds: 1_301,
+	}
+	presentationResult, err := store.UpdateParticipantPresentation(
+		ctx, memberCredential, presentationUpdate, 1_301,
+	)
+	if err != nil || presentationResult.Acceptance != relay.AcceptanceAccepted ||
+		presentationResult.Presentation.DisplayName != "Ada Lovelace" ||
+		presentationResult.Presentation.Revision != 1 {
+		t.Fatalf("participant presentation=%+v err=%v", presentationResult, err)
+	}
+	presentationRetry, err := store.UpdateParticipantPresentation(
+		ctx, memberCredential, presentationUpdate, 1_301,
+	)
+	if err != nil || presentationRetry.Acceptance != relay.AcceptanceDuplicate ||
+		presentationRetry.Presentation != presentationResult.Presentation {
+		t.Fatalf("participant presentation retry=%+v err=%v", presentationRetry, err)
+	}
+	concurrentPresentation := presentationUpdate
+	concurrentPresentation.RetryID = uuid.New()
+	concurrentPresentation.DisplayName = "Ada King"
+	if _, err := store.UpdateParticipantPresentation(
+		ctx, memberCredential, concurrentPresentation, 1_301,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantPresentationCollision) {
+		t.Fatalf("concurrent participant presentation err=%v", err)
+	}
 	participantStatus, err := store.GetParticipantStatus(ctx, memberCredential, 1_301)
 	if err != nil || participantStatus.SpaceID != provisioning.SpaceID ||
 		participantStatus.DomainID != provisioning.Domain.Registration.DomainID ||
@@ -92,6 +120,8 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		*participantStatus.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
 		participantStatus.Participant.ParticipantID != invitation.ParticipantID ||
 		participantStatus.Participant.Role != sharedspaces.RoleParticipant ||
+		participantStatus.Presentation == nil ||
+		participantStatus.Presentation.DisplayName != "Ada Lovelace" ||
 		!sameTestCapabilities(
 			participantStatus.Capabilities,
 			sharedspaces.RoleParticipant.Capabilities(sharedspaces.InteractionModeCollaborative),
@@ -105,6 +135,13 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		participantBootstrap.KeyGrant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		participantBootstrap.KeyGrant.KeyGrant.KeyEpoch != participantBootstrap.Status.CurrentKeyEpoch {
 		t.Fatalf("participant bootstrap=%+v err=%v", participantBootstrap, err)
+	}
+	wrongPresentationCredential := memberCredential
+	wrongPresentationCredential.MemberID = provisioning.InitialParticipantID
+	if _, err := store.UpdateParticipantPresentation(
+		ctx, wrongPresentationCredential, presentationUpdate, 1_301,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongScope) {
+		t.Fatalf("cross-participant presentation err=%v", err)
 	}
 	wrongStatusCredential := memberCredential
 	wrongStatusCredential.DomainID = uuid.New()
@@ -125,7 +162,9 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		!status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
 		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
-		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
+		len(status.Participants) != 2 || len(status.Presentations) != 1 ||
+		status.Presentations[0] != presentationResult.Presentation ||
+		status.Relay.ActiveSubscriptionCount != 2 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 	fence, err := relayStore.CreateCheckpointFence(ctx, hostCredential, relay.CheckpointFenceRequest{

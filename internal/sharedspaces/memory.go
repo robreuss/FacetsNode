@@ -17,6 +17,7 @@ type memorySpace struct {
 	provisioning          SpaceProvisioning
 	result                relay.TenantProvisioningResult
 	participants          map[uuid.UUID]Participant
+	presentations         map[uuid.UUID]ParticipantPresentation
 	keyGrants             map[uint64]map[uuid.UUID]ParticipantKeyGrant
 	managedContentKeys    map[uint64][]byte
 	keyEpoch              uint64
@@ -42,6 +43,8 @@ type MemoryStore struct {
 	revocationResponses             map[uuid.UUID]ParticipantRevocationResult
 	roleChangeRequests              map[uuid.UUID]ParticipantRoleChange
 	roleChangeResponses             map[uuid.UUID]ParticipantRoleChangeResult
+	presentationUpdateRequests      map[uuid.UUID]ParticipantPresentationUpdate
+	presentationUpdateResponses     map[uuid.UUID]ParticipantPresentationUpdateResult
 	checkpointEpochs                map[uuid.UUID]uint64
 	authorityEvents                 map[uuid.UUID][]AuthorityEvent
 	nextAuthoritySequences          map[uuid.UUID]uint64
@@ -66,6 +69,8 @@ func NewMemoryStore(relayStore relay.Store, custodians ...*keycustody.ManagedCon
 		revocationResponses:             make(map[uuid.UUID]ParticipantRevocationResult),
 		roleChangeRequests:              make(map[uuid.UUID]ParticipantRoleChange),
 		roleChangeResponses:             make(map[uuid.UUID]ParticipantRoleChangeResult),
+		presentationUpdateRequests:      make(map[uuid.UUID]ParticipantPresentationUpdate),
+		presentationUpdateResponses:     make(map[uuid.UUID]ParticipantPresentationUpdateResult),
 		checkpointEpochs:                make(map[uuid.UUID]uint64),
 		authorityEvents:                 make(map[uuid.UUID][]AuthorityEvent),
 		nextAuthoritySequences:          make(map[uuid.UUID]uint64),
@@ -124,6 +129,7 @@ func (s *MemoryStore) ProvisionSpace(
 	space := &memorySpace{
 		provisioning: provisioning, result: relayResult,
 		participants:       map[uuid.UUID]Participant{participant.ParticipantID: participant},
+		presentations:      make(map[uuid.UUID]ParticipantPresentation),
 		keyGrants:          make(map[uint64]map[uuid.UUID]ParticipantKeyGrant),
 		managedContentKeys: make(map[uint64][]byte),
 		keyEpoch:           InitialKeyEpoch,
@@ -470,6 +476,13 @@ func (s *MemoryStore) GetSpaceStatus(
 	sort.Slice(participants, func(left, right int) bool {
 		return participants[left].ParticipantID.String() < participants[right].ParticipantID.String()
 	})
+	presentations := make([]ParticipantPresentation, 0, len(space.presentations))
+	for _, presentation := range space.presentations {
+		presentations = append(presentations, presentation)
+	}
+	sort.Slice(presentations, func(left, right int) bool {
+		return presentations[left].ParticipantID.String() < presentations[right].ParticipantID.String()
+	})
 	var activeCheckpointEpoch *uint64
 	if space.activeCheckpointEpoch != 0 {
 		epoch := space.activeCheckpointEpoch
@@ -484,7 +497,7 @@ func (s *MemoryStore) GetSpaceStatus(
 		ActiveCheckpointEpoch: activeCheckpointEpoch,
 		DomainID:              space.provisioning.Domain.Registration.DomainID,
 		InitialParticipantID:  space.provisioning.InitialParticipantID,
-		Participants:          participants, Relay: relayStatus,
+		Participants:          participants, Presentations: presentations, Relay: relayStatus,
 		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
 	}, nil
 }
@@ -753,10 +766,99 @@ func (s *MemoryStore) GetParticipantStatus(
 		Capabilities:          participant.Role.Capabilities(space.provisioning.InteractionMode),
 		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
 	}
+	if presentation, found := space.presentations[credential.MemberID]; found {
+		status.Presentation = &presentation
+	}
 	if err := status.Validate(); err != nil {
 		return ParticipantStatus{}, err
 	}
 	return status, nil
+}
+
+func (s *MemoryStore) UpdateParticipantPresentation(
+	ctx context.Context,
+	credential relay.Credential,
+	update ParticipantPresentationUpdate,
+	nowMilliseconds int64,
+) (ParticipantPresentationUpdateResult, error) {
+	if err := update.Validate(); err != nil {
+		return ParticipantPresentationUpdateResult{}, err
+	}
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil ||
+		credential.MemberID == uuid.Nil {
+		return ParticipantPresentationUpdateResult{}, NewProtocolError(
+			CodeWrongScope, "participant presentation credential scope is invalid",
+		)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[update.SpaceID]
+	if space == nil {
+		return ParticipantPresentationUpdateResult{}, NewProtocolError(
+			CodeSpaceNotFound, "Shared Space was not found",
+		)
+	}
+	if credential.TenantID != update.SpaceID ||
+		credential.DomainID != space.provisioning.Domain.Registration.DomainID ||
+		credential.MemberID != update.ParticipantID {
+		return ParticipantPresentationUpdateResult{}, NewProtocolError(
+			CodeWrongScope, "participant presentation belongs to another participant",
+		)
+	}
+	participant, found := space.participants[update.ParticipantID]
+	if !found {
+		return ParticipantPresentationUpdateResult{}, NewProtocolError(
+			CodeParticipantNotFound, "participant was not found",
+		)
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ParticipantPresentationUpdateResult{}, NewProtocolError(
+			CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {
+		return ParticipantPresentationUpdateResult{}, err
+	}
+	if existing, found := s.presentationUpdateResponses[update.RetryID]; found {
+		if reflect.DeepEqual(s.presentationUpdateRequests[update.RetryID], update) {
+			existing.Acceptance = relay.AcceptanceDuplicate
+			return existing, nil
+		}
+		return ParticipantPresentationUpdateResult{}, NewProtocolError(
+			CodeParticipantPresentationCollision,
+			"participant presentation retry ID was reused",
+		)
+	}
+	if update.UpdatedAtMilliseconds > nowMilliseconds ||
+		update.UpdatedAtMilliseconds < participant.CreatedAtMilliseconds {
+		return ParticipantPresentationUpdateResult{}, NewProtocolError(
+			CodeInvalidParticipantPresentation,
+			"participant presentation update time is invalid",
+		)
+	}
+	currentRevision := uint64(0)
+	if current, found := space.presentations[update.ParticipantID]; found {
+		currentRevision = current.Revision
+	}
+	if update.PreviousRevision != currentRevision {
+		return ParticipantPresentationUpdateResult{}, NewProtocolError(
+			CodeParticipantPresentationCollision,
+			"participant presentation changed concurrently",
+		)
+	}
+	presentation := ParticipantPresentation{
+		Version: SchemaVersion, SpaceID: update.SpaceID,
+		ParticipantID: update.ParticipantID, DisplayName: update.DisplayName,
+		Revision: currentRevision + 1, UpdatedAtMilliseconds: update.UpdatedAtMilliseconds,
+	}
+	result := ParticipantPresentationUpdateResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: update.RetryID,
+		Presentation: presentation,
+	}
+	space.presentations[update.ParticipantID] = presentation
+	s.presentationUpdateRequests[update.RetryID] = update
+	s.presentationUpdateResponses[update.RetryID] = result
+	return result, nil
 }
 
 func (s *MemoryStore) GetParticipantBootstrap(
@@ -800,6 +902,9 @@ func (s *MemoryStore) GetParticipantBootstrap(
 		Participant:           participant,
 		Capabilities:          participant.Role.Capabilities(space.provisioning.InteractionMode),
 		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
+	}
+	if presentation, found := space.presentations[credential.MemberID]; found {
+		status.Presentation = &presentation
 	}
 	result := ParticipantBootstrap{Version: SchemaVersion, Status: status}
 	if space.provisioning.SecurityMode == SecurityModeE2EE {

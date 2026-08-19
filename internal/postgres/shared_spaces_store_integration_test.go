@@ -168,6 +168,33 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		invitationStates[cancelledInvitation.InvitationID].CancelledAtMilliseconds == nil {
 		t.Fatalf("invitation list=%+v", invitationList)
 	}
+	presentationUpdate := sharedspaces.ParticipantPresentationUpdate{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, PreviousRevision: 0, DisplayName: "Ada Lovelace",
+		UpdatedAtMilliseconds: now + 205,
+	}
+	presentationResult, err := store.UpdateParticipantPresentation(
+		ctx, memberCredential, presentationUpdate, now+205,
+	)
+	if err != nil || presentationResult.Acceptance != relay.AcceptanceAccepted ||
+		presentationResult.Presentation.Revision != 1 ||
+		presentationResult.Presentation.DisplayName != "Ada Lovelace" {
+		t.Fatalf("participant presentation=%+v err=%v", presentationResult, err)
+	}
+	presentationRetry, err := store.UpdateParticipantPresentation(
+		ctx, memberCredential, presentationUpdate, now+206,
+	)
+	if err != nil || presentationRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("participant presentation retry=%+v err=%v", presentationRetry, err)
+	}
+	presentationCollision := presentationUpdate
+	presentationCollision.RetryID = uuid.New()
+	presentationCollision.DisplayName = "Countess of Lovelace"
+	if _, err := store.UpdateParticipantPresentation(
+		ctx, memberCredential, presentationCollision, now+207,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantPresentationCollision) {
+		t.Fatalf("participant presentation collision err=%v", err)
+	}
 	memberKeyGrant, err := store.GetParticipantKeyGrant(ctx, memberCredential, now+210)
 	if err != nil || memberKeyGrant.KeyGrant.ParticipantID != invitation.ParticipantID ||
 		memberKeyGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch {
@@ -181,6 +208,8 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		*participantStatus.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
 		participantStatus.Participant.ParticipantID != invitation.ParticipantID ||
 		participantStatus.Participant.Role != sharedspaces.RoleParticipant ||
+		participantStatus.Presentation == nil ||
+		participantStatus.Presentation.DisplayName != "Ada Lovelace" ||
 		!postgresSameCapabilities(
 			participantStatus.Capabilities,
 			sharedspaces.RoleParticipant.Capabilities(provisioning.InteractionMode),
@@ -190,6 +219,8 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, now+212)
 	if err != nil || participantBootstrap.Status.Participant.ParticipantID != invitation.ParticipantID ||
 		participantBootstrap.Status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		participantBootstrap.Status.Presentation == nil ||
+		participantBootstrap.Status.Presentation.DisplayName != "Ada Lovelace" ||
 		participantBootstrap.KeyGrant == nil ||
 		participantBootstrap.KeyGrant.ParticipantID != invitation.ParticipantID ||
 		participantBootstrap.KeyGrant.CurrentKeyEpoch != participantBootstrap.Status.CurrentKeyEpoch ||
@@ -225,7 +256,10 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		!status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
 		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
-		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
+		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 ||
+		len(status.Presentations) != 1 ||
+		status.Presentations[0].ParticipantID != invitation.ParticipantID ||
+		status.Presentations[0].DisplayName != "Ada Lovelace" {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 	revocation := sharedspaces.ParticipantRevocation{
@@ -269,6 +303,11 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked participant bootstrap err=%v", err)
+	}
+	if _, err := store.UpdateParticipantPresentation(
+		ctx, memberCredential, presentationUpdate, now+301,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+		t.Fatalf("revoked participant presentation err=%v", err)
 	}
 	authorityEvents, err := store.ListAuthorityEvents(ctx, admin, 0, 100)
 	if err != nil || len(authorityEvents.Events) != 8 || authorityEvents.NextSequence == 0 {
