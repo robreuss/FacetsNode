@@ -48,6 +48,8 @@ type MemoryStore struct {
 	deviceRevocationRequests  map[uuid.UUID]DeviceRevocation
 	deviceRevocations         map[uuid.UUID]DeviceRevocationResult
 	revokedDevices            map[uuid.UUID]map[uuid.UUID]int64
+	joinRequests              map[uuid.UUID]JoinRequest
+	joinRequestRetry          map[uuid.UUID]uuid.UUID
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
@@ -63,7 +65,175 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		deviceRevocationRequests:  make(map[uuid.UUID]DeviceRevocation),
 		deviceRevocations:         make(map[uuid.UUID]DeviceRevocationResult),
 		revokedDevices:            make(map[uuid.UUID]map[uuid.UUID]int64),
+		joinRequests:              make(map[uuid.UUID]JoinRequest),
+		joinRequestRetry:          make(map[uuid.UUID]uuid.UUID),
 	}
+}
+
+func (s *MemoryStore) CreateJoinRequest(
+	_ context.Context,
+	request JoinRequest,
+	nowMilliseconds int64,
+) (JoinRequestCreateResult, error) {
+	if err := request.Validate(); err != nil {
+		return JoinRequestCreateResult{}, err
+	}
+	if err := request.RequireActive(nowMilliseconds); err != nil {
+		return JoinRequestCreateResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if requestID, found := s.joinRequestRetry[request.RetryID]; found {
+		existing := s.joinRequests[requestID]
+		if reflect.DeepEqual(existing, request) {
+			return JoinRequestCreateResult{
+				Acceptance: relay.AcceptanceDuplicate, RequestID: existing.RequestID,
+				ExpiresAtMilliseconds: existing.ExpiresAtMilliseconds,
+			}, nil
+		}
+		return JoinRequestCreateResult{}, NewProtocolError(
+			CodeJoinRequestCollision, "join request retry ID was reused",
+		)
+	}
+	if existing, found := s.joinRequests[request.RequestID]; found {
+		if reflect.DeepEqual(existing, request) {
+			return JoinRequestCreateResult{
+				Acceptance: relay.AcceptanceDuplicate, RequestID: existing.RequestID,
+				ExpiresAtMilliseconds: existing.ExpiresAtMilliseconds,
+			}, nil
+		}
+		return JoinRequestCreateResult{}, NewProtocolError(
+			CodeJoinRequestCollision, "join request ID was reused",
+		)
+	}
+	for _, existing := range s.joinRequests {
+		if existing.PINAuthorizationDigest == request.PINAuthorizationDigest &&
+			existing.ExpiresAtMilliseconds > nowMilliseconds {
+			return JoinRequestCreateResult{}, NewProtocolError(
+				CodeJoinRequestCollision, "join request PIN is already active",
+			)
+		}
+	}
+	s.joinRequests[request.RequestID] = request
+	s.joinRequestRetry[request.RetryID] = request.RequestID
+	return JoinRequestCreateResult{
+		Acceptance: relay.AcceptanceAccepted, RequestID: request.RequestID,
+		ExpiresAtMilliseconds: request.ExpiresAtMilliseconds,
+	}, nil
+}
+
+func (s *MemoryStore) LookupJoinRequest(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	pin string,
+	nowMilliseconds int64,
+) (JoinRequestSponsorPresentation, error) {
+	if !validJoinRequestPIN(pin) {
+		return JoinRequestSponsorPresentation{}, NewProtocolError(
+			CodeInvalidJoinRequest, "join request PIN is invalid",
+		)
+	}
+	if _, err := s.relay.GetDomainStatus(ctx, credential); err != nil {
+		return JoinRequestSponsorPresentation{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	principal, found := s.principals[credential.TenantID]
+	if !found {
+		return JoinRequestSponsorPresentation{}, NewProtocolError(
+			CodeUnauthorized, "Device Sync principal was not found",
+		)
+	}
+	if credential.DomainID != principal.provisioning.ControlDomain.Registration.DomainID {
+		return JoinRequestSponsorPresentation{}, NewProtocolError(
+			CodeWrongScope, "join request requires the principal control domain",
+		)
+	}
+	for _, request := range s.joinRequests {
+		if !request.MatchesPIN(pin) {
+			continue
+		}
+		if err := request.RequireActive(nowMilliseconds); err != nil {
+			return JoinRequestSponsorPresentation{}, err
+		}
+		if request.PrincipalID != nil && *request.PrincipalID != credential.TenantID {
+			return JoinRequestSponsorPresentation{}, NewProtocolError(
+				CodeWrongScope, "join request already belongs to another Device Sync principal",
+			)
+		}
+		return sponsorPresentation(request), nil
+	}
+	return JoinRequestSponsorPresentation{}, NewProtocolError(
+		CodeJoinRequestNotFound, "join request was not found",
+	)
+}
+
+func (s *MemoryStore) StoreJoinRequestBootstrap(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	bootstrap JoinBootstrapEnvelope,
+	nowMilliseconds int64,
+) (relay.Acceptance, error) {
+	if err := bootstrap.Validate(); err != nil {
+		return "", err
+	}
+	if _, err := s.relay.GetDomainStatus(ctx, credential); err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	principal, found := s.principals[credential.TenantID]
+	if !found {
+		return "", NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
+	}
+	if credential.DomainID != principal.provisioning.ControlDomain.Registration.DomainID {
+		return "", NewProtocolError(CodeWrongScope, "join request requires the principal control domain")
+	}
+	request, found := s.joinRequests[bootstrap.RequestID]
+	if !found {
+		return "", NewProtocolError(CodeJoinRequestNotFound, "join request was not found")
+	}
+	if err := request.RequireActive(nowMilliseconds); err != nil {
+		return "", err
+	}
+	if bootstrap.ExpiresAtMilliseconds > request.ExpiresAtMilliseconds {
+		return "", NewProtocolError(CodeWrongScope, "join request bootstrap outlives request")
+	}
+	if request.PrincipalID != nil || request.Bootstrap != nil {
+		if request.PrincipalID != nil && *request.PrincipalID == credential.TenantID &&
+			reflect.DeepEqual(*request.Bootstrap, bootstrap) {
+			return relay.AcceptanceDuplicate, nil
+		}
+		return "", NewProtocolError(CodeJoinRequestClaimed, "join request already has a bootstrap")
+	}
+	principalID := credential.TenantID
+	request.PrincipalID = &principalID
+	request.Bootstrap = &bootstrap
+	s.joinRequests[request.RequestID] = request
+	return relay.AcceptanceAccepted, nil
+}
+
+func (s *MemoryStore) FetchJoinRequestBootstrap(
+	_ context.Context,
+	credential JoinRequestCredential,
+	nowMilliseconds int64,
+) (JoinBootstrapEnvelope, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	request, found := s.joinRequests[credential.RequestID]
+	if !found {
+		return JoinBootstrapEnvelope{}, NewProtocolError(CodeJoinRequestNotFound, "join request was not found")
+	}
+	if err := request.VerifyPollingCredential(credential); err != nil {
+		return JoinBootstrapEnvelope{}, err
+	}
+	if err := request.RequireActive(nowMilliseconds); err != nil {
+		return JoinBootstrapEnvelope{}, err
+	}
+	if request.Bootstrap == nil {
+		return JoinBootstrapEnvelope{}, NewProtocolError(CodeJoinRequestNotFound, "join request bootstrap is not available")
+	}
+	return *request.Bootstrap, nil
 }
 
 func (s *MemoryStore) CreateAccountAdmission(_ context.Context, admission AccountAdmission, nowMilliseconds int64) (AdmissionCreateResult, error) {

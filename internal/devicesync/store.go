@@ -16,4 +16,8 @@ type Store interface {
 	ClaimSpaceDeviceAdmission(context.Context, SpaceDeviceAdmissionCredential, SpaceDeviceAdmissionClaim, int64) (SpaceDeviceAdmissionClaimResult, error)
 	GetPrincipalStatus(context.Context, relay.TenantCredential) (PrincipalStatus, error)
 	RevokeDevice(context.Context, relay.TenantCredential, DeviceRevocation, int64) (DeviceRevocationResult, error)
+	CreateJoinRequest(context.Context, JoinRequest, int64) (JoinRequestCreateResult, error)
+	LookupJoinRequest(context.Context, relay.AdministrationCredential, string, int64) (JoinRequestSponsorPresentation, error)
+	StoreJoinRequestBootstrap(context.Context, relay.AdministrationCredential, JoinBootstrapEnvelope, int64) (relay.Acceptance, error)
+	FetchJoinRequestBootstrap(context.Context, JoinRequestCredential, int64) (JoinBootstrapEnvelope, error)
 }

@@ -334,6 +334,22 @@ func (s *Server) Handler() http.Handler {
 			traffic.SurfaceManagement,
 			s.handleClaimDeviceSyncSpaceDeviceAdmission,
 		)
+		// A join request is deliberately separate from account admission. Its
+		// six-digit PIN only helps an existing trusted device locate a
+		// candidate-created encrypted mailbox; it never becomes Device Sync
+		// authority or content-key material.
+		register("POST /v1/device-sync/join-requests", traffic.SurfaceRendezvous, s.handleCreateDeviceSyncJoinRequest)
+		register("GET /v1/device-sync/join-requests/{requestID}/bootstrap", traffic.SurfaceRendezvous, s.handleFetchDeviceSyncJoinBootstrap)
+		register(
+			"GET /v1/device-sync/principals/{principalID}/control-domains/{domainID}/join-requests/{pin}",
+			traffic.SurfaceManagement,
+			s.handleLookupDeviceSyncJoinRequest,
+		)
+		register(
+			"PUT /v1/device-sync/principals/{principalID}/control-domains/{domainID}/join-requests/{requestID}/bootstrap",
+			traffic.SurfaceManagement,
+			s.handleStoreDeviceSyncJoinBootstrap,
+		)
 	}
 	if s.sharedSpacesStore != nil {
 		if s.operatorProvisioningOn {
@@ -609,18 +625,20 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			switch deviceSyncProtocol.Code {
 			case devicesync.CodeInvalidAdmission, devicesync.CodeInvalidPrincipal,
 				devicesync.CodeInvalidSpace,
+				devicesync.CodeInvalidJoinRequest,
 				devicesync.CodeWrongScope:
 				status = http.StatusBadRequest
 			case devicesync.CodeUnauthorized, devicesync.CodeAdmissionNotFound:
 				status = http.StatusUnauthorized
-			case devicesync.CodeDeviceNotFound:
+			case devicesync.CodeDeviceNotFound, devicesync.CodeJoinRequestNotFound:
 				status = http.StatusNotFound
-			case devicesync.CodeAdmissionExpired:
+			case devicesync.CodeAdmissionExpired, devicesync.CodeJoinRequestExpired:
 				status = http.StatusGone
 			case devicesync.CodeAdmissionClaimed, devicesync.CodeAdmissionCollision,
 				devicesync.CodePrincipalCollision, devicesync.CodeDeviceCollision,
 				devicesync.CodeDeviceRevoked, devicesync.CodeLastDevice,
-				devicesync.CodeSpaceCollision:
+				devicesync.CodeSpaceCollision, devicesync.CodeJoinRequestClaimed,
+				devicesync.CodeJoinRequestCollision:
 				status = http.StatusConflict
 			}
 			writeJSON(writer, status, struct {

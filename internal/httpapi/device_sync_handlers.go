@@ -53,6 +53,160 @@ type deviceSyncSpaceProvisioningInput struct {
 	Domain          relayDomainProvisioningInput `json:"domain"`
 }
 
+// deviceSyncJoinRequestCreateInput intentionally contains the raw candidate
+// polling credential and displayed PIN only at ingress. The handler derives
+// and persists digests; neither value is returned or stored in plaintext.
+type deviceSyncJoinRequestCreateInput struct {
+	Version                     int       `json:"version"`
+	RetryID                     uuid.UUID `json:"retryID"`
+	RequestID                   uuid.UUID `json:"requestID"`
+	CandidateDeviceID           uuid.UUID `json:"candidateDeviceID"`
+	CandidateBootstrapPublicKey string    `json:"candidateBootstrapPublicKey"`
+	PollingAuthorizationToken   string    `json:"pollingAuthorizationToken"`
+	PIN                         string    `json:"pin"`
+	ExpiresAtMilliseconds       int64     `json:"expiresAtMilliseconds"`
+}
+
+type deviceSyncJoinBootstrapInput struct {
+	devicesync.JoinBootstrapEnvelope
+}
+
+func (s *Server) handleCreateDeviceSyncJoinRequest(writer http.ResponseWriter, request *http.Request) {
+	var input deviceSyncJoinRequestCreateInput
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.Version != devicesync.SchemaVersion {
+		s.writeError(writer, devicesync.NewProtocolError(
+			devicesync.CodeInvalidJoinRequest, "join request version is invalid",
+		))
+		return
+	}
+	pollingDigest, err := devicesync.JoinRequestPollingAuthorizationDigest(devicesync.JoinRequestCredential{
+		RequestID: input.RequestID, Token: input.PollingAuthorizationToken,
+	})
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidJoinRequest, err.Error()))
+		return
+	}
+	pinDigest, err := devicesync.JoinRequestPINAuthorizationDigest(input.PIN)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidJoinRequest, err.Error()))
+		return
+	}
+	now := s.nowMilliseconds()
+	result, err := s.deviceSyncStore.CreateJoinRequest(request.Context(), devicesync.JoinRequest{
+		Version:                     devicesync.SchemaVersion,
+		RetryID:                     input.RetryID,
+		RequestID:                   input.RequestID,
+		CandidateDeviceID:           input.CandidateDeviceID,
+		CandidateBootstrapPublicKey: input.CandidateBootstrapPublicKey,
+		PollingAuthorizationDigest:  pollingDigest,
+		PINAuthorizationDigest:      pinDigest,
+		CreatedAtMilliseconds:       now,
+		ExpiresAtMilliseconds:       input.ExpiresAtMilliseconds,
+	}, now)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceRendezvous, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleLookupDeviceSyncJoinRequest(writer http.ResponseWriter, request *http.Request) {
+	credential, err := deviceSyncControlCredentialFromRequest(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	presentation, err := s.deviceSyncStore.LookupJoinRequest(
+		request.Context(), credential, request.PathValue("pin"), s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, presentation)
+}
+
+func (s *Server) handleStoreDeviceSyncJoinBootstrap(writer http.ResponseWriter, request *http.Request) {
+	credential, err := deviceSyncControlCredentialFromRequest(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	requestID, err := parseUUID(request.PathValue("requestID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidJoinRequest, err.Error()))
+		return
+	}
+	var input deviceSyncJoinBootstrapInput
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.RequestID != requestID {
+		s.writeError(writer, devicesync.NewProtocolError(
+			devicesync.CodeWrongScope, "join bootstrap path and body differ",
+		))
+		return
+	}
+	acceptance, err := s.deviceSyncStore.StoreJoinRequestBootstrap(
+		request.Context(), credential, input.JoinBootstrapEnvelope, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(acceptance))
+	writeJSON(writer, relayAcceptanceStatus(acceptance), struct {
+		Acceptance relay.Acceptance `json:"acceptance"`
+	}{Acceptance: acceptance})
+}
+
+func (s *Server) handleFetchDeviceSyncJoinBootstrap(writer http.ResponseWriter, request *http.Request) {
+	requestID, err := parseUUID(request.PathValue("requestID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidJoinRequest, err.Error()))
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(
+			devicesync.CodeUnauthorized, "join request polling credential is missing",
+		))
+		return
+	}
+	bootstrap, err := s.deviceSyncStore.FetchJoinRequestBootstrap(
+		request.Context(), devicesync.JoinRequestCredential{RequestID: requestID, Token: token}, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, bootstrap)
+}
+
+func deviceSyncControlCredentialFromRequest(request *http.Request) (relay.AdministrationCredential, error) {
+	principalID, err := parseUUID(request.PathValue("principalID"))
+	if err != nil {
+		return relay.AdministrationCredential{}, devicesync.NewProtocolError(devicesync.CodeInvalidPrincipal, err.Error())
+	}
+	domainID, err := parseUUID(request.PathValue("domainID"))
+	if err != nil {
+		return relay.AdministrationCredential{}, devicesync.NewProtocolError(devicesync.CodeInvalidJoinRequest, err.Error())
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		return relay.AdministrationCredential{}, devicesync.NewProtocolError(
+			devicesync.CodeUnauthorized, "Device Sync control-domain credential is missing",
+		)
+	}
+	return relay.AdministrationCredential{TenantID: principalID, DomainID: domainID, Token: token}, nil
+}
+
 func (s *Server) handleGetDeviceSyncPrincipalStatus(writer http.ResponseWriter, request *http.Request) {
 	principalID, err := parseUUID(request.PathValue("principalID"))
 	if err != nil {

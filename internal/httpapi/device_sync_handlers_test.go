@@ -548,6 +548,26 @@ func TestDeviceSyncRoutesAreAbsentFromSharedSpacesSurface(t *testing.T) {
 	)
 	requireStatus(t, response, http.StatusNotFound)
 	_ = response.Body.Close()
+	joinRequestResponse := performRelayJSON(
+		t, server.Handler(), http.MethodPost, "/v1/device-sync/join-requests",
+		map[string]any{}, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, joinRequestResponse, http.StatusNotFound)
+	_ = joinRequestResponse.Body.Close()
+	joinBootstrapResponse := performRelayJSON(
+		t, server.Handler(), http.MethodGet,
+		"/v1/device-sync/join-requests/"+uuid.NewString()+"/bootstrap",
+		nil, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, joinBootstrapResponse, http.StatusNotFound)
+	_ = joinBootstrapResponse.Body.Close()
+	joinLookupResponse := performRelayJSON(
+		t, server.Handler(), http.MethodGet,
+		"/v1/device-sync/principals/"+uuid.NewString()+"/control-domains/"+uuid.NewString()+"/join-requests/123456",
+		nil, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, joinLookupResponse, http.StatusNotFound)
+	_ = joinLookupResponse.Body.Close()
 	statusResponse := performRelayJSON(
 		t, server.Handler(), http.MethodGet,
 		"/v1/device-sync/principals/"+uuid.NewString()+"/status",
