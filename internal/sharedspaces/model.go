@@ -680,6 +680,43 @@ type ParticipantKeyGrantResult struct {
 	KeyGrant        ParticipantKeyGrant `json:"keyGrant"`
 }
 
+// ParticipantStatus is the participant-scoped recovery view of Shared Space
+// authority. It intentionally excludes the participant roster, invitations,
+// administration authority, and content key material. The relay credential is
+// the sole authorization for retrieving this record.
+type ParticipantStatus struct {
+	Version               int                `json:"version"`
+	SpaceID               uuid.UUID          `json:"spaceID"`
+	DomainID              uuid.UUID          `json:"domainID"`
+	SecurityMode          SecurityMode       `json:"securityMode"`
+	InteractionMode       InteractionMode    `json:"interactionMode"`
+	CurrentKeyEpoch       uint64             `json:"currentKeyEpoch"`
+	BootstrapReady        bool               `json:"bootstrapReady"`
+	ActiveCheckpointEpoch *uint64            `json:"activeCheckpointEpoch,omitempty"`
+	Participant           Participant        `json:"participant"`
+	Capabilities          []relay.Capability `json:"capabilities"`
+	CreatedAtMilliseconds int64              `json:"createdAtMilliseconds"`
+}
+
+func (s ParticipantStatus) Validate() error {
+	if s.Version != SchemaVersion || s.SpaceID == uuid.Nil || s.DomainID == uuid.Nil ||
+		!s.SecurityMode.Valid() || !s.InteractionMode.Valid() || s.CurrentKeyEpoch == 0 ||
+		s.CreatedAtMilliseconds < 0 || s.Participant.SpaceID != s.SpaceID ||
+		s.Participant.RevokedAtMilliseconds != nil {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant status fields are invalid")
+	}
+	if err := s.Participant.Validate(); err != nil {
+		return err
+	}
+	if !sameCapabilities(s.Capabilities, s.Participant.Role.Capabilities(s.InteractionMode)) {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant status capabilities are invalid")
+	}
+	if s.BootstrapReady != (s.ActiveCheckpointEpoch != nil && *s.ActiveCheckpointEpoch == s.CurrentKeyEpoch) {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant bootstrap status is invalid")
+	}
+	return nil
+}
+
 type ParticipantRoleChange struct {
 	Version               int       `json:"version"`
 	RetryID               uuid.UUID `json:"retryID"`

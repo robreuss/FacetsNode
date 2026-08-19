@@ -16,6 +16,7 @@ type Store interface {
 	ListAuthorityEvents(context.Context, relay.AdministrationCredential, uint64, int) (AuthorityEventPage, error)
 	ChangeParticipantRole(context.Context, relay.AdministrationCredential, ParticipantRoleChange, int64) (ParticipantRoleChangeResult, error)
 	RevokeParticipant(context.Context, relay.AdministrationCredential, ParticipantRevocation, int64) (ParticipantRevocationResult, error)
+	GetParticipantStatus(context.Context, relay.Credential, int64) (ParticipantStatus, error)
 	GetParticipantKeyGrant(context.Context, relay.Credential, int64) (ParticipantKeyGrantResult, error)
 	PublishEnvelope(context.Context, relay.Credential, relay.Envelope, int64) (relay.PublishResult, error)
 	StageCheckpoint(context.Context, relay.Credential, relay.CheckpointCandidate, int64) (relay.CheckpointStageResponse, error)

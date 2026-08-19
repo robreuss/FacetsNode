@@ -373,6 +373,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleRevokeSharedSpaceParticipant,
 		)
 		register(
+			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/status",
+			traffic.SurfaceManagement,
+			s.handleGetSharedSpaceParticipantStatus,
+		)
+		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/key-grant",
 			traffic.SurfaceManagement,
 			s.handleGetSharedSpaceParticipantKeyGrant,

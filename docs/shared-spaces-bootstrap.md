@@ -127,6 +127,25 @@ and new grants commit atomically. A current member may retrieve only its own
 current grant through its relay credential. The server cannot decrypt a grant
 or manufacture a missing one.
 
+## Participant recovery status
+
+An active participant can recover its current authority view after relaunch at:
+
+`GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/status`
+
+The request uses that participant's relay credential, and the credential member
+identifier must equal the participant in the path. The response contains the
+immutable Space security and interaction modes, current key epoch, bootstrap
+readiness, active checkpoint epoch, the caller's own participant record, and
+the exact relay capabilities derived from the caller's current role. It works
+for both E2EE and managed Spaces; E2EE key ciphertext remains available only
+through the separate current-key-grant endpoint.
+
+This participant-scoped response never exposes the roster, other participants,
+invitations, administration authority, bearer tokens, FEF content, or content
+key material. Role changes and checkpoint/key-epoch changes are visible on the
+next authenticated read. Revoked participants cannot retrieve status.
+
 ## Public ingress
 
 The HTTPS ingress allows `/v1/shared-spaces/*` participant and Space-authority

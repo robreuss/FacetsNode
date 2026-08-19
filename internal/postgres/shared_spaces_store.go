@@ -1310,6 +1310,113 @@ func (s *SharedSpacesStore) GetParticipantKeyGrant(
 	)
 }
 
+func (s *SharedSpacesStore) GetParticipantStatus(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) (sharedspaces.ParticipantStatus, error) {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant status credential scope is invalid",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return sharedspaces.ParticipantStatus{}, fmt.Errorf("begin Shared Space participant status fetch: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var domainID uuid.UUID
+	var securityMode sharedspaces.SecurityMode
+	var interactionMode sharedspaces.InteractionMode
+	var currentKeyEpoch uint64
+	var provisioningPayload []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT domain_id,security_mode,interaction_mode,current_key_epoch,provisioning_payload
+		FROM shared_spaces
+		WHERE space_id=$1
+	`, credential.TenantID).Scan(
+		&domainID, &securityMode, &interactionMode, &currentKeyEpoch, &provisioningPayload,
+	); err == pgx.ErrNoRows {
+		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	} else if err != nil {
+		return sharedspaces.ParticipantStatus{}, fmt.Errorf("load Shared Space participant status authority: %w", err)
+	}
+	if credential.DomainID != domainID {
+		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant status belongs to another Shared Space",
+		)
+	}
+	provisioning, err := decodeSpaceProvisioning(provisioningPayload)
+	if err != nil {
+		return sharedspaces.ParticipantStatus{}, fmt.Errorf("decode Shared Space participant status authority: %w", err)
+	}
+	participant, err := loadSharedSpaceParticipant(
+		ctx, tx, credential.TenantID, credential.MemberID, "",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantStatus{}, err
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	member, found, err := loadRelayMember(
+		ctx, tx, credential.TenantID, domainID, credential.MemberID, "",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantStatus{}, err
+	}
+	if !found {
+		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantNotFound, "participant relay member was not found",
+		)
+	}
+	if err := member.VerifyCredential(credential, nowMilliseconds); err != nil {
+		return sharedspaces.ParticipantStatus{}, err
+	}
+	expectedCapabilities := participant.Role.Capabilities(interactionMode)
+	if !reflect.DeepEqual(member.Capabilities, expectedCapabilities) {
+		return sharedspaces.ParticipantStatus{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant, "participant relay capabilities do not match Shared Space authority",
+		)
+	}
+	var activeCheckpointEpochValue *int64
+	if err := tx.QueryRow(ctx, `
+		SELECT key_epoch FROM relay_checkpoints
+		WHERE tenant_id=$1 AND domain_id=$2 AND state='activated'
+		ORDER BY activation_ordinal DESC LIMIT 1
+	`, credential.TenantID, domainID).Scan(&activeCheckpointEpochValue); err != nil && err != pgx.ErrNoRows {
+		return sharedspaces.ParticipantStatus{}, fmt.Errorf("load Shared Space participant bootstrap epoch: %w", err)
+	}
+	var activeCheckpointEpoch *uint64
+	if activeCheckpointEpochValue != nil {
+		epoch := uint64(*activeCheckpointEpochValue)
+		activeCheckpointEpoch = &epoch
+	}
+	status := sharedspaces.ParticipantStatus{
+		Version: sharedspaces.SchemaVersion, SpaceID: credential.TenantID, DomainID: domainID,
+		SecurityMode: securityMode, InteractionMode: interactionMode, CurrentKeyEpoch: currentKeyEpoch,
+		BootstrapReady:        activeCheckpointEpoch != nil && *activeCheckpointEpoch == currentKeyEpoch,
+		ActiveCheckpointEpoch: activeCheckpointEpoch,
+		Participant:           participant,
+		Capabilities:          member.Capabilities,
+		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
+	}
+	if err := status.Validate(); err != nil {
+		return sharedspaces.ParticipantStatus{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ParticipantStatus{}, fmt.Errorf("commit Shared Space participant status fetch: %w", err)
+	}
+	return status, nil
+}
+
 func (s *SharedSpacesStore) PublishEnvelope(
 	ctx context.Context,
 	credential relay.Credential,

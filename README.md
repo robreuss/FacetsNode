@@ -63,7 +63,9 @@ Immutable interaction modes and participant roles derive relay operations.
 For E2EE Spaces, the service atomically stores participant-specific encrypted
 key grants and advances key epochs on revocation, but plaintext content keys
 remain a client concern and never pass through the Shared Spaces operator
-credential.
+credential. Authenticated participants can recover their own current role,
+derived capabilities, key epoch, and bootstrap readiness after relaunch without
+receiving the Space roster or using a Space administration credential.
 
 ## Development
 

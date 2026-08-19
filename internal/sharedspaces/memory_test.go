@@ -81,6 +81,27 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		claimRetry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch || claimRetry.KeyGrant == nil {
 		t.Fatalf("claim retry=%+v err=%v", claimRetry, err)
 	}
+	participantStatus, err := store.GetParticipantStatus(ctx, memberCredential, 1_301)
+	if err != nil || participantStatus.SpaceID != provisioning.SpaceID ||
+		participantStatus.DomainID != provisioning.Domain.Registration.DomainID ||
+		participantStatus.SecurityMode != sharedspaces.SecurityModeE2EE ||
+		participantStatus.InteractionMode != sharedspaces.InteractionModeCollaborative ||
+		participantStatus.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		!participantStatus.BootstrapReady || participantStatus.ActiveCheckpointEpoch == nil ||
+		*participantStatus.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
+		participantStatus.Participant.ParticipantID != invitation.ParticipantID ||
+		participantStatus.Participant.Role != sharedspaces.RoleParticipant ||
+		!sameTestCapabilities(
+			participantStatus.Capabilities,
+			sharedspaces.RoleParticipant.Capabilities(sharedspaces.InteractionModeCollaborative),
+		) {
+		t.Fatalf("participant status=%+v err=%v", participantStatus, err)
+	}
+	wrongStatusCredential := memberCredential
+	wrongStatusCredential.DomainID = uuid.New()
+	if _, err := store.GetParticipantStatus(ctx, wrongStatusCredential, 1_301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongScope) {
+		t.Fatalf("cross-domain participant status err=%v", err)
+	}
 	invitationList, err := store.ListInvitations(ctx, admin, 1_300)
 	if err != nil || invitationList.SpaceID != provisioning.SpaceID ||
 		len(invitationList.Invitations) != 1 ||
@@ -147,6 +168,9 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, 1_500); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked relay credential err=%v", err)
 	}
+	if _, err := store.GetParticipantStatus(ctx, memberCredential, 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+		t.Fatalf("revoked participant status err=%v", err)
+	}
 	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
 		RetryID: uuid.New(), CheckpointID: stagedBeforeRotation.CheckpointID,
 		ActivatedAtMilliseconds: 1_500,
@@ -157,6 +181,14 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if err != nil || status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
 		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("status awaiting rotated checkpoint=%+v err=%v", status, err)
+	}
+	hostStatus, err := store.GetParticipantStatus(ctx, hostCredential, 1_500)
+	if err != nil || hostStatus.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
+		hostStatus.BootstrapReady || hostStatus.ActiveCheckpointEpoch == nil ||
+		*hostStatus.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
+		hostStatus.Participant.ParticipantID != provisioning.InitialParticipantID ||
+		hostStatus.Participant.Role != sharedspaces.RoleHost {
+		t.Fatalf("host participant status awaiting rotated checkpoint=%+v err=%v", hostStatus, err)
 	}
 	staleCandidate := stagedBeforeRotation
 	staleCandidate.RetryID = uuid.New()
@@ -184,6 +216,11 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		!status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
 		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("status after revocation=%+v err=%v", status, err)
+	}
+	hostStatus, err = store.GetParticipantStatus(ctx, hostCredential, 1_504)
+	if err != nil || !hostStatus.BootstrapReady || hostStatus.ActiveCheckpointEpoch == nil ||
+		*hostStatus.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("host participant status after rotated checkpoint=%+v err=%v", hostStatus, err)
 	}
 	staleEnvelope := testSharedEnvelope(provisioning, sharedspaces.InitialKeyEpoch, 1_600)
 	if _, err := store.PublishEnvelope(ctx, hostCredential, staleEnvelope, 1_600); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
@@ -458,10 +495,21 @@ func activateSharedSpaceCheckpoint(
 
 func TestMemoryStoreRejectsCrossSpaceAuthorityAndInitialHostRevocation(t *testing.T) {
 	ctx := context.Background()
-	store := sharedspaces.NewMemoryStore(relay.NewMemoryStore())
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
 	_, provisioning, admin := testSpaceProvisioning(t, 3_000, sharedspaces.SecurityModeManaged)
 	if _, err := store.ProvisionSpace(ctx, provisioning, 3_000); err != nil {
 		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	participantStatus, err := store.GetParticipantStatus(ctx, hostCredential, 3_001)
+	if err != nil || participantStatus.SecurityMode != sharedspaces.SecurityModeManaged ||
+		participantStatus.BootstrapReady || participantStatus.ActiveCheckpointEpoch != nil ||
+		participantStatus.Participant.Role != sharedspaces.RoleHost {
+		t.Fatalf("managed participant status=%+v err=%v", participantStatus, err)
 	}
 	invitation, _ := testInvitation(t, provisioning, admin, 3_100, sharedspaces.RoleReader)
 	wrong := admin
@@ -718,4 +766,16 @@ func testToken(seed byte) string {
 		value[index] = seed + byte(index)
 	}
 	return base64.RawURLEncoding.EncodeToString(value)
+}
+
+func sameTestCapabilities(left, right []relay.Capability) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

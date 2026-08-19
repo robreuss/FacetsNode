@@ -670,6 +670,56 @@ func rolePointer(role Role) *Role { return &role }
 
 func uint64Pointer(value uint64) *uint64 { return &value }
 
+func (s *MemoryStore) GetParticipantStatus(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) (ParticipantStatus, error) {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+		return ParticipantStatus{}, NewProtocolError(CodeWrongScope, "participant status credential scope is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return ParticipantStatus{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ParticipantStatus{}, NewProtocolError(CodeWrongScope, "participant status belongs to another Shared Space")
+	}
+	participant, found := space.participants[credential.MemberID]
+	if !found {
+		return ParticipantStatus{}, NewProtocolError(CodeParticipantNotFound, "participant was not found")
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ParticipantStatus{}, NewProtocolError(CodeParticipantRevoked, "participant is revoked")
+	}
+	// Fetch authenticates the relay credential and active membership without
+	// exposing another participant or changing Shared Space authority state.
+	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {
+		return ParticipantStatus{}, err
+	}
+	var activeCheckpointEpoch *uint64
+	if space.activeCheckpointEpoch != 0 {
+		epoch := space.activeCheckpointEpoch
+		activeCheckpointEpoch = &epoch
+	}
+	status := ParticipantStatus{
+		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
+		DomainID: credential.DomainID, SecurityMode: space.provisioning.SecurityMode,
+		InteractionMode: space.provisioning.InteractionMode, CurrentKeyEpoch: space.keyEpoch,
+		BootstrapReady:        activeCheckpointEpoch != nil && *activeCheckpointEpoch == space.keyEpoch,
+		ActiveCheckpointEpoch: activeCheckpointEpoch,
+		Participant:           participant,
+		Capabilities:          participant.Role.Capabilities(space.provisioning.InteractionMode),
+		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
+	}
+	if err := status.Validate(); err != nil {
+		return ParticipantStatus{}, err
+	}
+	return status, nil
+}
+
 func (s *MemoryStore) GetParticipantKeyGrant(
 	ctx context.Context,
 	credential relay.Credential,

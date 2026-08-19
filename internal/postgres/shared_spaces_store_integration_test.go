@@ -171,6 +171,20 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		memberKeyGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("member key grant=%+v err=%v", memberKeyGrant, err)
 	}
+	participantStatus, err := store.GetParticipantStatus(ctx, memberCredential, now+211)
+	if err != nil || participantStatus.SecurityMode != sharedspaces.SecurityModeE2EE ||
+		participantStatus.InteractionMode != provisioning.InteractionMode ||
+		participantStatus.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		!participantStatus.BootstrapReady || participantStatus.ActiveCheckpointEpoch == nil ||
+		*participantStatus.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
+		participantStatus.Participant.ParticipantID != invitation.ParticipantID ||
+		participantStatus.Participant.Role != sharedspaces.RoleParticipant ||
+		!postgresSameCapabilities(
+			participantStatus.Capabilities,
+			sharedspaces.RoleParticipant.Capabilities(provisioning.InteractionMode),
+		) {
+		t.Fatalf("member participant status=%+v err=%v", participantStatus, err)
+	}
 	demotion := sharedspaces.ParticipantRoleChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleParticipant,
@@ -238,6 +252,9 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, now+301); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked participant relay access err=%v", err)
+	}
+	if _, err := store.GetParticipantStatus(ctx, memberCredential, now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+		t.Fatalf("revoked participant status err=%v", err)
 	}
 	authorityEvents, err := store.ListAuthorityEvents(ctx, admin, 0, 100)
 	if err != nil || len(authorityEvents.Events) != 8 || authorityEvents.NextSequence == 0 {
@@ -455,4 +472,16 @@ func postgresParticipantKeyGrant(
 	s.FillBytes(signature[32:])
 	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
 	return &grant
+}
+
+func postgresSameCapabilities(left, right []relay.Capability) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
