@@ -20,6 +20,8 @@ type memorySpace struct {
 	presentations         map[uuid.UUID]ParticipantPresentation
 	keyGrants             map[uint64]map[uuid.UUID]ParticipantKeyGrant
 	managedContentKeys    map[uint64][]byte
+	computePools          map[uuid.UUID]ComputePool
+	computeBindings       map[uuid.UUID]SpaceComputeBinding
 	keyEpoch              uint64
 	activeCheckpointEpoch uint64
 }
@@ -45,6 +47,8 @@ type MemoryStore struct {
 	roleChangeResponses             map[uuid.UUID]ParticipantRoleChangeResult
 	presentationUpdateRequests      map[uuid.UUID]ParticipantPresentationUpdate
 	presentationUpdateResponses     map[uuid.UUID]ParticipantPresentationUpdateResult
+	computePoolChangeRequests       map[uuid.UUID]ComputePoolChange
+	computePoolChangeResponses      map[uuid.UUID]ComputePoolChangeResult
 	checkpointEpochs                map[uuid.UUID]uint64
 	authorityEvents                 map[uuid.UUID][]AuthorityEvent
 	nextAuthoritySequences          map[uuid.UUID]uint64
@@ -71,6 +75,8 @@ func NewMemoryStore(relayStore relay.Store, custodians ...*keycustody.ManagedCon
 		roleChangeResponses:             make(map[uuid.UUID]ParticipantRoleChangeResult),
 		presentationUpdateRequests:      make(map[uuid.UUID]ParticipantPresentationUpdate),
 		presentationUpdateResponses:     make(map[uuid.UUID]ParticipantPresentationUpdateResult),
+		computePoolChangeRequests:       make(map[uuid.UUID]ComputePoolChange),
+		computePoolChangeResponses:      make(map[uuid.UUID]ComputePoolChangeResult),
 		checkpointEpochs:                make(map[uuid.UUID]uint64),
 		authorityEvents:                 make(map[uuid.UUID][]AuthorityEvent),
 		nextAuthoritySequences:          make(map[uuid.UUID]uint64),
@@ -132,6 +138,8 @@ func (s *MemoryStore) ProvisionSpace(
 		presentations:      make(map[uuid.UUID]ParticipantPresentation),
 		keyGrants:          make(map[uint64]map[uuid.UUID]ParticipantKeyGrant),
 		managedContentKeys: make(map[uint64][]byte),
+		computePools:       make(map[uuid.UUID]ComputePool),
+		computeBindings:    make(map[uuid.UUID]SpaceComputeBinding),
 		keyEpoch:           InitialKeyEpoch,
 	}
 	if managedWrappedKey != nil {
@@ -483,6 +491,21 @@ func (s *MemoryStore) GetSpaceStatus(
 	sort.Slice(presentations, func(left, right int) bool {
 		return presentations[left].ParticipantID.String() < presentations[right].ParticipantID.String()
 	})
+	computePools := make([]ComputePool, 0, len(space.computePools))
+	for _, pool := range space.computePools {
+		computePools = append(computePools, pool)
+	}
+	sort.Slice(computePools, func(left, right int) bool {
+		return computePools[left].PoolID.String() < computePools[right].PoolID.String()
+	})
+	computeBindings := make([]SpaceComputeBinding, 0, len(space.computeBindings))
+	for _, binding := range space.computeBindings {
+		binding.AllowedOperations = append([]string(nil), binding.AllowedOperations...)
+		computeBindings = append(computeBindings, binding)
+	}
+	sort.Slice(computeBindings, func(left, right int) bool {
+		return computeBindings[left].PoolID.String() < computeBindings[right].PoolID.String()
+	})
 	var activeCheckpointEpoch *uint64
 	if space.activeCheckpointEpoch != 0 {
 		epoch := space.activeCheckpointEpoch
@@ -497,9 +520,93 @@ func (s *MemoryStore) GetSpaceStatus(
 		ActiveCheckpointEpoch: activeCheckpointEpoch,
 		DomainID:              space.provisioning.Domain.Registration.DomainID,
 		InitialParticipantID:  space.provisioning.InitialParticipantID,
-		Participants:          participants, Presentations: presentations, Relay: relayStatus,
+		Participants:          participants, Presentations: presentations,
+		ComputePools: computePools, ComputeBindings: computeBindings, Relay: relayStatus,
 		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
 	}, nil
+}
+
+func (s *MemoryStore) ChangeComputePool(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	change ComputePoolChange,
+	nowMilliseconds int64,
+) (ComputePoolChangeResult, error) {
+	if err := change.Validate(); err != nil {
+		return ComputePoolChangeResult{}, err
+	}
+	if change.ChangedAtMilliseconds > nowMilliseconds {
+		return ComputePoolChangeResult{}, NewProtocolError(CodeInvalidComputePool, "Shared Space compute pool change starts in the future")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[change.SpaceID]
+	if space == nil {
+		return ComputePoolChangeResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.TenantID != change.SpaceID ||
+		credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ComputePoolChangeResult{}, NewProtocolError(CodeWrongScope, "compute pool belongs to another Shared Space")
+	}
+	if _, err := s.relay.GetDomainStatus(ctx, credential); err != nil {
+		return ComputePoolChangeResult{}, err
+	}
+	if existing, found := s.computePoolChangeRequests[change.RetryID]; found {
+		if reflect.DeepEqual(existing, change) {
+			result := s.computePoolChangeResponses[change.RetryID]
+			result.Acceptance = relay.AcceptanceDuplicate
+			return result, nil
+		}
+		return ComputePoolChangeResult{}, NewProtocolError(CodeComputePoolCollision, "compute pool retry ID was reused")
+	}
+	existingPool, poolFound := space.computePools[change.PoolID]
+	existingBinding, bindingFound := space.computeBindings[change.PoolID]
+	if poolFound != bindingFound {
+		return ComputePoolChangeResult{}, NewProtocolError(CodeComputePoolCollision, "compute pool authority state is inconsistent")
+	}
+	if !poolFound {
+		if change.PreviousPoolRevision != 0 {
+			return ComputePoolChangeResult{}, NewProtocolError(CodeComputePoolNotFound, "compute pool was not found")
+		}
+	} else if existingPool.Revision != change.PreviousPoolRevision ||
+		existingBinding.Revision != change.PreviousBindingRevision {
+		return ComputePoolChangeResult{}, NewProtocolError(CodeComputePoolCollision, "compute pool revision changed")
+	}
+	createdAt := change.ChangedAtMilliseconds
+	if poolFound {
+		createdAt = existingPool.CreatedAtMilliseconds
+	}
+	nextRevision := change.PreviousPoolRevision + 1
+	pool := ComputePool{
+		Version: SchemaVersion, SpaceID: change.SpaceID, PoolID: change.PoolID,
+		DisplayName: change.DisplayName, Enabled: change.Enabled, Revision: nextRevision,
+		CreatedAtMilliseconds: createdAt, UpdatedAtMilliseconds: change.ChangedAtMilliseconds,
+	}
+	binding := SpaceComputeBinding{
+		Version: SchemaVersion, SpaceID: change.SpaceID, PoolID: change.PoolID,
+		AllowedOperations: append([]string(nil), change.AllowedOperations...),
+		ResourceCeiling:   change.ResourceCeiling, PricingRevision: change.PricingRevision,
+		DataSensitivityContract: change.DataSensitivityContract,
+		ProcessingContract:      change.ProcessingContract,
+		Revision:                nextRevision, CreatedAtMilliseconds: createdAt,
+		UpdatedAtMilliseconds: change.ChangedAtMilliseconds,
+	}
+	result := ComputePoolChangeResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: change.RetryID,
+		Pool: pool, Binding: binding,
+	}
+	space.computePools[change.PoolID] = pool
+	space.computeBindings[change.PoolID] = binding
+	s.computePoolChangeRequests[change.RetryID] = change
+	s.computePoolChangeResponses[change.RetryID] = result
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: change.RetryID, SpaceID: change.SpaceID, DomainID: credential.DomainID,
+		EventType: AuthorityEventSpaceComputeBindingChanged, ComputePoolID: &change.PoolID,
+		PreviousBindingRevision: &change.PreviousBindingRevision,
+		CurrentBindingRevision:  &nextRevision,
+		OccurredAtMilliseconds:  change.ChangedAtMilliseconds,
+	})
+	return result, nil
 }
 
 func (s *MemoryStore) ListAuthorityEvents(

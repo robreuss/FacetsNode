@@ -343,6 +343,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleListSharedSpaceAuthorityEvents,
 		)
 		register(
+			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/compute-pools/{poolID}",
+			traffic.SurfaceManagement,
+			s.handleChangeSharedSpaceComputePool,
+		)
+		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations",
 			traffic.SurfaceManagement,
 			s.handleCreateSharedSpaceInvitation,
@@ -613,13 +618,14 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			switch sharedSpacesProtocol.Code {
 			case sharedspaces.CodeInvalidSpace, sharedspaces.CodeInvalidInvitation,
 				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeInvalidParticipantPresentation,
-				sharedspaces.CodeInvalidAuthorityEvent,
+				sharedspaces.CodeInvalidAuthorityEvent, sharedspaces.CodeInvalidComputePool,
 				sharedspaces.CodeWrongScope:
 				status = http.StatusBadRequest
 			case sharedspaces.CodeUnauthorized:
 				status = http.StatusUnauthorized
 			case sharedspaces.CodeSpaceNotFound, sharedspaces.CodeInvitationNotFound,
-				sharedspaces.CodeParticipantNotFound, sharedspaces.CodeKeyGrantNotFound:
+				sharedspaces.CodeParticipantNotFound, sharedspaces.CodeKeyGrantNotFound,
+				sharedspaces.CodeComputePoolNotFound:
 				status = http.StatusNotFound
 			case sharedspaces.CodeInvitationCancelled:
 				status = http.StatusGone
@@ -628,6 +634,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				sharedspaces.CodeInvitationCancellationCollision,
 				sharedspaces.CodeParticipantPresentationCollision,
 				sharedspaces.CodeParticipantRoleCollision,
+				sharedspaces.CodeComputePoolCollision,
 				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost,
 				sharedspaces.CodeWrongKeyEpoch, sharedspaces.CodeBootstrapNotReady:
 				status = http.StatusConflict

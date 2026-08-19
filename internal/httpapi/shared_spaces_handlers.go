@@ -152,6 +152,45 @@ func (s *Server) handleListSharedSpaceAuthorityEvents(writer http.ResponseWriter
 	writeJSON(writer, http.StatusOK, page)
 }
 
+func (s *Server) handleChangeSharedSpaceComputePool(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	poolID, err := parseSharedSpacesUUID(request.PathValue("poolID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var change sharedspaces.ComputePoolChange
+	if err := readSharedSpacesJSON(writer, request, &change); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if change.SpaceID != spaceID || change.PoolID != poolID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope,
+			"Shared Space compute pool body and path differ",
+		))
+		return
+	}
+	result, err := s.sharedSpacesStore.ChangeComputePool(
+		request.Context(), credential, change, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
 func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, request *http.Request) {
 	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
 	if err != nil {

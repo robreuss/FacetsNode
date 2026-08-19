@@ -194,6 +194,32 @@ assert an email or payment identity, or prove a Facets Persona. Updating a
 presentation therefore does not append an authority event. Revoked participants
 cannot update their presentation.
 
+## Space compute bindings
+
+An authenticated Space administrator creates or replaces the policy joining a
+Shared Space to one compute pool at:
+
+`POST /v1/shared-spaces/{spaceID}/domains/{domainID}/compute-pools/{poolID}`
+
+The versioned request contains a retry identifier, the previous pool and binding
+revisions, a recognition-only display name, enabled state, sorted operation
+identifiers, hard resource ceilings, pricing revision, data-sensitivity
+contract, and processing contract. Creation uses zero previous revisions;
+subsequent replacement must name the exact current revision. Exact retry
+returns the prior result, while stale revisions or a retry identifier reused
+with different input are rejected.
+
+Pool and binding changes commit atomically and append one content-blind
+`space_compute_binding_changed` authority event. Administrator status includes
+the current pools and bindings. A binding does not copy membership, enroll a
+Worker, authorize a participant, or contain a Space content-key epoch. A later
+short-lived compute capability will be issued against the Space's current key
+epoch so participant revocation cannot leave a durable binding stale.
+
+This endpoint establishes authority policy only. AI job/result routing, Worker
+selection, explicit Worker consent, capability issuance, metering, and billing
+remain later slices.
+
 ## Public ingress
 
 The HTTPS ingress allows `/v1/shared-spaces/*` participant and Space-authority
@@ -213,7 +239,7 @@ This vertical slice intentionally does not yet implement:
 - client Persona binding and invitation UX;
 - managed-mode content inspection or moderation policy;
 - billing, Stripe Connect, hosting entitlements, or identity verification;
-- Space-bound compute capabilities;
+- signed Space-bound compute capabilities and AI job/result routing;
 - a completed production backup/restore drill and retention policy.
 
 Those gates build on this authority lifecycle without changing the rule that

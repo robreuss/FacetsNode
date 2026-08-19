@@ -32,19 +32,21 @@ const (
 type AuthorityEventType string
 
 const (
-	AuthorityEventSpaceProvisioned       AuthorityEventType = "space_provisioned"
-	AuthorityEventInvitationCreated      AuthorityEventType = "invitation_created"
-	AuthorityEventInvitationClaimed      AuthorityEventType = "invitation_claimed"
-	AuthorityEventInvitationCancelled    AuthorityEventType = "invitation_cancelled"
-	AuthorityEventParticipantRoleChanged AuthorityEventType = "participant_role_changed"
-	AuthorityEventParticipantRevoked     AuthorityEventType = "participant_revoked"
+	AuthorityEventSpaceProvisioned           AuthorityEventType = "space_provisioned"
+	AuthorityEventInvitationCreated          AuthorityEventType = "invitation_created"
+	AuthorityEventInvitationClaimed          AuthorityEventType = "invitation_claimed"
+	AuthorityEventInvitationCancelled        AuthorityEventType = "invitation_cancelled"
+	AuthorityEventParticipantRoleChanged     AuthorityEventType = "participant_role_changed"
+	AuthorityEventParticipantRevoked         AuthorityEventType = "participant_revoked"
+	AuthorityEventSpaceComputeBindingChanged AuthorityEventType = "space_compute_binding_changed"
 )
 
 func (t AuthorityEventType) Valid() bool {
 	switch t {
 	case AuthorityEventSpaceProvisioned, AuthorityEventInvitationCreated,
 		AuthorityEventInvitationClaimed, AuthorityEventInvitationCancelled,
-		AuthorityEventParticipantRoleChanged, AuthorityEventParticipantRevoked:
+		AuthorityEventParticipantRoleChanged, AuthorityEventParticipantRevoked,
+		AuthorityEventSpaceComputeBindingChanged:
 		return true
 	default:
 		return false
@@ -55,19 +57,22 @@ func (t AuthorityEventType) Valid() bool {
 // authority transition. It deliberately excludes credentials, key material,
 // encrypted content, payment state, contact attributes, and Persona claims.
 type AuthorityEvent struct {
-	Version                int                `json:"version"`
-	Sequence               uint64             `json:"sequence"`
-	EventID                uuid.UUID          `json:"eventID"`
-	SpaceID                uuid.UUID          `json:"spaceID"`
-	DomainID               uuid.UUID          `json:"domainID"`
-	EventType              AuthorityEventType `json:"eventType"`
-	SubjectParticipantID   *uuid.UUID         `json:"subjectParticipantID,omitempty"`
-	InvitationID           *uuid.UUID         `json:"invitationID,omitempty"`
-	PreviousRole           *Role              `json:"previousRole,omitempty"`
-	CurrentRole            *Role              `json:"currentRole,omitempty"`
-	PreviousKeyEpoch       *uint64            `json:"previousKeyEpoch,omitempty"`
-	CurrentKeyEpoch        *uint64            `json:"currentKeyEpoch,omitempty"`
-	OccurredAtMilliseconds int64              `json:"occurredAtMilliseconds"`
+	Version                 int                `json:"version"`
+	Sequence                uint64             `json:"sequence"`
+	EventID                 uuid.UUID          `json:"eventID"`
+	SpaceID                 uuid.UUID          `json:"spaceID"`
+	DomainID                uuid.UUID          `json:"domainID"`
+	EventType               AuthorityEventType `json:"eventType"`
+	SubjectParticipantID    *uuid.UUID         `json:"subjectParticipantID,omitempty"`
+	InvitationID            *uuid.UUID         `json:"invitationID,omitempty"`
+	PreviousRole            *Role              `json:"previousRole,omitempty"`
+	CurrentRole             *Role              `json:"currentRole,omitempty"`
+	PreviousKeyEpoch        *uint64            `json:"previousKeyEpoch,omitempty"`
+	CurrentKeyEpoch         *uint64            `json:"currentKeyEpoch,omitempty"`
+	ComputePoolID           *uuid.UUID         `json:"computePoolID,omitempty"`
+	PreviousBindingRevision *uint64            `json:"previousBindingRevision,omitempty"`
+	CurrentBindingRevision  *uint64            `json:"currentBindingRevision,omitempty"`
+	OccurredAtMilliseconds  int64              `json:"occurredAtMilliseconds"`
 }
 
 func (e AuthorityEvent) Validate() error {
@@ -79,7 +84,9 @@ func (e AuthorityEvent) Validate() error {
 		(e.PreviousRole != nil && !e.PreviousRole.Valid()) ||
 		(e.CurrentRole != nil && !e.CurrentRole.Valid()) ||
 		(e.PreviousKeyEpoch != nil && *e.PreviousKeyEpoch == 0) ||
-		(e.CurrentKeyEpoch != nil && *e.CurrentKeyEpoch == 0) {
+		(e.CurrentKeyEpoch != nil && *e.CurrentKeyEpoch == 0) ||
+		(e.ComputePoolID != nil && *e.ComputePoolID == uuid.Nil) ||
+		(e.CurrentBindingRevision != nil && *e.CurrentBindingRevision == 0) {
 		return NewProtocolError(CodeInvalidAuthorityEvent, "Shared Space authority event fields are invalid")
 	}
 	if !e.validTransitionShape() {
@@ -89,27 +96,36 @@ func (e AuthorityEvent) Validate() error {
 }
 
 func (e AuthorityEvent) validTransitionShape() bool {
+	computeFieldsAbsent := e.ComputePoolID == nil && e.PreviousBindingRevision == nil &&
+		e.CurrentBindingRevision == nil
 	switch e.EventType {
 	case AuthorityEventSpaceProvisioned:
 		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
 			e.PreviousRole == nil && e.CurrentRole != nil && *e.CurrentRole == RoleHost &&
-			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
 	case AuthorityEventInvitationCreated, AuthorityEventInvitationClaimed:
 		return e.SubjectParticipantID != nil && e.InvitationID != nil &&
 			e.PreviousRole == nil && e.CurrentRole != nil &&
-			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
 	case AuthorityEventInvitationCancelled:
 		return e.SubjectParticipantID != nil && e.InvitationID != nil &&
 			e.PreviousRole == nil && e.CurrentRole == nil &&
-			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil && computeFieldsAbsent
 	case AuthorityEventParticipantRoleChanged:
 		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
 			e.PreviousRole != nil && e.CurrentRole != nil &&
-			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil && computeFieldsAbsent
 	case AuthorityEventParticipantRevoked:
 		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
 			e.PreviousRole == nil && e.CurrentRole == nil &&
-			e.PreviousKeyEpoch != nil && e.CurrentKeyEpoch != nil
+			e.PreviousKeyEpoch != nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
+	case AuthorityEventSpaceComputeBindingChanged:
+		return e.SubjectParticipantID == nil && e.InvitationID == nil &&
+			e.PreviousRole == nil && e.CurrentRole == nil &&
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil &&
+			e.ComputePoolID != nil && e.PreviousBindingRevision != nil &&
+			e.CurrentBindingRevision != nil &&
+			*e.CurrentBindingRevision == *e.PreviousBindingRevision+1
 	default:
 		return false
 	}
@@ -898,6 +914,8 @@ type SpaceStatus struct {
 	InitialParticipantID  uuid.UUID                 `json:"initialParticipantID"`
 	Participants          []Participant             `json:"participants"`
 	Presentations         []ParticipantPresentation `json:"presentations"`
+	ComputePools          []ComputePool             `json:"computePools"`
+	ComputeBindings       []SpaceComputeBinding     `json:"computeBindings"`
 	Relay                 relay.DomainStatus        `json:"relay"`
 	CreatedAtMilliseconds int64                     `json:"createdAtMilliseconds"`
 }

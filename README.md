@@ -74,7 +74,10 @@ content key. The key is never returned by status, roster, invitation, operator,
 or Space-administration endpoints. Participants may maintain a revisioned
 display name for their own active membership. This recognition metadata is
 returned by status/bootstrap reads but never grants authority or asserts a
-verified Persona.
+verified Persona. Space administrators may also define retry-safe compute pools
+and Space bindings with operation, resource, pricing, sensitivity, and
+processing policy. These records grant no execution authority by themselves;
+short-lived signed capabilities and AI job routing are separate gates.
 
 ## Development
 

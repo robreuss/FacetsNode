@@ -314,6 +314,64 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreComputePoolAuthorityLifecycle(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 5_000, sharedspaces.SecurityModeE2EE)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 5_000); err != nil {
+		t.Fatal(err)
+	}
+	poolID := uuid.New()
+	change := sharedspaces.ComputePoolChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		PoolID: poolID, DisplayName: "Household Overnight", Enabled: true,
+		AllowedOperations: []string{"embeddings.generate", "text.classify"},
+		ResourceCeiling: sharedspaces.ComputeResourceCeiling{
+			MaximumInputBytes: 4 << 20, MaximumOutputBytes: 1 << 20,
+			MaximumMemoryBytes: 4 << 30, MaximumWallTimeMilliseconds: 300_000,
+		},
+		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
+		ProcessingContract: "participant-device-v1", ChangedAtMilliseconds: 5_100,
+	}
+	created, err := store.ChangeComputePool(ctx, admin, change, 5_100)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted ||
+		created.Pool.Revision != 1 || created.Binding.Revision != 1 {
+		t.Fatalf("create compute pool=%+v err=%v", created, err)
+	}
+	retry, err := store.ChangeComputePool(ctx, admin, change, 5_100)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("retry compute pool=%+v err=%v", retry, err)
+	}
+	update := change
+	update.RetryID = uuid.New()
+	update.PreviousPoolRevision = 1
+	update.PreviousBindingRevision = 1
+	update.DisplayName = "Household Overnight and Weekend"
+	update.ChangedAtMilliseconds = 5_200
+	updated, err := store.ChangeComputePool(ctx, admin, update, 5_200)
+	if err != nil || updated.Pool.Revision != 2 ||
+		updated.Pool.DisplayName != update.DisplayName {
+		t.Fatalf("update compute pool=%+v err=%v", updated, err)
+	}
+	stale := update
+	stale.RetryID = uuid.New()
+	if _, err := store.ChangeComputePool(ctx, admin, stale, 5_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputePoolCollision) {
+		t.Fatalf("stale compute pool change err=%v", err)
+	}
+	status, err := store.GetSpaceStatus(ctx, admin)
+	if err != nil || len(status.ComputePools) != 1 || len(status.ComputeBindings) != 1 ||
+		status.ComputePools[0].Revision != 2 || status.ComputeBindings[0].Revision != 2 {
+		t.Fatalf("compute status=%+v err=%v", status, err)
+	}
+	events, err := store.ListAuthorityEvents(ctx, admin, 0, 10)
+	if err != nil || len(events.Events) != 3 ||
+		events.Events[1].EventType != sharedspaces.AuthorityEventSpaceComputeBindingChanged ||
+		events.Events[2].EventType != sharedspaces.AuthorityEventSpaceComputeBindingChanged {
+		t.Fatalf("compute authority events=%+v err=%v", events, err)
+	}
+}
+
 func TestMemoryStoreCancelsUnclaimedInvitation(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()

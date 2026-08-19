@@ -27,6 +27,54 @@ func TestSecurityModeIsFixedToSupportedValues(t *testing.T) {
 	}
 }
 
+func TestComputePoolChangeAndResultValidation(t *testing.T) {
+	spaceID := uuid.New()
+	poolID := uuid.New()
+	retryID := uuid.New()
+	change := sharedspaces.ComputePoolChange{
+		Version: sharedspaces.SchemaVersion, RetryID: retryID, SpaceID: spaceID,
+		PoolID: poolID, DisplayName: "Nightly Research", Enabled: true,
+		AllowedOperations: []string{"embeddings.generate", "text.classify"},
+		ResourceCeiling: sharedspaces.ComputeResourceCeiling{
+			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 1 << 20,
+			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
+		},
+		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
+		ProcessingContract: "participant-device-v1", ChangedAtMilliseconds: 1_000,
+	}
+	if err := change.Validate(); err != nil {
+		t.Fatalf("valid compute pool change: %v", err)
+	}
+	unsorted := change
+	unsorted.AllowedOperations = []string{"text.classify", "embeddings.generate"}
+	if err := unsorted.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidComputePool) {
+		t.Fatalf("unsorted operations err=%v", err)
+	}
+
+	result := sharedspaces.ComputePoolChangeResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: retryID,
+		Pool: sharedspaces.ComputePool{
+			Version: sharedspaces.SchemaVersion, SpaceID: spaceID, PoolID: poolID,
+			DisplayName: change.DisplayName, Enabled: true, Revision: 1,
+			CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
+		},
+		Binding: sharedspaces.SpaceComputeBinding{
+			Version: sharedspaces.SchemaVersion, SpaceID: spaceID, PoolID: poolID,
+			AllowedOperations: change.AllowedOperations, ResourceCeiling: change.ResourceCeiling,
+			PricingRevision: 1, DataSensitivityContract: change.DataSensitivityContract,
+			ProcessingContract: change.ProcessingContract, Revision: 1,
+			CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
+		},
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatalf("valid compute pool result: %v", err)
+	}
+	result.Binding.Revision = 2
+	if err := result.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidComputePool) {
+		t.Fatalf("mismatched result err=%v", err)
+	}
+}
+
 func TestInteractionModeIsRequiredAndImmutableInProvisioning(t *testing.T) {
 	_, provisioning, _ := testSpaceProvisioning(t, 1_500, sharedspaces.SecurityModeE2EE)
 	for _, mode := range []sharedspaces.InteractionMode{

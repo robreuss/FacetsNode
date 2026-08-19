@@ -413,6 +413,59 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		participantRoles[provisioning.InitialParticipantID] != sharedspaces.RoleHost {
 		t.Fatalf("status=%+v", status)
 	}
+	poolID := uuid.New()
+	computePoolPath := spaceRoot + "/compute-pools/" + poolID.String()
+	computeChange := sharedspaces.ComputePoolChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		PoolID: poolID, DisplayName: "Space batch workers", Enabled: true,
+		AllowedOperations: []string{"facets.ai.classify", "facets.ai.embed"},
+		ResourceCeiling: sharedspaces.ComputeResourceCeiling{
+			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 1 << 20,
+			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
+		},
+		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
+		ProcessingContract: "participant-device-v1", ChangedAtMilliseconds: nowMilliseconds,
+	}
+	computeResponse := performRelayJSON(
+		t, handler, http.MethodPost, computePoolPath, computeChange,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, computeResponse, http.StatusCreated)
+	var computeResult sharedspaces.ComputePoolChangeResult
+	if err := json.NewDecoder(computeResponse.Body).Decode(&computeResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = computeResponse.Body.Close()
+	if computeResult.Pool.PoolID != poolID || computeResult.Binding.Revision != 1 {
+		t.Fatalf("compute result=%+v", computeResult)
+	}
+	computeRetry := performRelayJSON(
+		t, handler, http.MethodPost, computePoolPath, computeChange,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, computeRetry, http.StatusOK)
+	_ = computeRetry.Body.Close()
+	computeStatusResponse := performRelayJSON(
+		t, handler, http.MethodGet, statusPath, nil,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, computeStatusResponse, http.StatusOK)
+	var computeStatus sharedspaces.SpaceStatus
+	if err := json.NewDecoder(computeStatusResponse.Body).Decode(&computeStatus); err != nil {
+		t.Fatal(err)
+	}
+	_ = computeStatusResponse.Body.Close()
+	if len(computeStatus.ComputePools) != 1 || len(computeStatus.ComputeBindings) != 1 ||
+		computeStatus.ComputePools[0].PoolID != poolID ||
+		computeStatus.ComputeBindings[0].PoolID != poolID {
+		t.Fatalf("compute status=%+v", computeStatus)
+	}
+	wrongPoolPathResponse := performRelayJSON(
+		t, handler, http.MethodPost, spaceRoot+"/compute-pools/"+uuid.New().String(),
+		computeChange, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, wrongPoolPathResponse, http.StatusBadRequest)
+	_ = wrongPoolPathResponse.Body.Close()
 
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
@@ -536,9 +589,10 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		sharedspaces.AuthorityEventInvitationClaimed,
 		sharedspaces.AuthorityEventParticipantRoleChanged,
 		sharedspaces.AuthorityEventParticipantRoleChanged,
+		sharedspaces.AuthorityEventSpaceComputeBindingChanged,
 		sharedspaces.AuthorityEventParticipantRevoked,
 	}
-	if len(secondAuthorityPage.Events) != len(wantRemainingAuthorityEvents) || secondAuthorityPage.NextSequence != 8 {
+	if len(secondAuthorityPage.Events) != len(wantRemainingAuthorityEvents) || secondAuthorityPage.NextSequence != 9 {
 		t.Fatalf("second authority event page=%+v", secondAuthorityPage)
 	}
 	for index, eventType := range wantRemainingAuthorityEvents {

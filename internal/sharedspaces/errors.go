@@ -31,6 +31,9 @@ const (
 	CodeKeyGrantNotFound                 ErrorCode = "shared_space_key_grant_not_found"
 	CodeBootstrapNotReady                ErrorCode = "shared_space_bootstrap_not_ready"
 	CodeInvalidAuthorityEvent            ErrorCode = "invalid_shared_space_authority_event"
+	CodeInvalidComputePool               ErrorCode = "invalid_shared_space_compute_pool"
+	CodeComputePoolCollision             ErrorCode = "shared_space_compute_pool_collision"
+	CodeComputePoolNotFound              ErrorCode = "shared_space_compute_pool_not_found"
 )
 
 type ProtocolError struct {

@@ -251,15 +251,39 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		promoted.CurrentRole != sharedspaces.RoleParticipant {
 		t.Fatalf("promotion=%+v err=%v", promoted, err)
 	}
+	computePoolID := uuid.New()
+	computeChange := sharedspaces.ComputePoolChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		PoolID: computePoolID, DisplayName: "Space batch workers", Enabled: true,
+		AllowedOperations: []string{"facets.ai.classify", "facets.ai.embed"},
+		ResourceCeiling: sharedspaces.ComputeResourceCeiling{
+			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 1 << 20,
+			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
+		},
+		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
+		ProcessingContract: "participant-device-v1", ChangedAtMilliseconds: now + 240,
+	}
+	computeResult, err := store.ChangeComputePool(ctx, admin, computeChange, now+240)
+	if err != nil || computeResult.Acceptance != relay.AcceptanceAccepted ||
+		computeResult.Pool.Revision != 1 || computeResult.Binding.Revision != 1 {
+		t.Fatalf("compute pool=%+v err=%v", computeResult, err)
+	}
+	computeRetry, err := store.ChangeComputePool(ctx, admin, computeChange, now+241)
+	if err != nil || computeRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("compute pool retry=%+v err=%v", computeRetry, err)
+	}
 
 	status, err = store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		!status.BootstrapReady || status.ActiveCheckpointEpoch == nil ||
 		*status.ActiveCheckpointEpoch != sharedspaces.InitialKeyEpoch ||
 		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 ||
-		len(status.Presentations) != 1 ||
+		len(status.Presentations) != 1 || len(status.ComputePools) != 1 ||
+		len(status.ComputeBindings) != 1 ||
 		status.Presentations[0].ParticipantID != invitation.ParticipantID ||
-		status.Presentations[0].DisplayName != "Ada Lovelace" {
+		status.Presentations[0].DisplayName != "Ada Lovelace" ||
+		status.ComputePools[0].PoolID != computePoolID ||
+		status.ComputeBindings[0].PoolID != computePoolID {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 	revocation := sharedspaces.ParticipantRevocation{
@@ -310,7 +334,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		t.Fatalf("revoked participant presentation err=%v", err)
 	}
 	authorityEvents, err := store.ListAuthorityEvents(ctx, admin, 0, 100)
-	if err != nil || len(authorityEvents.Events) != 8 || authorityEvents.NextSequence == 0 {
+	if err != nil || len(authorityEvents.Events) != 9 || authorityEvents.NextSequence == 0 {
 		t.Fatalf("authority events=%+v err=%v", authorityEvents, err)
 	}
 	wantAuthorityEvents := []sharedspaces.AuthorityEventType{
@@ -321,6 +345,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		sharedspaces.AuthorityEventInvitationClaimed,
 		sharedspaces.AuthorityEventParticipantRoleChanged,
 		sharedspaces.AuthorityEventParticipantRoleChanged,
+		sharedspaces.AuthorityEventSpaceComputeBindingChanged,
 		sharedspaces.AuthorityEventParticipantRevoked,
 	}
 	for index, eventType := range wantAuthorityEvents {
@@ -337,6 +362,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 
 	var participantCount, relayMemberCount, revokedSubscriptionCount int
 	var cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount, keyGrantCount int
+	var computePoolCount, computeChangeCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			(SELECT count(*) FROM shared_space_participants
@@ -352,22 +378,28 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 			(SELECT count(*) FROM relay_subscriptions
 			 WHERE tenant_id=$1 AND domain_id=$4 AND subscription_id=$8 AND status='revoked'),
 			(SELECT count(*) FROM shared_space_participant_key_grants
-			 WHERE space_id=$1)
+			 WHERE space_id=$1),
+			(SELECT count(*) FROM shared_space_compute_pools
+			 WHERE space_id=$1 AND pool_id=$9),
+			(SELECT count(*) FROM shared_space_compute_pool_changes
+			 WHERE space_id=$1 AND pool_id=$9)
 	`, invitation.SpaceID, invitation.ParticipantID, revoked.RevokedAtMilliseconds,
 		admin.DomainID, invitation.SubscriptionID, cancelledInvitation.InvitationID,
-		cancellation.CancelledAtMilliseconds, cancelledInvitation.SubscriptionID).Scan(
+		cancellation.CancelledAtMilliseconds, cancelledInvitation.SubscriptionID, computePoolID).Scan(
 		&participantCount, &relayMemberCount, &revokedSubscriptionCount,
 		&cancellationCount, &revokedAdmissionCount, &cancelledSubscriptionCount, &keyGrantCount,
+		&computePoolCount, &computeChangeCount,
 	); err != nil {
 		t.Fatal(err)
 	}
 	if participantCount != 1 || relayMemberCount != 1 || revokedSubscriptionCount != 1 ||
 		cancellationCount != 1 || revokedAdmissionCount != 1 || cancelledSubscriptionCount != 1 ||
-		keyGrantCount != 2 {
+		keyGrantCount != 2 || computePoolCount != 1 || computeChangeCount != 1 {
 		t.Fatalf(
-			"product=%d member=%d subscription=%d cancellation=%d admission=%d cancelled subscription=%d key grants=%d",
+			"product=%d member=%d subscription=%d cancellation=%d admission=%d cancelled subscription=%d key grants=%d compute pools=%d compute changes=%d",
 			participantCount, relayMemberCount, revokedSubscriptionCount,
 			cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount, keyGrantCount,
+			computePoolCount, computeChangeCount,
 		)
 	}
 }
