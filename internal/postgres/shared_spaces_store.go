@@ -1557,6 +1557,117 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 	return bootstrap.Status, nil
 }
 
+func (s *SharedSpacesStore) AuthorizeComputeCapability(
+	ctx context.Context,
+	credential relay.Credential,
+	request sharedspaces.ComputeCapabilityRequest,
+	nowMilliseconds int64,
+) (sharedspaces.ComputeCapabilityAuthorization, error) {
+	if err := request.Validate(); err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, err
+	}
+	if credential.TenantID != request.SpaceID || credential.DomainID == uuid.Nil ||
+		credential.MemberID == uuid.Nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "compute capability credential scope is invalid",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
+			"begin Shared Space compute capability authorization: %w", err,
+		)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var domainID uuid.UUID
+	var currentKeyEpoch uint64
+	if err := tx.QueryRow(ctx, `
+		SELECT domain_id,current_key_epoch
+		FROM shared_spaces
+		WHERE space_id=$1
+	`, request.SpaceID).Scan(&domainID, &currentKeyEpoch); err == pgx.ErrNoRows {
+		return sharedspaces.ComputeCapabilityAuthorization{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	} else if err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
+			"load Shared Space compute capability authority: %w", err,
+		)
+	}
+	if credential.DomainID != domainID {
+		return sharedspaces.ComputeCapabilityAuthorization{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "compute capability belongs to another Shared Space",
+		)
+	}
+	participant, err := loadSharedSpaceParticipant(
+		ctx, tx, request.SpaceID, credential.MemberID, "",
+	)
+	if err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, err
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	member, found, err := loadRelayMember(
+		ctx, tx, request.SpaceID, domainID, credential.MemberID, "",
+	)
+	if err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, err
+	}
+	if !found {
+		return sharedspaces.ComputeCapabilityAuthorization{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantNotFound, "participant relay member was not found",
+		)
+	}
+	if err := member.VerifyCredential(credential, nowMilliseconds); err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, err
+	}
+
+	var poolPayload, bindingPayload []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT pool_payload,binding_payload
+		FROM shared_space_compute_pools
+		WHERE space_id=$1 AND pool_id=$2
+	`, request.SpaceID, request.PoolID).Scan(&poolPayload, &bindingPayload); err == pgx.ErrNoRows {
+		return sharedspaces.ComputeCapabilityAuthorization{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeComputePoolNotFound, "compute pool was not found",
+		)
+	} else if err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
+			"load Shared Space compute capability policy: %w", err,
+		)
+	}
+	var pool sharedspaces.ComputePool
+	var binding sharedspaces.SpaceComputeBinding
+	if err := json.Unmarshal(poolPayload, &pool); err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
+			"decode Shared Space compute pool: %w", err,
+		)
+	}
+	if err := json.Unmarshal(bindingPayload, &binding); err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
+			"decode Shared Space compute binding: %w", err,
+		)
+	}
+	authorization, err := sharedspaces.AuthorizeComputeCapability(
+		request, participant.ParticipantID, currentKeyEpoch, pool, binding, nowMilliseconds,
+	)
+	if err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
+			"commit Shared Space compute capability authorization: %w", err,
+		)
+	}
+	return authorization, nil
+}
+
 func (s *SharedSpacesStore) UpdateParticipantPresentation(
 	ctx context.Context,
 	credential relay.Credential,

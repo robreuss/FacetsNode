@@ -609,6 +609,60 @@ func (s *MemoryStore) ChangeComputePool(
 	return result, nil
 }
 
+func (s *MemoryStore) AuthorizeComputeCapability(
+	ctx context.Context,
+	credential relay.Credential,
+	request ComputeCapabilityRequest,
+	nowMilliseconds int64,
+) (ComputeCapabilityAuthorization, error) {
+	if err := request.Validate(); err != nil {
+		return ComputeCapabilityAuthorization{}, err
+	}
+	if credential.TenantID != request.SpaceID || credential.DomainID == uuid.Nil ||
+		credential.MemberID == uuid.Nil {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeWrongScope, "compute capability credential scope is invalid",
+		)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[request.SpaceID]
+	if space == nil {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeSpaceNotFound, "Shared Space was not found",
+		)
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeWrongScope, "compute capability belongs to another Shared Space",
+		)
+	}
+	participant, found := space.participants[credential.MemberID]
+	if !found {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeParticipantNotFound, "participant was not found",
+		)
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {
+		return ComputeCapabilityAuthorization{}, err
+	}
+	pool, poolFound := space.computePools[request.PoolID]
+	binding, bindingFound := space.computeBindings[request.PoolID]
+	if !poolFound || !bindingFound {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeComputePoolNotFound, "compute pool was not found",
+		)
+	}
+	return AuthorizeComputeCapability(
+		request, participant.ParticipantID, space.keyEpoch, pool, binding, nowMilliseconds,
+	)
+}
+
 func (s *MemoryStore) ListAuthorityEvents(
 	ctx context.Context,
 	credential relay.AdministrationCredential,

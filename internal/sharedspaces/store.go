@@ -20,6 +20,7 @@ type Store interface {
 	GetParticipantStatus(context.Context, relay.Credential, int64) (ParticipantStatus, error)
 	UpdateParticipantPresentation(context.Context, relay.Credential, ParticipantPresentationUpdate, int64) (ParticipantPresentationUpdateResult, error)
 	ChangeComputePool(context.Context, relay.AdministrationCredential, ComputePoolChange, int64) (ComputePoolChangeResult, error)
+	AuthorizeComputeCapability(context.Context, relay.Credential, ComputeCapabilityRequest, int64) (ComputeCapabilityAuthorization, error)
 	GetParticipantKeyGrant(context.Context, relay.Credential, int64) (ParticipantKeyGrantResult, error)
 	PublishEnvelope(context.Context, relay.Credential, relay.Envelope, int64) (relay.PublishResult, error)
 	StageCheckpoint(context.Context, relay.Credential, relay.CheckpointCandidate, int64) (relay.CheckpointStageResponse, error)

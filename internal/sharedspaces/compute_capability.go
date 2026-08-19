@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -40,6 +41,77 @@ type ComputeCapabilityClaims struct {
 	KeyEpoch                uint64                 `json:"keyEpoch"`
 	IssuedAtMilliseconds    int64                  `json:"issuedAtMilliseconds"`
 	ExpiresAtMilliseconds   int64                  `json:"expiresAtMilliseconds"`
+}
+
+// ComputeCapabilityRequest is a participant-authenticated request for one
+// narrowly scoped compute authority. RetryID becomes CapabilityID so retries
+// are deterministic without requiring an issuance ledger.
+type ComputeCapabilityRequest struct {
+	Version                 int                    `json:"version"`
+	RetryID                 uuid.UUID              `json:"retryID"`
+	SpaceID                 uuid.UUID              `json:"spaceID"`
+	PoolID                  uuid.UUID              `json:"poolID"`
+	Operation               string                 `json:"operation"`
+	ResourceRequest         ComputeResourceCeiling `json:"resourceRequest"`
+	ExpectedBindingRevision uint64                 `json:"expectedBindingRevision"`
+	ExpectedKeyEpoch        uint64                 `json:"expectedKeyEpoch"`
+	IssuedAtMilliseconds    int64                  `json:"issuedAtMilliseconds"`
+	ExpiresAtMilliseconds   int64                  `json:"expiresAtMilliseconds"`
+}
+
+func (r ComputeCapabilityRequest) Validate() error {
+	if r.Version != SchemaVersion || r.RetryID == uuid.Nil || r.SpaceID == uuid.Nil ||
+		r.PoolID == uuid.Nil || r.ExpectedBindingRevision == 0 || r.ExpectedKeyEpoch == 0 ||
+		!validComputeOperation(r.Operation) || r.IssuedAtMilliseconds < 0 ||
+		r.ExpiresAtMilliseconds <= r.IssuedAtMilliseconds ||
+		r.ExpiresAtMilliseconds-r.IssuedAtMilliseconds > MaximumComputeCapabilityLifetimeMillis {
+		return NewProtocolError(
+			CodeInvalidComputeCapability,
+			"Shared Space compute capability request is invalid",
+		)
+	}
+	if err := r.ResourceRequest.Validate(); err != nil {
+		return NewProtocolError(
+			CodeInvalidComputeCapability,
+			"Shared Space compute capability resource request is invalid",
+		)
+	}
+	return nil
+}
+
+// ComputeCapabilityAuthorization is the policy result produced while the
+// participant, pool, binding, and key epoch are read consistently. It is
+// signed outside the authority store so compute brokers need no membership
+// database access.
+type ComputeCapabilityAuthorization struct {
+	Version                 int                    `json:"version"`
+	CapabilityID            uuid.UUID              `json:"capabilityID"`
+	SubjectParticipantID    uuid.UUID              `json:"subjectParticipantID"`
+	SpaceID                 uuid.UUID              `json:"spaceID"`
+	PoolID                  uuid.UUID              `json:"poolID"`
+	Operation               string                 `json:"operation"`
+	ResourceCeiling         ComputeResourceCeiling `json:"resourceCeiling"`
+	PricingRevision         uint64                 `json:"pricingRevision"`
+	DataSensitivityContract string                 `json:"dataSensitivityContract"`
+	ProcessingContract      string                 `json:"processingContract"`
+	BindingRevision         uint64                 `json:"bindingRevision"`
+	KeyEpoch                uint64                 `json:"keyEpoch"`
+	IssuedAtMilliseconds    int64                  `json:"issuedAtMilliseconds"`
+	ExpiresAtMilliseconds   int64                  `json:"expiresAtMilliseconds"`
+}
+
+func (a ComputeCapabilityAuthorization) Validate() error {
+	claims := ComputeCapabilityClaims{
+		Version: a.Version, CapabilityID: a.CapabilityID, Issuer: "authorization",
+		KeyID:                base64.RawURLEncoding.EncodeToString(make([]byte, sha256.Size)),
+		SubjectParticipantID: a.SubjectParticipantID, SpaceID: a.SpaceID, PoolID: a.PoolID,
+		Operation: a.Operation, ResourceCeiling: a.ResourceCeiling,
+		PricingRevision: a.PricingRevision, DataSensitivityContract: a.DataSensitivityContract,
+		ProcessingContract: a.ProcessingContract, BindingRevision: a.BindingRevision,
+		KeyEpoch: a.KeyEpoch, IssuedAtMilliseconds: a.IssuedAtMilliseconds,
+		ExpiresAtMilliseconds: a.ExpiresAtMilliseconds,
+	}
+	return claims.Validate()
 }
 
 func (c ComputeCapabilityClaims) Validate() error {
@@ -156,6 +228,27 @@ func (s *ComputeCapabilitySigner) Sign(claims ComputeCapabilityClaims) (SignedCo
 		Version: SchemaVersion, Algorithm: ComputeCapabilityAlgorithm, Claims: claims,
 		Signature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(s.privateKey, payload)),
 	}, nil
+}
+
+func (s *ComputeCapabilitySigner) Issue(
+	authorization ComputeCapabilityAuthorization,
+) (SignedComputeCapability, error) {
+	if err := authorization.Validate(); err != nil {
+		return SignedComputeCapability{}, err
+	}
+	return s.Sign(ComputeCapabilityClaims{
+		Version: authorization.Version, CapabilityID: authorization.CapabilityID,
+		Issuer: s.issuer, KeyID: s.keyID,
+		SubjectParticipantID: authorization.SubjectParticipantID,
+		SpaceID:              authorization.SpaceID, PoolID: authorization.PoolID,
+		Operation: authorization.Operation, ResourceCeiling: authorization.ResourceCeiling,
+		PricingRevision:         authorization.PricingRevision,
+		DataSensitivityContract: authorization.DataSensitivityContract,
+		ProcessingContract:      authorization.ProcessingContract,
+		BindingRevision:         authorization.BindingRevision, KeyEpoch: authorization.KeyEpoch,
+		IssuedAtMilliseconds:  authorization.IssuedAtMilliseconds,
+		ExpiresAtMilliseconds: authorization.ExpiresAtMilliseconds,
+	})
 }
 
 type ComputeCapabilityVerifier struct {
@@ -289,4 +382,63 @@ func computeResourceCeilingContains(ceiling, request ComputeResourceCeiling) boo
 		request.MaximumOutputBytes <= ceiling.MaximumOutputBytes &&
 		request.MaximumMemoryBytes <= ceiling.MaximumMemoryBytes &&
 		request.MaximumWallTimeMilliseconds <= ceiling.MaximumWallTimeMilliseconds
+}
+
+// AuthorizeComputeCapability evaluates the mutable Shared Space policy needed
+// to issue an immutable capability. Callers must authenticate the participant
+// credential and read pool, binding, and key epoch in one consistent snapshot
+// before invoking this function.
+func AuthorizeComputeCapability(
+	request ComputeCapabilityRequest,
+	participantID uuid.UUID,
+	currentKeyEpoch uint64,
+	pool ComputePool,
+	binding SpaceComputeBinding,
+	nowMilliseconds int64,
+) (ComputeCapabilityAuthorization, error) {
+	if err := request.Validate(); err != nil {
+		return ComputeCapabilityAuthorization{}, err
+	}
+	if participantID == uuid.Nil || request.IssuedAtMilliseconds > nowMilliseconds ||
+		nowMilliseconds >= request.ExpiresAtMilliseconds {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeInvalidComputeCapability,
+			"Shared Space compute capability request is not currently valid",
+		)
+	}
+	if err := pool.Validate(); err != nil {
+		return ComputeCapabilityAuthorization{}, err
+	}
+	if err := binding.Validate(); err != nil {
+		return ComputeCapabilityAuthorization{}, err
+	}
+	if !pool.Enabled || pool.SpaceID != request.SpaceID || binding.SpaceID != request.SpaceID ||
+		pool.PoolID != request.PoolID || binding.PoolID != request.PoolID ||
+		binding.Revision != request.ExpectedBindingRevision ||
+		currentKeyEpoch != request.ExpectedKeyEpoch {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeComputeCapabilityUnauthorized,
+			"Shared Space compute capability policy changed or is unavailable",
+		)
+	}
+	operationIndex := sort.SearchStrings(binding.AllowedOperations, request.Operation)
+	if operationIndex >= len(binding.AllowedOperations) ||
+		binding.AllowedOperations[operationIndex] != request.Operation ||
+		!computeResourceCeilingContains(binding.ResourceCeiling, request.ResourceRequest) {
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeComputeCapabilityUnauthorized,
+			"Shared Space compute capability request exceeds its binding policy",
+		)
+	}
+	return ComputeCapabilityAuthorization{
+		Version: SchemaVersion, CapabilityID: request.RetryID,
+		SubjectParticipantID: participantID, SpaceID: request.SpaceID, PoolID: request.PoolID,
+		Operation: request.Operation, ResourceCeiling: request.ResourceRequest,
+		PricingRevision:         binding.PricingRevision,
+		DataSensitivityContract: binding.DataSensitivityContract,
+		ProcessingContract:      binding.ProcessingContract,
+		BindingRevision:         binding.Revision, KeyEpoch: currentKeyEpoch,
+		IssuedAtMilliseconds:  request.IssuedAtMilliseconds,
+		ExpiresAtMilliseconds: request.ExpiresAtMilliseconds,
+	}, nil
 }

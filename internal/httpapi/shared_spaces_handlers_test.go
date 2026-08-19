@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -26,6 +27,13 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	relayStore := relay.NewMemoryStore()
 	server := newRelayTestServer(t, relayStore, operatorToken)
 	server.SetSharedSpacesStore(sharedspaces.NewMemoryStore(relayStore))
+	computeCapabilitySigner, err := sharedspaces.NewComputeCapabilitySigner(
+		bytes.Repeat([]byte{0x71}, 32), "https://shared-spaces.example",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetSharedSpacesComputeCapabilitySigner(computeCapabilitySigner)
 	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
 	handler := server.Handler()
 
@@ -460,6 +468,66 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		computeStatus.ComputeBindings[0].PoolID != poolID {
 		t.Fatalf("compute status=%+v", computeStatus)
 	}
+	verificationKeyResponse := performRelayJSON(
+		t, handler, http.MethodGet,
+		"/v1/shared-spaces/compute-capability-verification-key", nil, "", uuid.Nil,
+	)
+	requireStatus(t, verificationKeyResponse, http.StatusOK)
+	var verificationKey sharedspaces.ComputeCapabilityVerificationKey
+	if err := json.NewDecoder(verificationKeyResponse.Body).Decode(&verificationKey); err != nil {
+		t.Fatal(err)
+	}
+	_ = verificationKeyResponse.Body.Close()
+	if err := verificationKey.Validate(); err != nil {
+		t.Fatalf("compute capability verification key is invalid: %v", err)
+	}
+	computeCapabilityRequest := sharedspaces.ComputeCapabilityRequest{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		PoolID: poolID, Operation: "facets.ai.embed",
+		ResourceRequest: sharedspaces.ComputeResourceCeiling{
+			MaximumInputBytes: 512 << 10, MaximumOutputBytes: 512 << 10,
+			MaximumMemoryBytes: 512 << 20, MaximumWallTimeMilliseconds: 30_000,
+		},
+		ExpectedBindingRevision: computeResult.Binding.Revision,
+		ExpectedKeyEpoch:        sharedspaces.InitialKeyEpoch,
+		IssuedAtMilliseconds:    nowMilliseconds, ExpiresAtMilliseconds: nowMilliseconds + 60_000,
+	}
+	computeCapabilityPath := spaceRoot + "/participants/" +
+		provisioning.InitialParticipantID.String() + "/compute-capabilities"
+	computeCapabilityResponse := performRelayJSON(
+		t, handler, http.MethodPost, computeCapabilityPath, computeCapabilityRequest,
+		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
+	)
+	requireStatus(t, computeCapabilityResponse, http.StatusOK)
+	var computeCapability sharedspaces.SignedComputeCapability
+	if err := json.NewDecoder(computeCapabilityResponse.Body).Decode(&computeCapability); err != nil {
+		t.Fatal(err)
+	}
+	_ = computeCapabilityResponse.Body.Close()
+	verifier, err := sharedspaces.NewComputeCapabilityVerifier(verificationKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(
+		computeCapability,
+		sharedspaces.ComputeCapabilityRequirement{
+			SpaceID: spaceID, PoolID: poolID,
+			SubjectParticipantID: provisioning.InitialParticipantID,
+			Operation:            "facets.ai.embed", ResourceRequest: computeCapabilityRequest.ResourceRequest,
+			KeyEpoch: sharedspaces.InitialKeyEpoch,
+		},
+		nowMilliseconds,
+	); err != nil {
+		t.Fatalf("issued compute capability did not verify: %v", err)
+	}
+	wrongComputeParticipantResponse := performRelayJSON(
+		t, handler, http.MethodPost,
+		spaceRoot+"/participants/"+participantID.String()+"/compute-capabilities",
+		computeCapabilityRequest, domain.MemberCredential.AuthorizationToken,
+		provisioning.InitialParticipantID,
+	)
+	requireStatus(t, wrongComputeParticipantResponse, http.StatusBadRequest)
+	_ = wrongComputeParticipantResponse.Body.Close()
 	wrongPoolPathResponse := performRelayJSON(
 		t, handler, http.MethodPost, spaceRoot+"/compute-pools/"+uuid.New().String(),
 		computeChange, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,

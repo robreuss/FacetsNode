@@ -23,21 +23,22 @@ import (
 const maximumRequestByteCount = ((rendezvous.MaximumCiphertextByteCount + 2) / 3 * 4) + 16_384
 
 type Server struct {
-	serviceIdentity        string
-	store                  rendezvous.Store
-	relayStore             relay.Store
-	deviceSyncStore        devicesync.Store
-	sharedSpacesStore      sharedspaces.Store
-	blobContentStore       relay.BlobContentStore
-	blobUploadContentStore relay.BlobUploadContentStore
-	relayWakeBroker        *relayWakeBroker
-	relayWakeNotifier      RelayWakeNotifier
-	operatorTokenDigest    [32]byte
-	operatorProvisioningOn bool
-	logger                 *slog.Logger
-	metrics                *Metrics
-	traffic                *trafficController
-	now                    func() time.Time
+	serviceIdentity                     string
+	store                               rendezvous.Store
+	relayStore                          relay.Store
+	deviceSyncStore                     devicesync.Store
+	sharedSpacesStore                   sharedspaces.Store
+	sharedSpacesComputeCapabilitySigner *sharedspaces.ComputeCapabilitySigner
+	blobContentStore                    relay.BlobContentStore
+	blobUploadContentStore              relay.BlobUploadContentStore
+	relayWakeBroker                     *relayWakeBroker
+	relayWakeNotifier                   RelayWakeNotifier
+	operatorTokenDigest                 [32]byte
+	operatorProvisioningOn              bool
+	logger                              *slog.Logger
+	metrics                             *Metrics
+	traffic                             *trafficController
+	now                                 func() time.Time
 }
 
 func New(store rendezvous.Store, logger *slog.Logger) *Server {
@@ -74,6 +75,16 @@ func (s *Server) SetDeviceSyncStore(store devicesync.Store) {
 // products reuse the same content-blind relay data plane.
 func (s *Server) SetSharedSpacesStore(store sharedspaces.Store) {
 	s.sharedSpacesStore = store
+}
+
+// SetSharedSpacesComputeCapabilitySigner enables short-lived compute
+// capability issuance and publishes only the corresponding verification key.
+// Compute brokers never need access to this private signing authority or the
+// Shared Space membership store.
+func (s *Server) SetSharedSpacesComputeCapabilitySigner(
+	signer *sharedspaces.ComputeCapabilitySigner,
+) {
+	s.sharedSpacesComputeCapabilitySigner = signer
 }
 
 func NewWithRelay(
@@ -347,6 +358,18 @@ func (s *Server) Handler() http.Handler {
 			traffic.SurfaceManagement,
 			s.handleChangeSharedSpaceComputePool,
 		)
+		if s.sharedSpacesComputeCapabilitySigner != nil {
+			register(
+				"GET /v1/shared-spaces/compute-capability-verification-key",
+				traffic.SurfaceManagement,
+				s.handleGetSharedSpaceComputeCapabilityVerificationKey,
+			)
+			register(
+				"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/compute-capabilities",
+				traffic.SurfaceManagement,
+				s.handleIssueSharedSpaceComputeCapability,
+			)
+		}
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations",
 			traffic.SurfaceManagement,
@@ -619,15 +642,16 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			case sharedspaces.CodeInvalidSpace, sharedspaces.CodeInvalidInvitation,
 				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeInvalidParticipantPresentation,
 				sharedspaces.CodeInvalidAuthorityEvent, sharedspaces.CodeInvalidComputePool,
+				sharedspaces.CodeInvalidComputeCapability,
 				sharedspaces.CodeWrongScope:
 				status = http.StatusBadRequest
-			case sharedspaces.CodeUnauthorized:
+			case sharedspaces.CodeUnauthorized, sharedspaces.CodeComputeCapabilityUnauthorized:
 				status = http.StatusUnauthorized
 			case sharedspaces.CodeSpaceNotFound, sharedspaces.CodeInvitationNotFound,
 				sharedspaces.CodeParticipantNotFound, sharedspaces.CodeKeyGrantNotFound,
 				sharedspaces.CodeComputePoolNotFound:
 				status = http.StatusNotFound
-			case sharedspaces.CodeInvitationCancelled:
+			case sharedspaces.CodeInvitationCancelled, sharedspaces.CodeComputeCapabilityExpired:
 				status = http.StatusGone
 			case sharedspaces.CodeSpaceCollision, sharedspaces.CodeInvitationCollision,
 				sharedspaces.CodeInvitationClaimed, sharedspaces.CodeParticipantCollision,

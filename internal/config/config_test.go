@@ -115,7 +115,10 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	t.Setenv("FACETS_SHARED_SPACES_DATABASE_URL", "postgres://example.invalid/shared_spaces")
 	t.Setenv("FACETS_SHARED_SPACES_LISTEN_ADDR", ":8082")
 	managedKey := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	computeSeed := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x43}, 32))
 	t.Setenv("FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY", managedKey)
+	t.Setenv("FACETS_SHARED_SPACES_COMPUTE_CAPABILITY_SIGNING_SEED", computeSeed)
+	t.Setenv("FACETS_SHARED_SPACES_PUBLIC_URL", "https://shared-spaces.example")
 
 	deviceSync, err := config.Load(config.DeviceSync)
 	if err != nil {
@@ -134,10 +137,21 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	if !bytes.Equal(sharedSpaces.ManagedKeyEncryptionKey, bytes.Repeat([]byte{0x42}, 32)) {
 		t.Fatal("Shared Spaces managed key-encryption key was not decoded")
 	}
+	if !bytes.Equal(sharedSpaces.ComputeCapabilitySigningSeed, bytes.Repeat([]byte{0x43}, 32)) {
+		t.Fatal("Shared Spaces compute capability signing seed was not decoded")
+	}
+	if sharedSpaces.PublicURL != "https://shared-spaces.example" {
+		t.Fatalf("Shared Spaces public URL=%q", sharedSpaces.PublicURL)
+	}
 }
 
 func TestSharedSpacesRequiresStrictManagedKeyEncryptionKey(t *testing.T) {
 	t.Setenv("FACETS_SHARED_SPACES_DATABASE_URL", "postgres://example.invalid/shared_spaces")
+	t.Setenv(
+		"FACETS_SHARED_SPACES_COMPUTE_CAPABILITY_SIGNING_SEED",
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x43}, 32)),
+	)
+	t.Setenv("FACETS_SHARED_SPACES_PUBLIC_URL", "https://shared-spaces.example")
 	for _, value := range []string{
 		"",
 		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 31)),
@@ -153,15 +167,56 @@ func TestSharedSpacesRequiresStrictManagedKeyEncryptionKey(t *testing.T) {
 	}
 }
 
+func TestSharedSpacesRequiresStrictComputeCapabilitySigningAuthority(t *testing.T) {
+	t.Setenv("FACETS_SHARED_SPACES_DATABASE_URL", "postgres://example.invalid/shared_spaces")
+	t.Setenv(
+		"FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY",
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32)),
+	)
+	t.Setenv("FACETS_SHARED_SPACES_PUBLIC_URL", "https://shared-spaces.example")
+	for _, value := range []string{
+		"",
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x43}, 31)),
+		base64.URLEncoding.EncodeToString(bytes.Repeat([]byte{0x43}, 32)),
+		"not-base64url",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("FACETS_SHARED_SPACES_COMPUTE_CAPABILITY_SIGNING_SEED", value)
+			if _, err := config.Load(config.SharedSpaces); err == nil {
+				t.Fatal("invalid compute capability signing seed accepted")
+			}
+		})
+	}
+}
+
+func TestSharedSpacesRequiresPublicURL(t *testing.T) {
+	t.Setenv("FACETS_SHARED_SPACES_DATABASE_URL", "postgres://example.invalid/shared_spaces")
+	t.Setenv(
+		"FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY",
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32)),
+	)
+	t.Setenv(
+		"FACETS_SHARED_SPACES_COMPUTE_CAPABILITY_SIGNING_SEED",
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x43}, 32)),
+	)
+	if _, err := config.Load(config.SharedSpaces); err == nil {
+		t.Fatal("missing Shared Spaces public URL accepted")
+	}
+}
+
 func TestDeviceSyncDoesNotConsumeSharedSpacesManagedKey(t *testing.T) {
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/device_sync")
 	t.Setenv("FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY", "invalid")
+	t.Setenv("FACETS_SHARED_SPACES_COMPUTE_CAPABILITY_SIGNING_SEED", "invalid")
 	configuration, err := config.Load(config.DeviceSync)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if configuration.ManagedKeyEncryptionKey != nil {
 		t.Fatal("Device Sync consumed Shared Spaces key custody configuration")
+	}
+	if configuration.ComputeCapabilitySigningSeed != nil {
+		t.Fatal("Device Sync consumed Shared Spaces compute signing configuration")
 	}
 }
 

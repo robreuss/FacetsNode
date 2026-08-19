@@ -19,6 +19,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/keycustody"
 	"github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 )
 
 func Main(service config.Service) {
@@ -98,6 +99,15 @@ func Main(service config.Service) {
 			os.Exit(1)
 		}
 		api.SetSharedSpacesStore(postgres.NewSharedSpacesStore(pool, managedContentKeys))
+		computeCapabilitySigner, err := sharedspaces.NewComputeCapabilitySigner(
+			configuration.ComputeCapabilitySigningSeed,
+			configuration.PublicURL,
+		)
+		if err != nil {
+			logger.Error("compute capability signing authority rejected", "error", err)
+			os.Exit(1)
+		}
+		api.SetSharedSpacesComputeCapabilitySigner(computeCapabilitySigner)
 	}
 	if err := api.SetTrafficLimits(configuration.TrafficLimits); err != nil {
 		logger.Error("traffic limits rejected", "error", err)

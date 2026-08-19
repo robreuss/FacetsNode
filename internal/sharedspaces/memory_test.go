@@ -364,6 +364,34 @@ func TestMemoryStoreComputePoolAuthorityLifecycle(t *testing.T) {
 		status.ComputePools[0].Revision != 2 || status.ComputeBindings[0].Revision != 2 {
 		t.Fatalf("compute status=%+v err=%v", status, err)
 	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	capabilityRequest := sharedspaces.ComputeCapabilityRequest{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		PoolID: poolID, Operation: "text.classify",
+		ResourceRequest: sharedspaces.ComputeResourceCeiling{
+			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 256 << 10,
+			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
+		},
+		ExpectedBindingRevision: 2, ExpectedKeyEpoch: sharedspaces.InitialKeyEpoch,
+		IssuedAtMilliseconds: 5_250, ExpiresAtMilliseconds: 65_250,
+	}
+	authorization, err := store.AuthorizeComputeCapability(
+		ctx, hostCredential, capabilityRequest, 5_250,
+	)
+	if err != nil || authorization.SubjectParticipantID != provisioning.InitialParticipantID ||
+		authorization.BindingRevision != 2 || authorization.Operation != "text.classify" {
+		t.Fatalf("compute capability authorization=%+v err=%v", authorization, err)
+	}
+	staleCapabilityRequest := capabilityRequest
+	staleCapabilityRequest.ExpectedBindingRevision = 1
+	if _, err := store.AuthorizeComputeCapability(
+		ctx, hostCredential, staleCapabilityRequest, 5_250,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeCapabilityUnauthorized) {
+		t.Fatalf("stale compute capability authorization err=%v", err)
+	}
 	events, err := store.ListAuthorityEvents(ctx, admin, 0, 10)
 	if err != nil || len(events.Events) != 3 ||
 		events.Events[1].EventType != sharedspaces.AuthorityEventSpaceComputeBindingChanged ||

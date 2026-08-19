@@ -5,27 +5,29 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
 type Config struct {
-	Service                 Service
-	ListenAddress           string
-	DatabaseURL             string
-	ShutdownPeriod          time.Duration
-	CleanupPeriod           time.Duration
-	TransferPeriod          time.Duration
-	DatabaseConns           int32
-	OperatorToken           string
-	ManagedKeyEncryptionKey []byte
-	PublicURL               string
-	BlobRoot                string
-	BlobUploadTTL           time.Duration
-	BlobOrphanGrace         time.Duration
-	CheckpointFenceTTL      time.Duration
-	TrafficLimits           traffic.Limits
+	Service                      Service
+	ListenAddress                string
+	DatabaseURL                  string
+	ShutdownPeriod               time.Duration
+	CleanupPeriod                time.Duration
+	TransferPeriod               time.Duration
+	DatabaseConns                int32
+	OperatorToken                string
+	ManagedKeyEncryptionKey      []byte
+	ComputeCapabilitySigningSeed []byte
+	PublicURL                    string
+	BlobRoot                     string
+	BlobUploadTTL                time.Duration
+	BlobOrphanGrace              time.Duration
+	CheckpointFenceTTL           time.Duration
+	TrafficLimits                traffic.Limits
 }
 
 type Service string
@@ -97,14 +99,24 @@ func Load(service Service) (Config, error) {
 		}
 	}
 	if service == SharedSpaces {
-		name := prefix + "_MANAGED_KEY_ENCRYPTION_KEY"
-		encoded := os.Getenv(name)
-		decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
-		if err != nil || len(decoded) != 32 ||
-			base64.RawURLEncoding.EncodeToString(decoded) != encoded {
-			return Config{}, fmt.Errorf("%s must be 32-byte unpadded base64url", name)
+		managedKeyName := prefix + "_MANAGED_KEY_ENCRYPTION_KEY"
+		configuration.ManagedKeyEncryptionKey, err = decodeSecret32(
+			managedKeyName, os.Getenv(managedKeyName),
+		)
+		if err != nil {
+			return Config{}, err
 		}
-		configuration.ManagedKeyEncryptionKey = decoded
+		computeSeedName := prefix + "_COMPUTE_CAPABILITY_SIGNING_SEED"
+		configuration.ComputeCapabilitySigningSeed, err = decodeSecret32(
+			computeSeedName, os.Getenv(computeSeedName),
+		)
+		if err != nil {
+			return Config{}, err
+		}
+		configuration.PublicURL = strings.TrimSpace(configuration.PublicURL)
+		if configuration.PublicURL == "" {
+			return Config{}, fmt.Errorf("%s_PUBLIC_URL is required", prefix)
+		}
 	}
 	if value := os.Getenv(prefix + "_SHUTDOWN_PERIOD"); value != "" {
 		period, err := time.ParseDuration(value)
@@ -209,4 +221,13 @@ func environment(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func decodeSecret32(name, encoded string) ([]byte, error) {
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(decoded) != 32 ||
+		base64.RawURLEncoding.EncodeToString(decoded) != encoded {
+		return nil, fmt.Errorf("%s must be 32-byte unpadded base64url", name)
+	}
+	return decoded, nil
 }

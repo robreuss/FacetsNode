@@ -191,6 +191,70 @@ func (s *Server) handleChangeSharedSpaceComputePool(writer http.ResponseWriter, 
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
+func (s *Server) handleGetSharedSpaceComputeCapabilityVerificationKey(
+	writer http.ResponseWriter,
+	_ *http.Request,
+) {
+	writeJSON(
+		writer,
+		http.StatusOK,
+		s.sharedSpacesComputeCapabilitySigner.VerificationKey(),
+	)
+}
+
+func (s *Server) handleIssueSharedSpaceComputeCapability(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	participantID, err := parseSharedSpacesUUID(request.PathValue("participantID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if credential.MemberID != participantID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope,
+			"Shared Space compute capability participant and credential differ",
+		))
+		return
+	}
+	var capabilityRequest sharedspaces.ComputeCapabilityRequest
+	if err := readSharedSpacesJSON(writer, request, &capabilityRequest); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if capabilityRequest.SpaceID != spaceID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope,
+			"Shared Space compute capability body and path differ",
+		))
+		return
+	}
+	authorization, err := s.sharedSpacesStore.AuthorizeComputeCapability(
+		request.Context(), credential, capabilityRequest, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	capability, err := s.sharedSpacesComputeCapabilitySigner.Issue(authorization)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, capability)
+}
+
 func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, request *http.Request) {
 	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
 	if err != nil {
