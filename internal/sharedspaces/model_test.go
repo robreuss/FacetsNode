@@ -93,6 +93,34 @@ func TestInteractionModesDeriveRelayCapabilities(t *testing.T) {
 	}
 }
 
+func TestAuthorityEventRequiresFieldsForItsTransition(t *testing.T) {
+	participantID := uuid.New()
+	previousRole := sharedspaces.RoleReader
+	currentRole := sharedspaces.RoleParticipant
+	valid := sharedspaces.AuthorityEvent{
+		Version: sharedspaces.SchemaVersion, Sequence: 1,
+		EventID: uuid.New(), SpaceID: uuid.New(), DomainID: uuid.New(),
+		EventType:            sharedspaces.AuthorityEventParticipantRoleChanged,
+		SubjectParticipantID: &participantID,
+		PreviousRole:         &previousRole, CurrentRole: &currentRole,
+		OccurredAtMilliseconds: 1_000,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid authority event: %v", err)
+	}
+	missingPreviousRole := valid
+	missingPreviousRole.PreviousRole = nil
+	if err := missingPreviousRole.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidAuthorityEvent) {
+		t.Fatalf("missing previous role err=%v", err)
+	}
+	unexpectedInvitation := valid
+	invitationID := uuid.New()
+	unexpectedInvitation.InvitationID = &invitationID
+	if err := unexpectedInvitation.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidAuthorityEvent) {
+		t.Fatalf("unexpected invitation err=%v", err)
+	}
+}
+
 func sortedCapabilities(capabilities []relay.Capability) []relay.Capability {
 	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
 	return capabilities

@@ -193,6 +193,31 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if result, err := store.PublishEnvelope(ctx, hostCredential, currentEnvelope, 1_600); err != nil || result.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("current envelope publish=%+v err=%v", result, err)
 	}
+
+	firstPage, err := store.ListAuthorityEvents(ctx, admin, 0, 2)
+	if err != nil || len(firstPage.Events) != 2 || firstPage.NextSequence != 2 ||
+		firstPage.Events[0].EventType != sharedspaces.AuthorityEventSpaceProvisioned ||
+		firstPage.Events[1].EventType != sharedspaces.AuthorityEventInvitationCreated {
+		t.Fatalf("first authority event page=%+v err=%v", firstPage, err)
+	}
+	secondPage, err := store.ListAuthorityEvents(ctx, admin, firstPage.NextSequence, 2)
+	if err != nil || len(secondPage.Events) != 2 || secondPage.NextSequence != 4 ||
+		secondPage.Events[0].EventType != sharedspaces.AuthorityEventInvitationClaimed ||
+		secondPage.Events[1].EventType != sharedspaces.AuthorityEventParticipantRevoked {
+		t.Fatalf("second authority event page=%+v err=%v", secondPage, err)
+	}
+	emptyPage, err := store.ListAuthorityEvents(ctx, admin, secondPage.NextSequence, 2)
+	if err != nil || len(emptyPage.Events) != 0 || emptyPage.NextSequence != secondPage.NextSequence {
+		t.Fatalf("empty authority event page=%+v err=%v", emptyPage, err)
+	}
+	if _, err := store.ListAuthorityEvents(ctx, admin, 0, 0); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidAuthorityEvent) {
+		t.Fatalf("invalid authority event page size err=%v", err)
+	}
+	wrongScope := admin
+	wrongScope.DomainID = uuid.New()
+	if _, err := store.ListAuthorityEvents(ctx, wrongScope, 0, 2); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongScope) {
+		t.Fatalf("wrong-scope authority event query err=%v", err)
+	}
 }
 
 func TestMemoryStoreCancelsUnclaimedInvitation(t *testing.T) {

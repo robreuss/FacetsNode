@@ -13,6 +13,7 @@ type Store interface {
 	CancelInvitation(context.Context, relay.AdministrationCredential, InvitationCancellation, int64) (InvitationCancellationResult, error)
 	ListInvitations(context.Context, relay.AdministrationCredential, int64) (InvitationList, error)
 	GetSpaceStatus(context.Context, relay.AdministrationCredential) (SpaceStatus, error)
+	ListAuthorityEvents(context.Context, relay.AdministrationCredential, uint64, int) (AuthorityEventPage, error)
 	ChangeParticipantRole(context.Context, relay.AdministrationCredential, ParticipantRoleChange, int64) (ParticipantRoleChangeResult, error)
 	RevokeParticipant(context.Context, relay.AdministrationCredential, ParticipantRevocation, int64) (ParticipantRevocationResult, error)
 	GetParticipantKeyGrant(context.Context, relay.Credential, int64) (ParticipantKeyGrantResult, error)

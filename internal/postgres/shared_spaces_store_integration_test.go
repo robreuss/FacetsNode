@@ -239,6 +239,31 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, now+301); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked participant relay access err=%v", err)
 	}
+	authorityEvents, err := store.ListAuthorityEvents(ctx, admin, 0, 100)
+	if err != nil || len(authorityEvents.Events) != 8 || authorityEvents.NextSequence == 0 {
+		t.Fatalf("authority events=%+v err=%v", authorityEvents, err)
+	}
+	wantAuthorityEvents := []sharedspaces.AuthorityEventType{
+		sharedspaces.AuthorityEventSpaceProvisioned,
+		sharedspaces.AuthorityEventInvitationCreated,
+		sharedspaces.AuthorityEventInvitationCancelled,
+		sharedspaces.AuthorityEventInvitationCreated,
+		sharedspaces.AuthorityEventInvitationClaimed,
+		sharedspaces.AuthorityEventParticipantRoleChanged,
+		sharedspaces.AuthorityEventParticipantRoleChanged,
+		sharedspaces.AuthorityEventParticipantRevoked,
+	}
+	for index, eventType := range wantAuthorityEvents {
+		if authorityEvents.Events[index].EventType != eventType {
+			t.Fatalf("authority event %d type=%q want=%q", index, authorityEvents.Events[index].EventType, eventType)
+		}
+		if index > 0 && authorityEvents.Events[index].Sequence <= authorityEvents.Events[index-1].Sequence {
+			t.Fatalf("authority event sequences are not strictly increasing: %+v", authorityEvents.Events)
+		}
+	}
+	if authorityEvents.NextSequence != authorityEvents.Events[len(authorityEvents.Events)-1].Sequence {
+		t.Fatalf("next sequence=%d want=%d", authorityEvents.NextSequence, authorityEvents.Events[len(authorityEvents.Events)-1].Sequence)
+	}
 
 	var participantCount, relayMemberCount, revokedSubscriptionCount int
 	var cancellationCount, revokedAdmissionCount, cancelledSubscriptionCount, keyGrantCount int

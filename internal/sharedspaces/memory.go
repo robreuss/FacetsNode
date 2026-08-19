@@ -40,6 +40,8 @@ type MemoryStore struct {
 	roleChangeRequests              map[uuid.UUID]ParticipantRoleChange
 	roleChangeResponses             map[uuid.UUID]ParticipantRoleChangeResult
 	checkpointEpochs                map[uuid.UUID]uint64
+	authorityEvents                 map[uuid.UUID][]AuthorityEvent
+	nextAuthoritySequences          map[uuid.UUID]uint64
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
@@ -55,6 +57,8 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		roleChangeRequests:              make(map[uuid.UUID]ParticipantRoleChange),
 		roleChangeResponses:             make(map[uuid.UUID]ParticipantRoleChangeResult),
 		checkpointEpochs:                make(map[uuid.UUID]uint64),
+		authorityEvents:                 make(map[uuid.UUID][]AuthorityEvent),
+		nextAuthoritySequences:          make(map[uuid.UUID]uint64),
 	}
 }
 
@@ -103,6 +107,14 @@ func (s *MemoryStore) ProvisionSpace(
 	}
 	s.spaces[provisioning.SpaceID] = space
 	s.spaceRetries[provisioning.RetryID] = provisioning.SpaceID
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: provisioning.RetryID, SpaceID: provisioning.SpaceID,
+		DomainID:             provisioning.Domain.Registration.DomainID,
+		EventType:            AuthorityEventSpaceProvisioned,
+		SubjectParticipantID: &participant.ParticipantID,
+		CurrentRole:          rolePointer(RoleHost), CurrentKeyEpoch: uint64Pointer(InitialKeyEpoch),
+		OccurredAtMilliseconds: provisioning.CreatedAtMilliseconds,
+	})
 	return spaceProvisioningResult(space, relay.AcceptanceAccepted), nil
 }
 
@@ -196,6 +208,13 @@ func (s *MemoryStore) CreateInvitation(
 	record := memoryInvitation{invitation: invitation}
 	s.invitations[invitation.InvitationID] = record
 	s.invitationRetries[invitation.RetryID] = invitation.InvitationID
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: invitation.RetryID, SpaceID: invitation.SpaceID,
+		DomainID: credential.DomainID, EventType: AuthorityEventInvitationCreated,
+		SubjectParticipantID: &invitation.ParticipantID, InvitationID: &invitation.InvitationID,
+		CurrentRole: &invitation.Role, CurrentKeyEpoch: uint64Pointer(space.keyEpoch),
+		OccurredAtMilliseconds: invitation.CreatedAtMilliseconds,
+	})
 	return InvitationCreateResult{Acceptance: created.Acceptance, Invitation: invitation}, nil
 }
 
@@ -265,6 +284,13 @@ func (s *MemoryStore) ClaimInvitation(
 	}
 	record.result = &result
 	s.invitations[credential.InvitationID] = record
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: credential.InvitationID, SpaceID: claim.SpaceID,
+		DomainID: credential.DomainID, EventType: AuthorityEventInvitationClaimed,
+		SubjectParticipantID: &participant.ParticipantID, InvitationID: &credential.InvitationID,
+		CurrentRole: &participant.Role, CurrentKeyEpoch: uint64Pointer(space.keyEpoch),
+		OccurredAtMilliseconds: claim.ClaimedAtMilliseconds,
+	})
 	return result, nil
 }
 
@@ -330,6 +356,13 @@ func (s *MemoryStore) CancelInvitation(
 	s.invitations[cancellation.InvitationID] = record
 	s.invitationCancellationRequests[cancellation.RetryID] = cancellation
 	s.invitationCancellationResponses[cancellation.RetryID] = result
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: cancellation.RetryID, SpaceID: cancellation.SpaceID,
+		DomainID: credential.DomainID, EventType: AuthorityEventInvitationCancelled,
+		SubjectParticipantID:   &record.invitation.ParticipantID,
+		InvitationID:           &cancellation.InvitationID,
+		OccurredAtMilliseconds: cancellation.CancelledAtMilliseconds,
+	})
 	return result, nil
 }
 
@@ -430,6 +463,45 @@ func (s *MemoryStore) GetSpaceStatus(
 	}, nil
 }
 
+func (s *MemoryStore) ListAuthorityEvents(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	afterSequence uint64,
+	limit int,
+) (AuthorityEventPage, error) {
+	if limit < 1 || limit > MaximumAuthorityEventPageSize {
+		return AuthorityEventPage{}, NewProtocolError(CodeInvalidAuthorityEvent, "Shared Space authority event page size is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return AuthorityEventPage{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return AuthorityEventPage{}, NewProtocolError(CodeWrongScope, "authority event credential belongs to another Shared Space")
+	}
+	if _, err := s.relay.GetDomainStatus(ctx, credential); err != nil {
+		return AuthorityEventPage{}, err
+	}
+	events := make([]AuthorityEvent, 0, limit)
+	nextSequence := afterSequence
+	for _, event := range s.authorityEvents[credential.TenantID] {
+		if event.Sequence <= afterSequence {
+			continue
+		}
+		events = append(events, event)
+		nextSequence = event.Sequence
+		if len(events) == limit {
+			break
+		}
+	}
+	return AuthorityEventPage{
+		Version: SchemaVersion, SpaceID: credential.TenantID,
+		Events: events, NextSequence: nextSequence,
+	}, nil
+}
+
 func (s *MemoryStore) ChangeParticipantRole(
 	ctx context.Context,
 	credential relay.AdministrationCredential,
@@ -496,6 +568,13 @@ func (s *MemoryStore) ChangeParticipantRole(
 	}
 	s.roleChangeRequests[change.RetryID] = change
 	s.roleChangeResponses[change.RetryID] = result
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: change.RetryID, SpaceID: change.SpaceID,
+		DomainID: credential.DomainID, EventType: AuthorityEventParticipantRoleChanged,
+		SubjectParticipantID: &change.ParticipantID,
+		PreviousRole:         &change.PreviousRole, CurrentRole: &change.NextRole,
+		OccurredAtMilliseconds: change.ChangedAtMilliseconds,
+	})
 	return result, nil
 }
 
@@ -569,8 +648,27 @@ func (s *MemoryStore) RevokeParticipant(
 	}
 	s.revocationRequests[revocation.RetryID] = revocation
 	s.revocationResponses[revocation.RetryID] = result
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: revocation.RetryID, SpaceID: revocation.SpaceID,
+		DomainID: credential.DomainID, EventType: AuthorityEventParticipantRevoked,
+		SubjectParticipantID: &revocation.ParticipantID,
+		PreviousKeyEpoch:     &revocation.PreviousKeyEpoch, CurrentKeyEpoch: &revocation.NextKeyEpoch,
+		OccurredAtMilliseconds: nowMilliseconds,
+	})
 	return result, nil
 }
+
+func (s *MemoryStore) appendAuthorityEvent(event AuthorityEvent) {
+	next := s.nextAuthoritySequences[event.SpaceID] + 1
+	event.Version = SchemaVersion
+	event.Sequence = next
+	s.nextAuthoritySequences[event.SpaceID] = next
+	s.authorityEvents[event.SpaceID] = append(s.authorityEvents[event.SpaceID], event)
+}
+
+func rolePointer(role Role) *Role { return &role }
+
+func uint64Pointer(value uint64) *uint64 { return &value }
 
 func (s *MemoryStore) GetParticipantKeyGrant(
 	ctx context.Context,

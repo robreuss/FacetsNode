@@ -22,7 +22,101 @@ const (
 	ParticipantKeyGrantAlgorithm                  = "P256-HKDF-SHA256+A256GCM"
 	ParticipantKeyGrantSignatureAlgorithm         = "ES256"
 	MaximumParticipantKeyGrantCiphertextByteCount = 16 * 1_024
+	MaximumAuthorityEventPageSize                 = 100
 )
+
+type AuthorityEventType string
+
+const (
+	AuthorityEventSpaceProvisioned       AuthorityEventType = "space_provisioned"
+	AuthorityEventInvitationCreated      AuthorityEventType = "invitation_created"
+	AuthorityEventInvitationClaimed      AuthorityEventType = "invitation_claimed"
+	AuthorityEventInvitationCancelled    AuthorityEventType = "invitation_cancelled"
+	AuthorityEventParticipantRoleChanged AuthorityEventType = "participant_role_changed"
+	AuthorityEventParticipantRevoked     AuthorityEventType = "participant_revoked"
+)
+
+func (t AuthorityEventType) Valid() bool {
+	switch t {
+	case AuthorityEventSpaceProvisioned, AuthorityEventInvitationCreated,
+		AuthorityEventInvitationClaimed, AuthorityEventInvitationCancelled,
+		AuthorityEventParticipantRoleChanged, AuthorityEventParticipantRevoked:
+		return true
+	default:
+		return false
+	}
+}
+
+// AuthorityEvent is a content-blind record of an accepted Shared Space
+// authority transition. It deliberately excludes credentials, key material,
+// encrypted content, payment state, contact attributes, and Persona claims.
+type AuthorityEvent struct {
+	Version                int                `json:"version"`
+	Sequence               uint64             `json:"sequence"`
+	EventID                uuid.UUID          `json:"eventID"`
+	SpaceID                uuid.UUID          `json:"spaceID"`
+	DomainID               uuid.UUID          `json:"domainID"`
+	EventType              AuthorityEventType `json:"eventType"`
+	SubjectParticipantID   *uuid.UUID         `json:"subjectParticipantID,omitempty"`
+	InvitationID           *uuid.UUID         `json:"invitationID,omitempty"`
+	PreviousRole           *Role              `json:"previousRole,omitempty"`
+	CurrentRole            *Role              `json:"currentRole,omitempty"`
+	PreviousKeyEpoch       *uint64            `json:"previousKeyEpoch,omitempty"`
+	CurrentKeyEpoch        *uint64            `json:"currentKeyEpoch,omitempty"`
+	OccurredAtMilliseconds int64              `json:"occurredAtMilliseconds"`
+}
+
+func (e AuthorityEvent) Validate() error {
+	if e.Version != SchemaVersion || e.Sequence == 0 || e.EventID == uuid.Nil ||
+		e.SpaceID == uuid.Nil || e.DomainID == uuid.Nil || !e.EventType.Valid() ||
+		e.OccurredAtMilliseconds < 0 ||
+		(e.SubjectParticipantID != nil && *e.SubjectParticipantID == uuid.Nil) ||
+		(e.InvitationID != nil && *e.InvitationID == uuid.Nil) ||
+		(e.PreviousRole != nil && !e.PreviousRole.Valid()) ||
+		(e.CurrentRole != nil && !e.CurrentRole.Valid()) ||
+		(e.PreviousKeyEpoch != nil && *e.PreviousKeyEpoch == 0) ||
+		(e.CurrentKeyEpoch != nil && *e.CurrentKeyEpoch == 0) {
+		return NewProtocolError(CodeInvalidAuthorityEvent, "Shared Space authority event fields are invalid")
+	}
+	if !e.validTransitionShape() {
+		return NewProtocolError(CodeInvalidAuthorityEvent, "Shared Space authority event transition fields are invalid")
+	}
+	return nil
+}
+
+func (e AuthorityEvent) validTransitionShape() bool {
+	switch e.EventType {
+	case AuthorityEventSpaceProvisioned:
+		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
+			e.PreviousRole == nil && e.CurrentRole != nil && *e.CurrentRole == RoleHost &&
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil
+	case AuthorityEventInvitationCreated, AuthorityEventInvitationClaimed:
+		return e.SubjectParticipantID != nil && e.InvitationID != nil &&
+			e.PreviousRole == nil && e.CurrentRole != nil &&
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil
+	case AuthorityEventInvitationCancelled:
+		return e.SubjectParticipantID != nil && e.InvitationID != nil &&
+			e.PreviousRole == nil && e.CurrentRole == nil &&
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil
+	case AuthorityEventParticipantRoleChanged:
+		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
+			e.PreviousRole != nil && e.CurrentRole != nil &&
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil
+	case AuthorityEventParticipantRevoked:
+		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
+			e.PreviousRole == nil && e.CurrentRole == nil &&
+			e.PreviousKeyEpoch != nil && e.CurrentKeyEpoch != nil
+	default:
+		return false
+	}
+}
+
+type AuthorityEventPage struct {
+	Version      int              `json:"version"`
+	SpaceID      uuid.UUID        `json:"spaceID"`
+	Events       []AuthorityEvent `json:"events"`
+	NextSequence uint64           `json:"nextSequence"`
+}
 
 type SecurityMode string
 

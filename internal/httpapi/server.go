@@ -338,6 +338,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleGetSharedSpaceStatus,
 		)
 		register(
+			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/authority-events",
+			traffic.SurfaceManagement,
+			s.handleListSharedSpaceAuthorityEvents,
+		)
+		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations",
 			traffic.SurfaceManagement,
 			s.handleCreateSharedSpaceInvitation,
@@ -592,7 +597,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			message = "The Shared Spaces request was rejected."
 			switch sharedSpacesProtocol.Code {
 			case sharedspaces.CodeInvalidSpace, sharedspaces.CodeInvalidInvitation,
-				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeWrongScope:
+				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeInvalidAuthorityEvent,
+				sharedspaces.CodeWrongScope:
 				status = http.StatusBadRequest
 			case sharedspaces.CodeUnauthorized:
 				status = http.StatusUnauthorized

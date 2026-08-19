@@ -100,6 +100,20 @@ epoch, bootstrap readiness, and participant authority state. It contains no
 FEF content, plaintext content keys, bearer tokens, email identity, payment
 identity, or Persona private material.
 
+The same administrator can page through the Space's durable, content-blind
+authority history at:
+
+`GET /v1/shared-spaces/{spaceID}/domains/{domainID}/authority-events`
+
+The optional `afterSequence` cursor and bounded `limit` parameter provide a
+stable chronological stream. Accepted provisioning, invitation creation,
+claim, cancellation, role change, and participant revocation transactions
+append exactly one event in the same database transaction as the authority
+change. Exact request retries do not append duplicate events. Records contain
+only routing identifiers, role and key-epoch transitions, event time, and the
+monotonic stream cursor; credentials, encrypted content, key material,
+payment/contact state, and Persona claims are deliberately excluded.
+
 Participant revocation is submitted at:
 
 `POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/revocation`

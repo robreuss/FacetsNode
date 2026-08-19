@@ -125,6 +125,17 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	if err := insertSharedSpaceParticipant(ctx, tx, initial); err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, err
 	}
+	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
+		EventID: provisioning.RetryID, SpaceID: provisioning.SpaceID,
+		DomainID:               provisioning.Domain.Registration.DomainID,
+		EventType:              sharedspaces.AuthorityEventSpaceProvisioned,
+		SubjectParticipantID:   &initial.ParticipantID,
+		CurrentRole:            rolePointer(sharedspaces.RoleHost),
+		CurrentKeyEpoch:        uint64Pointer(sharedspaces.InitialKeyEpoch),
+		OccurredAtMilliseconds: provisioning.CreatedAtMilliseconds,
+	}); err != nil {
+		return sharedspaces.SpaceProvisioningResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("commit Shared Space provisioning: %w", err)
 	}
@@ -322,6 +333,17 @@ func (s *SharedSpacesStore) CreateInvitation(
 		invitation.CreatedAtMilliseconds); err != nil {
 		return sharedspaces.InvitationCreateResult{}, fmt.Errorf("insert Shared Space invitation: %w", err)
 	}
+	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
+		EventID: invitation.RetryID, SpaceID: invitation.SpaceID,
+		DomainID: domainID, EventType: sharedspaces.AuthorityEventInvitationCreated,
+		SubjectParticipantID:   &invitation.ParticipantID,
+		InvitationID:           &invitation.InvitationID,
+		CurrentRole:            &invitation.Role,
+		CurrentKeyEpoch:        &currentKeyEpoch,
+		OccurredAtMilliseconds: invitation.CreatedAtMilliseconds,
+	}); err != nil {
+		return sharedspaces.InvitationCreateResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return sharedspaces.InvitationCreateResult{}, fmt.Errorf("commit Shared Space invitation: %w", err)
 	}
@@ -478,6 +500,17 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		relayResult.Member.MemberRegistration.MemberID); err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("complete Shared Space invitation: %w", err)
 	}
+	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
+		EventID: credential.InvitationID, SpaceID: claim.SpaceID,
+		DomainID: domainID, EventType: sharedspaces.AuthorityEventInvitationClaimed,
+		SubjectParticipantID:   &participant.ParticipantID,
+		InvitationID:           &credential.InvitationID,
+		CurrentRole:            &participant.Role,
+		CurrentKeyEpoch:        &currentKeyEpoch,
+		OccurredAtMilliseconds: claim.ClaimedAtMilliseconds,
+	}); err != nil {
+		return sharedspaces.InvitationClaimResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("commit Shared Space invitation claim: %w", err)
 	}
@@ -606,6 +639,15 @@ func (s *SharedSpacesStore) CancelInvitation(
 		ctx, tx, cancellation.SpaceID, &domainID, &subscriptionID, &participantID,
 		"shared_space_invitation_cancelled", cancellation.CancelledAtMilliseconds,
 	); err != nil {
+		return sharedspaces.InvitationCancellationResult{}, err
+	}
+	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
+		EventID: cancellation.RetryID, SpaceID: cancellation.SpaceID,
+		DomainID: domainID, EventType: sharedspaces.AuthorityEventInvitationCancelled,
+		SubjectParticipantID:   &participantID,
+		InvitationID:           &cancellation.InvitationID,
+		OccurredAtMilliseconds: cancellation.CancelledAtMilliseconds,
+	}); err != nil {
 		return sharedspaces.InvitationCancellationResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -751,6 +793,93 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	}, nil
 }
 
+func (s *SharedSpacesStore) ListAuthorityEvents(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	afterSequence uint64,
+	limit int,
+) (sharedspaces.AuthorityEventPage, error) {
+	if limit < 1 || limit > sharedspaces.MaximumAuthorityEventPageSize {
+		return sharedspaces.AuthorityEventPage{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidAuthorityEvent,
+			"Shared Space authority event page size is invalid",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return sharedspaces.AuthorityEventPage{}, fmt.Errorf("begin Shared Space authority event list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, _, _, err := loadSharedSpaceAuthority(
+		ctx, tx, credential.TenantID, credential, "",
+	); err != nil {
+		return sharedspaces.AuthorityEventPage{}, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT sequence,event_id,space_id,domain_id,version,event_type,
+		       subject_participant_id,invitation_id,previous_role,current_role,
+		       previous_key_epoch,current_key_epoch,occurred_at_milliseconds
+		FROM shared_space_authority_events
+		WHERE space_id=$1 AND sequence>$2
+		ORDER BY sequence
+		LIMIT $3
+	`, credential.TenantID, afterSequence, limit)
+	if err != nil {
+		return sharedspaces.AuthorityEventPage{}, fmt.Errorf("query Shared Space authority events: %w", err)
+	}
+	defer rows.Close()
+	events := make([]sharedspaces.AuthorityEvent, 0, limit)
+	nextSequence := afterSequence
+	for rows.Next() {
+		var event sharedspaces.AuthorityEvent
+		var previousRole, currentRole *string
+		var previousKeyEpoch, currentKeyEpoch *int64
+		if err := rows.Scan(
+			&event.Sequence, &event.EventID, &event.SpaceID, &event.DomainID,
+			&event.Version, &event.EventType, &event.SubjectParticipantID,
+			&event.InvitationID, &previousRole, &currentRole,
+			&previousKeyEpoch, &currentKeyEpoch,
+			&event.OccurredAtMilliseconds,
+		); err != nil {
+			return sharedspaces.AuthorityEventPage{}, fmt.Errorf("scan Shared Space authority event: %w", err)
+		}
+		if previousRole != nil {
+			role := sharedspaces.Role(*previousRole)
+			event.PreviousRole = &role
+		}
+		if currentRole != nil {
+			role := sharedspaces.Role(*currentRole)
+			event.CurrentRole = &role
+		}
+		if previousKeyEpoch != nil {
+			epoch := uint64(*previousKeyEpoch)
+			event.PreviousKeyEpoch = &epoch
+		}
+		if currentKeyEpoch != nil {
+			epoch := uint64(*currentKeyEpoch)
+			event.CurrentKeyEpoch = &epoch
+		}
+		if err := event.Validate(); err != nil {
+			return sharedspaces.AuthorityEventPage{}, fmt.Errorf("stored Shared Space authority event failed validation: %v", err)
+		}
+		events = append(events, event)
+		nextSequence = event.Sequence
+	}
+	if err := rows.Err(); err != nil {
+		return sharedspaces.AuthorityEventPage{}, fmt.Errorf("iterate Shared Space authority events: %w", err)
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.AuthorityEventPage{}, fmt.Errorf("commit Shared Space authority event list: %w", err)
+	}
+	return sharedspaces.AuthorityEventPage{
+		Version: sharedspaces.SchemaVersion, SpaceID: credential.TenantID,
+		Events: events, NextSequence: nextSequence,
+	}, nil
+}
+
 func (s *SharedSpacesStore) ChangeParticipantRole(
 	ctx context.Context,
 	credential relay.AdministrationCredential,
@@ -864,6 +993,16 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 		&change.ParticipantID, "shared_space_participant_role_changed",
 		change.ChangedAtMilliseconds,
 	); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
+		EventID: change.RetryID, SpaceID: change.SpaceID,
+		DomainID: domainID, EventType: sharedspaces.AuthorityEventParticipantRoleChanged,
+		SubjectParticipantID:   &change.ParticipantID,
+		PreviousRole:           &change.PreviousRole,
+		CurrentRole:            &change.NextRole,
+		OccurredAtMilliseconds: change.ChangedAtMilliseconds,
+	}); err != nil {
 		return sharedspaces.ParticipantRoleChangeResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1060,6 +1199,16 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		revocation.Version, revocation.PreviousKeyEpoch, revocation.NextKeyEpoch,
 		nowMilliseconds); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("record Shared Space participant revocation: %w", err)
+	}
+	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
+		EventID: revocation.RetryID, SpaceID: revocation.SpaceID,
+		DomainID: domainID, EventType: sharedspaces.AuthorityEventParticipantRevoked,
+		SubjectParticipantID:   &revocation.ParticipantID,
+		PreviousKeyEpoch:       &revocation.PreviousKeyEpoch,
+		CurrentKeyEpoch:        &revocation.NextKeyEpoch,
+		OccurredAtMilliseconds: nowMilliseconds,
+	}); err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("commit Shared Space participant revocation: %w", err)
@@ -1453,6 +1602,45 @@ func insertSharedSpaceParticipantKeyGrant(
 	}
 	return nil
 }
+
+func insertSharedSpaceAuthorityEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	event sharedspaces.AuthorityEvent,
+) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_authority_events (
+			space_id,domain_id,event_id,version,event_type,subject_participant_id,
+			invitation_id,previous_role,current_role,previous_key_epoch,current_key_epoch,
+			occurred_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	`, event.SpaceID, event.DomainID, event.EventID, sharedspaces.SchemaVersion,
+		string(event.EventType), event.SubjectParticipantID, event.InvitationID,
+		nullableSharedSpaceRole(event.PreviousRole), nullableSharedSpaceRole(event.CurrentRole),
+		nullableSharedSpaceKeyEpoch(event.PreviousKeyEpoch),
+		nullableSharedSpaceKeyEpoch(event.CurrentKeyEpoch), event.OccurredAtMilliseconds); err != nil {
+		return fmt.Errorf("insert Shared Space authority event: %w", err)
+	}
+	return nil
+}
+
+func nullableSharedSpaceRole(role *sharedspaces.Role) any {
+	if role == nil {
+		return nil
+	}
+	return string(*role)
+}
+
+func nullableSharedSpaceKeyEpoch(epoch *uint64) any {
+	if epoch == nil {
+		return nil
+	}
+	return int64(*epoch)
+}
+
+func rolePointer(role sharedspaces.Role) *sharedspaces.Role { return &role }
+
+func uint64Pointer(value uint64) *uint64 { return &value }
 
 func loadSharedSpaceParticipantKeyGrants(
 	ctx context.Context,

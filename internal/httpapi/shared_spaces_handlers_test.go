@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -383,6 +384,61 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	if _, err := relayStore.Fetch(t.Context(), revokedMember, 0, 1, nowMilliseconds+1); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("revoked member relay access err=%v", err)
 	}
+
+	authorityEventsPath := spaceRoot + "/authority-events"
+	firstAuthorityPageResponse := performRelayJSON(
+		t, handler, http.MethodGet, authorityEventsPath+"?limit=3", nil,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, firstAuthorityPageResponse, http.StatusOK)
+	var firstAuthorityPage sharedspaces.AuthorityEventPage
+	if err := json.NewDecoder(firstAuthorityPageResponse.Body).Decode(&firstAuthorityPage); err != nil {
+		t.Fatal(err)
+	}
+	_ = firstAuthorityPageResponse.Body.Close()
+	if len(firstAuthorityPage.Events) != 3 || firstAuthorityPage.NextSequence != 3 ||
+		firstAuthorityPage.Events[0].EventType != sharedspaces.AuthorityEventSpaceProvisioned ||
+		firstAuthorityPage.Events[1].EventType != sharedspaces.AuthorityEventInvitationCreated ||
+		firstAuthorityPage.Events[2].EventType != sharedspaces.AuthorityEventInvitationCancelled {
+		t.Fatalf("first authority event page=%+v", firstAuthorityPage)
+	}
+	secondAuthorityPageResponse := performRelayJSON(
+		t, handler, http.MethodGet,
+		authorityEventsPath+"?afterSequence="+strconv.FormatUint(firstAuthorityPage.NextSequence, 10)+"&limit=10",
+		nil, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, secondAuthorityPageResponse, http.StatusOK)
+	var secondAuthorityPage sharedspaces.AuthorityEventPage
+	if err := json.NewDecoder(secondAuthorityPageResponse.Body).Decode(&secondAuthorityPage); err != nil {
+		t.Fatal(err)
+	}
+	_ = secondAuthorityPageResponse.Body.Close()
+	wantRemainingAuthorityEvents := []sharedspaces.AuthorityEventType{
+		sharedspaces.AuthorityEventInvitationCreated,
+		sharedspaces.AuthorityEventInvitationClaimed,
+		sharedspaces.AuthorityEventParticipantRoleChanged,
+		sharedspaces.AuthorityEventParticipantRoleChanged,
+		sharedspaces.AuthorityEventParticipantRevoked,
+	}
+	if len(secondAuthorityPage.Events) != len(wantRemainingAuthorityEvents) || secondAuthorityPage.NextSequence != 8 {
+		t.Fatalf("second authority event page=%+v", secondAuthorityPage)
+	}
+	for index, eventType := range wantRemainingAuthorityEvents {
+		if secondAuthorityPage.Events[index].EventType != eventType {
+			t.Fatalf("authority event %d type=%q want=%q", index, secondAuthorityPage.Events[index].EventType, eventType)
+		}
+	}
+	unauthorizedAuthorityEvents := performRelayJSON(
+		t, handler, http.MethodGet, authorityEventsPath, nil, relayTestToken(0x7f), uuid.Nil,
+	)
+	requireStatus(t, unauthorizedAuthorityEvents, http.StatusUnauthorized)
+	_ = unauthorizedAuthorityEvents.Body.Close()
+	invalidAuthorityEvents := performRelayJSON(
+		t, handler, http.MethodGet, authorityEventsPath+"?limit=0", nil,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, invalidAuthorityEvents, http.StatusBadRequest)
+	_ = invalidAuthorityEvents.Body.Close()
 }
 
 func sharedSpaceParticipantKeyGrant(

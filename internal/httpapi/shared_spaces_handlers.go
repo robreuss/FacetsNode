@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/google/uuid"
 
@@ -106,6 +107,49 @@ func (s *Server) handleGetSharedSpaceStatus(writer http.ResponseWriter, request 
 		return
 	}
 	writeJSON(writer, http.StatusOK, status)
+}
+
+func (s *Server) handleListSharedSpaceAuthorityEvents(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	afterSequence := uint64(0)
+	if raw := request.URL.Query().Get("afterSequence"); raw != "" {
+		afterSequence, err = strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			s.writeError(writer, sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidAuthorityEvent,
+				"Shared Space authority event cursor is invalid",
+			))
+			return
+		}
+	}
+	limit := 50
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil {
+			s.writeError(writer, sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidAuthorityEvent,
+				"Shared Space authority event page size is invalid",
+			))
+			return
+		}
+	}
+	page, err := s.sharedSpacesStore.ListAuthorityEvents(
+		request.Context(), credential, afterSequence, limit,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, page)
 }
 
 func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, request *http.Request) {

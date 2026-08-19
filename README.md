@@ -27,7 +27,9 @@ device from its control and Space memberships. The Shared Spaces executable
 implements the first product authority boundary: an operator provisions an
 isolated Space and initial host, the host issues bounded participant
 invitations, invitees claim relay membership, and the host can inspect or
-revoke participants atomically.
+revoke participants atomically. Every accepted Shared Space authority change
+also appends a content-blind, cursor-paged administrative audit event in the
+same PostgreSQL transaction.
 
 ## Implemented shared foundation
 
