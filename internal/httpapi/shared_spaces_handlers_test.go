@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"strconv"
 	"testing"
@@ -48,6 +49,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		InteractionMode:        sharedspaces.InteractionModeCollaborative,
 		InitialParticipantID:   domain.MemberCredential.MemberID,
 		InitialParticipantKind: sharedspaces.ParticipantPerson,
+		InitialParticipantSigningKey: sharedSpaceParticipantSigningKey(
+			t, domain.MemberCredential.MemberID,
+		),
 		TenantProvisioning: newRelayTenantProvisioningRequest(
 			domain,
 			relayTestToken(0x41),
@@ -81,13 +85,14 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	subscriptionID := uuid.New()
 	invitationToken := relayTestToken(0x51)
 	invitation := sharedSpaceInvitationCreateInput{
-		Version:         sharedspaces.SchemaVersion,
-		RetryID:         uuid.New(),
-		ParticipantID:   participantID,
-		SubscriptionID:  subscriptionID,
-		Kind:            sharedspaces.ParticipantPerson,
-		Role:            sharedspaces.RoleReader,
-		InteractionMode: provisioning.InteractionMode,
+		Version:               sharedspaces.SchemaVersion,
+		RetryID:               uuid.New(),
+		ParticipantID:         participantID,
+		SubscriptionID:        subscriptionID,
+		Kind:                  sharedspaces.ParticipantPerson,
+		Role:                  sharedspaces.RoleReader,
+		ParticipantSigningKey: sharedSpaceParticipantSigningKey(t, participantID),
+		InteractionMode:       provisioning.InteractionMode,
 		InvitationCredential: sharedSpaceInvitationCredential{
 			InvitationID:       invitationID,
 			AuthorizationToken: invitationToken,
@@ -114,7 +119,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		ParticipantID: cancelledParticipantID, SubscriptionID: uuid.New(),
 		Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleReader,
-		InteractionMode: provisioning.InteractionMode,
+		ParticipantSigningKey: sharedSpaceParticipantSigningKey(t, cancelledParticipantID),
+		InteractionMode:       provisioning.InteractionMode,
 		InvitationCredential: sharedSpaceInvitationCredential{
 			InvitationID: cancelledInvitationID, AuthorizationToken: cancelledToken,
 		},
@@ -725,7 +731,10 @@ func TestSharedSpacesAPIManagedBootstrapDistributesAndRotatesServiceKey(t *testi
 		InteractionMode:        sharedspaces.InteractionModeCollaborative,
 		InitialParticipantID:   domain.MemberCredential.MemberID,
 		InitialParticipantKind: sharedspaces.ParticipantPerson,
-		TenantProvisioning:     newRelayTenantProvisioningRequest(domain, relayTestToken(0x42)),
+		InitialParticipantSigningKey: sharedSpaceParticipantSigningKey(
+			t, domain.MemberCredential.MemberID,
+		),
+		TenantProvisioning: newRelayTenantProvisioningRequest(domain, relayTestToken(0x42)),
 	}
 	created := performRelayJSON(
 		t, handler, http.MethodPost, "/v1/shared-spaces",
@@ -739,13 +748,14 @@ func TestSharedSpacesAPIManagedBootstrapDistributesAndRotatesServiceKey(t *testi
 	invitationID := uuid.New()
 	invitationToken := relayTestToken(0x52)
 	invitation := sharedSpaceInvitationCreateInput{
-		Version:         sharedspaces.SchemaVersion,
-		RetryID:         uuid.New(),
-		ParticipantID:   participantID,
-		SubscriptionID:  uuid.New(),
-		Kind:            sharedspaces.ParticipantPerson,
-		Role:            sharedspaces.RoleParticipant,
-		InteractionMode: provisioning.InteractionMode,
+		Version:               sharedspaces.SchemaVersion,
+		RetryID:               uuid.New(),
+		ParticipantID:         participantID,
+		SubscriptionID:        uuid.New(),
+		Kind:                  sharedspaces.ParticipantPerson,
+		Role:                  sharedspaces.RoleParticipant,
+		ParticipantSigningKey: sharedSpaceParticipantSigningKey(t, participantID),
+		InteractionMode:       provisioning.InteractionMode,
 		InvitationCredential: sharedSpaceInvitationCredential{
 			InvitationID:       invitationID,
 			AuthorizationToken: invitationToken,
@@ -864,10 +874,7 @@ func sharedSpaceParticipantKeyGrant(
 	now int64,
 ) *sharedspaces.ParticipantKeyGrant {
 	t.Helper()
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	privateKey := sharedSpaceParticipantSigningPrivateKey(t, issuerParticipantID)
 	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
 	signingFingerprint := sha256.Sum256(publicKey)
 	recipientFingerprint := sha256.Sum256([]byte("recipient agreement key"))
@@ -901,6 +908,33 @@ func sharedSpaceParticipantKeyGrant(
 	s.FillBytes(signature[32:])
 	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
 	return &grant
+}
+
+func sharedSpaceParticipantSigningPrivateKey(t *testing.T, participantID uuid.UUID) *ecdsa.PrivateKey {
+	t.Helper()
+	curve := elliptic.P256()
+	digest := sha256.Sum256(participantID[:])
+	maximum := new(big.Int).Sub(curve.Params().N, big.NewInt(1))
+	privateScalar := new(big.Int).SetBytes(digest[:])
+	privateScalar.Mod(privateScalar, maximum)
+	privateScalar.Add(privateScalar, big.NewInt(1))
+	x, y := curve.ScalarBaseMult(privateScalar.Bytes())
+	return &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y},
+		D:         privateScalar,
+	}
+}
+
+func sharedSpaceParticipantSigningKey(t *testing.T, participantID uuid.UUID) sharedspaces.ParticipantSigningKey {
+	t.Helper()
+	privateKey := sharedSpaceParticipantSigningPrivateKey(t, participantID)
+	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
+	fingerprint := sha256.Sum256(publicKey)
+	return sharedspaces.ParticipantSigningKey{
+		Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+		PublicKeyX963:         base64.RawURLEncoding.EncodeToString(publicKey),
+		SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+	}
 }
 
 func publishSharedSpaceBootstrapCheckpointHTTP(

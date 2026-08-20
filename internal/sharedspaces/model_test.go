@@ -213,6 +213,7 @@ func TestParticipantPresentationValidatesRecognitionMetadataAndStatusScope(t *te
 			ParticipantID:  provisioning.InitialParticipantID,
 			SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
 			Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
+			SigningKey:            provisioning.InitialParticipantSigningKey,
 			CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 		},
 		Capabilities:          sharedspaces.RoleHost.Capabilities(provisioning.InteractionMode),
@@ -308,12 +309,14 @@ func TestParticipantRevocationRequiresCompleteSecureGrantSet(t *testing.T) {
 			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 			ParticipantID: provisioning.InitialParticipantID,
 			Kind:          sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+			SigningKey:            provisioning.InitialParticipantSigningKey,
 			CreatedAtMilliseconds: 3_000,
 		},
 		{
 			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 			ParticipantID: participantID, Kind: sharedspaces.ParticipantPerson,
 			Role: sharedspaces.RoleParticipant, CreatedAtMilliseconds: 3_100,
+			SigningKey: testParticipantSigningKey(t, participantID),
 		},
 	}
 	revocation := sharedspaces.ParticipantRevocation{
@@ -336,6 +339,17 @@ func TestParticipantRevocationRequiresCompleteSecureGrantSet(t *testing.T) {
 	); err != nil {
 		t.Fatalf("complete grant set err=%v", err)
 	}
+	substitutedSigner := testParticipantKeyGrantSignedBy(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		provisioning.InitialParticipantID, uuid.New(), revocation.NextKeyEpoch, 3_200,
+	)
+	revocation.KeyGrants = []sharedspaces.ParticipantKeyGrant{*substitutedSigner}
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeSecure, participants, 3_200,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeUnauthorized) {
+		t.Fatalf("substituted signing key err=%v", err)
+	}
+	revocation.KeyGrants = []sharedspaces.ParticipantKeyGrant{*hostGrant}
 	revocation.KeyGrants = append(revocation.KeyGrants, *hostGrant)
 	if err := revocation.ValidateKeyGrants(
 		sharedspaces.SecurityModeSecure, participants, 3_200,
@@ -358,12 +372,14 @@ func TestParticipantRevocationForPrivateSpaceRetainsStaticKeyEpoch(t *testing.T)
 			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 			ParticipantID: provisioning.InitialParticipantID,
 			Kind:          sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+			SigningKey:            provisioning.InitialParticipantSigningKey,
 			CreatedAtMilliseconds: 3_300,
 		},
 		{
 			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 			ParticipantID: participantID, Kind: sharedspaces.ParticipantPerson,
 			Role: sharedspaces.RoleParticipant, CreatedAtMilliseconds: 3_310,
+			SigningKey: testParticipantSigningKey(t, participantID),
 		},
 	}
 	revocation := sharedspaces.ParticipantRevocation{
@@ -397,6 +413,7 @@ func TestParticipantBootstrapRequiresExactlyOneModeAppropriateKey(t *testing.T) 
 		ParticipantID:  provisioning.InitialParticipantID,
 		SubscriptionID: provisioning.InitialParticipantID,
 		Kind:           sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+		SigningKey:            provisioning.InitialParticipantSigningKey,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	status := sharedspaces.ParticipantStatus{

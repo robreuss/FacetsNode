@@ -29,6 +29,40 @@ const (
 	MaximumParticipantDisplayNameRunes            = 128
 )
 
+// ParticipantSigningKey is the public, long-lived signing identity bound to a
+// Shared Space participant. It is deliberately public metadata: binding a
+// key-grant issuer to this value lets the service reject substituted signing
+// keys while leaving the wrapped content key opaque.
+type ParticipantSigningKey struct {
+	Algorithm             string `json:"algorithm"`
+	PublicKeyX963         string `json:"publicKeyX963"`
+	SigningKeyFingerprint string `json:"signingKeyFingerprint"`
+}
+
+func (k ParticipantSigningKey) Validate() error {
+	if k.Algorithm != ParticipantKeyGrantSignatureAlgorithm ||
+		!validFingerprint(k.SigningKeyFingerprint) ||
+		!validBase64URLSize(k.PublicKeyX963, 65, 65) {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant signing key fields are invalid")
+	}
+	publicKeyBytes, _ := base64.RawURLEncoding.Strict().DecodeString(k.PublicKeyX963)
+	fingerprint := sha256.Sum256(publicKeyBytes)
+	if hex.EncodeToString(fingerprint[:]) != k.SigningKeyFingerprint {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant signing-key fingerprint differs")
+	}
+	x, y := elliptic.Unmarshal(elliptic.P256(), publicKeyBytes)
+	if x == nil || y == nil {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant signing key is invalid")
+	}
+	return nil
+}
+
+func (k ParticipantSigningKey) MatchesGrantSignature(signature ParticipantKeyGrantSignature) bool {
+	return k.Algorithm == signature.Algorithm &&
+		k.PublicKeyX963 == signature.PublicSigningKeyX963 &&
+		k.SigningKeyFingerprint == signature.SigningKeyFingerprint
+}
+
 type AuthorityEventType string
 
 const (
@@ -256,16 +290,17 @@ func (r Role) Capabilities(mode InteractionMode) []relay.Capability {
 }
 
 type SpaceProvisioning struct {
-	Version                int                      `json:"version"`
-	RetryID                uuid.UUID                `json:"retryID"`
-	SpaceID                uuid.UUID                `json:"spaceID"`
-	SecurityMode           SecurityMode             `json:"securityMode"`
-	InteractionMode        InteractionMode          `json:"interactionMode"`
-	InitialParticipantID   uuid.UUID                `json:"initialParticipantID"`
-	InitialParticipantKind ParticipantKind          `json:"initialParticipantKind"`
-	Tenant                 relay.TenantRegistration `json:"tenant"`
-	Domain                 relay.DomainProvisioning `json:"-"`
-	CreatedAtMilliseconds  int64                    `json:"createdAtMilliseconds"`
+	Version                      int                      `json:"version"`
+	RetryID                      uuid.UUID                `json:"retryID"`
+	SpaceID                      uuid.UUID                `json:"spaceID"`
+	SecurityMode                 SecurityMode             `json:"securityMode"`
+	InteractionMode              InteractionMode          `json:"interactionMode"`
+	InitialParticipantID         uuid.UUID                `json:"initialParticipantID"`
+	InitialParticipantKind       ParticipantKind          `json:"initialParticipantKind"`
+	InitialParticipantSigningKey ParticipantSigningKey    `json:"initialParticipantSigningKey"`
+	Tenant                       relay.TenantRegistration `json:"tenant"`
+	Domain                       relay.DomainProvisioning `json:"-"`
+	CreatedAtMilliseconds        int64                    `json:"createdAtMilliseconds"`
 }
 
 func (p SpaceProvisioning) Validate() error {
@@ -278,6 +313,9 @@ func (p SpaceProvisioning) Validate() error {
 		return err
 	}
 	if err := p.Domain.Validate(); err != nil {
+		return err
+	}
+	if err := p.InitialParticipantSigningKey.Validate(); err != nil {
 		return err
 	}
 	if p.SpaceID != p.Tenant.TenantID ||
@@ -294,14 +332,15 @@ func (p SpaceProvisioning) Validate() error {
 }
 
 type Participant struct {
-	Version               int             `json:"version"`
-	SpaceID               uuid.UUID       `json:"spaceID"`
-	ParticipantID         uuid.UUID       `json:"participantID"`
-	SubscriptionID        uuid.UUID       `json:"subscriptionID"`
-	Kind                  ParticipantKind `json:"kind"`
-	Role                  Role            `json:"role"`
-	CreatedAtMilliseconds int64           `json:"createdAtMilliseconds"`
-	RevokedAtMilliseconds *int64          `json:"revokedAtMilliseconds,omitempty"`
+	Version               int                   `json:"version"`
+	SpaceID               uuid.UUID             `json:"spaceID"`
+	ParticipantID         uuid.UUID             `json:"participantID"`
+	SubscriptionID        uuid.UUID             `json:"subscriptionID"`
+	Kind                  ParticipantKind       `json:"kind"`
+	Role                  Role                  `json:"role"`
+	SigningKey            ParticipantSigningKey `json:"signingKey"`
+	CreatedAtMilliseconds int64                 `json:"createdAtMilliseconds"`
+	RevokedAtMilliseconds *int64                `json:"revokedAtMilliseconds,omitempty"`
 }
 
 func (p Participant) Validate() error {
@@ -310,6 +349,9 @@ func (p Participant) Validate() error {
 		p.CreatedAtMilliseconds < 0 ||
 		(p.RevokedAtMilliseconds != nil && *p.RevokedAtMilliseconds < p.CreatedAtMilliseconds) {
 		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant fields are invalid")
+	}
+	if err := p.SigningKey.Validate(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -394,6 +436,7 @@ type Invitation struct {
 	Kind                  ParticipantKind       `json:"kind"`
 	Role                  Role                  `json:"role"`
 	InteractionMode       InteractionMode       `json:"interactionMode"`
+	ParticipantSigningKey ParticipantSigningKey `json:"participantSigningKey"`
 	KeyGrant              *ParticipantKeyGrant  `json:"keyGrant,omitempty"`
 	RelayAdmission        relay.MemberAdmission `json:"relayAdmission"`
 	CreatedAtMilliseconds int64                 `json:"createdAtMilliseconds"`
@@ -406,6 +449,9 @@ func (i Invitation) Validate() error {
 		return NewProtocolError(CodeInvalidInvitation, "Shared Space invitation fields are invalid")
 	}
 	if err := i.RelayAdmission.Validate(); err != nil {
+		return err
+	}
+	if err := i.ParticipantSigningKey.Validate(); err != nil {
 		return err
 	}
 	if i.KeyGrant != nil {
@@ -424,9 +470,9 @@ func (i Invitation) Validate() error {
 }
 
 // ParticipantKeyGrant is an opaque, recipient-bound package for one Shared
-// Space content-key epoch. The server verifies self-authentication and routing
-// scope, but only a participant client can bind the signing key to the
-// encrypted participant authority and decrypt the wrapped key material.
+// Space content-key epoch. The server verifies signature, routing scope, and
+// that the signature uses the issuer's registered public signing key. Only a
+// participant client decrypts the wrapped key material.
 type ParticipantKeyGrant struct {
 	Version                          int                          `json:"version"`
 	SpaceID                          uuid.UUID                    `json:"spaceID"`
@@ -707,7 +753,7 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 	}
 
 	active := make(map[uuid.UUID]Participant)
-	authorizedIssuers := make(map[uuid.UUID]struct{})
+	authorizedIssuers := make(map[uuid.UUID]ParticipantSigningKey)
 	for _, participant := range participants {
 		if participant.SpaceID != r.SpaceID {
 			return NewProtocolError(CodeWrongScope, "Shared Space participant belongs to another Space")
@@ -717,7 +763,7 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 		}
 		active[participant.ParticipantID] = participant
 		if participant.Role == RoleHost || participant.Role == RoleModerator {
-			authorizedIssuers[participant.ParticipantID] = struct{}{}
+			authorizedIssuers[participant.ParticipantID] = participant.SigningKey
 		}
 	}
 	if len(r.KeyGrants) != len(active) {
@@ -741,8 +787,12 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 		if _, found := active[grant.ParticipantID]; !found {
 			return NewProtocolError(CodeWrongScope, "Shared Space revocation key grant targets an inactive participant")
 		}
-		if _, found := authorizedIssuers[grant.IssuerParticipantID]; !found {
+		issuerKey, found := authorizedIssuers[grant.IssuerParticipantID]
+		if !found {
 			return NewProtocolError(CodeUnauthorized, "Shared Space revocation key grant issuer is not an active host or moderator")
+		}
+		if !issuerKey.MatchesGrantSignature(grant.Signature) {
+			return NewProtocolError(CodeUnauthorized, "Shared Space revocation key grant signature is not bound to its issuer")
 		}
 		if _, found := seen[grant.ParticipantID]; found {
 			return NewProtocolError(CodeInvalidParticipant, "Shared Space revocation contains duplicate participant key grants")

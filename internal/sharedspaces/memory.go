@@ -130,6 +130,7 @@ func (s *MemoryStore) ProvisionSpace(
 		ParticipantID:  provisioning.InitialParticipantID,
 		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: RoleHost,
+		SigningKey:            provisioning.InitialParticipantSigningKey,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	space := &memorySpace{
@@ -227,6 +228,12 @@ func (s *MemoryStore) CreateInvitation(
 				"participant key grant issuer is not an active Shared Space host or moderator",
 			)
 		}
+		if !issuer.SigningKey.MatchesGrantSignature(invitation.KeyGrant.Signature) {
+			return InvitationCreateResult{}, NewProtocolError(
+				CodeUnauthorized,
+				"participant key grant signature is not bound to its issuer",
+			)
+		}
 	}
 	if participant, found := space.participants[invitation.ParticipantID]; found && participant.RevokedAtMilliseconds == nil {
 		return InvitationCreateResult{}, NewProtocolError(CodeParticipantCollision, "participant is already active")
@@ -310,6 +317,7 @@ func (s *MemoryStore) ClaimInvitation(
 		Version: SchemaVersion, SpaceID: claim.SpaceID, ParticipantID: claim.ParticipantID,
 		SubscriptionID: record.invitation.SubscriptionID, Kind: record.invitation.Kind,
 		Role: record.invitation.Role, CreatedAtMilliseconds: nowMilliseconds,
+		SigningKey: record.invitation.ParticipantSigningKey,
 	}
 	space.participants[participant.ParticipantID] = participant
 	if record.invitation.KeyGrant != nil {

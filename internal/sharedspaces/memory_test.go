@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"math/big"
 	"reflect"
 	"testing"
 
@@ -412,6 +413,40 @@ func TestMemoryStoreComputePoolAuthorityLifecycle(t *testing.T) {
 		events.Events[1].EventType != sharedspaces.AuthorityEventSpaceComputeBindingChanged ||
 		events.Events[2].EventType != sharedspaces.AuthorityEventSpaceComputeBindingChanged {
 		t.Fatalf("compute authority events=%+v err=%v", events, err)
+	}
+}
+
+func TestMemoryStoreRejectsInvitationSignedByUnregisteredIssuerKey(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 1_400, sharedspaces.SecurityModeSecure)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 1_400); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, hostCredential, admin,
+		sharedspaces.InitialKeyEpoch, 1_450,
+	)
+
+	invitation, _ := testInvitation(t, provisioning, admin, 1_500, sharedspaces.RoleParticipant)
+	// The declared issuer is the host, but the signature is from another valid
+	// P-256 key. A syntactically valid signature is not sufficient authority.
+	invitation.KeyGrant = testParticipantKeyGrantSignedBy(
+		t,
+		provisioning.SpaceID,
+		invitation.ParticipantID,
+		provisioning.InitialParticipantID,
+		uuid.New(),
+		sharedspaces.InitialKeyEpoch,
+		1_500,
+	)
+	if _, err := store.CreateInvitation(ctx, admin, invitation, 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeUnauthorized) {
+		t.Fatalf("substituted issuer signing key err=%v", err)
 	}
 }
 
@@ -938,8 +973,9 @@ func testSpaceProvisioning(
 	provisioning := sharedspaces.SpaceProvisioning{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
 		SecurityMode: mode, InteractionMode: sharedspaces.InteractionModeCollaborative,
-		InitialParticipantID:   hostID,
-		InitialParticipantKind: sharedspaces.ParticipantPerson,
+		InitialParticipantID:         hostID,
+		InitialParticipantKind:       sharedspaces.ParticipantPerson,
+		InitialParticipantSigningKey: testParticipantSigningKey(t, hostID),
 		Tenant: relay.TenantRegistration{
 			Version: relay.SchemaVersion, RetryID: uuid.New(), TenantID: spaceID,
 			AuthorizationDigest: tenantDigest, CreatedAtMilliseconds: now,
@@ -1012,11 +1048,13 @@ func testInvitation(
 	if err != nil {
 		t.Fatal(err)
 	}
+	participantID := uuid.New()
 	invitation := sharedspaces.Invitation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: space.SpaceID,
-		InvitationID: invitationID, ParticipantID: uuid.New(), SubscriptionID: uuid.New(),
+		InvitationID: invitationID, ParticipantID: participantID, SubscriptionID: uuid.New(),
 		Kind: sharedspaces.ParticipantPerson, Role: role,
-		InteractionMode: space.InteractionMode, CreatedAtMilliseconds: now,
+		ParticipantSigningKey: testParticipantSigningKey(t, participantID),
+		InteractionMode:       space.InteractionMode, CreatedAtMilliseconds: now,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: space.SpaceID, DomainID: admin.DomainID,
 			AdmissionID: invitationID, AuthorizationDigest: digest,
@@ -1041,11 +1079,22 @@ func testParticipantKeyGrant(
 	keyEpoch uint64,
 	now int64,
 ) *sharedspaces.ParticipantKeyGrant {
+	return testParticipantKeyGrantSignedBy(
+		t, spaceID, participantID, issuerParticipantID, issuerParticipantID, keyEpoch, now,
+	)
+}
+
+func testParticipantKeyGrantSignedBy(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	issuerParticipantID uuid.UUID,
+	signingParticipantID uuid.UUID,
+	keyEpoch uint64,
+	now int64,
+) *sharedspaces.ParticipantKeyGrant {
 	t.Helper()
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	privateKey := testParticipantSigningPrivateKey(t, signingParticipantID)
 	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
 	signingFingerprint := sha256.Sum256(publicKey)
 	recipientFingerprint := sha256.Sum256([]byte("recipient agreement key"))
@@ -1079,6 +1128,33 @@ func testParticipantKeyGrant(
 	s.FillBytes(signature[32:])
 	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
 	return &grant
+}
+
+func testParticipantSigningPrivateKey(t *testing.T, participantID uuid.UUID) *ecdsa.PrivateKey {
+	t.Helper()
+	curve := elliptic.P256()
+	digest := sha256.Sum256(participantID[:])
+	maximum := new(big.Int).Sub(curve.Params().N, big.NewInt(1))
+	privateScalar := new(big.Int).SetBytes(digest[:])
+	privateScalar.Mod(privateScalar, maximum)
+	privateScalar.Add(privateScalar, big.NewInt(1))
+	x, y := curve.ScalarBaseMult(privateScalar.Bytes())
+	return &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y},
+		D:         privateScalar,
+	}
+}
+
+func testParticipantSigningKey(t *testing.T, participantID uuid.UUID) sharedspaces.ParticipantSigningKey {
+	t.Helper()
+	privateKey := testParticipantSigningPrivateKey(t, participantID)
+	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
+	fingerprint := sha256.Sum256(publicKey)
+	return sharedspaces.ParticipantSigningKey{
+		Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+		PublicKeyX963:         base64.RawURLEncoding.EncodeToString(publicKey),
+		SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+	}
 }
 
 func testToken(seed byte) string {

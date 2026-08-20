@@ -132,6 +132,7 @@ func (s *SharedSpacesStore) ProvisionSpace(
 		ParticipantID:  provisioning.InitialParticipantID,
 		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
+		SigningKey:            provisioning.InitialParticipantSigningKey,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	if _, err := tx.Exec(ctx, `
@@ -192,6 +193,7 @@ func postgresSharedSpaceProvisioningResult(
 		ParticipantID:  provisioning.InitialParticipantID,
 		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
+		SigningKey:            provisioning.InitialParticipantSigningKey,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	return sharedspaces.SpaceProvisioningResult{
@@ -208,11 +210,14 @@ func insertSharedSpaceParticipant(ctx context.Context, tx pgx.Tx, participant sh
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_space_participants (
 			space_id,participant_id,domain_id,subscription_id,version,kind,role,
+			signing_key_algorithm,signing_public_key_x963,signing_key_fingerprint,
 			created_at_milliseconds,revoked_at_milliseconds
-		) SELECT $1,$2,domain_id,$3,$4,$5,$6,$7,$8
+		) SELECT $1,$2,domain_id,$3,$4,$5,$6,$7,$8,$9,$10,$11
 		  FROM shared_spaces WHERE space_id=$1
 	`, participant.SpaceID, participant.ParticipantID, participant.SubscriptionID,
 		participant.Version, string(participant.Kind), string(participant.Role),
+		participant.SigningKey.Algorithm, participant.SigningKey.PublicKeyX963,
+		participant.SigningKey.SigningKeyFingerprint,
 		participant.CreatedAtMilliseconds, participant.RevokedAtMilliseconds); err != nil {
 		return fmt.Errorf("insert Shared Space participant: %w", err)
 	}
@@ -309,10 +314,15 @@ func (s *SharedSpacesStore) CreateInvitation(
 	}
 	if invitation.KeyGrant != nil {
 		var issuerRole sharedspaces.Role
+		var issuerSigningKey sharedspaces.ParticipantSigningKey
 		err := tx.QueryRow(ctx, `
-			SELECT role FROM shared_space_participants
+			SELECT role,signing_key_algorithm,signing_public_key_x963,signing_key_fingerprint
+			FROM shared_space_participants
 			WHERE space_id=$1 AND participant_id=$2 AND revoked_at_milliseconds IS NULL
-		`, invitation.SpaceID, invitation.KeyGrant.IssuerParticipantID).Scan(&issuerRole)
+		`, invitation.SpaceID, invitation.KeyGrant.IssuerParticipantID).Scan(
+			&issuerRole, &issuerSigningKey.Algorithm, &issuerSigningKey.PublicKeyX963,
+			&issuerSigningKey.SigningKeyFingerprint,
+		)
 		if err == pgx.ErrNoRows ||
 			(err == nil && issuerRole != sharedspaces.RoleHost && issuerRole != sharedspaces.RoleModerator) {
 			return sharedspaces.InvitationCreateResult{}, sharedspaces.NewProtocolError(
@@ -322,6 +332,12 @@ func (s *SharedSpacesStore) CreateInvitation(
 		}
 		if err != nil {
 			return sharedspaces.InvitationCreateResult{}, fmt.Errorf("load participant key grant issuer: %w", err)
+		}
+		if !issuerSigningKey.MatchesGrantSignature(invitation.KeyGrant.Signature) {
+			return sharedspaces.InvitationCreateResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeUnauthorized,
+				"participant key grant signature is not bound to its issuer",
+			)
 		}
 	}
 
@@ -515,6 +531,7 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		Version: sharedspaces.SchemaVersion, SpaceID: claim.SpaceID,
 		ParticipantID: claim.ParticipantID, SubscriptionID: invitation.SubscriptionID,
 		Kind: invitation.Kind, Role: invitation.Role,
+		SigningKey:            invitation.ParticipantSigningKey,
 		CreatedAtMilliseconds: relayResult.Member.MemberRegistration.CreatedAtMilliseconds,
 	}
 	if err := insertSharedSpaceParticipant(ctx, tx, participant); err != nil {
@@ -2302,6 +2319,7 @@ func loadSharedSpaceParticipant(
 ) (sharedspaces.Participant, error) {
 	query := `
 		SELECT version,space_id,participant_id,subscription_id,kind,role,
+		       signing_key_algorithm,signing_public_key_x963,signing_key_fingerprint,
 		       created_at_milliseconds,revoked_at_milliseconds
 		FROM shared_space_participants
 		WHERE space_id=$1 AND participant_id=$2`
@@ -2312,6 +2330,8 @@ func loadSharedSpaceParticipant(
 	if err := tx.QueryRow(ctx, query, spaceID, participantID).Scan(
 		&participant.Version, &participant.SpaceID, &participant.ParticipantID,
 		&participant.SubscriptionID, &participant.Kind, &participant.Role,
+		&participant.SigningKey.Algorithm, &participant.SigningKey.PublicKeyX963,
+		&participant.SigningKey.SigningKeyFingerprint,
 		&participant.CreatedAtMilliseconds, &participant.RevokedAtMilliseconds,
 	); err == pgx.ErrNoRows {
 		return sharedspaces.Participant{}, sharedspaces.NewProtocolError(
@@ -2330,6 +2350,7 @@ func loadSharedSpaceParticipants(
 ) ([]sharedspaces.Participant, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT version,space_id,participant_id,subscription_id,kind,role,
+		       signing_key_algorithm,signing_public_key_x963,signing_key_fingerprint,
 		       created_at_milliseconds,revoked_at_milliseconds
 		FROM shared_space_participants
 		WHERE space_id=$1
@@ -2345,6 +2366,8 @@ func loadSharedSpaceParticipants(
 		if err := rows.Scan(
 			&participant.Version, &participant.SpaceID, &participant.ParticipantID,
 			&participant.SubscriptionID, &participant.Kind, &participant.Role,
+			&participant.SigningKey.Algorithm, &participant.SigningKey.PublicKeyX963,
+			&participant.SigningKey.SigningKeyFingerprint,
 			&participant.CreatedAtMilliseconds, &participant.RevokedAtMilliseconds,
 		); err != nil {
 			return nil, fmt.Errorf("scan Shared Space participant: %w", err)

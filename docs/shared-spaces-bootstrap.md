@@ -87,8 +87,10 @@ capabilities must exactly match those derived from the Space's interaction
 mode and invited role.
 
 For a Private or Secure Space, the invitation also carries an opaque,
-participant-specific grant for the current content-key epoch. The server validates its signed
-metadata and stores the ciphertext atomically with the invitation, but never
+participant-specific grant for the current content-key epoch. Each participant registers a
+public signing key with its authority record. The server validates that grant metadata is
+signed by the current host or moderator's registered key and stores the ciphertext atomically
+with the invitation, but never
 receives the group content key in plaintext. Managed Spaces reject key grants.
 Their current service-managed content key is instead released only after the
 participant has successfully claimed membership and authenticates bootstrap.

@@ -31,7 +31,9 @@ Space creation:
    the key epoch and requires a replacement grant for every remaining active
    participant. Active participants can retrieve the current active roster so
    they can verify operational membership awareness; the roster carries no
-   keys, invitations, historical membership, or content.
+   keys, invitations, historical membership, or content. Each key grant is
+   signed by a host or moderator key already registered in that participant's
+   durable authority record; a valid but substituted signing key is rejected.
 3. **Managed** remains a reserved protocol mode for a future server-readable,
    high-scale public profile. It is not a current user-facing Shared Space
    option. Its service-managed content custody boundary is distinct from the
