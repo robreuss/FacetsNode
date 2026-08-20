@@ -6,9 +6,10 @@ Device Sync principal and its first device, admits additional devices to the
 opaque principal control-channel transport, binds a Facets Space identifier to
 an isolated relay domain, admits an already enrolled device to that Space
 transport, and gives a newly admitted device the active opaque checkpoint plus
-the subsequent mutation tail. Client-side content-trust transfer, canonical FEF
-application orchestration, account admission UX, and hosted account integration
-remain later gates.
+the subsequent mutation tail. The Swift client now transfers client-held
+content trust over the protected control channel and applies received content
+through the canonical FEF importer. Hosted account-admission UX, commercial
+entitlements, and zero-device key recovery remain later gates.
 
 ## Authority boundary
 

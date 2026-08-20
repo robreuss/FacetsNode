@@ -20,7 +20,9 @@
       "payloadContentType": "application/vnd.facets.fef+json",
       "payloadSHA256": "5a630c59a743a90a69ab195db8331071191bc1b8da4e72866cc8c0e3930b9f9e",
       "payloadBase64URL": "eyJtb2RlIjoibXV0YXRpb25fYmF0Y2giLCJ2ZXJzaW9uIjoxfQ",
-      "dependencyMessageIDs": ["10000000-0000-4000-8000-000000000001"],
+      "dependencyMessageIDs": [
+        "10000000-0000-4000-8000-000000000001"
+      ],
       "blobReferences": []
     },
     {
@@ -43,7 +45,14 @@
       "payloadSHA256": "ca8cb80d98e70eece9bc4be5f6c3056149ef0524e3a2f679e7985c074f4a8d3f",
       "payloadBase64URL": "eyJibG9iSURzIjpbInNoYTI1NjphYmMiXX0",
       "dependencyMessageIDs": [],
-      "blobReferences": [{"blobID":"blob-1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byteCount":4,"contentType":"application/octet-stream"}]
+      "blobReferences": [
+        {
+          "blobID": "blob-1",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byteCount": 4,
+          "contentType": "application/octet-stream"
+        }
+      ]
     },
     {
       "version": 1,
@@ -64,7 +73,9 @@
       "payloadContentType": "application/json",
       "payloadSHA256": "93d505c734af0de8381a4161e1ba695bcbc22c339cb717b58efe0398c0122dfa",
       "payloadBase64URL": "eyJjb2RlIjoibWlzc2luZ19kZXBlbmRlbmN5In0",
-      "dependencyMessageIDs": ["10000000-0000-4000-8000-000000000002"],
+      "dependencyMessageIDs": [
+        "10000000-0000-4000-8000-000000000002"
+      ],
       "blobReferences": []
     },
     {
