@@ -1,0 +1,85 @@
+{
+  "format": "facets.shared-space-secure-roster-attestation-fixture.v1",
+  "warning": "TEST FIXTURE ONLY. This contains public signing keys and deterministic test signatures; it grants no authority.",
+  "initial": {
+    "version": 1,
+    "spaceID": "11111111-2222-4333-8444-555555555555",
+    "domainID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "revision": 1,
+    "currentKeyEpoch": 1,
+    "participants": [
+      {
+        "version": 1,
+        "spaceID": "11111111-2222-4333-8444-555555555555",
+        "participantID": "11111111-1111-4111-8111-111111111111",
+        "subscriptionID": "33333333-3333-4333-8333-333333333333",
+        "kind": "person",
+        "role": "host",
+        "signingKey": {
+          "algorithm": "ES256",
+          "publicKeyX963": "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+          "signingKeyFingerprint": "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be"
+        },
+        "createdAtMilliseconds": 1700000000000
+      }
+    ],
+    "issuerParticipantID": "11111111-1111-4111-8111-111111111111",
+    "createdAtMilliseconds": 1700000000000,
+    "signature": {
+      "algorithm": "ES256",
+      "publicSigningKeyX963": "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+      "signingKeyFingerprint": "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be",
+      "signature": "_04O2ONyZymlMgd1EXnvBQbINFk2gc7xQrr2cXbLXT6eOXWbt1p8w17qbhDOzCQP72jyAj2Qp-9WVgqdb76AjA"
+    }
+  },
+  "successor": {
+    "version": 1,
+    "spaceID": "11111111-2222-4333-8444-555555555555",
+    "domainID": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "revision": 2,
+    "previousDigest": "7cb44f20a74347f75642857986ab53331080aacc27feedc8979f3f15daa2c7c3",
+    "currentKeyEpoch": 1,
+    "participants": [
+      {
+        "version": 1,
+        "spaceID": "11111111-2222-4333-8444-555555555555",
+        "participantID": "11111111-1111-4111-8111-111111111111",
+        "subscriptionID": "33333333-3333-4333-8333-333333333333",
+        "kind": "person",
+        "role": "host",
+        "signingKey": {
+          "algorithm": "ES256",
+          "publicKeyX963": "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+          "signingKeyFingerprint": "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be"
+        },
+        "createdAtMilliseconds": 1700000000000
+      },
+      {
+        "version": 1,
+        "spaceID": "11111111-2222-4333-8444-555555555555",
+        "participantID": "22222222-2222-4222-8222-222222222222",
+        "subscriptionID": "44444444-4444-4444-8444-444444444444",
+        "kind": "person",
+        "role": "participant",
+        "signingKey": {
+          "algorithm": "ES256",
+          "publicKeyX963": "BHzyexiNA09-ilI4AwS1GsPAiWnid_IbNaYLSPxHZpl4B3dVENuO0EApPZrGn3Qw27p9reY86YIpngS3nSJ4c9E",
+          "signingKeyFingerprint": "a9f300eb5960e89133af7362011a1e26f0e2ea2e36dc402a04af6c192b891a8c"
+        },
+        "createdAtMilliseconds": 1700000000100
+      }
+    ],
+    "issuerParticipantID": "11111111-1111-4111-8111-111111111111",
+    "createdAtMilliseconds": 1700000000100,
+    "signature": {
+      "algorithm": "ES256",
+      "publicSigningKeyX963": "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+      "signingKeyFingerprint": "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be",
+      "signature": "xVMdEaQczO1l3WdTvsuBFPo-X_BnNmfsMIV0hjAkSlC6ssoRcoqpUfPTwNV9thArhV0JgKAX23qxg4S69SkHHg"
+    }
+  },
+  "expectedInitialDigest": "7cb44f20a74347f75642857986ab53331080aacc27feedc8979f3f15daa2c7c3",
+  "expectedSuccessorDigest": "ab4d55b69a4e75cd6acd690310f80979a0f809f6e0dab7682bbf0abf17074d42",
+  "expectedInitialSigningPayloadBase64": "eyJ2ZXJzaW9uIjoxLCJzcGFjZUlEIjoiMTExMTExMTEtMjIyMi00MzMzLTg0NDQtNTU1NTU1NTU1NTU1IiwiZG9tYWluSUQiOiJhYWFhYWFhYS1iYmJiLTRjY2MtOGRkZC1lZWVlZWVlZWVlZWUiLCJyZXZpc2lvbiI6MSwiY3VycmVudEtleUVwb2NoIjoxLCJwYXJ0aWNpcGFudHMiOlt7InZlcnNpb24iOjEsInNwYWNlSUQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwYXJ0aWNpcGFudElEIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwic3Vic2NyaXB0aW9uSUQiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJraW5kIjoicGVyc29uIiwicm9sZSI6Imhvc3QiLCJzaWduaW5nS2V5Ijp7ImFsZ29yaXRobSI6IkVTMjU2IiwicHVibGljS2V5WDk2MyI6IkJHc1gwZkxoTEVKSC1Mem01V09rUVBKM0EzMkJMZXN6b1BTaE9VWFltTUtXVC1OQzR2NGFmNXVPNS10S2ZBLWVGaXZPTTFkck1WN095N1pBYURlX1VmVSIsInNpZ25pbmdLZXlGaW5nZXJwcmludCI6IjY5OGJlYTYzZGM0NGEzNDQ2NjNmZjE0MjlhZWExMDg0MmRmMjdiNmI5OTFlZjI1ODY2YjJjNmMwMmNkY2M1YmUifSwiY3JlYXRlZEF0TWlsbGlzZWNvbmRzIjoxNzAwMDAwMDAwMDAwfV0sImlzc3VlclBhcnRpY2lwYW50SUQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJjcmVhdGVkQXRNaWxsaXNlY29uZHMiOjE3MDAwMDAwMDAwMDB9",
+  "expectedSuccessorSigningPayloadBase64": "eyJ2ZXJzaW9uIjoxLCJzcGFjZUlEIjoiMTExMTExMTEtMjIyMi00MzMzLTg0NDQtNTU1NTU1NTU1NTU1IiwiZG9tYWluSUQiOiJhYWFhYWFhYS1iYmJiLTRjY2MtOGRkZC1lZWVlZWVlZWVlZWUiLCJyZXZpc2lvbiI6MiwicHJldmlvdXNEaWdlc3QiOiI3Y2I0NGYyMGE3NDM0N2Y3NTY0Mjg1Nzk4NmFiNTMzMzEwODBhYWNjMjdmZWVkYzg5NzlmM2YxNWRhYTJjN2MzIiwiY3VycmVudEtleUVwb2NoIjoxLCJwYXJ0aWNpcGFudHMiOlt7InZlcnNpb24iOjEsInNwYWNlSUQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwYXJ0aWNpcGFudElEIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwic3Vic2NyaXB0aW9uSUQiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJraW5kIjoicGVyc29uIiwicm9sZSI6Imhvc3QiLCJzaWduaW5nS2V5Ijp7ImFsZ29yaXRobSI6IkVTMjU2IiwicHVibGljS2V5WDk2MyI6IkJHc1gwZkxoTEVKSC1Mem01V09rUVBKM0EzMkJMZXN6b1BTaE9VWFltTUtXVC1OQzR2NGFmNXVPNS10S2ZBLWVGaXZPTTFkck1WN095N1pBYURlX1VmVSIsInNpZ25pbmdLZXlGaW5nZXJwcmludCI6IjY5OGJlYTYzZGM0NGEzNDQ2NjNmZjE0MjlhZWExMDg0MmRmMjdiNmI5OTFlZjI1ODY2YjJjNmMwMmNkY2M1YmUifSwiY3JlYXRlZEF0TWlsbGlzZWNvbmRzIjoxNzAwMDAwMDAwMDAwfSx7InZlcnNpb24iOjEsInNwYWNlSUQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwYXJ0aWNpcGFudElEIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwic3Vic2NyaXB0aW9uSUQiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJraW5kIjoicGVyc29uIiwicm9sZSI6InBhcnRpY2lwYW50Iiwic2lnbmluZ0tleSI6eyJhbGdvcml0aG0iOiJFUzI1NiIsInB1YmxpY0tleVg5NjMiOiJCSHp5ZXhpTkEwOS1pbEk0QXdTMUdzUEFpV25pZF9JYk5hWUxTUHhIWnBsNEIzZFZFTnVPMEVBcFBackduM1F3MjdwOXJlWTg2WUlwbmdTM25TSjRjOUUiLCJzaWduaW5nS2V5RmluZ2VycHJpbnQiOiJhOWYzMDBlYjU5NjBlODkxMzNhZjczNjIwMTFhMWUyNmYwZTJlYTJlMzZkYzQwMmEwNGFmNmMxOTJiODkxYThjIn0sImNyZWF0ZWRBdE1pbGxpc2Vjb25kcyI6MTcwMDAwMDAwMDEwMH1dLCJpc3N1ZXJQYXJ0aWNpcGFudElEIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiY3JlYXRlZEF0TWlsbGlzZWNvbmRzIjoxNzAwMDAwMDAwMTAwfQ"
+}

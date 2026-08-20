@@ -56,6 +56,30 @@ For this revision its SHA-256 is:
 1102b3f64c007b9bbf66c9eb74cb87b6b512e84241419df8827f7149b4e3ea26
 ```
 
+## Secure roster authority fixture
+
+Secure Shared Space roster authority is deliberately separate from a transport
+envelope: it is an independently signed, hash-linked client trust record. The
+portable fixture fixes its P-256 signature encoding, canonical signing bytes,
+initial roster, and one successor transition:
+
+```
+FacetsNode/internal/testfixture/shared-space-secure-roster-attestation-portable-v1.json
+Facets/Packages/FacetsDeveloperKit/Tests/FacetsFEFTests/Fixtures/shared-space-secure-roster-attestation-portable-v1.json
+```
+
+The Swift fixture is a required counterpart before a Secure Shared Space client
+is enabled. It must be byte-identical to the Go fixture, whose SHA-256 is:
+
+```
+aad269a61cff902b857dea7b64a423ce52a97f57a918bfbe43c8a58945bd1b1a
+```
+
+A client verifies an initial attestation against the provisioned host
+participant and accepts a later roster only when its signed revision,
+predecessor digest, active participant set, and key epoch form a valid
+successor. A relay response is never membership authority by itself.
+
 ## Delivery and canonical application
 
 Delivery is at least once. A client deduplicates by deterministic message

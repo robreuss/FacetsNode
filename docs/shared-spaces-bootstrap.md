@@ -194,10 +194,18 @@ participant roster at:
 
 The request uses the participant's relay credential, and the credential member
 identifier must equal the participant in the path. The response contains only
-the current active participants, their roles and kinds, and any current
-participant recognition presentation. It does not disclose invitations,
+the current active participants, their roles and kinds, any current participant
+recognition presentation, and the signed `authorityAttestation` whose exact
+participant set and key epoch match that roster. It does not disclose invitations,
 revoked participants, administration authority, bearer credentials, relay
 credentials, FEF content, or any content-key material.
+
+Clients validate the initial attestation against the provisioned host
+participant. Later reads are accepted only if their signed revision and
+predecessor digest form a valid successor of the last accepted attestation, and
+if its active participant set and key epoch exactly match the returned roster.
+An invalid or discontinuous attestation is a security failure, not a reason to
+silently replace the locally trusted membership view.
 
 Private and managed Spaces reject this participant-facing roster projection.
 Their hosts retain the authenticated administration status endpoint for
