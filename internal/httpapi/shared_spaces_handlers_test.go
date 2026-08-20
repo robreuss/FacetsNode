@@ -714,6 +714,13 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	if len(secondAuthorityPage.Events) != len(wantRemainingAuthorityEvents) || secondAuthorityPage.NextSequence != 9 {
 		t.Fatalf("second authority event page=%+v", secondAuthorityPage)
 	}
+	if firstAuthorityPage.Events[0].SecureRosterDigest == nil ||
+		secondAuthorityPage.Events[1].SecureRosterDigest == nil ||
+		secondAuthorityPage.Events[2].SecureRosterDigest == nil ||
+		secondAuthorityPage.Events[3].SecureRosterDigest == nil ||
+		secondAuthorityPage.Events[5].SecureRosterDigest == nil {
+		t.Fatalf("Secure authority events are missing roster digests: first=%+v second=%+v", firstAuthorityPage, secondAuthorityPage)
+	}
 	for index, eventType := range wantRemainingAuthorityEvents {
 		if secondAuthorityPage.Events[index].EventType != eventType {
 			t.Fatalf("authority event %d type=%q want=%q", index, secondAuthorityPage.Events[index].EventType, eventType)

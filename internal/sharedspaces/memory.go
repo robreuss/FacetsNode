@@ -160,6 +160,7 @@ func (s *MemoryStore) ProvisionSpace(
 		EventType:            AuthorityEventSpaceProvisioned,
 		SubjectParticipantID: &participant.ParticipantID,
 		CurrentRole:          rolePointer(RoleHost), CurrentKeyEpoch: uint64Pointer(InitialKeyEpoch),
+		SecureRosterDigest:     secureRosterDigest(provisioning.InitialSecureRosterAttestation),
 		OccurredAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	})
 	return spaceProvisioningResult(space, relay.AcceptanceAccepted), nil
@@ -450,6 +451,7 @@ func (s *MemoryStore) ClaimInvitation(
 		DomainID: credential.DomainID, EventType: AuthorityEventInvitationClaimed,
 		SubjectParticipantID: &participant.ParticipantID, InvitationID: &credential.InvitationID,
 		CurrentRole: &participant.Role, CurrentKeyEpoch: uint64Pointer(space.keyEpoch),
+		SecureRosterDigest:     secureRosterDigest(record.invitation.ActivationSecureRosterAttestation),
 		OccurredAtMilliseconds: claim.ClaimedAtMilliseconds,
 	})
 	return result, nil
@@ -904,6 +906,7 @@ func (s *MemoryStore) ChangeParticipantRole(
 		DomainID: credential.DomainID, EventType: AuthorityEventParticipantRoleChanged,
 		SubjectParticipantID: &change.ParticipantID,
 		PreviousRole:         &change.PreviousRole, CurrentRole: &change.NextRole,
+		SecureRosterDigest:     secureRosterDigest(change.SecureRosterAttestation),
 		OccurredAtMilliseconds: change.ChangedAtMilliseconds,
 	})
 	return result, nil
@@ -1004,6 +1007,7 @@ func (s *MemoryStore) RevokeParticipant(
 		DomainID: credential.DomainID, EventType: AuthorityEventParticipantRevoked,
 		SubjectParticipantID: &revocation.ParticipantID,
 		PreviousKeyEpoch:     &revocation.PreviousKeyEpoch, CurrentKeyEpoch: &revocation.NextKeyEpoch,
+		SecureRosterDigest:     secureRosterDigest(revocation.SecureRosterAttestation),
 		OccurredAtMilliseconds: nowMilliseconds,
 	})
 	return result, nil
@@ -1018,6 +1022,22 @@ func (s *MemoryStore) appendAuthorityEvent(event AuthorityEvent) {
 }
 
 func rolePointer(role Role) *Role { return &role }
+
+// secureRosterDigest is called only after the accompanying attestation has
+// passed its semantic and signature validation. A digest failure would require
+// JSON encoding a validated, fixed-shape value and is therefore not a second
+// authority decision; omit it defensively rather than changing the accepted
+// membership transition.
+func secureRosterDigest(attestation *SecureRosterAttestation) *string {
+	if attestation == nil {
+		return nil
+	}
+	digest, err := attestation.Digest()
+	if err != nil {
+		return nil
+	}
+	return &digest
+}
 
 func uint64Pointer(value uint64) *uint64 { return &value }
 

@@ -389,6 +389,16 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 			t.Fatalf("authority event sequences are not strictly increasing: %+v", authorityEvents.Events)
 		}
 	}
+	for _, index := range []int{0, 4, 5, 6, 8} {
+		if authorityEvents.Events[index].SecureRosterDigest == nil {
+			t.Fatalf("secure authority event %d is missing roster digest: %+v", index, authorityEvents.Events[index])
+		}
+	}
+	for _, index := range []int{1, 2, 3, 7} {
+		if authorityEvents.Events[index].SecureRosterDigest != nil {
+			t.Fatalf("non-roster authority event %d unexpectedly has digest: %+v", index, authorityEvents.Events[index])
+		}
+	}
 	if authorityEvents.NextSequence != authorityEvents.Events[len(authorityEvents.Events)-1].Sequence {
 		t.Fatalf("next sequence=%d want=%d", authorityEvents.NextSequence, authorityEvents.Events[len(authorityEvents.Events)-1].Sequence)
 	}

@@ -75,6 +75,19 @@ func decodeSecureRosterAttestation(payload []byte) (*sharedspaces.SecureRosterAt
 	return &attestation, nil
 }
 
+func secureRosterAttestationDigest(
+	attestation *sharedspaces.SecureRosterAttestation,
+) (*string, error) {
+	if attestation == nil {
+		return nil, nil
+	}
+	digest, err := attestation.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("digest Shared Space roster attestation: %w", err)
+	}
+	return &digest, nil
+}
+
 func activeSharedSpaceParticipants(participants []sharedspaces.Participant) []sharedspaces.Participant {
 	active := make([]sharedspaces.Participant, 0, len(participants))
 	for _, participant := range participants {
@@ -191,6 +204,10 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	if err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("encode Shared Space initial roster attestation: %w", err)
 	}
+	rosterAttestationDigest, err := secureRosterAttestationDigest(provisioning.InitialSecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.SpaceProvisioningResult{}, err
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("begin Shared Space provisioning: %w", err)
@@ -285,6 +302,7 @@ func (s *SharedSpacesStore) ProvisionSpace(
 		SubjectParticipantID:   &initial.ParticipantID,
 		CurrentRole:            rolePointer(sharedspaces.RoleHost),
 		CurrentKeyEpoch:        uint64Pointer(sharedspaces.InitialKeyEpoch),
+		SecureRosterDigest:     rosterAttestationDigest,
 		OccurredAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}); err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, err
@@ -691,6 +709,10 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	if err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("encode Shared Space invitation claim roster attestation: %w", err)
 	}
+	newRosterAttestationDigest, err := secureRosterAttestationDigest(invitation.ActivationSecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.InvitationClaimResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE shared_spaces
 		SET secure_roster_attestation=$2
@@ -714,6 +736,7 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		InvitationID:           &credential.InvitationID,
 		CurrentRole:            &participant.Role,
 		CurrentKeyEpoch:        &currentKeyEpoch,
+		SecureRosterDigest:     newRosterAttestationDigest,
 		OccurredAtMilliseconds: claim.ClaimedAtMilliseconds,
 	}); err != nil {
 		return sharedspaces.InvitationClaimResult{}, err
@@ -1196,6 +1219,7 @@ func (s *SharedSpacesStore) ListAuthorityEvents(
 		       subject_participant_id,invitation_id,previous_role,current_role,
 		       previous_key_epoch,current_key_epoch,compute_pool_id,
 		       previous_binding_revision,current_binding_revision,
+		       secure_roster_digest,
 		       occurred_at_milliseconds
 		FROM shared_space_authority_events
 		WHERE space_id=$1 AND sequence>$2
@@ -1213,12 +1237,14 @@ func (s *SharedSpacesStore) ListAuthorityEvents(
 		var previousRole, currentRole *string
 		var previousKeyEpoch, currentKeyEpoch *int64
 		var previousBindingRevision, currentBindingRevision *int64
+		var secureRosterDigest *string
 		if err := rows.Scan(
 			&event.Sequence, &event.EventID, &event.SpaceID, &event.DomainID,
 			&event.Version, &event.EventType, &event.SubjectParticipantID,
 			&event.InvitationID, &previousRole, &currentRole,
 			&previousKeyEpoch, &currentKeyEpoch, &event.ComputePoolID,
 			&previousBindingRevision, &currentBindingRevision,
+			&secureRosterDigest,
 			&event.OccurredAtMilliseconds,
 		); err != nil {
 			return sharedspaces.AuthorityEventPage{}, fmt.Errorf("scan Shared Space authority event: %w", err)
@@ -1247,6 +1273,7 @@ func (s *SharedSpacesStore) ListAuthorityEvents(
 			revision := uint64(*currentBindingRevision)
 			event.CurrentBindingRevision = &revision
 		}
+		event.SecureRosterDigest = secureRosterDigest
 		if err := event.Validate(); err != nil {
 			return sharedspaces.AuthorityEventPage{}, fmt.Errorf("stored Shared Space authority event failed validation: %v", err)
 		}
@@ -1392,6 +1419,10 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 	if err != nil {
 		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("encode Shared Space participant role change roster attestation: %w", err)
 	}
+	newRosterAttestationDigest, err := secureRosterAttestationDigest(change.SecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE shared_spaces
 		SET secure_roster_attestation=$2
@@ -1423,6 +1454,7 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 		SubjectParticipantID:   &change.ParticipantID,
 		PreviousRole:           &change.PreviousRole,
 		CurrentRole:            &change.NextRole,
+		SecureRosterDigest:     newRosterAttestationDigest,
 		OccurredAtMilliseconds: change.ChangedAtMilliseconds,
 	}); err != nil {
 		return sharedspaces.ParticipantRoleChangeResult{}, err
@@ -1647,6 +1679,10 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	if err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("encode Shared Space participant revocation roster attestation: %w", err)
 	}
+	newRosterAttestationDigest, err := secureRosterAttestationDigest(revocation.SecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE shared_spaces
 		SET current_key_epoch=$2,secure_roster_attestation=$3
@@ -1670,6 +1706,7 @@ func (s *SharedSpacesStore) RevokeParticipant(
 		SubjectParticipantID:   &revocation.ParticipantID,
 		PreviousKeyEpoch:       &revocation.PreviousKeyEpoch,
 		CurrentKeyEpoch:        &revocation.NextKeyEpoch,
+		SecureRosterDigest:     newRosterAttestationDigest,
 		OccurredAtMilliseconds: nowMilliseconds,
 	}); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, err
@@ -2825,8 +2862,9 @@ func insertSharedSpaceAuthorityEvent(
 			space_id,domain_id,event_id,version,event_type,subject_participant_id,
 			invitation_id,previous_role,current_role,previous_key_epoch,current_key_epoch,
 			compute_pool_id,previous_binding_revision,current_binding_revision,
+			secure_roster_digest,
 			occurred_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 	`, event.SpaceID, event.DomainID, event.EventID, sharedspaces.SchemaVersion,
 		string(event.EventType), event.SubjectParticipantID, event.InvitationID,
 		nullableSharedSpaceRole(event.PreviousRole), nullableSharedSpaceRole(event.CurrentRole),
@@ -2834,6 +2872,7 @@ func insertSharedSpaceAuthorityEvent(
 		nullableSharedSpaceKeyEpoch(event.CurrentKeyEpoch), event.ComputePoolID,
 		nullableSharedSpaceRevision(event.PreviousBindingRevision),
 		nullableSharedSpaceRevision(event.CurrentBindingRevision),
+		event.SecureRosterDigest,
 		event.OccurredAtMilliseconds); err != nil {
 		return fmt.Errorf("insert Shared Space authority event: %w", err)
 	}

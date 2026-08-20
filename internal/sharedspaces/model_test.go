@@ -181,6 +181,12 @@ func TestAuthorityEventRequiresFieldsForItsTransition(t *testing.T) {
 	if err := unexpectedInvitation.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidAuthorityEvent) {
 		t.Fatalf("unexpected invitation err=%v", err)
 	}
+	invalidRosterDigest := valid
+	digest := "not-a-sha256-digest"
+	invalidRosterDigest.SecureRosterDigest = &digest
+	if err := invalidRosterDigest.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidAuthorityEvent) {
+		t.Fatalf("invalid secure roster digest err=%v", err)
+	}
 }
 
 func TestParticipantPresentationValidatesRecognitionMetadataAndStatusScope(t *testing.T) {

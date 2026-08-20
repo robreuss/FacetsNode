@@ -107,7 +107,11 @@ type AuthorityEvent struct {
 	ComputePoolID           *uuid.UUID         `json:"computePoolID,omitempty"`
 	PreviousBindingRevision *uint64            `json:"previousBindingRevision,omitempty"`
 	CurrentBindingRevision  *uint64            `json:"currentBindingRevision,omitempty"`
-	OccurredAtMilliseconds  int64              `json:"occurredAtMilliseconds"`
+	// SecureRosterDigest binds a security-relevant Secure Space authority
+	// transition to the signed roster attestation that authorized it. It is
+	// non-content integrity metadata, never content or key material.
+	SecureRosterDigest     *string `json:"secureRosterDigest,omitempty"`
+	OccurredAtMilliseconds int64   `json:"occurredAtMilliseconds"`
 }
 
 func (e AuthorityEvent) Validate() error {
@@ -121,7 +125,8 @@ func (e AuthorityEvent) Validate() error {
 		(e.PreviousKeyEpoch != nil && *e.PreviousKeyEpoch == 0) ||
 		(e.CurrentKeyEpoch != nil && *e.CurrentKeyEpoch == 0) ||
 		(e.ComputePoolID != nil && *e.ComputePoolID == uuid.Nil) ||
-		(e.CurrentBindingRevision != nil && *e.CurrentBindingRevision == 0) {
+		(e.CurrentBindingRevision != nil && *e.CurrentBindingRevision == 0) ||
+		(e.SecureRosterDigest != nil && !validFingerprint(*e.SecureRosterDigest)) {
 		return NewProtocolError(CodeInvalidAuthorityEvent, "Shared Space authority event fields are invalid")
 	}
 	if !e.validTransitionShape() {

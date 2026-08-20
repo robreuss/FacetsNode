@@ -207,6 +207,15 @@ if its active participant set and key epoch exactly match the returned roster.
 An invalid or discontinuous attestation is a security failure, not a reason to
 silently replace the locally trusted membership view.
 
+The content-blind administrator authority-event feed also carries the optional
+`secureRosterDigest` for each Secure Space transition that changes the active
+roster: initial provisioning, a successful invitation claim, a role change, or
+a revocation. The value is the SHA-256 digest of that transition's signed
+roster attestation. It lets an operator correlate an administrative action with
+the exact client-verifiable authority record without learning roster contents
+from the event feed or treating the digest as a substitute for signature and
+chain validation.
+
 Private and managed Spaces reject this participant-facing roster projection.
 Their hosts retain the authenticated administration status endpoint for
 operational membership management. This makes membership awareness a deliberate

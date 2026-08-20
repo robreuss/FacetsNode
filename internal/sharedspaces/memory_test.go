@@ -328,11 +328,17 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		firstPage.Events[1].EventType != sharedspaces.AuthorityEventInvitationCreated {
 		t.Fatalf("first authority event page=%+v err=%v", firstPage, err)
 	}
+	if firstPage.Events[0].SecureRosterDigest == nil || firstPage.Events[1].SecureRosterDigest != nil {
+		t.Fatalf("initial and invitation authority digests=%+v", firstPage.Events)
+	}
 	secondPage, err := store.ListAuthorityEvents(ctx, admin, firstPage.NextSequence, 2)
 	if err != nil || len(secondPage.Events) != 2 || secondPage.NextSequence != 4 ||
 		secondPage.Events[0].EventType != sharedspaces.AuthorityEventInvitationClaimed ||
 		secondPage.Events[1].EventType != sharedspaces.AuthorityEventParticipantRevoked {
 		t.Fatalf("second authority event page=%+v err=%v", secondPage, err)
+	}
+	if secondPage.Events[0].SecureRosterDigest == nil || secondPage.Events[1].SecureRosterDigest == nil {
+		t.Fatalf("claim and revocation authority digests=%+v", secondPage.Events)
 	}
 	emptyPage, err := store.ListAuthorityEvents(ctx, admin, secondPage.NextSequence, 2)
 	if err != nil || len(emptyPage.Events) != 0 || emptyPage.NextSequence != secondPage.NextSequence {
