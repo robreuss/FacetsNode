@@ -1136,6 +1136,17 @@ func (s *MemoryStore) GetParticipantRoster(
 	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {
 		return ParticipantRoster{}, err
 	}
+	roster, err := s.participantRosterLocked(space, credential.DomainID)
+	if err != nil {
+		return ParticipantRoster{}, err
+	}
+	return roster, nil
+}
+
+// participantRosterLocked builds the current Secure roster from the same
+// MemoryStore lock held by its caller. Bootstrap uses it to bind the roster to
+// the exact key epoch and participant state that produced the caller's grant.
+func (s *MemoryStore) participantRosterLocked(space *memorySpace, domainID uuid.UUID) (ParticipantRoster, error) {
 	participants := make([]Participant, 0, len(space.participants))
 	for _, candidate := range space.participants {
 		if candidate.RevokedAtMilliseconds == nil {
@@ -1156,7 +1167,7 @@ func (s *MemoryStore) GetParticipantRoster(
 	})
 	roster := ParticipantRoster{
 		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
-		DomainID: credential.DomainID, SecurityMode: space.provisioning.SecurityMode,
+		DomainID: domainID, SecurityMode: space.provisioning.SecurityMode,
 		AuthoritySequence: s.nextAuthoritySequences[space.provisioning.SpaceID],
 		CurrentKeyEpoch:   space.keyEpoch,
 		Participants:      participants, Presentations: presentations,
@@ -1392,6 +1403,13 @@ func (s *MemoryStore) GetParticipantBootstrap(
 			Algorithm:   ManagedContentKeyAlgorithm,
 			KeyMaterial: base64.RawURLEncoding.EncodeToString(plaintext),
 		}
+	}
+	if space.provisioning.SecurityMode == SecurityModeSecure {
+		roster, err := s.participantRosterLocked(space, credential.DomainID)
+		if err != nil {
+			return ParticipantBootstrap{}, err
+		}
+		result.Roster = &roster
 	}
 	if err := result.Validate(); err != nil {
 		return ParticipantBootstrap{}, err

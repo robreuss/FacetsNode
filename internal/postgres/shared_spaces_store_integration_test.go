@@ -237,6 +237,9 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		participantBootstrap.Status.Presentation == nil ||
 		participantBootstrap.Status.Presentation.DisplayName != "Ada Lovelace" ||
 		participantBootstrap.KeyGrant == nil ||
+		participantBootstrap.Roster == nil ||
+		participantBootstrap.Roster.CurrentKeyEpoch != participantBootstrap.Status.CurrentKeyEpoch ||
+		len(participantBootstrap.Roster.Participants) != 2 ||
 		participantBootstrap.KeyGrant.ParticipantID != invitation.ParticipantID ||
 		participantBootstrap.KeyGrant.CurrentKeyEpoch != participantBootstrap.Status.CurrentKeyEpoch ||
 		participantBootstrap.KeyGrant.KeyGrant.KeyEpoch != participantBootstrap.Status.CurrentKeyEpoch {

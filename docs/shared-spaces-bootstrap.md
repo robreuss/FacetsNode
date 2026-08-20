@@ -161,9 +161,12 @@ after relaunch with one atomic request at:
 The response contains the participant status described below and exactly one
 mode-appropriate key result from the same repeatable-read snapshot: an opaque
 participant grant for a Private or Secure Space, or the current raw content key for a
-managed Space. This prevents a key rotation from producing status for one epoch
-and key authority for another. A managed key is returned only to the active
-participant whose authenticated member identifier matches the path.
+managed Space. For a Secure Space it also contains the active participant
+roster and its signed current authority attestation from that same snapshot.
+This prevents a key rotation or roster change from producing status for one
+epoch or revision and bootstrap authority for another. A managed key is
+returned only to the active participant whose authenticated member identifier
+matches the path.
 
 The status-only projection remains available at:
 
@@ -181,9 +184,10 @@ endpoint for relaunch and recovery.
 The status-only response never exposes the roster, other participants,
 invitations, administration authority, bearer tokens, FEF content, or content
 key material. The atomic bootstrap response adds only the caller's
-mode-appropriate key result. Role changes and checkpoint/key-epoch changes are
-visible on the next authenticated read. Revoked participants cannot retrieve
-status or bootstrap.
+mode-appropriate key result, plus the active Secure roster where the Space uses
+Secure mode. Role changes and checkpoint/key-epoch changes are visible on the
+next authenticated read. Revoked participants cannot retrieve status or
+bootstrap.
 
 ## Secure participant roster
 

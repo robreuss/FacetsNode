@@ -1256,16 +1256,19 @@ func (k ManagedContentKey) Validate() error {
 	return nil
 }
 
-// ParticipantBootstrap is an atomic participant-scoped recovery snapshot. An
-// A content-blind Private or Secure Space includes the caller's opaque
+// ParticipantBootstrap is an atomic participant-scoped recovery snapshot. A
+// content-blind Private or Secure Space includes the caller's opaque
 // participant grant. A managed Space includes the service-owned content key.
-// Exactly one key form must match the security mode and key epoch reported by
-// Status.
+// A Secure Space also includes its currently attested participant roster, so a
+// newly admitted device does not need to combine an independently timed roster
+// request with its key-epoch bootstrap. Exactly one key form must match the
+// security mode and key epoch reported by Status.
 type ParticipantBootstrap struct {
 	Version           int                        `json:"version"`
 	Status            ParticipantStatus          `json:"status"`
 	KeyGrant          *ParticipantKeyGrantResult `json:"keyGrant,omitempty"`
 	ManagedContentKey *ManagedContentKey         `json:"managedContentKey,omitempty"`
+	Roster            *ParticipantRoster         `json:"roster,omitempty"`
 }
 
 func (b ParticipantBootstrap) Validate() error {
@@ -1276,7 +1279,7 @@ func (b ParticipantBootstrap) Validate() error {
 		return err
 	}
 	if b.Status.SecurityMode == SecurityModeManaged {
-		if b.KeyGrant != nil || b.ManagedContentKey == nil ||
+		if b.KeyGrant != nil || b.ManagedContentKey == nil || b.Roster != nil ||
 			b.ManagedContentKey.SpaceID != b.Status.SpaceID ||
 			b.ManagedContentKey.ParticipantID != b.Status.Participant.ParticipantID ||
 			b.ManagedContentKey.KeyEpoch != b.Status.CurrentKeyEpoch {
@@ -1295,6 +1298,23 @@ func (b ParticipantBootstrap) Validate() error {
 	}
 	if err := b.KeyGrant.KeyGrant.Validate(); err != nil {
 		return err
+	}
+	if b.Status.SecurityMode != SecurityModeSecure {
+		if b.Roster != nil {
+			return NewProtocolError(CodeInvalidParticipant, "Private Shared Space participant bootstrap must not include a roster")
+		}
+		return nil
+	}
+	if b.Roster == nil {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space participant bootstrap roster is missing")
+	}
+	if err := b.Roster.Validate(); err != nil {
+		return err
+	}
+	if b.Roster.SpaceID != b.Status.SpaceID || b.Roster.DomainID != b.Status.DomainID ||
+		b.Roster.SecurityMode != b.Status.SecurityMode ||
+		b.Roster.CurrentKeyEpoch != b.Status.CurrentKeyEpoch {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space participant bootstrap roster is inconsistent")
 	}
 	return nil
 }

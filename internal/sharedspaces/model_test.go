@@ -477,6 +477,49 @@ func TestParticipantBootstrapRequiresExactlyOneModeAppropriateKey(t *testing.T) 
 	secure.Status.SecurityMode = sharedspaces.SecurityModeSecure
 	secure.ManagedContentKey = nil
 	secure.KeyGrant = mixed.KeyGrant
+	if err := secure.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("Secure bootstrap without roster err=%v", err)
+	}
+	_, secureProvisioning, _ := testSpaceProvisioning(t, 3_501, sharedspaces.SecurityModeSecure)
+	secureParticipant := sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: secureProvisioning.SpaceID,
+		ParticipantID:  secureProvisioning.InitialParticipantID,
+		SubscriptionID: secureProvisioning.Domain.Subscription.SubscriptionID,
+		Kind:           sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+		SigningKey:            secureProvisioning.InitialParticipantSigningKey,
+		CreatedAtMilliseconds: secureProvisioning.CreatedAtMilliseconds,
+	}
+	secure = sharedspaces.ParticipantBootstrap{
+		Version: sharedspaces.SchemaVersion,
+		Status: sharedspaces.ParticipantStatus{
+			Version: sharedspaces.SchemaVersion, SpaceID: secureProvisioning.SpaceID,
+			DomainID:              secureProvisioning.Domain.Registration.DomainID,
+			SecurityMode:          sharedspaces.SecurityModeSecure,
+			InteractionMode:       secureProvisioning.InteractionMode,
+			CurrentKeyEpoch:       sharedspaces.InitialKeyEpoch,
+			Participant:           secureParticipant,
+			Capabilities:          sharedspaces.RoleHost.Capabilities(secureProvisioning.InteractionMode),
+			CreatedAtMilliseconds: secureProvisioning.CreatedAtMilliseconds,
+		},
+		KeyGrant: &sharedspaces.ParticipantKeyGrantResult{
+			Version: sharedspaces.SchemaVersion, SpaceID: secureProvisioning.SpaceID,
+			ParticipantID:   secureProvisioning.InitialParticipantID,
+			CurrentKeyEpoch: sharedspaces.InitialKeyEpoch,
+			KeyGrant: *testParticipantKeyGrant(
+				t, secureProvisioning.SpaceID, secureProvisioning.InitialParticipantID,
+				secureProvisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch, 3_501,
+			),
+		},
+		Roster: &sharedspaces.ParticipantRoster{
+			Version: sharedspaces.SchemaVersion, SpaceID: secureProvisioning.SpaceID,
+			DomainID:          secureProvisioning.Domain.Registration.DomainID,
+			SecurityMode:      sharedspaces.SecurityModeSecure,
+			AuthoritySequence: 1, CurrentKeyEpoch: sharedspaces.InitialKeyEpoch,
+			Participants:          []sharedspaces.Participant{secureParticipant},
+			AuthorityAttestation:  *secureProvisioning.InitialSecureRosterAttestation,
+			CreatedAtMilliseconds: secureProvisioning.CreatedAtMilliseconds,
+		},
+	}
 	if err := secure.Validate(); err != nil {
 		t.Fatalf("valid Secure participant bootstrap: %v", err)
 	}

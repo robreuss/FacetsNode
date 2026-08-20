@@ -1920,6 +1920,29 @@ func (s *SharedSpacesStore) GetParticipantRoster(
 	} else if err != nil {
 		return sharedspaces.ParticipantRoster{}, fmt.Errorf("load Shared Space participant roster authority: %w", err)
 	}
+	roster, err := loadCurrentSecureParticipantRoster(
+		ctx, tx, status, currentKeyEpoch, rosterAttestationPayload,
+	)
+	if err != nil {
+		return sharedspaces.ParticipantRoster{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ParticipantRoster{}, fmt.Errorf("commit Shared Space participant roster: %w", err)
+	}
+	return roster, nil
+}
+
+// loadCurrentSecureParticipantRoster builds a verified roster using the
+// caller's existing repeatable-read transaction. Keeping it in the bootstrap
+// transaction prevents a key grant and its membership authority from being
+// assembled from different key epochs or roster revisions.
+func loadCurrentSecureParticipantRoster(
+	ctx context.Context,
+	tx pgx.Tx,
+	status sharedspaces.ParticipantStatus,
+	currentKeyEpoch uint64,
+	rosterAttestationPayload []byte,
+) (sharedspaces.ParticipantRoster, error) {
 	rosterAttestation, err := decodeSecureRosterAttestation(rosterAttestationPayload)
 	if err != nil {
 		return sharedspaces.ParticipantRoster{}, fmt.Errorf("decode Shared Space participant roster attestation: %w", err)
@@ -1966,9 +1989,6 @@ func (s *SharedSpacesStore) GetParticipantRoster(
 			sharedspaces.CodeInvalidAuthorityEvent,
 			"Shared Space roster authority sequence is unavailable",
 		)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return sharedspaces.ParticipantRoster{}, fmt.Errorf("commit Shared Space participant roster: %w", err)
 	}
 	roster := sharedspaces.ParticipantRoster{
 		Version: sharedspaces.SchemaVersion, SpaceID: status.SpaceID,
@@ -2377,12 +2397,13 @@ func (s *SharedSpacesStore) getParticipantBootstrap(
 	var interactionMode sharedspaces.InteractionMode
 	var currentKeyEpoch uint64
 	var provisioningPayload []byte
+	var rosterAttestationPayload []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT domain_id,security_mode,interaction_mode,current_key_epoch,provisioning_payload
+		SELECT domain_id,security_mode,interaction_mode,current_key_epoch,provisioning_payload,secure_roster_attestation
 		FROM shared_spaces
 		WHERE space_id=$1
 	`, credential.TenantID).Scan(
-		&domainID, &securityMode, &interactionMode, &currentKeyEpoch, &provisioningPayload,
+		&domainID, &securityMode, &interactionMode, &currentKeyEpoch, &provisioningPayload, &rosterAttestationPayload,
 	); err == pgx.ErrNoRows {
 		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
@@ -2509,6 +2530,18 @@ func (s *SharedSpacesStore) getParticipantBootstrap(
 			Algorithm:   sharedspaces.ManagedContentKeyAlgorithm,
 			KeyMaterial: base64.RawURLEncoding.EncodeToString(plaintext),
 		}
+	}
+	// A status-only read deliberately avoids materializing the complete Secure
+	// roster. The atomic bootstrap endpoint requests the grant and roster from
+	// this same transaction; status callers need only their own authority.
+	if includeKeyGrant && securityMode == sharedspaces.SecurityModeSecure {
+		roster, err := loadCurrentSecureParticipantRoster(
+			ctx, tx, status, currentKeyEpoch, rosterAttestationPayload,
+		)
+		if err != nil {
+			return sharedspaces.ParticipantBootstrap{}, err
+		}
+		result.Roster = &roster
 	}
 	if includeKeyGrant {
 		if err := result.Validate(); err != nil {

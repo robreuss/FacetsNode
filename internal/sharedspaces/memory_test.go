@@ -144,6 +144,10 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, 1_301)
 	if err != nil || !reflect.DeepEqual(participantBootstrap.Status, participantStatus) ||
 		participantBootstrap.KeyGrant == nil ||
+		participantBootstrap.Roster == nil ||
+		participantBootstrap.Roster.CurrentKeyEpoch != participantBootstrap.Status.CurrentKeyEpoch ||
+		participantBootstrap.Roster.AuthoritySequence != participantRosterSequenceBeforeRevocation ||
+		len(participantBootstrap.Roster.Participants) != 2 ||
 		participantBootstrap.KeyGrant.ParticipantID != invitation.ParticipantID ||
 		participantBootstrap.KeyGrant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		participantBootstrap.KeyGrant.KeyGrant.KeyEpoch != participantBootstrap.Status.CurrentKeyEpoch {

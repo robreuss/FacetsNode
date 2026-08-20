@@ -142,6 +142,20 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		mustLiveSecureRosterDigest(t, *retryClaimResult.SecureRosterAttestation) != mustLiveSecureRosterDigest(t, *claimResult.SecureRosterAttestation) {
 		t.Fatalf("Secure claim retry did not preserve roster authority: %+v", retryClaimResult)
 	}
+	bootstrapResponse := requestRelayJSON(
+		t, client, http.MethodGet,
+		spaceRoot+"/participants/"+participantID.String()+"/bootstrap", nil,
+		participantToken, participantID,
+	)
+	requireStatus(t, bootstrapResponse, http.StatusOK)
+	var bootstrap sharedspaces.ParticipantBootstrap
+	decodeLiveJSON(t, bootstrapResponse, &bootstrap)
+	if err := bootstrap.Validate(); err != nil || bootstrap.Roster == nil ||
+		bootstrap.Roster.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		len(bootstrap.Roster.Participants) != 2 ||
+		mustLiveSecureRosterDigest(t, bootstrap.Roster.AuthorityAttestation) != mustLiveSecureRosterDigest(t, *claimResult.SecureRosterAttestation) {
+		t.Fatalf("Secure participant bootstrap was not atomically bound to its roster: bootstrap=%+v error=%v", bootstrap, err)
+	}
 
 	rosterHistoryPath := spaceRoot + "/participants/" + participantID.String() + "/roster-attestations"
 	historyResponse := requestRelayJSON(
