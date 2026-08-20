@@ -28,7 +28,9 @@ type swiftRelayMemberAccess struct {
 
 type swiftRelayLiveAccess struct {
 	AdministrationCredential liveRelayAdministrationCredential `json:"administrationCredential"`
+	PublisherSubscriptionID  uuid.UUID                         `json:"publisherSubscriptionID"`
 	PublisherAccess          swiftRelayMemberAccess            `json:"publisherAccess"`
+	RecipientSubscriptionID  uuid.UUID                         `json:"recipientSubscriptionID"`
 	RecipientAccess          swiftRelayMemberAccess            `json:"recipientAccess"`
 }
 
@@ -58,6 +60,7 @@ func TestLiveProvisionSwiftRelayAccess(t *testing.T) {
 			DomainID:           domain.Domain.DomainID,
 			AuthorizationToken: domain.AdministrationCredential.AuthorizationToken,
 		},
+		PublisherSubscriptionID: domain.SubscriptionID,
 		PublisherAccess: swiftRelayMemberAccess{
 			Version:                  relay.SchemaVersion,
 			TenantID:                 domain.Domain.TenantID,
@@ -67,6 +70,7 @@ func TestLiveProvisionSwiftRelayAccess(t *testing.T) {
 			KeyEpoch:                 1,
 			EncryptionKeyMaterial:    keyMaterial,
 		},
+		RecipientSubscriptionID: recipient.SubscriptionID,
 		RecipientAccess: swiftRelayMemberAccess{
 			Version:                  relay.SchemaVersion,
 			TenantID:                 domain.Domain.TenantID,

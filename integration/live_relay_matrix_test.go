@@ -34,8 +34,9 @@ type liveRelayDomain struct {
 }
 
 type liveRelayMember struct {
-	Registration relay.MemberRegistration
-	Credential   relay.Credential
+	SubscriptionID uuid.UUID
+	Registration   relay.MemberRegistration
+	Credential     relay.Credential
 }
 
 type liveRelayFetchPage struct {
@@ -375,7 +376,11 @@ func admitLiveRelayRecipient(
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	return liveRelayMember{Registration: claim.Member.MemberRegistration, Credential: credential}
+	return liveRelayMember{
+		SubscriptionID: subscriptionID,
+		Registration:   claim.Member.MemberRegistration,
+		Credential:     credential,
+	}
 }
 
 func liveRelayEnvelope(
