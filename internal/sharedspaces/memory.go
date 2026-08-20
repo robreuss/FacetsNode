@@ -990,7 +990,8 @@ func (s *MemoryStore) GetParticipantRoster(
 	roster := ParticipantRoster{
 		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
 		DomainID: credential.DomainID, SecurityMode: space.provisioning.SecurityMode,
-		Participants: participants, Presentations: presentations,
+		AuthoritySequence: s.nextAuthoritySequences[space.provisioning.SpaceID],
+		Participants:      participants, Presentations: presentations,
 		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
 	}
 	if err := roster.Validate(); err != nil {

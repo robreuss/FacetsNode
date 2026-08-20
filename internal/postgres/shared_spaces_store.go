@@ -1603,13 +1603,28 @@ func (s *SharedSpacesStore) GetParticipantRoster(
 			activePresentations = append(activePresentations, presentation)
 		}
 	}
+	var authoritySequence int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(sequence), 0)
+		FROM shared_space_authority_events
+		WHERE space_id=$1
+	`, status.SpaceID).Scan(&authoritySequence); err != nil {
+		return sharedspaces.ParticipantRoster{}, fmt.Errorf("query Shared Space roster authority sequence: %w", err)
+	}
+	if authoritySequence < 1 {
+		return sharedspaces.ParticipantRoster{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidAuthorityEvent,
+			"Shared Space roster authority sequence is unavailable",
+		)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return sharedspaces.ParticipantRoster{}, fmt.Errorf("commit Shared Space participant roster: %w", err)
 	}
 	roster := sharedspaces.ParticipantRoster{
 		Version: sharedspaces.SchemaVersion, SpaceID: status.SpaceID,
 		DomainID: status.DomainID, SecurityMode: status.SecurityMode,
-		Participants: activeParticipants, Presentations: activePresentations,
+		AuthoritySequence: uint64(authoritySequence),
+		Participants:      activeParticipants, Presentations: activePresentations,
 		CreatedAtMilliseconds: status.CreatedAtMilliseconds,
 	}
 	if err := roster.Validate(); err != nil {

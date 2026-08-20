@@ -823,10 +823,15 @@ type ParticipantStatus struct {
 // current membership visible to every participant as an operational safety
 // control.
 type ParticipantRoster struct {
-	Version               int                       `json:"version"`
-	SpaceID               uuid.UUID                 `json:"spaceID"`
-	DomainID              uuid.UUID                 `json:"domainID"`
-	SecurityMode          SecurityMode              `json:"securityMode"`
+	Version      int          `json:"version"`
+	SpaceID      uuid.UUID    `json:"spaceID"`
+	DomainID     uuid.UUID    `json:"domainID"`
+	SecurityMode SecurityMode `json:"securityMode"`
+	// AuthoritySequence is the newest accepted authority transition for this
+	// Space. A client can compare it with its last observed value to discover
+	// that active membership or role state changed, without the service
+	// disclosing historical authority events or revoked participants.
+	AuthoritySequence     uint64                    `json:"authoritySequence"`
 	Participants          []Participant             `json:"participants"`
 	Presentations         []ParticipantPresentation `json:"presentations"`
 	CreatedAtMilliseconds int64                     `json:"createdAtMilliseconds"`
@@ -834,7 +839,8 @@ type ParticipantRoster struct {
 
 func (r ParticipantRoster) Validate() error {
 	if r.Version != SchemaVersion || r.SpaceID == uuid.Nil || r.DomainID == uuid.Nil ||
-		r.SecurityMode != SecurityModeSecure || r.CreatedAtMilliseconds < 0 {
+		r.SecurityMode != SecurityModeSecure || r.AuthoritySequence == 0 ||
+		r.CreatedAtMilliseconds < 0 {
 		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant roster fields are invalid")
 	}
 	participantIDs := make(map[uuid.UUID]struct{}, len(r.Participants))

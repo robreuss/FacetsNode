@@ -130,11 +130,13 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	}
 	participantRoster, err := store.GetParticipantRoster(ctx, memberCredential, 1_301)
 	if err != nil || participantRoster.SecurityMode != sharedspaces.SecurityModeSecure ||
+		participantRoster.AuthoritySequence == 0 ||
 		len(participantRoster.Participants) != 2 || len(participantRoster.Presentations) != 1 ||
 		participantRoster.Presentations[0].ParticipantID != invitation.ParticipantID ||
 		participantRoster.Presentations[0].DisplayName != "Ada Lovelace" {
 		t.Fatalf("participant roster=%+v err=%v", participantRoster, err)
 	}
+	participantRosterSequenceBeforeRevocation := participantRoster.AuthoritySequence
 	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, 1_301)
 	if err != nil || !reflect.DeepEqual(participantBootstrap.Status, participantStatus) ||
 		participantBootstrap.KeyGrant == nil ||
@@ -209,6 +211,12 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if revoked.PreviousKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		revoked.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("revocation did not rotate key epoch: %+v", revoked)
+	}
+	hostRoster, err := store.GetParticipantRoster(ctx, hostCredential, 1_400)
+	if err != nil || hostRoster.AuthoritySequence <= participantRosterSequenceBeforeRevocation ||
+		len(hostRoster.Participants) != 1 ||
+		hostRoster.Participants[0].ParticipantID != provisioning.InitialParticipantID {
+		t.Fatalf("host roster after revocation=%+v err=%v", hostRoster, err)
 	}
 	hostGrant, err := store.GetParticipantKeyGrant(ctx, hostCredential, 1_401)
 	if err != nil || hostGrant.ParticipantID != provisioning.InitialParticipantID ||

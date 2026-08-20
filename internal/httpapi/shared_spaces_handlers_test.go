@@ -374,6 +374,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	_ = participantRosterResponse.Body.Close()
 	if participantRoster.SpaceID != spaceID || participantRoster.DomainID != domainID ||
 		participantRoster.SecurityMode != sharedspaces.SecurityModeSecure ||
+		participantRoster.AuthoritySequence == 0 ||
 		len(participantRoster.Participants) != 2 || len(participantRoster.Presentations) != 1 ||
 		participantRoster.Presentations[0].ParticipantID != participantID ||
 		participantRoster.Presentations[0].DisplayName != "Ada Lovelace" {
