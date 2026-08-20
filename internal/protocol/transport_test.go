@@ -125,3 +125,81 @@ func TestReceiptVocabulary(t *testing.T) {
 		t.Fatalf("unexpected correction validation error: %v", err)
 	}
 }
+
+func TestPortableCorrectionFixtureOrdersCompleteBundle(t *testing.T) {
+	data, err := os.ReadFile("testdata/facets-server-correction-portable-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest := fmt.Sprintf("%x", sha256.Sum256(data)); digest != "9588e7ba7bdd1012ed48578a89f729a540a43241dcdf7e33aa056a5876b13cc9" {
+		t.Fatalf("portable correction fixture digest = %s", digest)
+	}
+	var fixture struct {
+		Format                    string              `json:"format"`
+		CorrectionReceipt         CorrectionReceipt   `json:"correctionReceipt"`
+		CorrectedEnvelopes        []TransportEnvelope `json:"correctedEnvelopes"`
+		ExpectedOrderedMessageIDs []uuid.UUID         `json:"expectedOrderedMessageIDs"`
+		CanonicalAppliedReceipt   DeliveryReceipt     `json:"canonicalAppliedReceipt"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.Format != "facets.server-correction-fixture.v1" {
+		t.Fatalf("unexpected fixture format: %q", fixture.Format)
+	}
+	ordered, err := CorrectedBundle(fixture.CorrectionReceipt, fixture.CorrectedEnvelopes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]uuid.UUID, len(ordered))
+	for index, envelope := range ordered {
+		got[index] = envelope.MessageID
+	}
+	if !slices.Equal(got, fixture.ExpectedOrderedMessageIDs) {
+		t.Fatalf("corrected bundle order = %v, want %v", got, fixture.ExpectedOrderedMessageIDs)
+	}
+	if fixture.CanonicalAppliedReceipt.Stage != DeliveryCanonicalApplied ||
+		fixture.CanonicalAppliedReceipt.ReferencedMessageID != fixture.CorrectionReceipt.ReferencedMessageID {
+		t.Fatalf("unexpected canonical receipt: %+v", fixture.CanonicalAppliedReceipt)
+	}
+}
+
+func TestCorrectedBundleRejectsIncompleteAndCyclicBundles(t *testing.T) {
+	parentID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
+	childID := uuid.MustParse("10000000-0000-4000-8000-000000000002")
+	child, err := NewTransportEnvelope(
+		PayloadFEFMutationBatch,
+		childID,
+		1,
+		"application/json",
+		[]byte("child"),
+		[]uuid.UUID{parentID},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := NewCorrectionReceipt(childID, "device-b", CorrectionMissingDependency, []string{parentID.String()}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CorrectedBundle(receipt, []TransportEnvelope{child}); !errors.Is(err, ErrCorrectionDependencyMissing) {
+		t.Fatalf("incomplete correction error = %v", err)
+	}
+
+	parent, err := NewTransportEnvelope(
+		PayloadFEFCheckpoint,
+		parentID,
+		0,
+		"application/json",
+		[]byte("parent"),
+		[]uuid.UUID{childID},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CorrectedBundle(receipt, []TransportEnvelope{parent, child}); !errors.Is(err, ErrCorrectionDependencyCycle) {
+		t.Fatalf("cyclic correction error = %v", err)
+	}
+}

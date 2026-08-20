@@ -59,13 +59,16 @@ const (
 )
 
 var (
-	ErrUnsupportedVersion  = errors.New("unsupported transport version")
-	ErrInvalidEnvelope     = errors.New("invalid transport envelope")
-	ErrInvalidDependencies = errors.New("invalid transport dependencies")
-	ErrInvalidBlob         = errors.New("invalid blob reference")
-	ErrDuplicateBlob       = errors.New("duplicate blob reference")
-	ErrPayloadDigest       = errors.New("payload digest mismatch")
-	ErrInvalidReceipt      = errors.New("invalid receipt")
+	ErrUnsupportedVersion          = errors.New("unsupported transport version")
+	ErrInvalidEnvelope             = errors.New("invalid transport envelope")
+	ErrInvalidDependencies         = errors.New("invalid transport dependencies")
+	ErrInvalidBlob                 = errors.New("invalid blob reference")
+	ErrDuplicateBlob               = errors.New("duplicate blob reference")
+	ErrPayloadDigest               = errors.New("payload digest mismatch")
+	ErrInvalidReceipt              = errors.New("invalid receipt")
+	ErrInvalidCorrectionBundle     = errors.New("invalid correction bundle")
+	ErrCorrectionDependencyMissing = errors.New("corrected bundle does not satisfy a requested dependency")
+	ErrCorrectionDependencyCycle   = errors.New("corrected bundle contains a dependency cycle")
 )
 
 type BlobReference struct {
@@ -281,6 +284,82 @@ func (receipt CorrectionReceipt) Validate() error {
 		return ErrInvalidReceipt
 	}
 	return nil
+}
+
+// CorrectedBundle returns a deterministic, dependency-ordered repair bundle for
+// a typed missing-dependency receipt. The server does not call this function
+// and never reconstructs a semantic Facets graph: an authenticated sender
+// supplies the complete transport bundle and a receiving client verifies that
+// it fulfils the explicit request before applying it through the FEF importer.
+//
+// A requested dependency is satisfied by either an envelope message ID or a
+// blob identifier included in the correction. Dependencies not named by the
+// receipt may be external anchors the receiver already has; only in-bundle
+// dependency edges affect the returned ordering.
+func CorrectedBundle(receipt CorrectionReceipt, envelopes []TransportEnvelope) ([]TransportEnvelope, error) {
+	if err := receipt.Validate(); err != nil || receipt.Code != CorrectionMissingDependency {
+		return nil, ErrInvalidCorrectionBundle
+	}
+
+	byMessageID := make(map[uuid.UUID]TransportEnvelope, len(envelopes))
+	blobIDs := make(map[string]struct{})
+	for _, envelope := range envelopes {
+		if err := envelope.Validate(); err != nil {
+			return nil, err
+		}
+		if _, exists := byMessageID[envelope.MessageID]; exists {
+			return nil, ErrInvalidCorrectionBundle
+		}
+		byMessageID[envelope.MessageID] = envelope
+		for _, reference := range envelope.BlobReferences {
+			blobIDs[reference.BlobID] = struct{}{}
+		}
+	}
+	if _, exists := byMessageID[receipt.ReferencedMessageID]; !exists {
+		return nil, ErrInvalidCorrectionBundle
+	}
+	for _, required := range receipt.MissingDependencyIDs {
+		if messageID, err := uuid.Parse(required); err == nil {
+			if _, exists := byMessageID[messageID]; exists {
+				continue
+			}
+		}
+		if _, exists := blobIDs[required]; !exists {
+			return nil, ErrCorrectionDependencyMissing
+		}
+	}
+
+	remaining := make(map[uuid.UUID]TransportEnvelope, len(byMessageID))
+	for messageID, envelope := range byMessageID {
+		remaining[messageID] = envelope
+	}
+	ordered := make([]TransportEnvelope, 0, len(envelopes))
+	for len(remaining) > 0 {
+		ready := make([]uuid.UUID, 0, len(remaining))
+		for messageID, envelope := range remaining {
+			blocked := false
+			for _, dependency := range envelope.DependencyMessageIDs {
+				if _, exists := remaining[dependency]; exists {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				ready = append(ready, messageID)
+			}
+		}
+		if len(ready) == 0 {
+			return nil, ErrCorrectionDependencyCycle
+		}
+		sort.Slice(ready, func(i, j int) bool {
+			return strings.ToLower(ready[i].String()) < strings.ToLower(ready[j].String())
+		})
+		for _, messageID := range ready {
+			ordered = append(ordered, remaining[messageID])
+			delete(remaining, messageID)
+		}
+	}
+	return ordered, nil
 }
 
 func isLowercaseSHA256(value string) bool {

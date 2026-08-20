@@ -20,11 +20,14 @@ decide whether a decrypted payload is accepted.
 
 ## Envelope v1
 
-Every v1 envelope has a deterministic message ID, a source identity digest,
-payload kind, content type, SHA-256 digest, unpadded base64url payload bytes,
-dependency message IDs, and zero or more content-addressed blob references.
-The payload digest covers the exact payload bytes. A blob reference identifies
-the blob, its SHA-256 digest, byte count, and content type.
+Every v1 envelope has a deterministic message ID, payload kind, content type,
+SHA-256 digest, unpadded base64url payload bytes, dependency message IDs, and
+zero or more content-addressed blob references. The payload digest covers the
+exact payload bytes. A blob reference identifies the blob, its SHA-256 digest,
+byte count, and content type. Relay publication is bound separately to an
+authenticated transport member. Content-source and author identity stay in the
+client-authenticated payload when needed, rather than becoming server-visible
+envelope metadata.
 
 The allocated kinds are:
 
@@ -119,6 +122,24 @@ closure is valid.
 This is a recovery path, not normal operation. Publishers should send the
 smallest complete relationship bundle in dependency order; repeated correction
 or unrecoverable dependency failure is observable diagnostic state.
+
+The portable correction fixture fixes the receipt vocabulary and the required
+client-side validation rule: the corrected bundle includes the referenced
+envelope, satisfies every requested envelope or blob dependency, and is ordered
+topologically for dependencies included in that bundle. Unknown external
+dependencies remain legal anchors because the receiver may already have them.
+Cycles and incomplete repairs are rejected before canonical application.
+
+```
+FacetsNode/internal/protocol/testdata/facets-server-correction-portable-v1.json
+Facets/Packages/FacetsDeveloperKit/Tests/FacetsNodeClientTests/Fixtures/facets-server-correction-portable-v1.json
+```
+
+For this revision its SHA-256 is:
+
+```
+9588e7ba7bdd1012ed48578a89f729a540a43241dcdf7e33aa056a5876b13cc9
+```
 
 ## Compatibility rules
 

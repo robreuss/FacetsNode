@@ -1,0 +1,57 @@
+{
+  "format": "facets.server-correction-fixture.v1",
+  "warning": "All values are synthetic protocol test material. The bundle demonstrates transport dependency repair only; it contains no Facets content or keys.",
+  "correctionReceipt": {
+    "version": 1,
+    "referencedMessageID": "10000000-0000-4000-8000-000000000002",
+    "recipientID": "device-b",
+    "code": "missing_dependency",
+    "missingDependencyIDs": [
+      "10000000-0000-4000-8000-000000000001",
+      "media-blob-a"
+    ],
+    "recordedAtMilliseconds": 1710000002000
+  },
+  "correctedEnvelopes": [
+    {
+      "version": 1,
+      "kind": "fef_checkpoint",
+      "messageID": "10000000-0000-4000-8000-000000000001",
+      "createdAtMilliseconds": 1710000000000,
+      "payloadContentType": "application/vnd.facets.fef+json",
+      "payloadSHA256": "e47125968b3b71049fbc4802d1e40a71ea1359decfabacf70b34588037d4ff0c",
+      "payloadBase64URL": "cGFyZW50",
+      "dependencyMessageIDs": [],
+      "blobReferences": []
+    },
+    {
+      "version": 1,
+      "kind": "fef_mutation_batch",
+      "messageID": "10000000-0000-4000-8000-000000000002",
+      "createdAtMilliseconds": 1710000001000,
+      "payloadContentType": "application/vnd.facets.fef+json",
+      "payloadSHA256": "ddc9e669194254cef019a29d3619a2c16592e5d52e1a81e98b01bd52319149a3",
+      "payloadBase64URL": "Y2hpbGQ",
+      "dependencyMessageIDs": ["10000000-0000-4000-8000-000000000001"],
+      "blobReferences": [
+        {
+          "blobID": "media-blob-a",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byteCount": 0,
+          "contentType": "video/quicktime"
+        }
+      ]
+    }
+  ],
+  "expectedOrderedMessageIDs": [
+    "10000000-0000-4000-8000-000000000001",
+    "10000000-0000-4000-8000-000000000002"
+  ],
+  "canonicalAppliedReceipt": {
+    "version": 1,
+    "referencedMessageID": "10000000-0000-4000-8000-000000000002",
+    "recipientID": "device-b",
+    "stage": "canonical_applied",
+    "recordedAtMilliseconds": 1710000003000
+  }
+}
