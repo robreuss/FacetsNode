@@ -128,6 +128,13 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		) {
 		t.Fatalf("participant status=%+v err=%v", participantStatus, err)
 	}
+	participantRoster, err := store.GetParticipantRoster(ctx, memberCredential, 1_301)
+	if err != nil || participantRoster.SecurityMode != sharedspaces.SecurityModeSecure ||
+		len(participantRoster.Participants) != 2 || len(participantRoster.Presentations) != 1 ||
+		participantRoster.Presentations[0].ParticipantID != invitation.ParticipantID ||
+		participantRoster.Presentations[0].DisplayName != "Ada Lovelace" {
+		t.Fatalf("participant roster=%+v err=%v", participantRoster, err)
+	}
 	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, 1_301)
 	if err != nil || !reflect.DeepEqual(participantBootstrap.Status, participantStatus) ||
 		participantBootstrap.KeyGrant == nil ||
@@ -882,6 +889,9 @@ func TestMemoryStorePrivateRevocationStopsDeliveryWithoutRotatingKeyEpoch(t *tes
 	}
 	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, 5_801); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
 		t.Fatalf("private revoked relay access err=%v", err)
+	}
+	if _, err := store.GetParticipantRoster(ctx, hostCredential, 5_801); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRosterUnavailable) {
+		t.Fatalf("private participant roster err=%v", err)
 	}
 	status, err := store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||

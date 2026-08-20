@@ -183,6 +183,25 @@ mode-appropriate key result. Role changes and checkpoint/key-epoch changes are
 visible on the next authenticated read. Revoked participants cannot retrieve
 status or bootstrap.
 
+## Secure participant roster
+
+An active participant in a Secure Space may retrieve the current active
+participant roster at:
+
+`GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/roster`
+
+The request uses the participant's relay credential, and the credential member
+identifier must equal the participant in the path. The response contains only
+the current active participants, their roles and kinds, and any current
+participant recognition presentation. It does not disclose invitations,
+revoked participants, administration authority, bearer credentials, relay
+credentials, FEF content, or any content-key material.
+
+Private and managed Spaces reject this participant-facing roster projection.
+Their hosts retain the authenticated administration status endpoint for
+operational membership management. This makes membership awareness a deliberate
+Secure Space property without turning recognition metadata into authority.
+
 ## Participant recognition metadata
 
 An active participant may set the display name shown for its own membership at:

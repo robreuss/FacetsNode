@@ -24,6 +24,7 @@ const (
 	CodeParticipantRoleCollision         ErrorCode = "shared_space_participant_role_collision"
 	CodeParticipantNotFound              ErrorCode = "shared_space_participant_not_found"
 	CodeParticipantRevoked               ErrorCode = "shared_space_participant_revoked"
+	CodeParticipantRosterUnavailable     ErrorCode = "shared_space_participant_roster_unavailable"
 	CodeInitialHost                      ErrorCode = "shared_space_initial_host"
 	CodeUnauthorized                     ErrorCode = "shared_space_unauthorized"
 	CodeWrongScope                       ErrorCode = "shared_space_wrong_scope"

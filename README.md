@@ -71,7 +71,10 @@ epochs on revocation. In both cases plaintext content keys remain a client
 concern and never pass through the Shared Spaces operator credential.
 Authenticated participants can recover their own current role,
 derived capabilities, key epoch, and bootstrap readiness after relaunch without
-receiving the Space roster or using a Space administration credential. For
+receiving the Space roster or using a Space administration credential. Secure
+Space participants may additionally retrieve the current active participant
+roster, including optional recognition names, through their own authenticated
+participant endpoint. Private Space rosters remain administration-only. For
 managed Spaces, that same atomic bootstrap includes the current service-managed
 content key. The key is never returned by status, roster, invitation, operator,
 or Space-administration endpoints. Participants may maintain a revisioned

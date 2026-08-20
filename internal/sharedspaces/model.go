@@ -813,6 +813,59 @@ type ParticipantStatus struct {
 	CreatedAtMilliseconds int64                    `json:"createdAtMilliseconds"`
 }
 
+// ParticipantRoster is the active membership view available to an enrolled
+// participant of a Secure Shared Space. It deliberately carries recognition
+// metadata and membership roles only: it does not disclose invitations,
+// revoked members, relay credentials, or content-key material.
+//
+// Private Spaces intentionally do not expose this roster. Their closed-group
+// operator can use the administrative status view, while Secure Spaces make
+// current membership visible to every participant as an operational safety
+// control.
+type ParticipantRoster struct {
+	Version               int                       `json:"version"`
+	SpaceID               uuid.UUID                 `json:"spaceID"`
+	DomainID              uuid.UUID                 `json:"domainID"`
+	SecurityMode          SecurityMode              `json:"securityMode"`
+	Participants          []Participant             `json:"participants"`
+	Presentations         []ParticipantPresentation `json:"presentations"`
+	CreatedAtMilliseconds int64                     `json:"createdAtMilliseconds"`
+}
+
+func (r ParticipantRoster) Validate() error {
+	if r.Version != SchemaVersion || r.SpaceID == uuid.Nil || r.DomainID == uuid.Nil ||
+		r.SecurityMode != SecurityModeSecure || r.CreatedAtMilliseconds < 0 {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant roster fields are invalid")
+	}
+	participantIDs := make(map[uuid.UUID]struct{}, len(r.Participants))
+	for index, participant := range r.Participants {
+		if err := participant.Validate(); err != nil {
+			return err
+		}
+		if participant.SpaceID != r.SpaceID || participant.RevokedAtMilliseconds != nil {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space participant roster includes an invalid member")
+		}
+		if _, exists := participantIDs[participant.ParticipantID]; exists ||
+			(index > 0 && r.Participants[index-1].ParticipantID.String() >= participant.ParticipantID.String()) {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space participant roster order is invalid")
+		}
+		participantIDs[participant.ParticipantID] = struct{}{}
+	}
+	for index, presentation := range r.Presentations {
+		if err := presentation.Validate(); err != nil {
+			return err
+		}
+		if presentation.SpaceID != r.SpaceID {
+			return NewProtocolError(CodeInvalidParticipantPresentation, "Shared Space participant roster presentation scope is invalid")
+		}
+		if _, found := participantIDs[presentation.ParticipantID]; !found ||
+			(index > 0 && r.Presentations[index-1].ParticipantID.String() >= presentation.ParticipantID.String()) {
+			return NewProtocolError(CodeInvalidParticipantPresentation, "Shared Space participant roster presentation is invalid")
+		}
+	}
+	return nil
+}
+
 func (s ParticipantStatus) Validate() error {
 	if s.Version != SchemaVersion || s.SpaceID == uuid.Nil || s.DomainID == uuid.Nil ||
 		!s.SecurityMode.Valid() || !s.InteractionMode.Valid() || s.CurrentKeyEpoch == 0 ||

@@ -362,6 +362,23 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		) {
 		t.Fatalf("participant status=%+v", participantStatus)
 	}
+	participantRosterPath := spaceRoot + "/participants/" + participantID.String() + "/roster"
+	participantRosterResponse := performRelayJSON(
+		t, handler, http.MethodGet, participantRosterPath, nil, memberToken, participantID,
+	)
+	requireStatus(t, participantRosterResponse, http.StatusOK)
+	var participantRoster sharedspaces.ParticipantRoster
+	if err := json.NewDecoder(participantRosterResponse.Body).Decode(&participantRoster); err != nil {
+		t.Fatal(err)
+	}
+	_ = participantRosterResponse.Body.Close()
+	if participantRoster.SpaceID != spaceID || participantRoster.DomainID != domainID ||
+		participantRoster.SecurityMode != sharedspaces.SecurityModeSecure ||
+		len(participantRoster.Participants) != 2 || len(participantRoster.Presentations) != 1 ||
+		participantRoster.Presentations[0].ParticipantID != participantID ||
+		participantRoster.Presentations[0].DisplayName != "Ada Lovelace" {
+		t.Fatalf("participant roster=%+v", participantRoster)
+	}
 	participantBootstrapPath := spaceRoot + "/participants/" + participantID.String() + "/bootstrap"
 	participantBootstrapResponse := performRelayJSON(
 		t, handler, http.MethodGet, participantBootstrapPath, nil, memberToken, participantID,
@@ -388,6 +405,12 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, wrongParticipantStatusResponse, http.StatusBadRequest)
 	_ = wrongParticipantStatusResponse.Body.Close()
+	wrongParticipantRosterResponse := performRelayJSON(
+		t, handler, http.MethodGet, participantRosterPath, nil,
+		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
+	)
+	requireStatus(t, wrongParticipantRosterResponse, http.StatusBadRequest)
+	_ = wrongParticipantRosterResponse.Body.Close()
 	wrongParticipantBootstrapResponse := performRelayJSON(
 		t, handler, http.MethodGet, participantBootstrapPath, nil,
 		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,

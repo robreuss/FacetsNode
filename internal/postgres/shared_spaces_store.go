@@ -1557,6 +1557,67 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 	return bootstrap.Status, nil
 }
 
+func (s *SharedSpacesStore) GetParticipantRoster(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) (sharedspaces.ParticipantRoster, error) {
+	status, err := s.GetParticipantStatus(ctx, credential, nowMilliseconds)
+	if err != nil {
+		return sharedspaces.ParticipantRoster{}, err
+	}
+	if status.SecurityMode != sharedspaces.SecurityModeSecure {
+		return sharedspaces.ParticipantRoster{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRosterUnavailable,
+			"participant roster is available only for Secure Shared Spaces",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return sharedspaces.ParticipantRoster{}, fmt.Errorf("begin Shared Space participant roster: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	participants, err := loadSharedSpaceParticipants(ctx, tx, status.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantRoster{}, err
+	}
+	activeParticipants := make([]sharedspaces.Participant, 0, len(participants))
+	for _, participant := range participants {
+		if participant.RevokedAtMilliseconds == nil {
+			activeParticipants = append(activeParticipants, participant)
+		}
+	}
+	presentations, err := loadSharedSpaceParticipantPresentations(ctx, tx, status.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantRoster{}, err
+	}
+	activeParticipantsByID := make(map[uuid.UUID]struct{}, len(activeParticipants))
+	for _, participant := range activeParticipants {
+		activeParticipantsByID[participant.ParticipantID] = struct{}{}
+	}
+	activePresentations := make([]sharedspaces.ParticipantPresentation, 0, len(presentations))
+	for _, presentation := range presentations {
+		if _, found := activeParticipantsByID[presentation.ParticipantID]; found {
+			activePresentations = append(activePresentations, presentation)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ParticipantRoster{}, fmt.Errorf("commit Shared Space participant roster: %w", err)
+	}
+	roster := sharedspaces.ParticipantRoster{
+		Version: sharedspaces.SchemaVersion, SpaceID: status.SpaceID,
+		DomainID: status.DomainID, SecurityMode: status.SecurityMode,
+		Participants: activeParticipants, Presentations: activePresentations,
+		CreatedAtMilliseconds: status.CreatedAtMilliseconds,
+	}
+	if err := roster.Validate(); err != nil {
+		return sharedspaces.ParticipantRoster{}, err
+	}
+	return roster, nil
+}
+
 func (s *SharedSpacesStore) AuthorizeComputeCapability(
 	ctx context.Context,
 	credential relay.Credential,

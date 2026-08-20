@@ -936,6 +936,69 @@ func (s *MemoryStore) GetParticipantStatus(
 	return status, nil
 }
 
+func (s *MemoryStore) GetParticipantRoster(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) (ParticipantRoster, error) {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+		return ParticipantRoster{}, NewProtocolError(CodeWrongScope, "participant roster credential scope is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[credential.TenantID]
+	if space == nil {
+		return ParticipantRoster{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ParticipantRoster{}, NewProtocolError(CodeWrongScope, "participant roster belongs to another Shared Space")
+	}
+	if space.provisioning.SecurityMode != SecurityModeSecure {
+		return ParticipantRoster{}, NewProtocolError(
+			CodeParticipantRosterUnavailable,
+			"participant roster is available only for Secure Shared Spaces",
+		)
+	}
+	participant, found := space.participants[credential.MemberID]
+	if !found {
+		return ParticipantRoster{}, NewProtocolError(CodeParticipantNotFound, "participant was not found")
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ParticipantRoster{}, NewProtocolError(CodeParticipantRevoked, "participant is revoked")
+	}
+	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {
+		return ParticipantRoster{}, err
+	}
+	participants := make([]Participant, 0, len(space.participants))
+	for _, candidate := range space.participants {
+		if candidate.RevokedAtMilliseconds == nil {
+			participants = append(participants, candidate)
+		}
+	}
+	sort.Slice(participants, func(left, right int) bool {
+		return participants[left].ParticipantID.String() < participants[right].ParticipantID.String()
+	})
+	presentations := make([]ParticipantPresentation, 0, len(participants))
+	for _, candidate := range participants {
+		if presentation, found := space.presentations[candidate.ParticipantID]; found {
+			presentations = append(presentations, presentation)
+		}
+	}
+	sort.Slice(presentations, func(left, right int) bool {
+		return presentations[left].ParticipantID.String() < presentations[right].ParticipantID.String()
+	})
+	roster := ParticipantRoster{
+		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
+		DomainID: credential.DomainID, SecurityMode: space.provisioning.SecurityMode,
+		Participants: participants, Presentations: presentations,
+		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
+	}
+	if err := roster.Validate(); err != nil {
+		return ParticipantRoster{}, err
+	}
+	return roster, nil
+}
+
 func (s *MemoryStore) UpdateParticipantPresentation(
 	ctx context.Context,
 	credential relay.Credential,
