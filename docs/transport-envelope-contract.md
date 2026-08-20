@@ -10,8 +10,9 @@ membership authority, billing, or compute policy.
 The server routes durable opaque envelopes. For Device Sync, payloads and blob
 bytes are always client-encrypted; the service receives no content key,
 plaintext FEF, or semantic graph. Shared Spaces select their own immutable
-security profile and may use the same envelope mechanics with a different
-content-custody policy.
+security profile. Private and Secure Shared Spaces are content-blind E2EE
+profiles; the future managed profile has a separately specified
+service-readable custody boundary.
 
 An envelope is transport data, not content authority. A bearer admits transport
 delivery only. Client-held principal, device, participant, and key authority
