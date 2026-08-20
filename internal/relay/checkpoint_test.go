@@ -316,6 +316,16 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	if err != nil || changed.Subscription.StartCursor == nil || *changed.Subscription.StartCursor != activation.StartCursor {
 		t.Fatalf("rebootstrap=%+v err=%v", changed, err)
 	}
+	// A rebootstrap-required subscription is intentionally read-only, but it
+	// must be able to force its stale local cursor back to the checkpoint
+	// boundary and acknowledge the retained ciphertext after durable repair.
+	fetched, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_600)
+	if err != nil || len(fetched.Messages) != 1 || fetched.Messages[0].Envelope.MessageID != retained.MessageID {
+		t.Fatalf("rebootstrap fetch=%+v err=%v", fetched, err)
+	}
+	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentAccepted, 1_601); err != nil {
+		t.Fatalf("rebootstrap acknowledge err=%v", err)
+	}
 	eligible, err := store.DryRunCheckpointCollection(ctx, admin, relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID})
 	if err != nil || !eligible.Eligible {
 		t.Fatalf("eligible=%+v err=%v first=%s", eligible, err, first.MessageID)

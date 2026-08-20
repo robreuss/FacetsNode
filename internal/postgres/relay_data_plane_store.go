@@ -1009,12 +1009,7 @@ func loadSubscriptionStatus(ctx context.Context, q relayQuerier, tenantID, domai
 }
 
 func loadActiveMemberSubscription(ctx context.Context, q relayQuerier, tenantID, domainID, memberID uuid.UUID, lock string) (uuid.UUID, error) {
-	var subscriptionID uuid.UUID
-	var status relay.SubscriptionStatus
-	err := q.QueryRow(ctx, `SELECT m.subscription_id,s.status FROM relay_members m JOIN relay_subscriptions s USING (tenant_id,domain_id,subscription_id) WHERE m.tenant_id=$1 AND m.domain_id=$2 AND m.member_id=$3 `+lock, tenantID, domainID, memberID).Scan(&subscriptionID, &status)
-	if err == pgx.ErrNoRows {
-		return uuid.Nil, relay.NewProtocolError(relay.CodeMemberNotFound, "member subscription was not found")
-	}
+	subscriptionID, status, err := loadReadableMemberSubscription(ctx, q, tenantID, domainID, memberID, lock)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -1022,6 +1017,27 @@ func loadActiveMemberSubscription(ctx context.Context, q relayQuerier, tenantID,
 		return uuid.Nil, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription is not active")
 	}
 	return subscriptionID, nil
+}
+
+// loadReadableMemberSubscription permits a member that has been explicitly
+// placed into rebootstrap_required to fetch and acknowledge the retained
+// checkpoint/tail needed to repair its local replica.  It deliberately does
+// not make that subscription writable; publication continues to require the
+// active-only helper above.
+func loadReadableMemberSubscription(ctx context.Context, q relayQuerier, tenantID, domainID, memberID uuid.UUID, lock string) (uuid.UUID, relay.SubscriptionStatus, error) {
+	var subscriptionID uuid.UUID
+	var status relay.SubscriptionStatus
+	err := q.QueryRow(ctx, `SELECT m.subscription_id,s.status FROM relay_members m JOIN relay_subscriptions s USING (tenant_id,domain_id,subscription_id) WHERE m.tenant_id=$1 AND m.domain_id=$2 AND m.member_id=$3 `+lock, tenantID, domainID, memberID).Scan(&subscriptionID, &status)
+	if err == pgx.ErrNoRows {
+		return uuid.Nil, "", relay.NewProtocolError(relay.CodeMemberNotFound, "member subscription was not found")
+	}
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	if status != relay.SubscriptionActive && status != relay.SubscriptionRebootstrapRequired {
+		return uuid.Nil, "", relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription is not readable")
+	}
+	return subscriptionID, status, nil
 }
 
 func (s *RelayStore) GetTenantStatus(ctx context.Context, credential relay.TenantCredential) (relay.TenantStatus, error) {

@@ -200,6 +200,41 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		t.Fatalf("activation retry=%+v err=%v", retry, err)
 	}
 
+	// A rebootstrap-required recipient deliberately discards its local cursor.
+	// It must still be able to read and acknowledge the server-selected
+	// checkpoint tail, even when it asks with a stale cursor beyond the tail.
+	// It remains unable to publish until an explicit, later rebootstrap
+	// completion moves it back to active.
+	rebootstrapRequest := relay.SubscriptionStatusChangeRequest{
+		RetryID: uuid.New(), Status: relay.SubscriptionRebootstrapRequired,
+		ChangedAtMilliseconds: 1_252,
+	}
+	rebootstrap, err := store.ChangeSubscriptionStatus(ctx, admin, recipientSubscriptionID, rebootstrapRequest)
+	if err != nil || rebootstrap.Acceptance != relay.AcceptanceAccepted || rebootstrap.Subscription.StartCursor == nil || *rebootstrap.Subscription.StartCursor != activatedResponse.StartCursor {
+		t.Fatalf("rebootstrap status=%+v err=%v", rebootstrap, err)
+	}
+	if duplicate, err := store.ChangeSubscriptionStatus(ctx, admin, recipientSubscriptionID, rebootstrapRequest); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != rebootstrap.Subscription {
+		t.Fatalf("rebootstrap status retry=%+v err=%v", duplicate, err)
+	}
+	rebootstrapFetch, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_252)
+	if err != nil || len(rebootstrapFetch.Messages) != 2 ||
+		rebootstrapFetch.Messages[0].Envelope.MessageID != retainedSuffix.MessageID ||
+		rebootstrapFetch.Messages[1].Envelope.MessageID != third.MessageID {
+		t.Fatalf("rebootstrap fetch=%+v err=%v", rebootstrapFetch, err)
+	}
+	for _, message := range rebootstrapFetch.Messages {
+		if acknowledgment, err := store.Acknowledge(ctx, recipient, message.Envelope.MessageID, relay.AcknowledgmentApplied, 1_252); err != nil || acknowledgment.Acceptance != relay.AcceptanceAccepted {
+			t.Fatalf("rebootstrap acknowledgment=%+v err=%v", acknowledgment, err)
+		}
+	}
+	blockedRebootstrapPublish := retainedSuffix
+	blockedRebootstrapPublish.MessageID = uuid.New()
+	blockedRebootstrapPublish.PublisherMemberID = recipient.MemberID
+	blockedRebootstrapPublish.CreatedAtMilliseconds = 1_252
+	if _, err := store.Publish(ctx, recipient, blockedRebootstrapPublish, 1_252); !relay.ErrorHasCode(err, relay.CodeInvalidSubscription) {
+		t.Fatalf("rebootstrap publish err=%v", err)
+	}
+
 	plan, err := store.DryRunCheckpointCollection(ctx, admin, relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID})
 	if err != nil || !plan.Eligible || plan.MessageCount != 2 || plan.BlobCount != 1 {
 		t.Fatalf("plan=%+v err=%v", plan, err)

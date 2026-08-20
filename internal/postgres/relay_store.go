@@ -1085,7 +1085,7 @@ func (s *RelayStore) Fetch(
 	); err != nil {
 		return relay.FetchResult{}, err
 	}
-	subscriptionID, err := loadActiveMemberSubscription(
+	subscriptionID, subscriptionStatus, err := loadReadableMemberSubscription(
 		ctx, transaction, credential.TenantID, credential.DomainID,
 		credential.MemberID, "FOR SHARE",
 	)
@@ -1096,8 +1096,16 @@ func (s *RelayStore) Fetch(
 	if err := transaction.QueryRow(ctx, `SELECT start_sequence FROM relay_subscriptions WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3`, credential.TenantID, credential.DomainID, subscriptionID).Scan(&subscriptionStart); err != nil {
 		return relay.FetchResult{}, fmt.Errorf("load subscription start cursor: %w", err)
 	}
-	if subscriptionStart != nil && uint64(*subscriptionStart) > afterSequence {
-		afterSequence = uint64(*subscriptionStart)
+	if subscriptionStart != nil {
+		startSequence := uint64(*subscriptionStart)
+		if subscriptionStatus == relay.SubscriptionRebootstrapRequired {
+			// A rebootstrap invalidates any cursor from the discarded local
+			// replica.  Always resume from the server-selected checkpoint
+			// boundary instead of allowing a stale higher cursor to skip it.
+			afterSequence = startSequence
+		} else if startSequence > afterSequence {
+			afterSequence = startSequence
+		}
 	}
 	var activeFenceBoundary int64
 	if err := transaction.QueryRow(ctx, `SELECT boundary_sequence FROM relay_checkpoint_fences WHERE tenant_id=$1 AND domain_id=$2 AND status='active' LIMIT 1`, credential.TenantID, credential.DomainID).Scan(&activeFenceBoundary); err == nil {
@@ -1206,7 +1214,7 @@ func (s *RelayStore) GetMessage(
 	if err := member.Authorize(credential, relay.CapabilityFetchMessage, nowMilliseconds); err != nil {
 		return relay.Message{}, err
 	}
-	subscriptionID, err := loadActiveMemberSubscription(ctx, transaction, credential.TenantID, credential.DomainID, credential.MemberID, "")
+	subscriptionID, _, err := loadReadableMemberSubscription(ctx, transaction, credential.TenantID, credential.DomainID, credential.MemberID, "")
 	if err != nil {
 		return relay.Message{}, err
 	}
@@ -1283,7 +1291,7 @@ func (s *RelayStore) Acknowledge(
 	); err != nil {
 		return relay.AcknowledgmentResult{}, err
 	}
-	subscriptionID, err := loadActiveMemberSubscription(
+	subscriptionID, _, err := loadReadableMemberSubscription(
 		ctx, transaction, credential.TenantID, credential.DomainID,
 		credential.MemberID, "FOR SHARE",
 	)

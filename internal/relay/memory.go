@@ -1477,7 +1477,7 @@ func (s *MemoryStore) Fetch(
 		return FetchResult{}, err
 	}
 	refreshMemoryFence(domain, nowMilliseconds)
-	subscription, err := activeMemberSubscription(domain, credential.MemberID)
+	subscription, err := readableMemberSubscription(domain, credential.MemberID)
 	if err != nil {
 		return FetchResult{}, err
 	}
@@ -1486,7 +1486,11 @@ func (s *MemoryStore) Fetch(
 		if cursorErr != nil {
 			return FetchResult{}, cursorErr
 		}
-		if start > afterSequence {
+		if subscription.Status == SubscriptionRebootstrapRequired {
+			// The caller's old cursor belongs to a replica that has been
+			// discarded.  The authoritative checkpoint boundary wins.
+			afterSequence = start
+		} else if start > afterSequence {
 			afterSequence = start
 		}
 	}
@@ -1543,7 +1547,7 @@ func (s *MemoryStore) GetMessage(
 		return Message{}, err
 	}
 	refreshMemoryFence(domain, nowMilliseconds)
-	subscription, err := activeMemberSubscription(domain, credential.MemberID)
+	subscription, err := readableMemberSubscription(domain, credential.MemberID)
 	if err != nil {
 		return Message{}, err
 	}
@@ -1583,7 +1587,7 @@ func (s *MemoryStore) Acknowledge(
 	if err != nil {
 		return AcknowledgmentResult{}, err
 	}
-	subscription, err := activeMemberSubscription(domain, credential.MemberID)
+	subscription, err := readableMemberSubscription(domain, credential.MemberID)
 	if err != nil {
 		return AcknowledgmentResult{}, err
 	}
@@ -1766,6 +1770,20 @@ func ensureBlobCapacity(domain *memoryDomain, byteCount int64) error {
 }
 
 func activeMemberSubscription(domain *memoryDomain, memberID uuid.UUID) (Subscription, error) {
+	subscription, err := readableMemberSubscription(domain, memberID)
+	if err != nil {
+		return Subscription{}, err
+	}
+	if subscription.Status != SubscriptionActive {
+		return Subscription{}, protocolError(CodeInvalidSubscription, "subscription is not active")
+	}
+	return subscription, nil
+}
+
+// readableMemberSubscription is intentionally narrower than an active
+// subscription: a rebootstrap-required member may read and acknowledge the
+// retained checkpoint/tail, but may not publish new content.
+func readableMemberSubscription(domain *memoryDomain, memberID uuid.UUID) (Subscription, error) {
 	subscriptionID, ok := domain.memberSubscriptions[memberID]
 	if !ok || subscriptionID == uuid.Nil {
 		return Subscription{}, protocolError(CodeInvalidSubscription, "member has no subscription")
@@ -1774,8 +1792,8 @@ func activeMemberSubscription(domain *memoryDomain, memberID uuid.UUID) (Subscri
 	if !ok {
 		return Subscription{}, protocolError(CodeSubscriptionNotFound, "subscription was not found")
 	}
-	if subscription.Status != SubscriptionActive {
-		return Subscription{}, protocolError(CodeInvalidSubscription, "subscription is not active")
+	if subscription.Status != SubscriptionActive && subscription.Status != SubscriptionRebootstrapRequired {
+		return Subscription{}, protocolError(CodeInvalidSubscription, "subscription is not readable")
 	}
 	return subscription, nil
 }
