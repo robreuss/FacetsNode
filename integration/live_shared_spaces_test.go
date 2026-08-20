@@ -182,6 +182,43 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		t.Fatalf("unexpected activation Secure roster history: page=%+v error=%v", activationRosterPage, err)
 	}
 
+	// A role change is both a data-plane authorization change and a Secure
+	// membership-authority transition. Exercise it against the running service
+	// before testing the participant's newly granted capability.
+	promotion := sharedspaces.ParticipantRoleChange{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		ParticipantID: participantID, PreviousRole: sharedspaces.RoleReader,
+		NextRole: sharedspaces.RoleParticipant, ChangedAtMilliseconds: now + 1,
+	}
+	promotion.SecureRosterAttestation = liveSharedSpaceRoleChangeRosterAttestation(
+		t, provisioning, domainID, promotion, *claimResult.SecureRosterAttestation,
+	)
+	promotionResponse := requestRelayJSON(
+		t, client, http.MethodPost,
+		spaceRoot+"/participants/"+participantID.String()+"/role",
+		promotion, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, promotionResponse, http.StatusCreated)
+	var promotionResult sharedspaces.ParticipantRoleChangeResult
+	decodeLiveJSON(t, promotionResponse, &promotionResult)
+	if promotionResult.CurrentRole != sharedspaces.RoleParticipant ||
+		promotionResult.PreviousRole != sharedspaces.RoleReader {
+		t.Fatalf("unexpected Secure participant promotion: %+v", promotionResult)
+	}
+	promotedBootstrapResponse := requestRelayJSON(
+		t, client, http.MethodGet,
+		spaceRoot+"/participants/"+participantID.String()+"/bootstrap", nil,
+		participantToken, participantID,
+	)
+	requireStatus(t, promotedBootstrapResponse, http.StatusOK)
+	var promotedBootstrap sharedspaces.ParticipantBootstrap
+	decodeLiveJSON(t, promotedBootstrapResponse, &promotedBootstrap)
+	if err := promotedBootstrap.Validate(); err != nil ||
+		promotedBootstrap.Status.Participant.Role != sharedspaces.RoleParticipant ||
+		promotedBootstrap.Roster == nil || promotedBootstrap.Roster.AuthorityAttestation.Revision != 3 {
+		t.Fatalf("Secure promotion bootstrap did not converge: bootstrap=%+v error=%v", promotedBootstrap, err)
+	}
+
 	statusResponse := requestRelayJSON(
 		t, client, http.MethodGet, spaceRoot+"/status", nil,
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
@@ -231,6 +268,14 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	if len(delivery.Messages) != 1 || delivery.Messages[0].Envelope.MessageID != message.MessageID {
 		t.Fatalf("unexpected Shared Space relay delivery: %+v", delivery)
 	}
+	participantMessage := message
+	participantMessage.MessageID = uuid.New()
+	participantMessage.PublisherMemberID = participantID
+	participantMessage.CreatedAtMilliseconds = now + 2
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut, relayRoot+"/messages/"+participantMessage.MessageID.String(),
+		participantMessage, participantToken, participantID,
+	), http.StatusCreated)
 
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
@@ -241,7 +286,7 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		)},
 	}
 	revocation.SecureRosterAttestation = liveSharedSpaceRevocationRosterAttestation(
-		t, provisioning, domainID, revocation, *claimResult.SecureRosterAttestation, now,
+		t, provisioning, domainID, revocation, *promotion.SecureRosterAttestation, now,
 	)
 	revokedResponse := requestRelayJSON(
 		t, client, http.MethodPost,
@@ -271,9 +316,9 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	requireStatus(t, historyResponse, http.StatusOK)
 	var hostRosterHistory sharedspaces.SecureRosterAttestationPage
 	decodeLiveJSON(t, historyResponse, &hostRosterHistory)
-	if err := hostRosterHistory.Validate(); err != nil || len(hostRosterHistory.Attestations) != 3 ||
-		hostRosterHistory.Attestations[2].Revision != 3 ||
-		hostRosterHistory.Attestations[2].CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+	if err := hostRosterHistory.Validate(); err != nil || len(hostRosterHistory.Attestations) != 4 ||
+		hostRosterHistory.Attestations[3].Revision != 4 ||
+		hostRosterHistory.Attestations[3].CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("unexpected post-revocation Secure roster history: page=%+v error=%v", hostRosterHistory, err)
 	}
 	staleMessage := message
@@ -517,6 +562,27 @@ func liveSharedSpaceRevocationRosterAttestation(
 	return liveSharedSpaceSuccessorRosterAttestation(
 		t, provisioning, domainID, previous, revocation.NextKeyEpoch, participants,
 		createdAtMilliseconds,
+	)
+}
+
+func liveSharedSpaceRoleChangeRosterAttestation(
+	t *testing.T,
+	provisioning liveSharedSpaceProvisioningInput,
+	domainID uuid.UUID,
+	change sharedspaces.ParticipantRoleChange,
+	previous sharedspaces.SecureRosterAttestation,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for index := range participants {
+		if participants[index].ParticipantID == change.ParticipantID {
+			participants[index].Role = change.NextRole
+			break
+		}
+	}
+	return liveSharedSpaceSuccessorRosterAttestation(
+		t, provisioning, domainID, previous, previous.CurrentKeyEpoch, participants,
+		change.ChangedAtMilliseconds,
 	)
 }
 

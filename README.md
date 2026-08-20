@@ -69,15 +69,16 @@ future delivery but cannot remove a key already received. Secure Spaces
 atomically store participant-specific encrypted key grants and advance key
 epochs on revocation. In both cases plaintext content keys remain a client
 concern and never pass through the Shared Spaces operator credential.
-Authenticated participants can recover their own current role,
-derived capabilities, key epoch, and bootstrap readiness after relaunch without
-receiving the Space roster or using a Space administration credential. Secure
-Space participants may additionally retrieve the current active participant
-roster, including optional recognition names, through their own authenticated
-participant endpoint. Private Space rosters remain administration-only. For
-managed Spaces, that same atomic bootstrap includes the current service-managed
-content key. The key is never returned by status, roster, invitation, operator,
-or Space-administration endpoints. Participants may maintain a revisioned
+Authenticated participants can recover their own current role, derived
+capabilities, key epoch, and bootstrap readiness after relaunch without using a
+Space administration credential. A Secure participant's atomic bootstrap also
+returns the signed current active roster, including optional recognition names,
+so its membership authority and key epoch share one consistent snapshot. The
+separate Secure roster endpoint remains available for later authenticated
+refreshes. Private Space rosters remain administration-only. For managed
+Spaces, that same atomic bootstrap includes the current service-managed content
+key. The key is never returned by status, roster, invitation, operator, or
+Space-administration endpoints. Participants may maintain a revisioned
 display name for their own active membership. This recognition metadata is
 returned by status/bootstrap reads but never grants authority or asserts a
 verified Persona. Space administrators may also define retry-safe compute pools
