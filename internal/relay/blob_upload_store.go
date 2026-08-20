@@ -19,6 +19,14 @@ type BlobUploadContentStore interface {
 	Delete(context.Context, BlobScope, uuid.UUID) error
 }
 
+// BlobUploadMaintenanceContentStore is the hosted-storage lifecycle seam for
+// resumable upload staging. Backends enumerate opaque candidates and remove
+// only after RelayStore has rechecked authorization and expiry.
+type BlobUploadMaintenanceContentStore interface {
+	UploadCandidates(context.Context) ([]BlobUploadContentCandidate, error)
+	DeleteUpload(context.Context, BlobScope, uuid.UUID) error
+}
+
 type FileBlobUploadContentStore struct {
 	root  string
 	blobs BlobContentStore
@@ -148,9 +156,9 @@ func (s *FileBlobUploadContentStore) DeleteUpload(ctx context.Context, scope Blo
 	return s.Delete(ctx, scope, uploadID)
 }
 
-func (s *FileBlobUploadContentStore) UploadCandidates(ctx context.Context) ([]BlobUploadFileCandidate, error) {
+func (s *FileBlobUploadContentStore) UploadCandidates(ctx context.Context) ([]BlobUploadContentCandidate, error) {
 	base := filepath.Join(s.root, ".uploads")
-	var result []BlobUploadFileCandidate
+	var result []BlobUploadContentCandidate
 	err := filepath.WalkDir(base, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -179,7 +187,7 @@ func (s *FileBlobUploadContentStore) UploadCandidates(ctx context.Context) ([]Bl
 		if err != nil {
 			return err
 		}
-		result = append(result, BlobUploadFileCandidate{Scope: BlobScope{TenantID: tenantID, DomainID: domainID}, UploadID: uploadID, ModifiedMilliseconds: info.ModTime().UnixMilli()})
+		result = append(result, BlobUploadContentCandidate{Scope: BlobScope{TenantID: tenantID, DomainID: domainID}, UploadID: uploadID, ModifiedMilliseconds: info.ModTime().UnixMilli()})
 		return nil
 	})
 	return result, err

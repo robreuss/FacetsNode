@@ -19,19 +19,51 @@ type maintenanceAuthority struct {
 	expired bool
 }
 
+// memoryBlobMaintenanceStore intentionally has no filesystem representation.
+// It protects the adapter boundary used by hosted object storage: serverapp
+// decides whether a candidate is still authorized, while the backend owns how
+// it is listed and removed.
+type memoryBlobMaintenanceStore struct {
+	candidates []relay.BlobContentCandidate
+	deleted    []string
+}
+
+func (s *memoryBlobMaintenanceStore) BlobCandidates(context.Context) ([]relay.BlobContentCandidate, error) {
+	return append([]relay.BlobContentCandidate(nil), s.candidates...), nil
+}
+
+func (s *memoryBlobMaintenanceStore) DeleteBlob(_ context.Context, _ relay.BlobScope, blobID string) error {
+	s.deleted = append(s.deleted, blobID)
+	return nil
+}
+
+type memoryBlobUploadMaintenanceStore struct {
+	candidates []relay.BlobUploadContentCandidate
+	deleted    []uuid.UUID
+}
+
+func (s *memoryBlobUploadMaintenanceStore) UploadCandidates(context.Context) ([]relay.BlobUploadContentCandidate, error) {
+	return append([]relay.BlobUploadContentCandidate(nil), s.candidates...), nil
+}
+
+func (s *memoryBlobUploadMaintenanceStore) DeleteUpload(_ context.Context, _ relay.BlobScope, uploadID uuid.UUID) error {
+	s.deleted = append(s.deleted, uploadID)
+	return nil
+}
+
 func (s *maintenanceAuthority) ExpireBlobUploads(context.Context, int64, int64) ([]relay.BlobUploadExpiry, error) {
 	s.expired = true
 	return nil, nil
 }
 
-func (s *maintenanceAuthority) DeleteBlobIfUnauthorized(_ context.Context, candidate relay.BlobFileCandidate, _, _ int64, remove func() error) (bool, error) {
+func (s *maintenanceAuthority) DeleteBlobIfUnauthorized(_ context.Context, candidate relay.BlobContentCandidate, _, _ int64, remove func() error) (bool, error) {
 	if s.blobs[candidate.BlobID] {
 		return false, nil
 	}
 	return true, remove()
 }
 
-func (s *maintenanceAuthority) DeleteBlobUploadIfUnauthorized(_ context.Context, candidate relay.BlobUploadFileCandidate, _, _ int64, remove func() error) (bool, error) {
+func (s *maintenanceAuthority) DeleteBlobUploadIfUnauthorized(_ context.Context, candidate relay.BlobUploadContentCandidate, _, _ int64, remove func() error) (bool, error) {
 	if s.uploads[candidate.UploadID] {
 		return false, nil
 	}
@@ -87,5 +119,28 @@ func TestReconcileBlobFilesRechecksAuthorityBeforeDeletion(t *testing.T) {
 	}
 	if _, err := os.Stat(uploadPath(orphanUpload)); !os.IsNotExist(err) {
 		t.Fatalf("orphan upload retained err=%v", err)
+	}
+}
+
+func TestReconcileBlobFilesUsesBackendNeutralMaintenanceStores(t *testing.T) {
+	ctx := context.Background()
+	scope := relay.BlobScope{TenantID: uuid.New(), DomainID: uuid.New()}
+	orphanBlob := relay.BlobID([]byte("hosted-orphan"))
+	orphanUpload := uuid.New()
+	blobs := &memoryBlobMaintenanceStore{candidates: []relay.BlobContentCandidate{{
+		Scope: scope, BlobID: orphanBlob, ModifiedMilliseconds: 1,
+	}}}
+	uploads := &memoryBlobUploadMaintenanceStore{candidates: []relay.BlobUploadContentCandidate{{
+		Scope: scope, UploadID: orphanUpload, ModifiedMilliseconds: 1,
+	}}}
+	authority := &maintenanceAuthority{blobs: map[string]bool{}, uploads: map[uuid.UUID]bool{}}
+	if err := reconcileBlobFiles(ctx, authority, blobs, uploads, 9_999, 100); err != nil {
+		t.Fatal(err)
+	}
+	if len(blobs.deleted) != 1 || blobs.deleted[0] != orphanBlob {
+		t.Fatalf("expected orphan blob deletion, got %v", blobs.deleted)
+	}
+	if len(uploads.deleted) != 1 || uploads.deleted[0] != orphanUpload {
+		t.Fatalf("expected orphan upload deletion, got %v", uploads.deleted)
 	}
 }

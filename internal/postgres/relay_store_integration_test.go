@@ -654,16 +654,16 @@ func TestPostgresResumableBlobReservationsRetriesAndExpiry(t *testing.T) {
 		t.Fatalf("post-expiry=%+v", status)
 	}
 	removed := false
-	allowed, err := store.DeleteBlobUploadIfUnauthorized(ctx, relay.BlobUploadFileCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, UploadID: second.UploadID, ModifiedMilliseconds: 1_500}, 2_550, 100, func() error { removed = true; return nil })
+	allowed, err := store.DeleteBlobUploadIfUnauthorized(ctx, relay.BlobUploadContentCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, UploadID: second.UploadID, ModifiedMilliseconds: 1_500}, 2_550, 100, func() error { removed = true; return nil })
 	if err != nil || allowed {
 		t.Fatalf("early deletion allowed=%v err=%v", allowed, err)
 	}
-	allowed, err = store.DeleteBlobUploadIfUnauthorized(ctx, relay.BlobUploadFileCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, UploadID: second.UploadID, ModifiedMilliseconds: 1_500}, 2_601, 100, func() error { removed = true; return nil })
+	allowed, err = store.DeleteBlobUploadIfUnauthorized(ctx, relay.BlobUploadContentCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, UploadID: second.UploadID, ModifiedMilliseconds: 1_500}, 2_601, 100, func() error { removed = true; return nil })
 	if err != nil || !allowed || !removed {
 		t.Fatalf("eligible deletion allowed=%v err=%v", allowed, err)
 	}
 	removed = false
-	allowed, err = store.DeleteBlobIfUnauthorized(ctx, relay.BlobFileCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, BlobID: request.RelayBlobID, ModifiedMilliseconds: 0}, 9_999, 100, func() error { removed = true; return nil })
+	allowed, err = store.DeleteBlobIfUnauthorized(ctx, relay.BlobContentCandidate{Scope: relay.BlobScope{TenantID: tenantID, DomainID: domainID}, BlobID: request.RelayBlobID, ModifiedMilliseconds: 0}, 9_999, 100, func() error { removed = true; return nil })
 	if err != nil || allowed {
 		t.Fatalf("authoritative blob deletion allowed=%v err=%v", allowed, err)
 	}

@@ -70,7 +70,7 @@ func (s *RelayStore) ExpireBlobUploads(ctx context.Context, nowMilliseconds, gra
 	return expired, nil
 }
 
-func (s *RelayStore) DeleteBlobIfUnauthorized(ctx context.Context, candidate relay.BlobFileCandidate, nowMilliseconds, graceMilliseconds int64, remove func() error) (bool, error) {
+func (s *RelayStore) DeleteBlobIfUnauthorized(ctx context.Context, candidate relay.BlobContentCandidate, nowMilliseconds, graceMilliseconds int64, remove func() error) (bool, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, err
@@ -107,7 +107,7 @@ func (s *RelayStore) DeleteBlobIfUnauthorized(ctx context.Context, candidate rel
 	return true, nil
 }
 
-func (s *RelayStore) DeleteBlobUploadIfUnauthorized(ctx context.Context, candidate relay.BlobUploadFileCandidate, nowMilliseconds, graceMilliseconds int64, remove func() error) (bool, error) {
+func (s *RelayStore) DeleteBlobUploadIfUnauthorized(ctx context.Context, candidate relay.BlobUploadContentCandidate, nowMilliseconds, graceMilliseconds int64, remove func() error) (bool, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return false, err

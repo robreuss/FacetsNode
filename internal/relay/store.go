@@ -161,6 +161,6 @@ type BlobUploadExpiry struct {
 
 type BlobMaintenanceStore interface {
 	ExpireBlobUploads(context.Context, int64, int64) ([]BlobUploadExpiry, error)
-	DeleteBlobIfUnauthorized(context.Context, BlobFileCandidate, int64, int64, func() error) (bool, error)
-	DeleteBlobUploadIfUnauthorized(context.Context, BlobUploadFileCandidate, int64, int64, func() error) (bool, error)
+	DeleteBlobIfUnauthorized(context.Context, BlobContentCandidate, int64, int64, func() error) (bool, error)
+	DeleteBlobUploadIfUnauthorized(context.Context, BlobUploadContentCandidate, int64, int64, func() error) (bool, error)
 }

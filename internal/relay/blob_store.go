@@ -50,13 +50,21 @@ type BlobContentStore interface {
 	) (BlobContent, error)
 }
 
-type BlobFileCandidate struct {
+// BlobContentMaintenanceStore is deliberately separate from BlobContentStore.
+// Hosted object storage needs the same authority-checked reclamation lifecycle
+// as local volumes, but does not need to expose filesystem paths to serverapp.
+type BlobContentMaintenanceStore interface {
+	BlobCandidates(context.Context) ([]BlobContentCandidate, error)
+	DeleteBlob(context.Context, BlobScope, string) error
+}
+
+type BlobContentCandidate struct {
 	Scope                BlobScope
 	BlobID               string
 	ModifiedMilliseconds int64
 }
 
-type BlobUploadFileCandidate struct {
+type BlobUploadContentCandidate struct {
 	Scope                BlobScope
 	UploadID             uuid.UUID
 	ModifiedMilliseconds int64
@@ -196,8 +204,8 @@ func (s *FileBlobContentStore) DeleteBlob(ctx context.Context, scope BlobScope, 
 	return nil
 }
 
-func (s *FileBlobContentStore) BlobCandidates(ctx context.Context) ([]BlobFileCandidate, error) {
-	var result []BlobFileCandidate
+func (s *FileBlobContentStore) BlobCandidates(ctx context.Context) ([]BlobContentCandidate, error) {
+	var result []BlobContentCandidate
 	err := filepath.WalkDir(s.root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -228,7 +236,7 @@ func (s *FileBlobContentStore) BlobCandidates(ctx context.Context) ([]BlobFileCa
 		if err != nil {
 			return err
 		}
-		result = append(result, BlobFileCandidate{Scope: BlobScope{TenantID: tenantID, DomainID: domainID}, BlobID: segments[2], ModifiedMilliseconds: info.ModTime().UnixMilli()})
+		result = append(result, BlobContentCandidate{Scope: BlobScope{TenantID: tenantID, DomainID: domainID}, BlobID: segments[2], ModifiedMilliseconds: info.ModTime().UnixMilli()})
 		return nil
 	})
 	return result, err

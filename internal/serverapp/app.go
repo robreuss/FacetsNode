@@ -166,7 +166,7 @@ func Main(service config.Service) {
 	logger.Info("shutdown complete")
 }
 
-func blobMaintenanceLoop(ctx context.Context, logger *slog.Logger, store relay.BlobMaintenanceStore, blobs *relay.FileBlobContentStore, uploads *relay.FileBlobUploadContentStore, period, grace time.Duration) {
+func blobMaintenanceLoop(ctx context.Context, logger *slog.Logger, store relay.BlobMaintenanceStore, blobs relay.BlobContentMaintenanceStore, uploads relay.BlobUploadMaintenanceContentStore, period, grace time.Duration) {
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 	for {
@@ -184,7 +184,7 @@ func blobMaintenanceLoop(ctx context.Context, logger *slog.Logger, store relay.B
 	}
 }
 
-func reconcileBlobFiles(ctx context.Context, store relay.BlobMaintenanceStore, blobs *relay.FileBlobContentStore, uploads *relay.FileBlobUploadContentStore, nowMilliseconds, graceMilliseconds int64) error {
+func reconcileBlobFiles(ctx context.Context, store relay.BlobMaintenanceStore, blobs relay.BlobContentMaintenanceStore, uploads relay.BlobUploadMaintenanceContentStore, nowMilliseconds, graceMilliseconds int64) error {
 	if _, err := store.ExpireBlobUploads(ctx, nowMilliseconds, graceMilliseconds); err != nil {
 		return err
 	}
