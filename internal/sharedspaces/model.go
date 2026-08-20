@@ -26,8 +26,13 @@ const (
 	ManagedContentKeyAlgorithm                    = "A256GCM"
 	MaximumParticipantKeyGrantCiphertextByteCount = 16 * 1_024
 	MaximumAuthorityEventPageSize                 = 100
-	MaximumParticipantDisplayNameBytes            = 512
-	MaximumParticipantDisplayNameRunes            = 128
+	// MaximumSecureRosterAttestationPageSize bounds the amount of historic
+	// membership authority a Secure participant may fetch in one request. The
+	// records are public to active Secure participants, but never to a revoked
+	// participant or an unauthenticated client.
+	MaximumSecureRosterAttestationPageSize = 100
+	MaximumParticipantDisplayNameBytes     = 512
+	MaximumParticipantDisplayNameRunes     = 128
 )
 
 // ParticipantSigningKey is the public, long-lived signing identity bound to a
@@ -854,11 +859,16 @@ func (c InvitationClaim) Validate() error {
 }
 
 type InvitationClaimResult struct {
-	Acceptance      relay.Acceptance                     `json:"acceptance"`
-	CurrentKeyEpoch uint64                               `json:"currentKeyEpoch"`
-	KeyGrant        *ParticipantKeyGrant                 `json:"keyGrant,omitempty"`
-	Participant     Participant                          `json:"participant"`
-	Member          relay.SubscriptionMemberRegistration `json:"member"`
+	Acceptance      relay.Acceptance     `json:"acceptance"`
+	CurrentKeyEpoch uint64               `json:"currentKeyEpoch"`
+	KeyGrant        *ParticipantKeyGrant `json:"keyGrant,omitempty"`
+	// SecureRosterAttestation is the signed authority record that admitted the
+	// participant. A newly enrolled Secure client persists and verifies this
+	// before accepting subsequent roster changes. It is absent for Private and
+	// Managed Spaces.
+	SecureRosterAttestation *SecureRosterAttestation             `json:"secureRosterAttestation,omitempty"`
+	Participant             Participant                          `json:"participant"`
+	Member                  relay.SubscriptionMemberRegistration `json:"member"`
 }
 
 type InvitationCancellation struct {
@@ -1108,6 +1118,46 @@ type ParticipantRoster struct {
 	Presentations         []ParticipantPresentation `json:"presentations"`
 	AuthorityAttestation  SecureRosterAttestation   `json:"authorityAttestation"`
 	CreatedAtMilliseconds int64                     `json:"createdAtMilliseconds"`
+}
+
+// SecureRosterAttestationPage lets an active Secure participant recover a
+// missed portion of the signed roster chain after being offline. It is not a
+// participant presentation: callers render only the current ParticipantRoster
+// and use these records solely to validate continuity. Historic records may
+// describe members who are no longer active, so the server never serves this
+// endpoint to a revoked participant.
+type SecureRosterAttestationPage struct {
+	Version      int                       `json:"version"`
+	SpaceID      uuid.UUID                 `json:"spaceID"`
+	DomainID     uuid.UUID                 `json:"domainID"`
+	Attestations []SecureRosterAttestation `json:"attestations"`
+	NextRevision uint64                    `json:"nextRevision"`
+}
+
+func (p SecureRosterAttestationPage) Validate() error {
+	if p.Version != SchemaVersion || p.SpaceID == uuid.Nil || p.DomainID == uuid.Nil ||
+		len(p.Attestations) > MaximumSecureRosterAttestationPageSize {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster authority page fields are invalid")
+	}
+	for index, attestation := range p.Attestations {
+		if err := attestation.Validate(); err != nil {
+			return err
+		}
+		if attestation.SpaceID != p.SpaceID || attestation.DomainID != p.DomainID ||
+			(index > 0 && p.Attestations[index-1].Revision >= attestation.Revision) {
+			return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster authority page order is invalid")
+		}
+		if index > 0 {
+			previous := p.Attestations[index-1]
+			if err := attestation.ValidateSuccessor(previous, attestation.Participants, attestation.CurrentKeyEpoch); err != nil {
+				return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster authority page is discontinuous")
+			}
+		}
+	}
+	if len(p.Attestations) > 0 && p.NextRevision != p.Attestations[len(p.Attestations)-1].Revision {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster authority page continuation is invalid")
+	}
+	return nil
 }
 
 func (r ParticipantRoster) Validate() error {

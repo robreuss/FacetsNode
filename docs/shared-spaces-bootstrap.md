@@ -207,6 +207,26 @@ if its active participant set and key epoch exactly match the returned roster.
 An invalid or discontinuous attestation is a security failure, not a reason to
 silently replace the locally trusted membership view.
 
+An active Secure participant that was offline across more than one roster
+change retrieves the bounded signed history at:
+
+`GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/roster-attestations?afterRevision={revision}&limit={limit}`
+
+The response is a `SecureRosterAttestationPage`. It contains ordered,
+hash-linked authority records after the supplied revision and a continuation
+`nextRevision`; it is not a historic roster UI and must not be used to restore
+recognition metadata. A client validates each record against the immediately
+preceding locally accepted record before advancing its saved authority state.
+When no record has been persisted locally, it begins at revision zero and
+validates the initial host-signed record before the rest of the page. The
+server returns this history only to active Secure participants: it never serves
+it to revoked members, untrusted callers, Private Spaces, or Managed Spaces.
+
+The successful Secure invitation-claim response includes the activation roster
+attestation that admitted the participant. A newly joined client persists and
+validates that record before accepting later roster reads, so it does not have
+to infer its initial authority view from mutable server state.
+
 The content-blind administrator authority-event feed also carries the optional
 `secureRosterDigest` for each Secure Space transition that changes the active
 roster: initial provisioning, a successful invitation claim, a role change, or

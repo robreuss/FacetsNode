@@ -427,6 +427,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleGetSharedSpaceParticipantRoster,
 		)
 		register(
+			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/roster-attestations",
+			traffic.SurfaceManagement,
+			s.handleListSharedSpaceSecureRosterAttestations,
+		)
+		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/presentation",
 			traffic.SurfaceManagement,
 			s.handleUpdateSharedSpaceParticipantPresentation,

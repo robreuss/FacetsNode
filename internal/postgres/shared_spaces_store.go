@@ -88,6 +88,49 @@ func secureRosterAttestationDigest(
 	return &digest, nil
 }
 
+// insertSharedSpaceSecureRosterAttestation records every accepted Secure
+// membership transition. The current record on shared_spaces is useful for a
+// fresh bootstrap, but an offline participant needs this whole signed chain to
+// prove that no roster change was hidden or substituted by the service.
+func insertSharedSpaceSecureRosterAttestation(
+	ctx context.Context,
+	tx pgx.Tx,
+	attestation *sharedspaces.SecureRosterAttestation,
+) error {
+	if attestation == nil {
+		return nil
+	}
+	payload, err := encodeSecureRosterAttestation(attestation)
+	if err != nil {
+		return fmt.Errorf("encode Shared Space roster attestation history: %w", err)
+	}
+	digest, err := attestation.Digest()
+	if err != nil {
+		return fmt.Errorf("digest Shared Space roster attestation history: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_secure_roster_attestations (
+			space_id,revision,attestation_digest,previous_digest,current_key_epoch,
+			issuer_participant_id,created_at_milliseconds,attestation
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, attestation.SpaceID, attestation.Revision, digest, attestation.PreviousDigest,
+		attestation.CurrentKeyEpoch, attestation.IssuerParticipantID,
+		attestation.CreatedAtMilliseconds, payload); err != nil {
+		return fmt.Errorf("record Shared Space roster attestation history: %w", err)
+	}
+	return nil
+}
+
+func cloneSecureRosterAttestation(
+	attestation *sharedspaces.SecureRosterAttestation,
+) *sharedspaces.SecureRosterAttestation {
+	if attestation == nil {
+		return nil
+	}
+	copy := *attestation
+	return &copy
+}
+
 func activeSharedSpaceParticipants(participants []sharedspaces.Participant) []sharedspaces.Participant {
 	active := make([]sharedspaces.Participant, 0, len(participants))
 	for _, participant := range participants {
@@ -283,6 +326,11 @@ func (s *SharedSpacesStore) ProvisionSpace(
 		rosterAttestationPayload,
 		provisioning.CreatedAtMilliseconds); err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("insert Shared Space: %w", err)
+	}
+	if err := insertSharedSpaceSecureRosterAttestation(
+		ctx, tx, provisioning.InitialSecureRosterAttestation,
+	); err != nil {
+		return sharedspaces.SpaceProvisioningResult{}, err
 	}
 	if err := insertSharedSpaceParticipant(ctx, tx, initial); err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, err
@@ -665,6 +713,7 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		return sharedspaces.InvitationClaimResult{
 			Acceptance: relay.AcceptanceDuplicate, Participant: participant,
 			CurrentKeyEpoch: currentKeyEpoch, KeyGrant: invitation.KeyGrant,
+			SecureRosterAttestation: cloneSecureRosterAttestation(invitation.ActivationSecureRosterAttestation),
 			Member: relay.SubscriptionMemberRegistration{
 				SubscriptionID: subscriptionID, MemberRegistration: member,
 			},
@@ -720,6 +769,11 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	`, claim.SpaceID, newRosterAttestationPayload); err != nil {
 		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("advance Shared Space invitation claim roster authority: %w", err)
 	}
+	if err := insertSharedSpaceSecureRosterAttestation(
+		ctx, tx, invitation.ActivationSecureRosterAttestation,
+	); err != nil {
+		return sharedspaces.InvitationClaimResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE shared_space_invitations
 		SET claimed_at_milliseconds=$3,claimed_member_id=$4,updated_at=now()
@@ -746,7 +800,9 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	}
 	return sharedspaces.InvitationClaimResult{
 		Acceptance: relayResult.Acceptance, CurrentKeyEpoch: currentKeyEpoch,
-		KeyGrant: invitation.KeyGrant, Participant: participant, Member: relayResult.Member,
+		KeyGrant: invitation.KeyGrant, Participant: participant,
+		SecureRosterAttestation: cloneSecureRosterAttestation(invitation.ActivationSecureRosterAttestation),
+		Member:                  relayResult.Member,
 	}, nil
 }
 
@@ -1430,6 +1486,9 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 	`, change.SpaceID, newRosterAttestationPayload); err != nil {
 		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("advance Shared Space participant role roster authority: %w", err)
 	}
+	if err := insertSharedSpaceSecureRosterAttestation(ctx, tx, change.SecureRosterAttestation); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_space_participant_role_changes (
 			space_id,retry_id,participant_id,version,previous_role,next_role,
@@ -1690,6 +1749,9 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	`, revocation.SpaceID, revocation.NextKeyEpoch, newRosterAttestationPayload); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("advance Shared Space key epoch: %w", err)
 	}
+	if err := insertSharedSpaceSecureRosterAttestation(ctx, tx, revocation.SecureRosterAttestation); err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_space_participant_revocations (
 			space_id,retry_id,participant_id,version,previous_key_epoch,next_key_epoch,
@@ -1920,6 +1982,87 @@ func (s *SharedSpacesStore) GetParticipantRoster(
 		return sharedspaces.ParticipantRoster{}, err
 	}
 	return roster, nil
+}
+
+// ListSecureRosterAttestations returns the signed membership-history segment a
+// still-active Secure participant needs to bridge a saved roster revision to
+// the current authority record. It intentionally remains unavailable for
+// Private and Managed Spaces and for revoked participants, because historic
+// rosters can identify people who are no longer current members.
+func (s *SharedSpacesStore) ListSecureRosterAttestations(
+	ctx context.Context,
+	credential relay.Credential,
+	afterRevision uint64,
+	limit int,
+	nowMilliseconds int64,
+) (sharedspaces.SecureRosterAttestationPage, error) {
+	if limit < 1 || limit > sharedspaces.MaximumSecureRosterAttestationPageSize {
+		return sharedspaces.SecureRosterAttestationPage{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant,
+			"Secure Shared Space roster authority page size is invalid",
+		)
+	}
+	status, err := s.GetParticipantStatus(ctx, credential, nowMilliseconds)
+	if err != nil {
+		return sharedspaces.SecureRosterAttestationPage{}, err
+	}
+	if status.SecurityMode != sharedspaces.SecurityModeSecure {
+		return sharedspaces.SecureRosterAttestationPage{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRosterUnavailable,
+			"roster authority is available only for Secure Shared Spaces",
+		)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return sharedspaces.SecureRosterAttestationPage{}, fmt.Errorf("begin Shared Space roster authority page: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+		SELECT attestation
+		FROM shared_space_secure_roster_attestations
+		WHERE space_id=$1 AND revision>$2
+		ORDER BY revision
+		LIMIT $3
+	`, status.SpaceID, afterRevision, limit)
+	if err != nil {
+		return sharedspaces.SecureRosterAttestationPage{}, fmt.Errorf("query Shared Space roster authority page: %w", err)
+	}
+	defer rows.Close()
+	page := sharedspaces.SecureRosterAttestationPage{
+		Version: sharedspaces.SchemaVersion, SpaceID: status.SpaceID, DomainID: status.DomainID,
+		Attestations: make([]sharedspaces.SecureRosterAttestation, 0, limit),
+		NextRevision: afterRevision,
+	}
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return sharedspaces.SecureRosterAttestationPage{}, fmt.Errorf("scan Shared Space roster authority page: %w", err)
+		}
+		attestation, err := decodeSecureRosterAttestation(payload)
+		if err != nil {
+			return sharedspaces.SecureRosterAttestationPage{}, fmt.Errorf("decode Shared Space roster authority page: %w", err)
+		}
+		if attestation == nil {
+			return sharedspaces.SecureRosterAttestationPage{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidParticipant,
+				"Shared Space roster authority history contains an empty record",
+			)
+		}
+		page.Attestations = append(page.Attestations, *attestation)
+		page.NextRevision = attestation.Revision
+	}
+	if err := rows.Err(); err != nil {
+		return sharedspaces.SecureRosterAttestationPage{}, fmt.Errorf("iterate Shared Space roster authority page: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.SecureRosterAttestationPage{}, fmt.Errorf("commit Shared Space roster authority page: %w", err)
+	}
+	if err := page.Validate(); err != nil {
+		return sharedspaces.SecureRosterAttestationPage{}, err
+	}
+	return page, nil
 }
 
 func (s *SharedSpacesStore) AuthorizeComputeCapability(

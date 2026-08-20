@@ -19,6 +19,7 @@ type Store interface {
 	GetParticipantBootstrap(context.Context, relay.Credential, int64) (ParticipantBootstrap, error)
 	GetParticipantStatus(context.Context, relay.Credential, int64) (ParticipantStatus, error)
 	GetParticipantRoster(context.Context, relay.Credential, int64) (ParticipantRoster, error)
+	ListSecureRosterAttestations(context.Context, relay.Credential, uint64, int, int64) (SecureRosterAttestationPage, error)
 	UpdateParticipantPresentation(context.Context, relay.Credential, ParticipantPresentationUpdate, int64) (ParticipantPresentationUpdateResult, error)
 	ChangeComputePool(context.Context, relay.AdministrationCredential, ComputePoolChange, int64) (ComputePoolChangeResult, error)
 	AuthorizeComputeCapability(context.Context, relay.Credential, ComputeCapabilityRequest, int64) (ComputeCapabilityAuthorization, error)

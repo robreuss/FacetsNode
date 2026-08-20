@@ -76,7 +76,9 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if err != nil || claimed.Acceptance != relay.AcceptanceAccepted ||
 		claimed.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		claimed.Participant.Role != sharedspaces.RoleParticipant ||
-		claimed.KeyGrant == nil || claimed.KeyGrant.ParticipantID != invitation.ParticipantID {
+		claimed.KeyGrant == nil || claimed.KeyGrant.ParticipantID != invitation.ParticipantID ||
+		claimed.SecureRosterAttestation == nil ||
+		claimed.SecureRosterAttestation.Revision != 2 {
 		t.Fatalf("claim=%+v err=%v", claimed, err)
 	}
 	claimRetry, err := store.ClaimInvitation(ctx, invitationCredential, claim, 1_300)
@@ -236,6 +238,36 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		len(hostRoster.Participants) != 1 ||
 		hostRoster.Participants[0].ParticipantID != provisioning.InitialParticipantID {
 		t.Fatalf("host roster after revocation=%+v err=%v", hostRoster, err)
+	}
+	firstRosterHistoryPage, err := store.ListSecureRosterAttestations(
+		ctx, hostCredential, 0, 2, 1_400,
+	)
+	if err != nil || len(firstRosterHistoryPage.Attestations) != 2 ||
+		firstRosterHistoryPage.NextRevision != 2 ||
+		firstRosterHistoryPage.Attestations[0].Revision != 1 ||
+		firstRosterHistoryPage.Attestations[1].Revision != 2 {
+		t.Fatalf("first Secure roster history page=%+v err=%v", firstRosterHistoryPage, err)
+	}
+	firstRosterDigest, err := firstRosterHistoryPage.Attestations[0].Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRosterHistoryPage.Attestations[1].PreviousDigest != firstRosterDigest {
+		t.Fatalf("Secure roster history predecessor=%q want %q", firstRosterHistoryPage.Attestations[1].PreviousDigest, firstRosterDigest)
+	}
+	secondRosterHistoryPage, err := store.ListSecureRosterAttestations(
+		ctx, hostCredential, firstRosterHistoryPage.NextRevision, 2, 1_400,
+	)
+	if err != nil || len(secondRosterHistoryPage.Attestations) != 1 ||
+		secondRosterHistoryPage.NextRevision != 3 ||
+		secondRosterHistoryPage.Attestations[0].Revision != 3 {
+		t.Fatalf("second Secure roster history page=%+v err=%v", secondRosterHistoryPage, err)
+	}
+	if _, err := store.ListSecureRosterAttestations(ctx, memberCredential, 0, 2, 1_400); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+		t.Fatalf("revoked participant roster history err=%v", err)
+	}
+	if _, err := store.ListSecureRosterAttestations(ctx, hostCredential, 0, 0, 1_400); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("invalid Secure roster history page size err=%v", err)
 	}
 	hostGrant, err := store.GetParticipantKeyGrant(ctx, hostCredential, 1_401)
 	if err != nil || hostGrant.ParticipantID != provisioning.InitialParticipantID ||

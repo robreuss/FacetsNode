@@ -404,6 +404,42 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		participantRoster.Presentations[0].DisplayName != "Ada Lovelace" {
 		t.Fatalf("participant roster=%+v", participantRoster)
 	}
+	participantRosterHistoryPath := spaceRoot + "/participants/" + participantID.String() + "/roster-attestations?limit=1"
+	participantRosterHistoryResponse := performRelayJSON(
+		t, handler, http.MethodGet, participantRosterHistoryPath, nil, memberToken, participantID,
+	)
+	requireStatus(t, participantRosterHistoryResponse, http.StatusOK)
+	var participantRosterHistory sharedspaces.SecureRosterAttestationPage
+	if err := json.NewDecoder(participantRosterHistoryResponse.Body).Decode(&participantRosterHistory); err != nil {
+		t.Fatal(err)
+	}
+	_ = participantRosterHistoryResponse.Body.Close()
+	if participantRosterHistory.SpaceID != spaceID || participantRosterHistory.DomainID != domainID ||
+		len(participantRosterHistory.Attestations) != 1 ||
+		participantRosterHistory.Attestations[0].Revision != 1 ||
+		participantRosterHistory.NextRevision != 1 {
+		t.Fatalf("first participant roster history=%+v", participantRosterHistory)
+	}
+	participantRosterHistoryResumePath := spaceRoot + "/participants/" + participantID.String() + "/roster-attestations?afterRevision=1&limit=1"
+	participantRosterHistoryResumeResponse := performRelayJSON(
+		t, handler, http.MethodGet, participantRosterHistoryResumePath, nil, memberToken, participantID,
+	)
+	requireStatus(t, participantRosterHistoryResumeResponse, http.StatusOK)
+	var participantRosterHistoryResume sharedspaces.SecureRosterAttestationPage
+	if err := json.NewDecoder(participantRosterHistoryResumeResponse.Body).Decode(&participantRosterHistoryResume); err != nil {
+		t.Fatal(err)
+	}
+	_ = participantRosterHistoryResumeResponse.Body.Close()
+	firstRosterHistoryDigest, err := participantRosterHistory.Attestations[0].Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(participantRosterHistoryResume.Attestations) != 1 ||
+		participantRosterHistoryResume.Attestations[0].Revision != 2 ||
+		participantRosterHistoryResume.Attestations[0].PreviousDigest != firstRosterHistoryDigest ||
+		participantRosterHistoryResume.NextRevision != 2 {
+		t.Fatalf("resumed participant roster history=%+v", participantRosterHistoryResume)
+	}
 	participantBootstrapPath := spaceRoot + "/participants/" + participantID.String() + "/bootstrap"
 	participantBootstrapResponse := performRelayJSON(
 		t, handler, http.MethodGet, participantBootstrapPath, nil, memberToken, participantID,
