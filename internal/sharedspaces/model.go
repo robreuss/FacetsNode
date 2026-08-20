@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
+	"reflect"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -290,17 +291,18 @@ func (r Role) Capabilities(mode InteractionMode) []relay.Capability {
 }
 
 type SpaceProvisioning struct {
-	Version                      int                      `json:"version"`
-	RetryID                      uuid.UUID                `json:"retryID"`
-	SpaceID                      uuid.UUID                `json:"spaceID"`
-	SecurityMode                 SecurityMode             `json:"securityMode"`
-	InteractionMode              InteractionMode          `json:"interactionMode"`
-	InitialParticipantID         uuid.UUID                `json:"initialParticipantID"`
-	InitialParticipantKind       ParticipantKind          `json:"initialParticipantKind"`
-	InitialParticipantSigningKey ParticipantSigningKey    `json:"initialParticipantSigningKey"`
-	Tenant                       relay.TenantRegistration `json:"tenant"`
-	Domain                       relay.DomainProvisioning `json:"-"`
-	CreatedAtMilliseconds        int64                    `json:"createdAtMilliseconds"`
+	Version                        int                      `json:"version"`
+	RetryID                        uuid.UUID                `json:"retryID"`
+	SpaceID                        uuid.UUID                `json:"spaceID"`
+	SecurityMode                   SecurityMode             `json:"securityMode"`
+	InteractionMode                InteractionMode          `json:"interactionMode"`
+	InitialParticipantID           uuid.UUID                `json:"initialParticipantID"`
+	InitialParticipantKind         ParticipantKind          `json:"initialParticipantKind"`
+	InitialParticipantSigningKey   ParticipantSigningKey    `json:"initialParticipantSigningKey"`
+	InitialSecureRosterAttestation *SecureRosterAttestation `json:"initialSecureRosterAttestation,omitempty"`
+	Tenant                         relay.TenantRegistration `json:"tenant"`
+	Domain                         relay.DomainProvisioning `json:"-"`
+	CreatedAtMilliseconds          int64                    `json:"createdAtMilliseconds"`
 }
 
 func (p SpaceProvisioning) Validate() error {
@@ -317,6 +319,22 @@ func (p SpaceProvisioning) Validate() error {
 	}
 	if err := p.InitialParticipantSigningKey.Validate(); err != nil {
 		return err
+	}
+	if p.SecurityMode == SecurityModeSecure {
+		if p.InitialSecureRosterAttestation == nil {
+			return NewProtocolError(CodeInvalidSpace, "Secure Shared Space provisioning is missing its initial roster attestation")
+		}
+		host := Participant{
+			Version: SchemaVersion, SpaceID: p.SpaceID, ParticipantID: p.InitialParticipantID,
+			SubscriptionID: p.Domain.Subscription.SubscriptionID, Kind: p.InitialParticipantKind,
+			Role: RoleHost, SigningKey: p.InitialParticipantSigningKey,
+			CreatedAtMilliseconds: p.CreatedAtMilliseconds,
+		}
+		if err := p.InitialSecureRosterAttestation.ValidateInitial(host); err != nil {
+			return err
+		}
+	} else if p.InitialSecureRosterAttestation != nil {
+		return NewProtocolError(CodeInvalidSpace, "only Secure Shared Space provisioning may carry a roster attestation")
 	}
 	if p.SpaceID != p.Tenant.TenantID ||
 		p.SpaceID != p.Domain.Registration.TenantID ||
@@ -427,19 +445,20 @@ type SpaceProvisioningResult struct {
 }
 
 type Invitation struct {
-	Version               int                   `json:"version"`
-	RetryID               uuid.UUID             `json:"retryID"`
-	SpaceID               uuid.UUID             `json:"spaceID"`
-	InvitationID          uuid.UUID             `json:"invitationID"`
-	ParticipantID         uuid.UUID             `json:"participantID"`
-	SubscriptionID        uuid.UUID             `json:"subscriptionID"`
-	Kind                  ParticipantKind       `json:"kind"`
-	Role                  Role                  `json:"role"`
-	InteractionMode       InteractionMode       `json:"interactionMode"`
-	ParticipantSigningKey ParticipantSigningKey `json:"participantSigningKey"`
-	KeyGrant              *ParticipantKeyGrant  `json:"keyGrant,omitempty"`
-	RelayAdmission        relay.MemberAdmission `json:"relayAdmission"`
-	CreatedAtMilliseconds int64                 `json:"createdAtMilliseconds"`
+	Version                           int                      `json:"version"`
+	RetryID                           uuid.UUID                `json:"retryID"`
+	SpaceID                           uuid.UUID                `json:"spaceID"`
+	InvitationID                      uuid.UUID                `json:"invitationID"`
+	ParticipantID                     uuid.UUID                `json:"participantID"`
+	SubscriptionID                    uuid.UUID                `json:"subscriptionID"`
+	Kind                              ParticipantKind          `json:"kind"`
+	Role                              Role                     `json:"role"`
+	InteractionMode                   InteractionMode          `json:"interactionMode"`
+	ParticipantSigningKey             ParticipantSigningKey    `json:"participantSigningKey"`
+	KeyGrant                          *ParticipantKeyGrant     `json:"keyGrant,omitempty"`
+	ActivationSecureRosterAttestation *SecureRosterAttestation `json:"activationSecureRosterAttestation,omitempty"`
+	RelayAdmission                    relay.MemberAdmission    `json:"relayAdmission"`
+	CreatedAtMilliseconds             int64                    `json:"createdAtMilliseconds"`
 }
 
 func (i Invitation) Validate() error {
@@ -458,6 +477,9 @@ func (i Invitation) Validate() error {
 		if err := i.KeyGrant.Validate(); err != nil {
 			return err
 		}
+	}
+	if i.ActivationSecureRosterAttestation != nil && i.ActivationSecureRosterAttestation.SpaceID != i.SpaceID {
+		return NewProtocolError(CodeWrongScope, "Shared Space invitation roster attestation belongs to another Space")
 	}
 	if i.SpaceID != i.RelayAdmission.TenantID || i.InvitationID != i.RelayAdmission.AdmissionID ||
 		i.CreatedAtMilliseconds != i.RelayAdmission.CreatedAtMilliseconds ||
@@ -494,6 +516,191 @@ type ParticipantKeyGrantSignature struct {
 	PublicSigningKeyX963  string `json:"publicSigningKeyX963"`
 	SigningKeyFingerprint string `json:"signingKeyFingerprint"`
 	Signature             string `json:"signature"`
+}
+
+// SecureRosterAttestation is the client-signed, hash-linked authority view for
+// a Secure Shared Space. It contains only public membership authority: active
+// participants, their public signing identities, roles, and the current
+// content-key epoch. It deliberately excludes content, wrapped keys, relay
+// credentials, invitation records, and recognition metadata.
+//
+// The first record is signed by the initial host. Each later record names the
+// digest of its predecessor and is signed by an active host or moderator from
+// that predecessor. A client can therefore detect a server-substituted roster
+// or an equivocated transition after it has observed a prior attestation.
+type SecureRosterAttestation struct {
+	Version               int                          `json:"version"`
+	SpaceID               uuid.UUID                    `json:"spaceID"`
+	DomainID              uuid.UUID                    `json:"domainID"`
+	Revision              uint64                       `json:"revision"`
+	PreviousDigest        string                       `json:"previousDigest,omitempty"`
+	CurrentKeyEpoch       uint64                       `json:"currentKeyEpoch"`
+	Participants          []Participant                `json:"participants"`
+	IssuerParticipantID   uuid.UUID                    `json:"issuerParticipantID"`
+	CreatedAtMilliseconds int64                        `json:"createdAtMilliseconds"`
+	Signature             ParticipantKeyGrantSignature `json:"signature"`
+}
+
+type secureRosterAttestationSigningFields struct {
+	Version               int           `json:"version"`
+	SpaceID               uuid.UUID     `json:"spaceID"`
+	DomainID              uuid.UUID     `json:"domainID"`
+	Revision              uint64        `json:"revision"`
+	PreviousDigest        string        `json:"previousDigest,omitempty"`
+	CurrentKeyEpoch       uint64        `json:"currentKeyEpoch"`
+	Participants          []Participant `json:"participants"`
+	IssuerParticipantID   uuid.UUID     `json:"issuerParticipantID"`
+	CreatedAtMilliseconds int64         `json:"createdAtMilliseconds"`
+}
+
+func (a SecureRosterAttestation) signingPayload() ([]byte, error) {
+	return json.Marshal(secureRosterAttestationSigningFields{
+		Version: a.Version, SpaceID: a.SpaceID, DomainID: a.DomainID,
+		Revision: a.Revision, PreviousDigest: a.PreviousDigest,
+		CurrentKeyEpoch: a.CurrentKeyEpoch, Participants: a.Participants,
+		IssuerParticipantID:   a.IssuerParticipantID,
+		CreatedAtMilliseconds: a.CreatedAtMilliseconds,
+	})
+}
+
+// SigningPayload returns the canonical bytes covered by Signature. Swift
+// clients must use this representation rather than a map encoding so secure
+// roster authority is portable across implementations.
+func (a SecureRosterAttestation) SigningPayload() ([]byte, error) {
+	return a.signingPayload()
+}
+
+// Digest is the predecessor reference used by a successor attestation. It
+// includes the signature, so changing either authority data or its signer
+// changes the chain.
+func (a SecureRosterAttestation) Digest() (string, error) {
+	encoded, err := json.Marshal(a)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func (a SecureRosterAttestation) Validate() error {
+	if a.Version != SchemaVersion || a.SpaceID == uuid.Nil || a.DomainID == uuid.Nil ||
+		a.Revision == 0 || a.CurrentKeyEpoch == 0 || a.IssuerParticipantID == uuid.Nil ||
+		a.CreatedAtMilliseconds < 0 ||
+		(a.Revision == 1 && a.PreviousDigest != "") ||
+		(a.Revision > 1 && !validFingerprint(a.PreviousDigest)) {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation fields are invalid")
+	}
+	participantIDs := make(map[uuid.UUID]struct{}, len(a.Participants))
+	for index, participant := range a.Participants {
+		if err := participant.Validate(); err != nil {
+			return err
+		}
+		if participant.SpaceID != a.SpaceID || participant.RevokedAtMilliseconds != nil ||
+			(index > 0 && a.Participants[index-1].ParticipantID.String() >= participant.ParticipantID.String()) {
+			return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation participants are invalid")
+		}
+		if _, found := participantIDs[participant.ParticipantID]; found {
+			return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation contains duplicate participants")
+		}
+		participantIDs[participant.ParticipantID] = struct{}{}
+	}
+	if _, found := participantIDs[a.IssuerParticipantID]; !found ||
+		a.Signature.Algorithm != ParticipantKeyGrantSignatureAlgorithm ||
+		!validFingerprint(a.Signature.SigningKeyFingerprint) ||
+		!validBase64URLSize(a.Signature.PublicSigningKeyX963, 65, 65) ||
+		!validBase64URLSize(a.Signature.Signature, 64, 64) {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation issuer or signature is invalid")
+	}
+	publicKeyBytes, _ := base64.RawURLEncoding.Strict().DecodeString(a.Signature.PublicSigningKeyX963)
+	fingerprint := sha256.Sum256(publicKeyBytes)
+	if hex.EncodeToString(fingerprint[:]) != a.Signature.SigningKeyFingerprint {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation signing-key fingerprint differs")
+	}
+	x, y := elliptic.Unmarshal(elliptic.P256(), publicKeyBytes)
+	if x == nil || y == nil {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation signing key is invalid")
+	}
+	payload, err := a.signingPayload()
+	if err != nil {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation cannot be encoded")
+	}
+	signatureBytes, _ := base64.RawURLEncoding.Strict().DecodeString(a.Signature.Signature)
+	digest := sha256.Sum256(payload)
+	if !ecdsa.Verify(
+		&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, digest[:],
+		new(big.Int).SetBytes(signatureBytes[:32]), new(big.Int).SetBytes(signatureBytes[32:]),
+	) {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation signature is invalid")
+	}
+	return nil
+}
+
+// ValidateInitial verifies the first authority record against the initial host
+// pinned in the provisioning record.
+func (a SecureRosterAttestation) ValidateInitial(host Participant) error {
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	if a.Revision != 1 || a.PreviousDigest != "" || a.CurrentKeyEpoch != InitialKeyEpoch ||
+		a.IssuerParticipantID != host.ParticipantID || host.Role != RoleHost ||
+		!host.SigningKey.MatchesGrantSignature(a.Signature) || len(a.Participants) != 1 ||
+		a.Participants[0] != host {
+		return NewProtocolError(CodeUnauthorized, "Secure Shared Space initial roster attestation is not bound to its host")
+	}
+	return nil
+}
+
+// ValidateSuccessor verifies that the new roster is the immediate signed
+// successor to previous and that its issuer was authorized in that prior
+// roster. expectedParticipants is the exact active authority state the server
+// is about to persist; the server cannot silently add, remove, or retitle a
+// participant while retaining a valid client attestation.
+func (a SecureRosterAttestation) ValidateSuccessor(
+	previous SecureRosterAttestation,
+	expectedParticipants []Participant,
+	expectedKeyEpoch uint64,
+) error {
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	if err := previous.Validate(); err != nil {
+		return err
+	}
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space prior roster attestation cannot be encoded")
+	}
+	if a.SpaceID != previous.SpaceID || a.DomainID != previous.DomainID ||
+		a.Revision != previous.Revision+1 || a.PreviousDigest != previousDigest ||
+		a.CurrentKeyEpoch != expectedKeyEpoch ||
+		!sameParticipants(a.Participants, expectedParticipants) {
+		return NewProtocolError(CodeWrongScope, "Secure Shared Space roster attestation transition differs from authority state")
+	}
+	var issuer *Participant
+	for index := range previous.Participants {
+		candidate := &previous.Participants[index]
+		if candidate.ParticipantID == a.IssuerParticipantID {
+			issuer = candidate
+			break
+		}
+	}
+	if issuer == nil || (issuer.Role != RoleHost && issuer.Role != RoleModerator) ||
+		!issuer.SigningKey.MatchesGrantSignature(a.Signature) {
+		return NewProtocolError(CodeUnauthorized, "Secure Shared Space roster attestation issuer is not an authorized prior member")
+	}
+	return nil
+}
+
+func sameParticipants(left, right []Participant) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 type participantKeyGrantSigningFields struct {
@@ -705,13 +912,14 @@ type InvitationList struct {
 }
 
 type ParticipantRevocation struct {
-	Version          int                   `json:"version"`
-	RetryID          uuid.UUID             `json:"retryID"`
-	SpaceID          uuid.UUID             `json:"spaceID"`
-	ParticipantID    uuid.UUID             `json:"participantID"`
-	PreviousKeyEpoch uint64                `json:"previousKeyEpoch"`
-	NextKeyEpoch     uint64                `json:"nextKeyEpoch"`
-	KeyGrants        []ParticipantKeyGrant `json:"keyGrants,omitempty"`
+	Version                 int                      `json:"version"`
+	RetryID                 uuid.UUID                `json:"retryID"`
+	SpaceID                 uuid.UUID                `json:"spaceID"`
+	ParticipantID           uuid.UUID                `json:"participantID"`
+	PreviousKeyEpoch        uint64                   `json:"previousKeyEpoch"`
+	NextKeyEpoch            uint64                   `json:"nextKeyEpoch"`
+	KeyGrants               []ParticipantKeyGrant    `json:"keyGrants,omitempty"`
+	SecureRosterAttestation *SecureRosterAttestation `json:"secureRosterAttestation,omitempty"`
 }
 
 func (r ParticipantRevocation) Validate() error {
@@ -808,7 +1016,8 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 func (r ParticipantRevocation) Equivalent(other ParticipantRevocation) bool {
 	if r.Version != other.Version || r.RetryID != other.RetryID || r.SpaceID != other.SpaceID ||
 		r.ParticipantID != other.ParticipantID || r.PreviousKeyEpoch != other.PreviousKeyEpoch ||
-		r.NextKeyEpoch != other.NextKeyEpoch || len(r.KeyGrants) != len(other.KeyGrants) {
+		r.NextKeyEpoch != other.NextKeyEpoch || len(r.KeyGrants) != len(other.KeyGrants) ||
+		!sameOptionalSecureRosterAttestation(r.SecureRosterAttestation, other.SecureRosterAttestation) {
 		return false
 	}
 	grants := make(map[uuid.UUID]ParticipantKeyGrant, len(r.KeyGrants))
@@ -824,6 +1033,13 @@ func (r ParticipantRevocation) Equivalent(other ParticipantRevocation) bool {
 		}
 	}
 	return true
+}
+
+func sameOptionalSecureRosterAttestation(left, right *SecureRosterAttestation) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return reflect.DeepEqual(*left, *right)
 }
 
 type ParticipantRevocationResult struct {
@@ -882,14 +1098,16 @@ type ParticipantRoster struct {
 	// that active membership or role state changed, without the service
 	// disclosing historical authority events or revoked participants.
 	AuthoritySequence     uint64                    `json:"authoritySequence"`
+	CurrentKeyEpoch       uint64                    `json:"currentKeyEpoch"`
 	Participants          []Participant             `json:"participants"`
 	Presentations         []ParticipantPresentation `json:"presentations"`
+	AuthorityAttestation  SecureRosterAttestation   `json:"authorityAttestation"`
 	CreatedAtMilliseconds int64                     `json:"createdAtMilliseconds"`
 }
 
 func (r ParticipantRoster) Validate() error {
 	if r.Version != SchemaVersion || r.SpaceID == uuid.Nil || r.DomainID == uuid.Nil ||
-		r.SecurityMode != SecurityModeSecure || r.AuthoritySequence == 0 ||
+		r.SecurityMode != SecurityModeSecure || r.AuthoritySequence == 0 || r.CurrentKeyEpoch == 0 ||
 		r.CreatedAtMilliseconds < 0 {
 		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant roster fields are invalid")
 	}
@@ -918,6 +1136,14 @@ func (r ParticipantRoster) Validate() error {
 			(index > 0 && r.Presentations[index-1].ParticipantID.String() >= presentation.ParticipantID.String()) {
 			return NewProtocolError(CodeInvalidParticipantPresentation, "Shared Space participant roster presentation is invalid")
 		}
+	}
+	if err := r.AuthorityAttestation.Validate(); err != nil {
+		return err
+	}
+	if r.AuthorityAttestation.SpaceID != r.SpaceID || r.AuthorityAttestation.DomainID != r.DomainID ||
+		r.AuthorityAttestation.CurrentKeyEpoch != r.CurrentKeyEpoch ||
+		!sameParticipants(r.AuthorityAttestation.Participants, r.Participants) {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant roster authority attestation differs from roster state")
 	}
 	return nil
 }
@@ -1019,13 +1245,14 @@ func (b ParticipantBootstrap) Validate() error {
 }
 
 type ParticipantRoleChange struct {
-	Version               int       `json:"version"`
-	RetryID               uuid.UUID `json:"retryID"`
-	SpaceID               uuid.UUID `json:"spaceID"`
-	ParticipantID         uuid.UUID `json:"participantID"`
-	PreviousRole          Role      `json:"previousRole"`
-	NextRole              Role      `json:"nextRole"`
-	ChangedAtMilliseconds int64     `json:"changedAtMilliseconds"`
+	Version                 int                      `json:"version"`
+	RetryID                 uuid.UUID                `json:"retryID"`
+	SpaceID                 uuid.UUID                `json:"spaceID"`
+	ParticipantID           uuid.UUID                `json:"participantID"`
+	PreviousRole            Role                     `json:"previousRole"`
+	NextRole                Role                     `json:"nextRole"`
+	ChangedAtMilliseconds   int64                    `json:"changedAtMilliseconds"`
+	SecureRosterAttestation *SecureRosterAttestation `json:"secureRosterAttestation,omitempty"`
 }
 
 func (c ParticipantRoleChange) Validate() error {

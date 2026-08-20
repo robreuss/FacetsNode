@@ -12,15 +12,16 @@ import (
 )
 
 type sharedSpaceProvisioningInput struct {
-	Version                      int                                `json:"version"`
-	RetryID                      uuid.UUID                          `json:"retryID"`
-	SpaceID                      uuid.UUID                          `json:"spaceID"`
-	SecurityMode                 sharedspaces.SecurityMode          `json:"securityMode"`
-	InteractionMode              sharedspaces.InteractionMode       `json:"interactionMode"`
-	InitialParticipantID         uuid.UUID                          `json:"initialParticipantID"`
-	InitialParticipantKind       sharedspaces.ParticipantKind       `json:"initialParticipantKind"`
-	InitialParticipantSigningKey sharedspaces.ParticipantSigningKey `json:"initialParticipantSigningKey"`
-	TenantProvisioning           relayTenantProvisioningInput       `json:"tenantProvisioning"`
+	Version                        int                                   `json:"version"`
+	RetryID                        uuid.UUID                             `json:"retryID"`
+	SpaceID                        uuid.UUID                             `json:"spaceID"`
+	SecurityMode                   sharedspaces.SecurityMode             `json:"securityMode"`
+	InteractionMode                sharedspaces.InteractionMode          `json:"interactionMode"`
+	InitialParticipantID           uuid.UUID                             `json:"initialParticipantID"`
+	InitialParticipantKind         sharedspaces.ParticipantKind          `json:"initialParticipantKind"`
+	InitialParticipantSigningKey   sharedspaces.ParticipantSigningKey    `json:"initialParticipantSigningKey"`
+	InitialSecureRosterAttestation *sharedspaces.SecureRosterAttestation `json:"initialSecureRosterAttestation,omitempty"`
+	TenantProvisioning             relayTenantProvisioningInput          `json:"tenantProvisioning"`
 }
 
 type sharedSpaceInvitationCredential struct {
@@ -29,19 +30,20 @@ type sharedSpaceInvitationCredential struct {
 }
 
 type sharedSpaceInvitationCreateInput struct {
-	Version                     int                                `json:"version"`
-	RetryID                     uuid.UUID                          `json:"retryID"`
-	ParticipantID               uuid.UUID                          `json:"participantID"`
-	SubscriptionID              uuid.UUID                          `json:"subscriptionID"`
-	Kind                        sharedspaces.ParticipantKind       `json:"kind"`
-	Role                        sharedspaces.Role                  `json:"role"`
-	InteractionMode             sharedspaces.InteractionMode       `json:"interactionMode"`
-	ParticipantSigningKey       sharedspaces.ParticipantSigningKey `json:"participantSigningKey"`
-	KeyGrant                    *sharedspaces.ParticipantKeyGrant  `json:"keyGrant,omitempty"`
-	InvitationCredential        sharedSpaceInvitationCredential    `json:"invitationCredential"`
-	ExpiresAtMilliseconds       int64                              `json:"expiresAtMilliseconds"`
-	MemberExpiresAtMilliseconds *int64                             `json:"memberExpiresAtMilliseconds,omitempty"`
-	CreatedAtMilliseconds       int64                              `json:"createdAtMilliseconds"`
+	Version                           int                                   `json:"version"`
+	RetryID                           uuid.UUID                             `json:"retryID"`
+	ParticipantID                     uuid.UUID                             `json:"participantID"`
+	SubscriptionID                    uuid.UUID                             `json:"subscriptionID"`
+	Kind                              sharedspaces.ParticipantKind          `json:"kind"`
+	Role                              sharedspaces.Role                     `json:"role"`
+	InteractionMode                   sharedspaces.InteractionMode          `json:"interactionMode"`
+	ParticipantSigningKey             sharedspaces.ParticipantSigningKey    `json:"participantSigningKey"`
+	KeyGrant                          *sharedspaces.ParticipantKeyGrant     `json:"keyGrant,omitempty"`
+	ActivationSecureRosterAttestation *sharedspaces.SecureRosterAttestation `json:"activationSecureRosterAttestation,omitempty"`
+	InvitationCredential              sharedSpaceInvitationCredential       `json:"invitationCredential"`
+	ExpiresAtMilliseconds             int64                                 `json:"expiresAtMilliseconds"`
+	MemberExpiresAtMilliseconds       *int64                                `json:"memberExpiresAtMilliseconds,omitempty"`
+	CreatedAtMilliseconds             int64                                 `json:"createdAtMilliseconds"`
 }
 
 type sharedSpaceInvitationClaimInput struct {
@@ -75,11 +77,12 @@ func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request 
 	provisioning := sharedspaces.SpaceProvisioning{
 		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
 		SpaceID: input.SpaceID, SecurityMode: input.SecurityMode,
-		InteractionMode:              input.InteractionMode,
-		InitialParticipantID:         input.InitialParticipantID,
-		InitialParticipantKind:       input.InitialParticipantKind,
-		InitialParticipantSigningKey: input.InitialParticipantSigningKey,
-		Tenant:                       tenant, Domain: domain,
+		InteractionMode:                input.InteractionMode,
+		InitialParticipantID:           input.InitialParticipantID,
+		InitialParticipantKind:         input.InitialParticipantKind,
+		InitialParticipantSigningKey:   input.InitialParticipantSigningKey,
+		InitialSecureRosterAttestation: input.InitialSecureRosterAttestation,
+		Tenant:                         tenant, Domain: domain,
 		CreatedAtMilliseconds: tenant.CreatedAtMilliseconds,
 	}
 	result, err := s.sharedSpacesStore.ProvisionSpace(
@@ -297,8 +300,9 @@ func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, r
 		SpaceID: spaceID, InvitationID: invitationCredential.AdmissionID,
 		ParticipantID: input.ParticipantID, SubscriptionID: input.SubscriptionID,
 		Kind: input.Kind, Role: input.Role, InteractionMode: input.InteractionMode,
-		ParticipantSigningKey: input.ParticipantSigningKey,
-		KeyGrant:              input.KeyGrant,
+		ParticipantSigningKey:             input.ParticipantSigningKey,
+		KeyGrant:                          input.KeyGrant,
+		ActivationSecureRosterAttestation: input.ActivationSecureRosterAttestation,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: spaceID, DomainID: domainID,
 			AdmissionID:                 invitationCredential.AdmissionID,

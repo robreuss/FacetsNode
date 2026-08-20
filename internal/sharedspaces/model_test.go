@@ -18,6 +18,7 @@ func TestSecurityModeIsFixedToSupportedValues(t *testing.T) {
 		t.Fatalf("Secure provisioning: %v", err)
 	}
 	provisioning.SecurityMode = sharedspaces.SecurityModePrivate
+	provisioning.InitialSecureRosterAttestation = nil
 	if err := provisioning.Validate(); err != nil {
 		t.Fatalf("Private provisioning: %v", err)
 	}

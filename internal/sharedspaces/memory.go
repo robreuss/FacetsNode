@@ -14,22 +14,24 @@ import (
 )
 
 type memorySpace struct {
-	provisioning          SpaceProvisioning
-	result                relay.TenantProvisioningResult
-	participants          map[uuid.UUID]Participant
-	presentations         map[uuid.UUID]ParticipantPresentation
-	keyGrants             map[uint64]map[uuid.UUID]ParticipantKeyGrant
-	managedContentKeys    map[uint64][]byte
-	computePools          map[uuid.UUID]ComputePool
-	computeBindings       map[uuid.UUID]SpaceComputeBinding
-	keyEpoch              uint64
-	activeCheckpointEpoch uint64
+	provisioning            SpaceProvisioning
+	result                  relay.TenantProvisioningResult
+	participants            map[uuid.UUID]Participant
+	secureRosterAttestation *SecureRosterAttestation
+	presentations           map[uuid.UUID]ParticipantPresentation
+	keyGrants               map[uint64]map[uuid.UUID]ParticipantKeyGrant
+	managedContentKeys      map[uint64][]byte
+	computePools            map[uuid.UUID]ComputePool
+	computeBindings         map[uuid.UUID]SpaceComputeBinding
+	keyEpoch                uint64
+	activeCheckpointEpoch   uint64
 }
 
 type memoryInvitation struct {
-	invitation   Invitation
-	result       *InvitationClaimResult
-	cancellation *InvitationCancellationResult
+	invitation            Invitation
+	result                *InvitationClaimResult
+	cancellation          *InvitationCancellationResult
+	claimedAtMilliseconds *int64
 }
 
 type MemoryStore struct {
@@ -143,6 +145,10 @@ func (s *MemoryStore) ProvisionSpace(
 		computeBindings:    make(map[uuid.UUID]SpaceComputeBinding),
 		keyEpoch:           InitialKeyEpoch,
 	}
+	if provisioning.InitialSecureRosterAttestation != nil {
+		attestation := *provisioning.InitialSecureRosterAttestation
+		space.secureRosterAttestation = &attestation
+	}
 	if managedWrappedKey != nil {
 		space.managedContentKeys[InitialKeyEpoch] = managedWrappedKey
 	}
@@ -168,6 +174,101 @@ func spaceProvisioningResult(space *memorySpace, acceptance relay.Acceptance) Sp
 		CurrentKeyEpoch:    space.keyEpoch,
 		InitialParticipant: initial, Relay: space.result,
 	}
+}
+
+func activeMemoryParticipants(space *memorySpace) []Participant {
+	participants := make([]Participant, 0, len(space.participants))
+	for _, participant := range space.participants {
+		if participant.RevokedAtMilliseconds == nil {
+			participants = append(participants, participant)
+		}
+	}
+	sort.Slice(participants, func(left, right int) bool {
+		return participants[left].ParticipantID.String() < participants[right].ParticipantID.String()
+	})
+	return participants
+}
+
+func participantFromInvitation(invitation Invitation) Participant {
+	return Participant{
+		Version: SchemaVersion, SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, SubscriptionID: invitation.SubscriptionID,
+		Kind: invitation.Kind, Role: invitation.Role,
+		SigningKey: invitation.ParticipantSigningKey,
+		// The Secure roster authority record is signed before the relay claim.
+		// Its creation time is therefore the invitation's durable authority time,
+		// not the later transport-delivery time of a claim.
+		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
+	}
+}
+
+func participantCreationTime(space *memorySpace, invitation Invitation, nowMilliseconds int64) int64 {
+	if space.provisioning.SecurityMode == SecurityModeSecure {
+		return invitation.CreatedAtMilliseconds
+	}
+	return nowMilliseconds
+}
+
+func validateInvitationRosterAttestation(space *memorySpace, invitation Invitation) error {
+	if space.provisioning.SecurityMode != SecurityModeSecure {
+		if invitation.ActivationSecureRosterAttestation != nil {
+			return NewProtocolError(CodeInvalidInvitation, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if space.secureRosterAttestation == nil || invitation.ActivationSecureRosterAttestation == nil {
+		return NewProtocolError(CodeInvalidInvitation, "Secure Shared Space invitation is missing its roster authority attestation")
+	}
+	expected := append(activeMemoryParticipants(space), participantFromInvitation(invitation))
+	sort.Slice(expected, func(left, right int) bool {
+		return expected[left].ParticipantID.String() < expected[right].ParticipantID.String()
+	})
+	return invitation.ActivationSecureRosterAttestation.ValidateSuccessor(
+		*space.secureRosterAttestation, expected, space.keyEpoch,
+	)
+}
+
+func validateRoleChangeRosterAttestation(space *memorySpace, change ParticipantRoleChange) error {
+	if space.provisioning.SecurityMode != SecurityModeSecure {
+		if change.SecureRosterAttestation != nil {
+			return NewProtocolError(CodeInvalidParticipant, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if space.secureRosterAttestation == nil || change.SecureRosterAttestation == nil {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space role change is missing its roster authority attestation")
+	}
+	expected := activeMemoryParticipants(space)
+	for index := range expected {
+		if expected[index].ParticipantID == change.ParticipantID {
+			expected[index].Role = change.NextRole
+			break
+		}
+	}
+	return change.SecureRosterAttestation.ValidateSuccessor(
+		*space.secureRosterAttestation, expected, space.keyEpoch,
+	)
+}
+
+func validateRevocationRosterAttestation(space *memorySpace, revocation ParticipantRevocation) error {
+	if space.provisioning.SecurityMode != SecurityModeSecure {
+		if revocation.SecureRosterAttestation != nil {
+			return NewProtocolError(CodeInvalidParticipant, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if space.secureRosterAttestation == nil || revocation.SecureRosterAttestation == nil {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space revocation is missing its roster authority attestation")
+	}
+	expected := make([]Participant, 0, len(space.participants)-1)
+	for _, participant := range activeMemoryParticipants(space) {
+		if participant.ParticipantID != revocation.ParticipantID {
+			expected = append(expected, participant)
+		}
+	}
+	return revocation.SecureRosterAttestation.ValidateSuccessor(
+		*space.secureRosterAttestation, expected, revocation.NextKeyEpoch,
+	)
 }
 
 func (s *MemoryStore) CreateInvitation(
@@ -234,6 +335,9 @@ func (s *MemoryStore) CreateInvitation(
 				"participant key grant signature is not bound to its issuer",
 			)
 		}
+	}
+	if err := validateInvitationRosterAttestation(space, invitation); err != nil {
+		return InvitationCreateResult{}, err
 	}
 	if participant, found := space.participants[invitation.ParticipantID]; found && participant.RevokedAtMilliseconds == nil {
 		return InvitationCreateResult{}, NewProtocolError(CodeParticipantCollision, "participant is already active")
@@ -306,6 +410,9 @@ func (s *MemoryStore) ClaimInvitation(
 	if err := record.invitation.ValidateKeyGrant(space.provisioning.SecurityMode, space.keyEpoch); err != nil {
 		return InvitationClaimResult{}, err
 	}
+	if err := validateInvitationRosterAttestation(space, record.invitation); err != nil {
+		return InvitationClaimResult{}, err
+	}
 	relayResult, err := s.relay.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{
 		TenantID: credential.SpaceID, DomainID: credential.DomainID,
 		AdmissionID: credential.InvitationID, Token: credential.Token,
@@ -316,10 +423,14 @@ func (s *MemoryStore) ClaimInvitation(
 	participant := Participant{
 		Version: SchemaVersion, SpaceID: claim.SpaceID, ParticipantID: claim.ParticipantID,
 		SubscriptionID: record.invitation.SubscriptionID, Kind: record.invitation.Kind,
-		Role: record.invitation.Role, CreatedAtMilliseconds: nowMilliseconds,
+		Role: record.invitation.Role, CreatedAtMilliseconds: participantCreationTime(space, record.invitation, nowMilliseconds),
 		SigningKey: record.invitation.ParticipantSigningKey,
 	}
 	space.participants[participant.ParticipantID] = participant
+	if record.invitation.ActivationSecureRosterAttestation != nil {
+		attestation := *record.invitation.ActivationSecureRosterAttestation
+		space.secureRosterAttestation = &attestation
+	}
 	if record.invitation.KeyGrant != nil {
 		if space.keyGrants[space.keyEpoch] == nil {
 			space.keyGrants[space.keyEpoch] = make(map[uuid.UUID]ParticipantKeyGrant)
@@ -331,6 +442,8 @@ func (s *MemoryStore) ClaimInvitation(
 		KeyGrant: record.invitation.KeyGrant, Participant: participant, Member: relayResult.Member,
 	}
 	record.result = &result
+	claimedAtMilliseconds := claim.ClaimedAtMilliseconds
+	record.claimedAtMilliseconds = &claimedAtMilliseconds
 	s.invitations[credential.InvitationID] = record
 	s.appendAuthorityEvent(AuthorityEvent{
 		EventID: credential.InvitationID, SpaceID: claim.SpaceID,
@@ -444,6 +557,9 @@ func (s *MemoryStore) ListInvitations(
 		if record.result != nil {
 			state = InvitationClaimed
 			value := record.result.Participant.CreatedAtMilliseconds
+			if record.claimedAtMilliseconds != nil {
+				value = *record.claimedAtMilliseconds
+			}
 			claimedAt = &value
 		} else if record.cancellation != nil {
 			state = InvitationCancelled
@@ -758,6 +874,9 @@ func (s *MemoryStore) ChangeParticipantRole(
 			CodeParticipantRoleCollision, "participant role changed concurrently",
 		)
 	}
+	if err := validateRoleChangeRosterAttestation(space, change); err != nil {
+		return ParticipantRoleChangeResult{}, err
+	}
 	relayResult, err := s.relay.ChangeMemberCapabilities(ctx, credential, relay.MemberCapabilityChange{
 		Version: relay.SchemaVersion, RetryID: change.RetryID, MemberID: change.ParticipantID,
 		PreviousCapabilities:  change.PreviousRole.Capabilities(space.provisioning.InteractionMode),
@@ -769,6 +888,10 @@ func (s *MemoryStore) ChangeParticipantRole(
 	}
 	participant.Role = change.NextRole
 	space.participants[participant.ParticipantID] = participant
+	if change.SecureRosterAttestation != nil {
+		attestation := *change.SecureRosterAttestation
+		space.secureRosterAttestation = &attestation
+	}
 	result := ParticipantRoleChangeResult{
 		Acceptance: relayResult.Acceptance, RetryID: change.RetryID, SpaceID: change.SpaceID,
 		ParticipantID: change.ParticipantID, PreviousRole: change.PreviousRole,
@@ -834,6 +957,9 @@ func (s *MemoryStore) RevokeParticipant(
 	); err != nil {
 		return ParticipantRevocationResult{}, err
 	}
+	if err := validateRevocationRosterAttestation(space, revocation); err != nil {
+		return ParticipantRevocationResult{}, err
+	}
 	var managedWrappedKey []byte
 	if space.provisioning.SecurityMode == SecurityModeManaged {
 		if s.managedContentKeys == nil {
@@ -852,6 +978,10 @@ func (s *MemoryStore) RevokeParticipant(
 	participant.RevokedAtMilliseconds = &nowMilliseconds
 	space.participants[participant.ParticipantID] = participant
 	space.keyEpoch = revocation.NextKeyEpoch
+	if revocation.SecureRosterAttestation != nil {
+		attestation := *revocation.SecureRosterAttestation
+		space.secureRosterAttestation = &attestation
+	}
 	if managedWrappedKey != nil {
 		space.managedContentKeys[revocation.NextKeyEpoch] = managedWrappedKey
 	} else if len(revocation.KeyGrants) > 0 {
@@ -999,9 +1129,14 @@ func (s *MemoryStore) GetParticipantRoster(
 		Version: SchemaVersion, SpaceID: space.provisioning.SpaceID,
 		DomainID: credential.DomainID, SecurityMode: space.provisioning.SecurityMode,
 		AuthoritySequence: s.nextAuthoritySequences[space.provisioning.SpaceID],
+		CurrentKeyEpoch:   space.keyEpoch,
 		Participants:      participants, Presentations: presentations,
 		CreatedAtMilliseconds: space.provisioning.CreatedAtMilliseconds,
 	}
+	if space.secureRosterAttestation == nil {
+		return ParticipantRoster{}, NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster authority attestation is unavailable")
+	}
+	roster.AuthorityAttestation = *space.secureRosterAttestation
 	if err := roster.Validate(); err != nil {
 		return ParticipantRoster{}, err
 	}

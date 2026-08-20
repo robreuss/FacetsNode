@@ -57,6 +57,119 @@ func decodeSpaceProvisioning(payload []byte) (sharedspaces.SpaceProvisioning, er
 	return stored.Provisioning, nil
 }
 
+func encodeSecureRosterAttestation(attestation *sharedspaces.SecureRosterAttestation) ([]byte, error) {
+	if attestation == nil {
+		return nil, nil
+	}
+	return json.Marshal(attestation)
+}
+
+func decodeSecureRosterAttestation(payload []byte) (*sharedspaces.SecureRosterAttestation, error) {
+	if len(payload) == 0 {
+		return nil, nil
+	}
+	var attestation sharedspaces.SecureRosterAttestation
+	if err := json.Unmarshal(payload, &attestation); err != nil {
+		return nil, err
+	}
+	return &attestation, nil
+}
+
+func activeSharedSpaceParticipants(participants []sharedspaces.Participant) []sharedspaces.Participant {
+	active := make([]sharedspaces.Participant, 0, len(participants))
+	for _, participant := range participants {
+		if participant.RevokedAtMilliseconds == nil {
+			active = append(active, participant)
+		}
+	}
+	sort.Slice(active, func(left, right int) bool {
+		return active[left].ParticipantID.String() < active[right].ParticipantID.String()
+	})
+	return active
+}
+
+func participantFromSharedSpaceInvitation(invitation sharedspaces.Invitation) sharedspaces.Participant {
+	return sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, SubscriptionID: invitation.SubscriptionID,
+		Kind: invitation.Kind, Role: invitation.Role, SigningKey: invitation.ParticipantSigningKey,
+		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
+	}
+}
+
+func validateSharedSpaceInvitationRosterAttestation(
+	securityMode sharedspaces.SecurityMode,
+	current *sharedspaces.SecureRosterAttestation,
+	participants []sharedspaces.Participant,
+	currentKeyEpoch uint64,
+	invitation sharedspaces.Invitation,
+) error {
+	if securityMode != sharedspaces.SecurityModeSecure {
+		if invitation.ActivationSecureRosterAttestation != nil {
+			return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidInvitation, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if current == nil || invitation.ActivationSecureRosterAttestation == nil {
+		return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidInvitation, "Secure Shared Space invitation is missing its roster authority attestation")
+	}
+	expected := append(activeSharedSpaceParticipants(participants), participantFromSharedSpaceInvitation(invitation))
+	sort.Slice(expected, func(left, right int) bool {
+		return expected[left].ParticipantID.String() < expected[right].ParticipantID.String()
+	})
+	return invitation.ActivationSecureRosterAttestation.ValidateSuccessor(*current, expected, currentKeyEpoch)
+}
+
+func validateSharedSpaceRoleChangeRosterAttestation(
+	securityMode sharedspaces.SecurityMode,
+	current *sharedspaces.SecureRosterAttestation,
+	participants []sharedspaces.Participant,
+	currentKeyEpoch uint64,
+	change sharedspaces.ParticipantRoleChange,
+) error {
+	if securityMode != sharedspaces.SecurityModeSecure {
+		if change.SecureRosterAttestation != nil {
+			return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidParticipant, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if current == nil || change.SecureRosterAttestation == nil {
+		return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidParticipant, "Secure Shared Space role change is missing its roster authority attestation")
+	}
+	expected := activeSharedSpaceParticipants(participants)
+	for index := range expected {
+		if expected[index].ParticipantID == change.ParticipantID {
+			expected[index].Role = change.NextRole
+			break
+		}
+	}
+	return change.SecureRosterAttestation.ValidateSuccessor(*current, expected, currentKeyEpoch)
+}
+
+func validateSharedSpaceRevocationRosterAttestation(
+	securityMode sharedspaces.SecurityMode,
+	current *sharedspaces.SecureRosterAttestation,
+	participants []sharedspaces.Participant,
+	revocation sharedspaces.ParticipantRevocation,
+) error {
+	if securityMode != sharedspaces.SecurityModeSecure {
+		if revocation.SecureRosterAttestation != nil {
+			return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidParticipant, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if current == nil || revocation.SecureRosterAttestation == nil {
+		return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidParticipant, "Secure Shared Space revocation is missing its roster authority attestation")
+	}
+	expected := make([]sharedspaces.Participant, 0, len(participants)-1)
+	for _, participant := range activeSharedSpaceParticipants(participants) {
+		if participant.ParticipantID != revocation.ParticipantID {
+			expected = append(expected, participant)
+		}
+	}
+	return revocation.SecureRosterAttestation.ValidateSuccessor(*current, expected, revocation.NextKeyEpoch)
+}
+
 func (s *SharedSpacesStore) ProvisionSpace(
 	ctx context.Context,
 	provisioning sharedspaces.SpaceProvisioning,
@@ -73,6 +186,10 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	payload, err := encodeSpaceProvisioning(provisioning)
 	if err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("encode Shared Space provisioning: %w", err)
+	}
+	rosterAttestationPayload, err := encodeSecureRosterAttestation(provisioning.InitialSecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("encode Shared Space initial roster attestation: %w", err)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -139,13 +256,14 @@ func (s *SharedSpacesStore) ProvisionSpace(
 		INSERT INTO shared_spaces (
 			space_id,provisioning_retry_id,version,security_mode,interaction_mode,domain_id,
 			initial_participant_id,initial_subscription_id,initial_participant_kind,
-			provisioning_payload,created_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			provisioning_payload,secure_roster_attestation,created_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 	`, provisioning.SpaceID, provisioning.RetryID, provisioning.Version,
 		string(provisioning.SecurityMode), string(provisioning.InteractionMode),
 		provisioning.Domain.Registration.DomainID,
 		provisioning.InitialParticipantID, initial.SubscriptionID,
 		string(provisioning.InitialParticipantKind), payload,
+		rosterAttestationPayload,
 		provisioning.CreatedAtMilliseconds); err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("insert Shared Space: %w", err)
 	}
@@ -292,6 +410,19 @@ func (s *SharedSpacesStore) CreateInvitation(
 
 	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, invitation.SpaceID)
 	if err != nil {
+		return sharedspaces.InvitationCreateResult{}, err
+	}
+	currentRosterAttestation, err := loadSharedSpaceSecureRosterAttestation(ctx, tx, invitation.SpaceID)
+	if err != nil {
+		return sharedspaces.InvitationCreateResult{}, err
+	}
+	participants, err := loadSharedSpaceParticipants(ctx, tx, invitation.SpaceID)
+	if err != nil {
+		return sharedspaces.InvitationCreateResult{}, err
+	}
+	if err := validateSharedSpaceInvitationRosterAttestation(
+		provisioning.SecurityMode, currentRosterAttestation, participants, currentKeyEpoch, invitation,
+	); err != nil {
 		return sharedspaces.InvitationCreateResult{}, err
 	}
 	var bootstrapReady bool
@@ -472,12 +603,13 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	var currentKeyEpoch uint64
 	var securityMode sharedspaces.SecurityMode
 	var interactionMode sharedspaces.InteractionMode
+	var currentRosterAttestationPayload []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT current_key_epoch,security_mode,interaction_mode
+		SELECT current_key_epoch,security_mode,interaction_mode,secure_roster_attestation
 		FROM shared_spaces
 		WHERE space_id=$1
 		FOR UPDATE
-	`, claim.SpaceID).Scan(&currentKeyEpoch, &securityMode, &interactionMode); err == pgx.ErrNoRows {
+	`, claim.SpaceID).Scan(&currentKeyEpoch, &securityMode, &interactionMode, &currentRosterAttestationPayload); err == pgx.ErrNoRows {
 		return sharedspaces.InvitationClaimResult{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
 		)
@@ -489,6 +621,10 @@ func (s *SharedSpacesStore) ClaimInvitation(
 			sharedspaces.CodeInvalidInvitation,
 			"invitation interaction mode differs from the Shared Space",
 		)
+	}
+	currentRosterAttestation, err := decodeSecureRosterAttestation(currentRosterAttestationPayload)
+	if err != nil {
+		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("decode Shared Space invitation claim roster attestation: %w", err)
 	}
 
 	if claimedAt != nil && claimedMemberID != nil {
@@ -519,6 +655,15 @@ func (s *SharedSpacesStore) ClaimInvitation(
 	if err := invitation.ValidateKeyGrant(securityMode, currentKeyEpoch); err != nil {
 		return sharedspaces.InvitationClaimResult{}, err
 	}
+	participants, err := loadSharedSpaceParticipants(ctx, tx, claim.SpaceID)
+	if err != nil {
+		return sharedspaces.InvitationClaimResult{}, err
+	}
+	if err := validateSharedSpaceInvitationRosterAttestation(
+		securityMode, currentRosterAttestation, participants, currentKeyEpoch, invitation,
+	); err != nil {
+		return sharedspaces.InvitationClaimResult{}, err
+	}
 
 	relayResult, err := s.relay.claimSubscriptionAdmissionTx(ctx, tx, relay.AdmissionCredential{
 		TenantID: credential.SpaceID, DomainID: credential.DomainID,
@@ -532,7 +677,7 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		ParticipantID: claim.ParticipantID, SubscriptionID: invitation.SubscriptionID,
 		Kind: invitation.Kind, Role: invitation.Role,
 		SigningKey:            invitation.ParticipantSigningKey,
-		CreatedAtMilliseconds: relayResult.Member.MemberRegistration.CreatedAtMilliseconds,
+		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
 	}
 	if err := insertSharedSpaceParticipant(ctx, tx, participant); err != nil {
 		return sharedspaces.InvitationClaimResult{}, err
@@ -541,6 +686,17 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		if err := insertSharedSpaceParticipantKeyGrant(ctx, tx, *invitation.KeyGrant); err != nil {
 			return sharedspaces.InvitationClaimResult{}, err
 		}
+	}
+	newRosterAttestationPayload, err := encodeSecureRosterAttestation(invitation.ActivationSecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("encode Shared Space invitation claim roster attestation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE shared_spaces
+		SET secure_roster_attestation=$2
+		WHERE space_id=$1
+	`, claim.SpaceID, newRosterAttestationPayload); err != nil {
+		return sharedspaces.InvitationClaimResult{}, fmt.Errorf("advance Shared Space invitation claim roster authority: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE shared_space_invitations
@@ -1141,20 +1297,27 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 	var existingParticipantID uuid.UUID
 	var existingPreviousRole, existingNextRole string
 	var existingChangedAt int64
+	var existingRosterAttestationPayload []byte
 	err = tx.QueryRow(ctx, `
-		SELECT version,participant_id,previous_role,next_role,changed_at_milliseconds
+		SELECT version,participant_id,previous_role,next_role,changed_at_milliseconds,
+		       secure_roster_attestation
 		FROM shared_space_participant_role_changes
 		WHERE space_id=$1 AND retry_id=$2
 		FOR UPDATE
 	`, change.SpaceID, change.RetryID).Scan(
 		&existingVersion, &existingParticipantID, &existingPreviousRole,
-		&existingNextRole, &existingChangedAt,
+		&existingNextRole, &existingChangedAt, &existingRosterAttestationPayload,
 	)
 	if err == nil {
+		existingRosterAttestation, decodeErr := decodeSecureRosterAttestation(existingRosterAttestationPayload)
+		if decodeErr != nil {
+			return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("decode Shared Space participant role change roster attestation: %w", decodeErr)
+		}
 		if existingVersion != change.Version || existingParticipantID != change.ParticipantID ||
 			sharedspaces.Role(existingPreviousRole) != change.PreviousRole ||
 			sharedspaces.Role(existingNextRole) != change.NextRole ||
-			existingChangedAt != change.ChangedAtMilliseconds {
+			existingChangedAt != change.ChangedAtMilliseconds ||
+			!reflect.DeepEqual(existingRosterAttestation, change.SecureRosterAttestation) {
 			return sharedspaces.ParticipantRoleChangeResult{}, sharedspaces.NewProtocolError(
 				sharedspaces.CodeParticipantRoleCollision, "participant role change retry ID was reused",
 			)
@@ -1191,6 +1354,23 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 			sharedspaces.CodeParticipantRoleCollision, "participant role changed concurrently",
 		)
 	}
+	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, change.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	currentRosterAttestation, err := loadSharedSpaceSecureRosterAttestation(ctx, tx, change.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	participants, err := loadSharedSpaceParticipants(ctx, tx, change.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
+	if err := validateSharedSpaceRoleChangeRosterAttestation(
+		provisioning.SecurityMode, currentRosterAttestation, participants, currentKeyEpoch, change,
+	); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, err
+	}
 	if _, err := s.relay.changeMemberCapabilitiesInTransaction(
 		ctx, tx, credential, relay.MemberCapabilityChange{
 			Version: relay.SchemaVersion, RetryID: change.RetryID, MemberID: change.ParticipantID,
@@ -1208,13 +1388,25 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 	`, change.SpaceID, change.ParticipantID, string(change.NextRole)); err != nil {
 		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("change Shared Space participant role: %w", err)
 	}
+	newRosterAttestationPayload, err := encodeSecureRosterAttestation(change.SecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("encode Shared Space participant role change roster attestation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE shared_spaces
+		SET secure_roster_attestation=$2
+		WHERE space_id=$1
+	`, change.SpaceID, newRosterAttestationPayload); err != nil {
+		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("advance Shared Space participant role roster authority: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_space_participant_role_changes (
 			space_id,retry_id,participant_id,version,previous_role,next_role,
-			changed_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+			changed_at_milliseconds,secure_roster_attestation
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 	`, change.SpaceID, change.RetryID, change.ParticipantID, change.Version,
-		string(change.PreviousRole), string(change.NextRole), change.ChangedAtMilliseconds); err != nil {
+		string(change.PreviousRole), string(change.NextRole), change.ChangedAtMilliseconds,
+		newRosterAttestationPayload); err != nil {
 		return sharedspaces.ParticipantRoleChangeResult{}, fmt.Errorf("record Shared Space participant role change: %w", err)
 	}
 	participantSubscriptionID := participant.SubscriptionID
@@ -1276,16 +1468,22 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	var existingParticipantID uuid.UUID
 	var existingRevokedAt int64
 	var existingPreviousKeyEpoch, existingNextKeyEpoch uint64
+	var existingRosterAttestationPayload []byte
 	err = tx.QueryRow(ctx, `
-		SELECT version,participant_id,previous_key_epoch,next_key_epoch,revoked_at_milliseconds
+		SELECT version,participant_id,previous_key_epoch,next_key_epoch,revoked_at_milliseconds,
+		       secure_roster_attestation
 		FROM shared_space_participant_revocations
 		WHERE space_id=$1 AND retry_id=$2
 		FOR UPDATE
 	`, revocation.SpaceID, revocation.RetryID).Scan(
 		&existingVersion, &existingParticipantID, &existingPreviousKeyEpoch,
-		&existingNextKeyEpoch, &existingRevokedAt,
+		&existingNextKeyEpoch, &existingRevokedAt, &existingRosterAttestationPayload,
 	)
 	if err == nil {
+		existingRosterAttestation, decodeErr := decodeSecureRosterAttestation(existingRosterAttestationPayload)
+		if decodeErr != nil {
+			return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("decode Shared Space participant revocation roster attestation: %w", decodeErr)
+		}
 		existingKeyGrants, err := loadSharedSpaceParticipantKeyGrants(
 			ctx, tx, revocation.SpaceID, existingNextKeyEpoch,
 		)
@@ -1296,7 +1494,8 @@ func (s *SharedSpacesStore) RevokeParticipant(
 			Version: existingVersion, RetryID: revocation.RetryID,
 			SpaceID: revocation.SpaceID, ParticipantID: existingParticipantID,
 			PreviousKeyEpoch: existingPreviousKeyEpoch, NextKeyEpoch: existingNextKeyEpoch,
-			KeyGrants: existingKeyGrants,
+			KeyGrants:               existingKeyGrants,
+			SecureRosterAttestation: existingRosterAttestation,
 		}
 		if !existing.Equivalent(revocation) {
 			return sharedspaces.ParticipantRevocationResult{}, sharedspaces.NewProtocolError(
@@ -1371,6 +1570,15 @@ func (s *SharedSpacesStore) RevokeParticipant(
 	if err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, err
 	}
+	currentRosterAttestation, err := loadSharedSpaceSecureRosterAttestation(ctx, tx, revocation.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, err
+	}
+	if err := validateSharedSpaceRevocationRosterAttestation(
+		provisioning.SecurityMode, currentRosterAttestation, participants, revocation,
+	); err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, err
+	}
 	if err := revocation.ValidateKeyGrants(
 		provisioning.SecurityMode, participants, nowMilliseconds,
 	); err != nil {
@@ -1435,21 +1643,25 @@ func (s *SharedSpacesStore) RevokeParticipant(
 			return sharedspaces.ParticipantRevocationResult{}, err
 		}
 	}
+	newRosterAttestationPayload, err := encodeSecureRosterAttestation(revocation.SecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("encode Shared Space participant revocation roster attestation: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE shared_spaces
-		SET current_key_epoch=$2
+		SET current_key_epoch=$2,secure_roster_attestation=$3
 		WHERE space_id=$1
-	`, revocation.SpaceID, revocation.NextKeyEpoch); err != nil {
+	`, revocation.SpaceID, revocation.NextKeyEpoch, newRosterAttestationPayload); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("advance Shared Space key epoch: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_space_participant_revocations (
 			space_id,retry_id,participant_id,version,previous_key_epoch,next_key_epoch,
-			revoked_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+			revoked_at_milliseconds,secure_roster_attestation
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 	`, revocation.SpaceID, revocation.RetryID, revocation.ParticipantID,
 		revocation.Version, revocation.PreviousKeyEpoch, revocation.NextKeyEpoch,
-		nowMilliseconds); err != nil {
+		nowMilliseconds, newRosterAttestationPayload); err != nil {
 		return sharedspaces.ParticipantRevocationResult{}, fmt.Errorf("record Shared Space participant revocation: %w", err)
 	}
 	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
@@ -1596,6 +1808,28 @@ func (s *SharedSpacesStore) GetParticipantRoster(
 		return sharedspaces.ParticipantRoster{}, fmt.Errorf("begin Shared Space participant roster: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var currentKeyEpoch uint64
+	var rosterAttestationPayload []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT current_key_epoch,secure_roster_attestation
+		FROM shared_spaces
+		WHERE space_id=$1
+	`, status.SpaceID).Scan(&currentKeyEpoch, &rosterAttestationPayload); err == pgx.ErrNoRows {
+		return sharedspaces.ParticipantRoster{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	} else if err != nil {
+		return sharedspaces.ParticipantRoster{}, fmt.Errorf("load Shared Space participant roster authority: %w", err)
+	}
+	rosterAttestation, err := decodeSecureRosterAttestation(rosterAttestationPayload)
+	if err != nil {
+		return sharedspaces.ParticipantRoster{}, fmt.Errorf("decode Shared Space participant roster attestation: %w", err)
+	}
+	if rosterAttestation == nil {
+		return sharedspaces.ParticipantRoster{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant, "Secure Shared Space roster authority attestation is unavailable",
+		)
+	}
 	participants, err := loadSharedSpaceParticipants(ctx, tx, status.SpaceID)
 	if err != nil {
 		return sharedspaces.ParticipantRoster{}, err
@@ -1641,7 +1875,8 @@ func (s *SharedSpacesStore) GetParticipantRoster(
 		Version: sharedspaces.SchemaVersion, SpaceID: status.SpaceID,
 		DomainID: status.DomainID, SecurityMode: status.SecurityMode,
 		AuthoritySequence: uint64(authoritySequence),
-		Participants:      activeParticipants, Presentations: activePresentations,
+		CurrentKeyEpoch:   currentKeyEpoch, AuthorityAttestation: *rosterAttestation,
+		Participants: activeParticipants, Presentations: activePresentations,
 		CreatedAtMilliseconds: status.CreatedAtMilliseconds,
 	}
 	if err := roster.Validate(); err != nil {
@@ -2270,6 +2505,28 @@ func loadSharedSpaceKeyEpoch(ctx context.Context, tx pgx.Tx, spaceID uuid.UUID) 
 		return 0, fmt.Errorf("load Shared Space key epoch: %w", err)
 	}
 	return keyEpoch, nil
+}
+
+func loadSharedSpaceSecureRosterAttestation(
+	ctx context.Context,
+	tx pgx.Tx,
+	spaceID uuid.UUID,
+) (*sharedspaces.SecureRosterAttestation, error) {
+	var payload []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT secure_roster_attestation FROM shared_spaces WHERE space_id=$1
+	`, spaceID).Scan(&payload); err == pgx.ErrNoRows {
+		return nil, sharedspaces.NewProtocolError(
+			sharedspaces.CodeSpaceNotFound, "Shared Space was not found",
+		)
+	} else if err != nil {
+		return nil, fmt.Errorf("load Shared Space roster attestation: %w", err)
+	}
+	attestation, err := decodeSecureRosterAttestation(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode Shared Space roster attestation: %w", err)
+	}
+	return attestation, nil
 }
 
 func loadSharedSpaceAuthority(

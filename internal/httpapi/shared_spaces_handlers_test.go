@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"net/http"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -57,6 +58,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 			relayTestToken(0x41),
 		),
 	}
+	provisioning.InitialSecureRosterAttestation = sharedSpaceInitialRosterAttestation(
+		t, provisioning, domainID, nowMilliseconds,
+	)
 	created := performRelayJSON(
 		t, handler, http.MethodPost, "/v1/shared-spaces",
 		provisioning, operatorToken, uuid.Nil,
@@ -104,6 +108,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		t, spaceID, participantID, provisioning.InitialParticipantID,
 		sharedspaces.InitialKeyEpoch, nowMilliseconds,
 	)
+	invitation.ActivationSecureRosterAttestation = sharedSpaceInvitationRosterAttestation(
+		t, provisioning, domainID, invitation, *provisioning.InitialSecureRosterAttestation,
+	)
 	spaceRoot := "/v1/shared-spaces/" + spaceID.String() + "/domains/" + domainID.String()
 	blocked := performRelayJSON(
 		t, handler, http.MethodPost, spaceRoot+"/invitations",
@@ -130,6 +137,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	cancelledInvitation.KeyGrant = sharedSpaceParticipantKeyGrant(
 		t, spaceID, cancelledParticipantID, provisioning.InitialParticipantID,
 		sharedspaces.InitialKeyEpoch, nowMilliseconds,
+	)
+	cancelledInvitation.ActivationSecureRosterAttestation = sharedSpaceInvitationRosterAttestation(
+		t, provisioning, domainID, cancelledInvitation, *provisioning.InitialSecureRosterAttestation,
 	)
 	cancelledIssue := performRelayJSON(
 		t, handler, http.MethodPost, spaceRoot+"/invitations",
@@ -271,6 +281,10 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		ParticipantID: participantID, PreviousRole: sharedspaces.RoleReader,
 		NextRole: sharedspaces.RoleParticipant, ChangedAtMilliseconds: nowMilliseconds,
 	}
+	promotion.SecureRosterAttestation = sharedSpaceRoleChangeRosterAttestation(
+		t, provisioning, domainID, promotion, *invitation.ActivationSecureRosterAttestation,
+		participantID, subscriptionID, invitation.ParticipantSigningKey,
+	)
 	promoted := performRelayJSON(
 		t, handler, http.MethodPost, rolePath, promotion,
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
@@ -295,6 +309,10 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		ParticipantID: participantID, PreviousRole: sharedspaces.RoleParticipant,
 		NextRole: sharedspaces.RoleReader, ChangedAtMilliseconds: nowMilliseconds,
 	}
+	demotion.SecureRosterAttestation = sharedSpaceRoleChangeRosterAttestation(
+		t, provisioning, domainID, demotion, *promotion.SecureRosterAttestation,
+		participantID, subscriptionID, invitation.ParticipantSigningKey,
+	)
 	demoted := performRelayJSON(
 		t, handler, http.MethodPost, rolePath, demotion,
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
@@ -574,6 +592,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 			sharedspaces.InitialKeyEpoch+1, nowMilliseconds,
 		)},
 	}
+	revocation.SecureRosterAttestation = sharedSpaceRevocationRosterAttestation(
+		t, provisioning, domainID, revocation, *demotion.SecureRosterAttestation,
+	)
 	revoked := performRelayJSON(
 		t, handler, http.MethodPost,
 		spaceRoot+"/participants/"+participantID.String()+"/revocation",
@@ -935,6 +956,159 @@ func sharedSpaceParticipantSigningKey(t *testing.T, participantID uuid.UUID) sha
 		PublicKeyX963:         base64.RawURLEncoding.EncodeToString(publicKey),
 		SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
 	}
+}
+
+func sharedSpaceInitialRosterAttestation(
+	t *testing.T,
+	provisioning sharedSpaceProvisioningInput,
+	domainID uuid.UUID,
+	nowMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	host := sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID:  provisioning.InitialParticipantID,
+		SubscriptionID: provisioning.TenantProvisioning.InitialDomain.SubscriptionID,
+		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
+		SigningKey:            provisioning.InitialParticipantSigningKey,
+		CreatedAtMilliseconds: nowMilliseconds,
+	}
+	return sharedSpaceSignedRosterAttestation(
+		t, provisioning.SpaceID, domainID, 1, "", sharedspaces.InitialKeyEpoch,
+		[]sharedspaces.Participant{host}, provisioning.InitialParticipantID, nowMilliseconds,
+	)
+}
+
+func sharedSpaceInvitationRosterAttestation(
+	t *testing.T,
+	provisioning sharedSpaceProvisioningInput,
+	domainID uuid.UUID,
+	invitation sharedSpaceInvitationCreateInput,
+	previous sharedspaces.SecureRosterAttestation,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	host := sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID:  provisioning.InitialParticipantID,
+		SubscriptionID: provisioning.TenantProvisioning.InitialDomain.SubscriptionID,
+		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
+		SigningKey:            provisioning.InitialParticipantSigningKey,
+		CreatedAtMilliseconds: previous.CreatedAtMilliseconds,
+	}
+	member := sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID: invitation.ParticipantID, SubscriptionID: invitation.SubscriptionID,
+		Kind: invitation.Kind, Role: invitation.Role, SigningKey: invitation.ParticipantSigningKey,
+		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
+	}
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sharedSpaceSignedRosterAttestation(
+		t, provisioning.SpaceID, domainID, previous.Revision+1, previousDigest,
+		previous.CurrentKeyEpoch, []sharedspaces.Participant{host, member},
+		provisioning.InitialParticipantID, invitation.CreatedAtMilliseconds,
+	)
+}
+
+func sharedSpaceRoleChangeRosterAttestation(
+	t *testing.T,
+	provisioning sharedSpaceProvisioningInput,
+	domainID uuid.UUID,
+	change sharedspaces.ParticipantRoleChange,
+	previous sharedspaces.SecureRosterAttestation,
+	participantID uuid.UUID,
+	subscriptionID uuid.UUID,
+	signingKey sharedspaces.ParticipantSigningKey,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for index := range participants {
+		if participants[index].ParticipantID == participantID {
+			participants[index].Role = change.NextRole
+		}
+	}
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sharedSpaceSignedRosterAttestation(
+		t, provisioning.SpaceID, domainID, previous.Revision+1, previousDigest,
+		previous.CurrentKeyEpoch, participants, provisioning.InitialParticipantID,
+		change.ChangedAtMilliseconds,
+	)
+}
+
+func sharedSpaceRevocationRosterAttestation(
+	t *testing.T,
+	provisioning sharedSpaceProvisioningInput,
+	domainID uuid.UUID,
+	revocation sharedspaces.ParticipantRevocation,
+	previous sharedspaces.SecureRosterAttestation,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	participants := make([]sharedspaces.Participant, 0, len(previous.Participants)-1)
+	for _, participant := range previous.Participants {
+		if participant.ParticipantID != revocation.ParticipantID {
+			participants = append(participants, participant)
+		}
+	}
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sharedSpaceSignedRosterAttestation(
+		t, provisioning.SpaceID, domainID, previous.Revision+1, previousDigest,
+		revocation.NextKeyEpoch, participants, provisioning.InitialParticipantID,
+		previous.CreatedAtMilliseconds,
+	)
+}
+
+func sharedSpaceSignedRosterAttestation(
+	t *testing.T,
+	spaceID uuid.UUID,
+	domainID uuid.UUID,
+	revision uint64,
+	previousDigest string,
+	keyEpoch uint64,
+	participants []sharedspaces.Participant,
+	issuerParticipantID uuid.UUID,
+	createdAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	sortedParticipants := append([]sharedspaces.Participant(nil), participants...)
+	sort.Slice(sortedParticipants, func(left, right int) bool {
+		return sortedParticipants[left].ParticipantID.String() < sortedParticipants[right].ParticipantID.String()
+	})
+	privateKey := sharedSpaceParticipantSigningPrivateKey(t, issuerParticipantID)
+	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
+	fingerprint := sha256.Sum256(publicKey)
+	attestation := &sharedspaces.SecureRosterAttestation{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID, DomainID: domainID,
+		Revision: revision, PreviousDigest: previousDigest, CurrentKeyEpoch: keyEpoch,
+		Participants: sortedParticipants, IssuerParticipantID: issuerParticipantID,
+		CreatedAtMilliseconds: createdAtMilliseconds,
+		Signature: sharedspaces.ParticipantKeyGrantSignature{
+			Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
+			SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+		},
+	}
+	payload, err := attestation.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	attestation.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return attestation
 }
 
 func publishSharedSpaceBootstrapCheckpointHTTP(

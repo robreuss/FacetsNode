@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"math/big"
 	"os"
+	"sort"
 	"testing"
 	"time"
 
@@ -149,6 +150,19 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		claimed.Participant.Role != sharedspaces.RoleParticipant {
 		t.Fatalf("claim=%+v err=%v", claimed, err)
 	}
+	roster, err := postgresstore.NewSharedSpacesStore(pool).GetParticipantRoster(ctx, hostCredential, now+200)
+	if err != nil || roster.AuthorityAttestation.Revision == 0 ||
+		roster.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("persisted secure roster=%+v err=%v", roster, err)
+	}
+	wantRosterDigest, err := invitation.ActivationSecureRosterAttestation.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRosterDigest, err := roster.AuthorityAttestation.Digest()
+	if err != nil || gotRosterDigest != wantRosterDigest {
+		t.Fatalf("persisted secure roster digest=%q want=%q err=%v", gotRosterDigest, wantRosterDigest, err)
+	}
 	claimRetry, err := store.ClaimInvitation(ctx, credential, claim, now+201)
 	if err != nil || claimRetry.Acceptance != relay.AcceptanceDuplicate ||
 		claimRetry.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
@@ -233,6 +247,10 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleParticipant,
 		NextRole: sharedspaces.RoleReader, ChangedAtMilliseconds: now + 220,
 	}
+	demotion.SecureRosterAttestation = postgresRoleChangeRosterAttestation(
+		t, provisioning, invitation, *invitation.ActivationSecureRosterAttestation,
+		demotion.NextRole, demotion.ChangedAtMilliseconds,
+	)
 	demoted, err := store.ChangeParticipantRole(ctx, admin, demotion, now+220)
 	if err != nil || demoted.Acceptance != relay.AcceptanceAccepted ||
 		demoted.CurrentRole != sharedspaces.RoleReader {
@@ -247,6 +265,10 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		ParticipantID: invitation.ParticipantID, PreviousRole: sharedspaces.RoleReader,
 		NextRole: sharedspaces.RoleParticipant, ChangedAtMilliseconds: now + 230,
 	}
+	promotion.SecureRosterAttestation = postgresRoleChangeRosterAttestation(
+		t, provisioning, invitation, *demotion.SecureRosterAttestation,
+		promotion.NextRole, promotion.ChangedAtMilliseconds,
+	)
 	promoted, err := store.ChangeParticipantRole(ctx, admin, promotion, now+230)
 	if err != nil || promoted.Acceptance != relay.AcceptanceAccepted ||
 		promoted.CurrentRole != sharedspaces.RoleParticipant {
@@ -296,6 +318,16 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, now+300,
 		)},
 	}
+	previousRevocationDigest, err := promotion.SecureRosterAttestation.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remainingParticipants := []sharedspaces.Participant{postgresInitialSharedSpaceParticipant(provisioning)}
+	revocation.SecureRosterAttestation = postgresSecureRosterAttestation(
+		t, provisioning, promotion.SecureRosterAttestation.Revision+1,
+		previousRevocationDigest, sharedspaces.InitialKeyEpoch+1, remainingParticipants,
+		provisioning.InitialParticipantID, now+300,
+	)
 	revoked, err := store.RevokeParticipant(ctx, admin, revocation, now+300)
 	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("revoke=%+v err=%v", revoked, err)
@@ -626,6 +658,11 @@ func postgresSharedSpaceProvisioning(
 			CreatedAtMilliseconds: now,
 		},
 	}
+	provisioning.InitialSecureRosterAttestation = postgresSecureRosterAttestation(
+		t, provisioning, 1, "", sharedspaces.InitialKeyEpoch,
+		[]sharedspaces.Participant{postgresInitialSharedSpaceParticipant(provisioning)},
+		hostID, now,
+	)
 	return provisioning, admin
 }
 
@@ -668,7 +705,114 @@ func postgresSharedSpaceInvitation(
 			sharedspaces.InitialKeyEpoch, now,
 		)
 	}
+	if space.SecurityMode == sharedspaces.SecurityModeSecure {
+		host := postgresInitialSharedSpaceParticipant(space)
+		participant := sharedspaces.Participant{
+			Version: sharedspaces.SchemaVersion, SpaceID: space.SpaceID,
+			ParticipantID: participantID, SubscriptionID: invitation.SubscriptionID,
+			Kind: invitation.Kind, Role: invitation.Role,
+			SigningKey:            invitation.ParticipantSigningKey,
+			CreatedAtMilliseconds: now,
+		}
+		previousDigest, err := space.InitialSecureRosterAttestation.Digest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		invitation.ActivationSecureRosterAttestation = postgresSecureRosterAttestation(
+			t, space, space.InitialSecureRosterAttestation.Revision+1,
+			previousDigest, sharedspaces.InitialKeyEpoch,
+			postgresSortedParticipants([]sharedspaces.Participant{host, participant}),
+			space.InitialParticipantID, now,
+		)
+	}
 	return invitation, credential
+}
+
+func postgresInitialSharedSpaceParticipant(space sharedspaces.SpaceProvisioning) sharedspaces.Participant {
+	return sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: space.SpaceID,
+		ParticipantID:  space.InitialParticipantID,
+		SubscriptionID: space.Domain.Subscription.SubscriptionID,
+		Kind:           space.InitialParticipantKind, Role: sharedspaces.RoleHost,
+		SigningKey:            space.InitialParticipantSigningKey,
+		CreatedAtMilliseconds: space.CreatedAtMilliseconds,
+	}
+}
+
+func postgresSortedParticipants(participants []sharedspaces.Participant) []sharedspaces.Participant {
+	sorted := append([]sharedspaces.Participant(nil), participants...)
+	sort.Slice(sorted, func(left, right int) bool {
+		return sorted[left].ParticipantID.String() < sorted[right].ParticipantID.String()
+	})
+	return sorted
+}
+
+func postgresSecureRosterAttestation(
+	t *testing.T,
+	space sharedspaces.SpaceProvisioning,
+	revision uint64,
+	previousDigest string,
+	keyEpoch uint64,
+	participants []sharedspaces.Participant,
+	issuerParticipantID uuid.UUID,
+	createdAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	privateKey := postgresParticipantSigningPrivateKey(t, issuerParticipantID)
+	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
+	fingerprint := sha256.Sum256(publicKey)
+	attestation := sharedspaces.SecureRosterAttestation{
+		Version: sharedspaces.SchemaVersion, SpaceID: space.SpaceID,
+		DomainID: space.Domain.Registration.DomainID,
+		Revision: revision, PreviousDigest: previousDigest, CurrentKeyEpoch: keyEpoch,
+		Participants:          postgresSortedParticipants(participants),
+		IssuerParticipantID:   issuerParticipantID,
+		CreatedAtMilliseconds: createdAtMilliseconds,
+		Signature: sharedspaces.ParticipantKeyGrantSignature{
+			Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
+			SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+		},
+	}
+	payload, err := attestation.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	attestation.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return &attestation
+}
+
+func postgresRoleChangeRosterAttestation(
+	t *testing.T,
+	space sharedspaces.SpaceProvisioning,
+	invitation sharedspaces.Invitation,
+	previous sharedspaces.SecureRosterAttestation,
+	nextRole sharedspaces.Role,
+	changedAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for index := range participants {
+		if participants[index].ParticipantID == invitation.ParticipantID {
+			participants[index].Role = nextRole
+		}
+	}
+	return postgresSecureRosterAttestation(
+		t, space, previous.Revision+1, previousDigest, previous.CurrentKeyEpoch,
+		participants, space.InitialParticipantID, changedAtMilliseconds,
+	)
 }
 
 func postgresParticipantKeyGrant(
