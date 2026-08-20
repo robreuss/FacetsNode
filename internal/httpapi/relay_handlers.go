@@ -1175,6 +1175,32 @@ func (s *Server) handleFetchRelayMessages(writer http.ResponseWriter, request *h
 	})
 }
 
+func (s *Server) handleGetRelayMessage(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	messageID, err := parseRelayUUID(request.PathValue("messageID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	message, err := s.relayStore.GetMessage(
+		request.Context(), credential, messageID, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, message)
+}
+
 func (s *Server) handleAcknowledgeRelayMessage(writer http.ResponseWriter, request *http.Request) {
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {

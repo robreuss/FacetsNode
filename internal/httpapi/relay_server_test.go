@@ -280,6 +280,35 @@ func TestRelayAPICreatesDomainDeliversAndRevokesWithoutLoggingSecrets(t *testing
 		fetched.Cursor != relay.EncodeCursor(1) {
 		t.Fatalf("unexpected fetch: %+v", fetched)
 	}
+	recoveryFetch := performRelayJSON(
+		t,
+		handler,
+		http.MethodGet,
+		publishPath,
+		nil,
+		recipient.Credential.AuthorizationToken,
+		recipient.Member.MemberRegistration.MemberID,
+	)
+	requireStatus(t, recoveryFetch, http.StatusOK)
+	var recovered relay.Message
+	if err := json.NewDecoder(recoveryFetch.Body).Decode(&recovered); err != nil {
+		t.Fatal(err)
+	}
+	_ = recoveryFetch.Body.Close()
+	if recovered.Sequence != 1 || recovered.Envelope != envelope {
+		t.Fatalf("unexpected exact recovery result: %+v", recovered)
+	}
+	publisherRecovery := performRelayJSON(
+		t,
+		handler,
+		http.MethodGet,
+		publishPath,
+		nil,
+		created.MemberCredential.AuthorizationToken,
+		created.Member.MemberID,
+	)
+	requireStatus(t, publisherRecovery, http.StatusNotFound)
+	_ = publisherRecovery.Body.Close()
 	quietWake := performRelayJSON(
 		t,
 		handler,

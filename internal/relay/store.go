@@ -121,6 +121,16 @@ type Store interface {
 		limit int,
 		nowMilliseconds int64,
 	) (FetchResult, error)
+	// GetMessage returns an already stored opaque envelope by its deterministic
+	// message identifier. It is an authenticated recovery path for a receiver
+	// whose causal predecessor was not present in its ordinary cursor page; the
+	// relay returns ciphertext only and never interprets the payload.
+	GetMessage(
+		ctx context.Context,
+		credential Credential,
+		messageID uuid.UUID,
+		nowMilliseconds int64,
+	) (Message, error)
 	Acknowledge(
 		ctx context.Context,
 		credential Credential,

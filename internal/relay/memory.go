@@ -1523,6 +1523,43 @@ func (s *MemoryStore) Fetch(
 	return result, nil
 }
 
+func (s *MemoryStore) GetMessage(
+	_ context.Context,
+	credential Credential,
+	messageID uuid.UUID,
+	nowMilliseconds int64,
+) (Message, error) {
+	if messageID == uuid.Nil {
+		return Message{}, protocolError(CodeMessageNotFound, "message was not found")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedMember(
+		credential,
+		CapabilityFetchMessage,
+		nowMilliseconds,
+	)
+	if err != nil {
+		return Message{}, err
+	}
+	refreshMemoryFence(domain, nowMilliseconds)
+	subscription, err := activeMemberSubscription(domain, credential.MemberID)
+	if err != nil {
+		return Message{}, err
+	}
+	stored, found := domain.messageByID[messageID]
+	if !found || stored.publisherSubscription == subscription.SubscriptionID {
+		return Message{}, protocolError(CodeMessageNotFound, "message was not found")
+	}
+	if stored.checkpointFenceID != nil {
+		fence := domain.checkpointFences[*stored.checkpointFenceID]
+		if fence == nil || fence.state.Status != CheckpointFenceActivated {
+			return Message{}, protocolError(CodeMessageNotFound, "message was not found")
+		}
+	}
+	return stored.message, nil
+}
+
 func (s *MemoryStore) Acknowledge(
 	_ context.Context,
 	credential Credential,

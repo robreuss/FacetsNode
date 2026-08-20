@@ -258,6 +258,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleFetchRelayMessages,
 		)
 		register(
+			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}",
+			traffic.SurfaceRelayMessage,
+			s.handleGetRelayMessage,
+		)
+		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/wake",
 			traffic.SurfaceRelayMessage,
 			s.handleWaitForRelayMessages,

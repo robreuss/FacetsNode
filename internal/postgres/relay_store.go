@@ -1173,6 +1173,70 @@ func (s *RelayStore) Fetch(
 	return result, nil
 }
 
+// GetMessage returns one opaque envelope retained by the relay. It is used by
+// a receiver to repair a missed causal predecessor without giving the server
+// any access to the encrypted FEF payload.
+func (s *RelayStore) GetMessage(
+	ctx context.Context,
+	credential relay.Credential,
+	messageID uuid.UUID,
+	nowMilliseconds int64,
+) (relay.Message, error) {
+	if messageID == uuid.Nil {
+		return relay.Message{}, relay.NewProtocolError(relay.CodeMessageNotFound, "message was not found")
+	}
+	transaction, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return relay.Message{}, fmt.Errorf("begin relay message lookup: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	if _, err := loadRelayTenant(ctx, transaction, credential.TenantID, ""); err != nil {
+		return relay.Message{}, err
+	}
+	if _, _, _, _, _, _, err := loadRelayDomain(ctx, transaction, credential.TenantID, credential.DomainID, ""); err != nil {
+		return relay.Message{}, err
+	}
+	member, found, err := loadRelayMember(ctx, transaction, credential.TenantID, credential.DomainID, credential.MemberID, "")
+	if err != nil {
+		return relay.Message{}, err
+	}
+	if !found {
+		return relay.Message{}, relay.NewProtocolError(relay.CodeMemberNotFound, "member was not found")
+	}
+	if err := member.Authorize(credential, relay.CapabilityFetchMessage, nowMilliseconds); err != nil {
+		return relay.Message{}, err
+	}
+	subscriptionID, err := loadActiveMemberSubscription(ctx, transaction, credential.TenantID, credential.DomainID, credential.MemberID, "")
+	if err != nil {
+		return relay.Message{}, err
+	}
+	message, found, err := loadRelayMessage(ctx, transaction, credential.TenantID, credential.DomainID, messageID, "")
+	if err != nil {
+		return relay.Message{}, err
+	}
+	if !found {
+		return relay.Message{}, relay.NewProtocolError(relay.CodeMessageNotFound, "message was not found")
+	}
+	var publisherSubscriptionID uuid.UUID
+	var fenceID *uuid.UUID
+	if err := transaction.QueryRow(ctx, `SELECT publisher_subscription_id, checkpoint_fence_id FROM relay_messages WHERE tenant_id=$1 AND domain_id=$2 AND message_id=$3`, credential.TenantID, credential.DomainID, messageID).Scan(&publisherSubscriptionID, &fenceID); err != nil {
+		return relay.Message{}, fmt.Errorf("load relay message visibility: %w", err)
+	}
+	if publisherSubscriptionID == subscriptionID {
+		return relay.Message{}, relay.NewProtocolError(relay.CodeMessageNotFound, "message was not found")
+	}
+	if fenceID != nil {
+		var status relay.CheckpointFenceStatus
+		if err := transaction.QueryRow(ctx, `SELECT status FROM relay_checkpoint_fences WHERE tenant_id=$1 AND domain_id=$2 AND fence_id=$3`, credential.TenantID, credential.DomainID, *fenceID).Scan(&status); err != nil || status != relay.CheckpointFenceActivated {
+			return relay.Message{}, relay.NewProtocolError(relay.CodeMessageNotFound, "message was not found")
+		}
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return relay.Message{}, fmt.Errorf("commit relay message lookup: %w", err)
+	}
+	return message, nil
+}
+
 func (s *RelayStore) Acknowledge(
 	ctx context.Context,
 	credential relay.Credential,

@@ -106,6 +106,23 @@ func TestMemoryStoreDeliversOncePerDomainWithPerSubscriptionFacts(t *testing.T) 
 		publisherFetch.NextSequence != 1 {
 		t.Fatalf("publisher fetch=%+v err=%v", publisherFetch, err)
 	}
+	recovered, err := store.GetMessage(
+		ctx,
+		recipientCredential,
+		fixture.Envelope.MessageID,
+		1_500,
+	)
+	if err != nil || recovered.Sequence != 1 || recovered.Envelope != fixture.Envelope {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	if _, err := store.GetMessage(
+		ctx,
+		fixture.PublisherAccess.Credential(),
+		fixture.Envelope.MessageID,
+		1_500,
+	); !relay.ErrorHasCode(err, relay.CodeMessageNotFound) {
+		t.Fatalf("publisher exact retrieval err=%v", err)
+	}
 
 	if _, err := store.Acknowledge(
 		ctx,
