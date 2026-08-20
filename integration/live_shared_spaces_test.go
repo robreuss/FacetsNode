@@ -40,7 +40,7 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	hostID := domain.MemberCredential.MemberID
 	provisioning := liveSharedSpaceProvisioningInput{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
-		SpaceID: spaceID, SecurityMode: sharedspaces.SecurityModeE2EE,
+		SpaceID: spaceID, SecurityMode: sharedspaces.SecurityModeSecure,
 		InteractionMode:      sharedspaces.InteractionModeCollaborative,
 		InitialParticipantID: hostID, InitialParticipantKind: sharedspaces.ParticipantPerson,
 		TenantProvisioning: liveRelayTenantProvisioningRequest{

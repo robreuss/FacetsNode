@@ -201,7 +201,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		t.Fatalf("member key grant=%+v err=%v", memberKeyGrant, err)
 	}
 	participantStatus, err := store.GetParticipantStatus(ctx, memberCredential, now+211)
-	if err != nil || participantStatus.SecurityMode != sharedspaces.SecurityModeE2EE ||
+	if err != nil || participantStatus.SecurityMode != sharedspaces.SecurityModeSecure ||
 		participantStatus.InteractionMode != provisioning.InteractionMode ||
 		participantStatus.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		!participantStatus.BootstrapReady || participantStatus.ActiveCheckpointEpoch == nil ||
@@ -587,7 +587,7 @@ func postgresSharedSpaceProvisioning(
 	}
 	provisioning := sharedspaces.SpaceProvisioning{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
-		SecurityMode:           sharedspaces.SecurityModeE2EE,
+		SecurityMode:           sharedspaces.SecurityModeSecure,
 		InteractionMode:        sharedspaces.InteractionModeCollaborative,
 		InitialParticipantID:   hostID,
 		InitialParticipantKind: sharedspaces.ParticipantPerson,
@@ -658,7 +658,7 @@ func postgresSharedSpaceInvitation(
 			CreatedAtMilliseconds: now, ExpiresAtMilliseconds: now + 60*60*1_000,
 		},
 	}
-	if space.SecurityMode == sharedspaces.SecurityModeE2EE {
+	if space.SecurityMode.ContentBlind() {
 		invitation.KeyGrant = postgresParticipantKeyGrant(
 			t, space.SpaceID, invitation.ParticipantID, space.InitialParticipantID,
 			sharedspaces.InitialKeyEpoch, now,

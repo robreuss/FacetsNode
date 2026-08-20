@@ -44,7 +44,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		Version:                sharedspaces.SchemaVersion,
 		RetryID:                uuid.New(),
 		SpaceID:                spaceID,
-		SecurityMode:           sharedspaces.SecurityModeE2EE,
+		SecurityMode:           sharedspaces.SecurityModeSecure,
 		InteractionMode:        sharedspaces.InteractionModeCollaborative,
 		InitialParticipantID:   domain.MemberCredential.MemberID,
 		InitialParticipantKind: sharedspaces.ParticipantPerson,
@@ -347,7 +347,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	}
 	_ = participantStatusResponse.Body.Close()
 	if participantStatus.SpaceID != spaceID || participantStatus.DomainID != domainID ||
-		participantStatus.SecurityMode != sharedspaces.SecurityModeE2EE ||
+		participantStatus.SecurityMode != sharedspaces.SecurityModeSecure ||
 		participantStatus.InteractionMode != provisioning.InteractionMode ||
 		participantStatus.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		!participantStatus.BootstrapReady || participantStatus.ActiveCheckpointEpoch == nil ||

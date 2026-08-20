@@ -13,9 +13,13 @@ import (
 )
 
 func TestSecurityModeIsFixedToSupportedValues(t *testing.T) {
-	_, provisioning, _ := testSpaceProvisioning(t, 1_000, sharedspaces.SecurityModeE2EE)
+	_, provisioning, _ := testSpaceProvisioning(t, 1_000, sharedspaces.SecurityModeSecure)
 	if err := provisioning.Validate(); err != nil {
-		t.Fatalf("E2EE provisioning: %v", err)
+		t.Fatalf("Secure provisioning: %v", err)
+	}
+	provisioning.SecurityMode = sharedspaces.SecurityModePrivate
+	if err := provisioning.Validate(); err != nil {
+		t.Fatalf("Private provisioning: %v", err)
 	}
 	provisioning.SecurityMode = sharedspaces.SecurityModeManaged
 	if err := provisioning.Validate(); err != nil {
@@ -24,6 +28,14 @@ func TestSecurityModeIsFixedToSupportedValues(t *testing.T) {
 	provisioning.SecurityMode = "hybrid"
 	if err := provisioning.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidSpace) {
 		t.Fatalf("unsupported security mode err=%v", err)
+	}
+	if !sharedspaces.SecurityModePrivate.ContentBlind() ||
+		sharedspaces.SecurityModePrivate.RotatesKeyEpochOnRevocation() ||
+		!sharedspaces.SecurityModeSecure.ContentBlind() ||
+		!sharedspaces.SecurityModeSecure.RotatesKeyEpochOnRevocation() ||
+		sharedspaces.SecurityModeManaged.ContentBlind() ||
+		!sharedspaces.SecurityModeManaged.RotatesKeyEpochOnRevocation() {
+		t.Fatalf("security profile properties do not match their contract")
 	}
 }
 
@@ -76,7 +88,7 @@ func TestComputePoolChangeAndResultValidation(t *testing.T) {
 }
 
 func TestInteractionModeIsRequiredAndImmutableInProvisioning(t *testing.T) {
-	_, provisioning, _ := testSpaceProvisioning(t, 1_500, sharedspaces.SecurityModeE2EE)
+	_, provisioning, _ := testSpaceProvisioning(t, 1_500, sharedspaces.SecurityModeSecure)
 	for _, mode := range []sharedspaces.InteractionMode{
 		sharedspaces.InteractionModeBroadcast,
 		sharedspaces.InteractionModeCommunity,
@@ -190,7 +202,7 @@ func TestParticipantPresentationValidatesRecognitionMetadataAndStatusScope(t *te
 		t.Fatalf("untrimmed participant display name err=%v", err)
 	}
 
-	_, provisioning, _ := testSpaceProvisioning(t, 1_000, sharedspaces.SecurityModeE2EE)
+	_, provisioning, _ := testSpaceProvisioning(t, 1_000, sharedspaces.SecurityModeSecure)
 	status := sharedspaces.ParticipantStatus{
 		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 		DomainID:     provisioning.Domain.Registration.DomainID,
@@ -222,7 +234,7 @@ func sortedCapabilities(capabilities []relay.Capability) []relay.Capability {
 }
 
 func TestInvitationRoleFreezesRelayCapabilities(t *testing.T) {
-	_, provisioning, admin := testSpaceProvisioning(t, 2_000, sharedspaces.SecurityModeE2EE)
+	_, provisioning, admin := testSpaceProvisioning(t, 2_000, sharedspaces.SecurityModeSecure)
 	invitation, _ := testInvitation(t, provisioning, admin, 2_100, sharedspaces.RoleReader)
 	if err := invitation.Validate(); err != nil {
 		t.Fatalf("reader invitation: %v", err)
@@ -238,10 +250,13 @@ func TestInvitationRoleFreezesRelayCapabilities(t *testing.T) {
 }
 
 func TestParticipantKeyGrantRejectsTamperingAndWrongScope(t *testing.T) {
-	_, provisioning, admin := testSpaceProvisioning(t, 2_500, sharedspaces.SecurityModeE2EE)
+	_, provisioning, admin := testSpaceProvisioning(t, 2_500, sharedspaces.SecurityModeSecure)
 	invitation, _ := testInvitation(t, provisioning, admin, 2_600, sharedspaces.RoleParticipant)
-	if err := invitation.ValidateKeyGrant(sharedspaces.SecurityModeE2EE, sharedspaces.InitialKeyEpoch); err != nil {
-		t.Fatalf("valid E2EE grant: %v", err)
+	if err := invitation.ValidateKeyGrant(sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch); err != nil {
+		t.Fatalf("valid Secure grant: %v", err)
+	}
+	if err := invitation.ValidateKeyGrant(sharedspaces.SecurityModePrivate, sharedspaces.InitialKeyEpoch); err != nil {
+		t.Fatalf("valid Private grant: %v", err)
 	}
 
 	tampered := invitation
@@ -253,12 +268,12 @@ func TestParticipantKeyGrantRejectsTamperingAndWrongScope(t *testing.T) {
 	}
 
 	wrongEpoch := invitation
-	if err := wrongEpoch.ValidateKeyGrant(sharedspaces.SecurityModeE2EE, sharedspaces.InitialKeyEpoch+1); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
+	if err := wrongEpoch.ValidateKeyGrant(sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch+1); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
 		t.Fatalf("wrong epoch err=%v", err)
 	}
 	wrongParticipant := invitation
 	wrongParticipant.ParticipantID = uuid.New()
-	if err := wrongParticipant.ValidateKeyGrant(sharedspaces.SecurityModeE2EE, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongScope) {
+	if err := wrongParticipant.ValidateKeyGrant(sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongScope) {
 		t.Fatalf("wrong participant err=%v", err)
 	}
 	if err := invitation.ValidateKeyGrant(sharedspaces.SecurityModeManaged, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
@@ -266,8 +281,8 @@ func TestParticipantKeyGrantRejectsTamperingAndWrongScope(t *testing.T) {
 	}
 	missing := invitation
 	missing.KeyGrant = nil
-	if err := missing.ValidateKeyGrant(sharedspaces.SecurityModeE2EE, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
-		t.Fatalf("missing E2EE grant err=%v", err)
+	if err := missing.ValidateKeyGrant(sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
+		t.Fatalf("missing Secure grant err=%v", err)
 	}
 }
 
@@ -285,8 +300,8 @@ func TestParticipantRevocationRejectsInvalidKeyEpochTransition(t *testing.T) {
 	}
 }
 
-func TestParticipantRevocationRequiresCompleteE2EEGrantSet(t *testing.T) {
-	_, provisioning, _ := testSpaceProvisioning(t, 3_000, sharedspaces.SecurityModeE2EE)
+func TestParticipantRevocationRequiresCompleteSecureGrantSet(t *testing.T) {
+	_, provisioning, _ := testSpaceProvisioning(t, 3_000, sharedspaces.SecurityModeSecure)
 	participantID := uuid.New()
 	participants := []sharedspaces.Participant{
 		{
@@ -307,7 +322,7 @@ func TestParticipantRevocationRequiresCompleteE2EEGrantSet(t *testing.T) {
 		NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
 	}
 	if err := revocation.ValidateKeyGrants(
-		sharedspaces.SecurityModeE2EE, participants, 3_200,
+		sharedspaces.SecurityModeSecure, participants, 3_200,
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
 		t.Fatalf("missing grant set err=%v", err)
 	}
@@ -317,13 +332,13 @@ func TestParticipantRevocationRequiresCompleteE2EEGrantSet(t *testing.T) {
 	)
 	revocation.KeyGrants = []sharedspaces.ParticipantKeyGrant{*hostGrant}
 	if err := revocation.ValidateKeyGrants(
-		sharedspaces.SecurityModeE2EE, participants, 3_200,
+		sharedspaces.SecurityModeSecure, participants, 3_200,
 	); err != nil {
 		t.Fatalf("complete grant set err=%v", err)
 	}
 	revocation.KeyGrants = append(revocation.KeyGrants, *hostGrant)
 	if err := revocation.ValidateKeyGrants(
-		sharedspaces.SecurityModeE2EE, participants, 3_200,
+		sharedspaces.SecurityModeSecure, participants, 3_200,
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
 		t.Fatalf("duplicate grant recipient err=%v", err)
 	}
@@ -332,6 +347,46 @@ func TestParticipantRevocationRequiresCompleteE2EEGrantSet(t *testing.T) {
 		sharedspaces.SecurityModeManaged, participants, 3_200,
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
 		t.Fatalf("managed grant set err=%v", err)
+	}
+}
+
+func TestParticipantRevocationForPrivateSpaceRetainsStaticKeyEpoch(t *testing.T) {
+	_, provisioning, _ := testSpaceProvisioning(t, 3_300, sharedspaces.SecurityModePrivate)
+	participantID := uuid.New()
+	participants := []sharedspaces.Participant{
+		{
+			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+			ParticipantID: provisioning.InitialParticipantID,
+			Kind:          sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+			CreatedAtMilliseconds: 3_300,
+		},
+		{
+			Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+			ParticipantID: participantID, Kind: sharedspaces.ParticipantPerson,
+			Role: sharedspaces.RoleParticipant, CreatedAtMilliseconds: 3_310,
+		},
+	}
+	revocation := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: participantID, PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch: sharedspaces.InitialKeyEpoch,
+	}
+	if err := revocation.ValidateKeyGrants(sharedspaces.SecurityModePrivate, participants, 3_320); err != nil {
+		t.Fatalf("private static-key revocation: %v", err)
+	}
+
+	rotating := revocation
+	rotating.NextKeyEpoch++
+	if err := rotating.ValidateKeyGrants(sharedspaces.SecurityModePrivate, participants, 3_320); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("private key rotation err=%v", err)
+	}
+	withGrant := revocation
+	withGrant.KeyGrants = []sharedspaces.ParticipantKeyGrant{*testParticipantKeyGrant(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch, 3_320,
+	)}
+	if err := withGrant.ValidateKeyGrants(sharedspaces.SecurityModePrivate, participants, 3_320); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("private replacement grant err=%v", err)
 	}
 }
 
@@ -391,18 +446,18 @@ func TestParticipantBootstrapRequiresExactlyOneModeAppropriateKey(t *testing.T) 
 		),
 	}
 	if err := mixed.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
-		t.Fatalf("mixed managed and E2EE keys err=%v", err)
+		t.Fatalf("mixed managed and content-blind keys err=%v", err)
 	}
 
-	e2ee := bootstrap
-	e2ee.Status.SecurityMode = sharedspaces.SecurityModeE2EE
-	e2ee.ManagedContentKey = nil
-	e2ee.KeyGrant = mixed.KeyGrant
-	if err := e2ee.Validate(); err != nil {
-		t.Fatalf("valid E2EE participant bootstrap: %v", err)
+	secure := bootstrap
+	secure.Status.SecurityMode = sharedspaces.SecurityModeSecure
+	secure.ManagedContentKey = nil
+	secure.KeyGrant = mixed.KeyGrant
+	if err := secure.Validate(); err != nil {
+		t.Fatalf("valid Secure participant bootstrap: %v", err)
 	}
-	e2ee.ManagedContentKey = bootstrap.ManagedContentKey
-	if err := e2ee.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
-		t.Fatalf("E2EE bootstrap with managed key err=%v", err)
+	secure.ManagedContentKey = bootstrap.ManagedContentKey
+	if err := secure.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("Secure bootstrap with managed key err=%v", err)
 	}
 }

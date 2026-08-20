@@ -3,9 +3,9 @@
 Status: first authority vertical slice
 
 This contract creates a durable Shared Space authority with an explicit
-security-mode boundary. The service cannot decrypt E2EE Space content. For a
-managed Space, it owns the content-key epoch and encrypts each content key at
-rest under the deployment key-encryption key. One Shared Space owns one relay
+security-mode boundary. The service cannot decrypt Private or Secure Space
+content. For a managed Space, it owns the content-key epoch and encrypts each
+content key at rest under the deployment key-encryption key. One Shared Space owns one relay
 tenant and one relay domain. The Space authority, participant records,
 invitations, subscriptions, relay admissions, relay membership, and managed
 key changes commit atomically in PostgreSQL.
@@ -47,9 +47,15 @@ The request is versioned and includes a client-generated retry identifier.
 Exact retries return the prior result; a retry identifier reused with different
 input is rejected.
 
-The service supports two immutable v1 security modes:
+The service supports three immutable protocol modes. Native product creation
+will expose the content-blind Private and Secure profiles; managed mode is
+reserved for the later server-readable public tier:
 
-- `e2ee`: the service stores only encrypted envelopes and encrypted blobs;
+- `private`: a content-blind static-group-key Space for a closed trusted
+  community. Revocation stops future delivery but does not rotate a key that a
+  former participant may already possess;
+- `secure`: a content-blind high-assurance Space. Revocation advances the key
+  epoch and requires a new opaque grant for every remaining participant;
 - `managed`: the service generates and distributes the Space content key under
   an explicit managed-Space contract. Semantic inspection and moderation
   policy remain a later gate.
@@ -80,8 +86,8 @@ invitation secret. The secret itself is not stored. The invitation's relay
 capabilities must exactly match those derived from the Space's interaction
 mode and invited role.
 
-For an E2EE Space, the invitation also carries an opaque, participant-specific
-grant for the current content-key epoch. The server validates its signed
+For a Private or Secure Space, the invitation also carries an opaque,
+participant-specific grant for the current content-key epoch. The server validates its signed
 metadata and stores the ciphertext atomically with the invitation, but never
 receives the group content key in plaintext. Managed Spaces reject key grants.
 Their current service-managed content key is instead released only after the
@@ -127,12 +133,14 @@ Participant revocation is submitted at:
 
 The authority participant and all of that participant's relay access are
 revoked in one transaction. Revocation does not erase ciphertext already
-downloaded by a participant. For E2EE Spaces, revocation must include exactly
-one signed opaque grant for every remaining active participant at the next
-content-key epoch. The participant revocation, relay revocation, epoch advance,
-and new grants commit atomically. A current member may retrieve only its own
-current grant through its relay credential. The server cannot decrypt a grant
-or manufacture a missing one.
+downloaded by a participant. For a Secure Space, revocation must include
+exactly one signed opaque grant for every remaining active participant at the
+next content-key epoch. The participant revocation, relay revocation, epoch
+advance, and new grants commit atomically. A Private Space records revocation
+and stops future relay access without changing its static key epoch or storing
+replacement grants. A current member may retrieve only its own current grant
+through its relay credential. The server cannot decrypt a grant or manufacture
+a missing one.
 
 For managed Spaces, the service generates the next content key and stores its
 wrapped form in the same transaction as participant and relay revocation. A
@@ -150,7 +158,7 @@ after relaunch with one atomic request at:
 
 The response contains the participant status described below and exactly one
 mode-appropriate key result from the same repeatable-read snapshot: an opaque
-participant grant for an E2EE Space, or the current raw content key for a
+participant grant for a Private or Secure Space, or the current raw content key for a
 managed Space. This prevents a key rotation from producing status for one epoch
 and key authority for another. A managed key is returned only to the active
 participant whose authenticated member identifier matches the path.
@@ -164,7 +172,7 @@ identifier must equal the participant in the path. The response contains the
 immutable Space security and interaction modes, current key epoch, bootstrap
 readiness, active checkpoint epoch, the caller's own participant record, and
 the exact relay capabilities derived from the caller's current role. It works
-for both E2EE and managed Spaces. The separate current-key-grant endpoint is
+for Private, Secure, and managed Spaces. The separate current-key-grant endpoint is
 retained for a focused key refresh, but clients should use the atomic bootstrap
 endpoint for relaunch and recovery.
 

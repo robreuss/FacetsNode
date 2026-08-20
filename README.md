@@ -16,8 +16,9 @@ Installing one service does not expose the other product.
 
 The shared relay foundation is content-blind. It stores opaque routing
 identifiers, capability digests, bounded metadata, encrypted envelopes, and
-encrypted blobs without parsing FEF content. Device Sync and E2EE Shared
-Spaces never give the service a domain content key. Managed Shared Spaces use
+encrypted blobs without parsing FEF content. Device Sync and content-blind
+Private and Secure Shared Spaces never give the service a domain content key.
+Managed Shared Spaces use
 a distinct boundary: the service generates the Space content key, encrypts it
 at rest under a deployment-owned key-encryption key, rotates it with
 participant revocation, and releases it only through participant-authenticated
@@ -63,10 +64,12 @@ content keys never pass through the operator credential or account admission.
 The first Shared Spaces authority lifecycle is specified in
 [the Shared Spaces bootstrap contract](docs/shared-spaces-bootstrap.md).
 Immutable interaction modes and participant roles derive relay operations.
-For E2EE Spaces, the service atomically stores participant-specific encrypted
-key grants and advances key epochs on revocation, but plaintext content keys
-remain a client concern and never pass through the Shared Spaces operator
-credential. Authenticated participants can recover their own current role,
+Private Spaces store a static participant group-key epoch: revocation stops
+future delivery but cannot remove a key already received. Secure Spaces
+atomically store participant-specific encrypted key grants and advance key
+epochs on revocation. In both cases plaintext content keys remain a client
+concern and never pass through the Shared Spaces operator credential.
+Authenticated participants can recover their own current role,
 derived capabilities, key epoch, and bootstrap readiness after relaunch without
 receiving the Space roster or using a Space administration credential. For
 managed Spaces, that same atomic bootstrap includes the current service-managed

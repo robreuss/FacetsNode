@@ -141,12 +141,34 @@ type AuthorityEventPage struct {
 type SecurityMode string
 
 const (
-	SecurityModeE2EE    SecurityMode = "e2ee"
+	// SecurityModePrivate is content-blind E2EE for a closed, trusted group.
+	// It uses a stable group-key epoch. Revoking a participant stops future
+	// delivery, but does not revoke material that participant already received.
+	SecurityModePrivate SecurityMode = "private"
+	// SecurityModeSecure is content-blind E2EE for high-assurance groups.
+	// Every participant revocation advances the key epoch and atomically grants
+	// the new epoch to every remaining active participant.
+	SecurityModeSecure SecurityMode = "secure"
+	// SecurityModeManaged is reserved for the server-readable public profile.
+	// It is not a substitute for either content-blind E2EE profile.
 	SecurityModeManaged SecurityMode = "managed"
 )
 
 func (m SecurityMode) Valid() bool {
-	return m == SecurityModeE2EE || m == SecurityModeManaged
+	return m == SecurityModePrivate || m == SecurityModeSecure || m == SecurityModeManaged
+}
+
+// ContentBlind reports whether the service must handle only opaque encrypted
+// content and participant-wrapped key material.
+func (m SecurityMode) ContentBlind() bool {
+	return m == SecurityModePrivate || m == SecurityModeSecure
+}
+
+// RotatesKeyEpochOnRevocation reports whether a participant revocation must
+// establish a fresh content-key epoch. Private Spaces deliberately retain their
+// static group-key epoch; Secure and managed Spaces rotate.
+func (m SecurityMode) RotatesKeyEpochOnRevocation() bool {
+	return m == SecurityModeSecure || m == SecurityModeManaged
 }
 
 // InteractionMode defines which participant roles may publish into a Shared
@@ -502,14 +524,17 @@ func (g ParticipantKeyGrant) Validate() error {
 }
 
 func (i Invitation) ValidateKeyGrant(mode SecurityMode, currentKeyEpoch uint64) error {
+	if !mode.Valid() {
+		return NewProtocolError(CodeInvalidSpace, "Shared Space security mode is invalid")
+	}
 	if mode == SecurityModeManaged {
 		if i.KeyGrant != nil {
-			return NewProtocolError(CodeInvalidInvitation, "managed Shared Space invitations cannot carry E2EE key grants")
+			return NewProtocolError(CodeInvalidInvitation, "managed Shared Space invitations cannot carry participant key grants")
 		}
 		return nil
 	}
 	if i.KeyGrant == nil {
-		return NewProtocolError(CodeInvalidInvitation, "E2EE Shared Space invitation is missing its participant key grant")
+		return NewProtocolError(CodeInvalidInvitation, "content-blind Shared Space invitation is missing its participant key grant")
 	}
 	grant := i.KeyGrant
 	if grant.SpaceID != i.SpaceID || grant.ParticipantID != i.ParticipantID ||
@@ -646,29 +671,39 @@ type ParticipantRevocation struct {
 func (r ParticipantRevocation) Validate() error {
 	if r.Version != SchemaVersion || r.RetryID == uuid.Nil || r.SpaceID == uuid.Nil ||
 		r.ParticipantID == uuid.Nil || r.PreviousKeyEpoch < InitialKeyEpoch ||
-		r.NextKeyEpoch != r.PreviousKeyEpoch+1 {
+		r.NextKeyEpoch < r.PreviousKeyEpoch || r.NextKeyEpoch > r.PreviousKeyEpoch+1 {
 		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant revocation fields are invalid")
 	}
 	return nil
 }
 
-// ValidateKeyGrants enforces an atomic E2EE epoch rotation. A revocation may
-// advance the Space epoch only when every participant that remains active has
-// one valid opaque grant for the next epoch. The server validates authority
-// and coverage without learning the wrapped content key.
+// ValidateKeyGrants enforces the security profile's revocation rule. Secure
+// Spaces rotate atomically: every remaining active participant must receive a
+// valid opaque grant for the next epoch. Private Spaces retain their static
+// epoch and carry no rotation grants. The server validates authority and
+// coverage without learning a content key in either content-blind profile.
 func (r ParticipantRevocation) ValidateKeyGrants(
 	mode SecurityMode,
 	participants []Participant,
 	nowMilliseconds int64,
 ) error {
-	if mode == SecurityModeManaged {
-		if len(r.KeyGrants) != 0 {
-			return NewProtocolError(CodeInvalidParticipant, "managed Shared Space revocations cannot carry E2EE key grants")
+	if !mode.Valid() {
+		return NewProtocolError(CodeInvalidSpace, "Shared Space security mode is invalid")
+	}
+	if mode == SecurityModePrivate {
+		if r.NextKeyEpoch != r.PreviousKeyEpoch || len(r.KeyGrants) != 0 {
+			return NewProtocolError(CodeInvalidParticipant, "private Shared Space revocation must retain its static key epoch without key grants")
 		}
 		return nil
 	}
-	if mode != SecurityModeE2EE {
-		return NewProtocolError(CodeInvalidSpace, "Shared Space security mode is invalid")
+	if mode == SecurityModeManaged {
+		if r.NextKeyEpoch != r.PreviousKeyEpoch+1 || len(r.KeyGrants) != 0 {
+			return NewProtocolError(CodeInvalidParticipant, "managed Shared Space revocation must rotate its key epoch without participant key grants")
+		}
+		return nil
+	}
+	if r.NextKeyEpoch != r.PreviousKeyEpoch+1 {
+		return NewProtocolError(CodeInvalidParticipant, "secure Shared Space revocation must advance its key epoch")
 	}
 
 	active := make(map[uuid.UUID]Participant)
@@ -686,7 +721,7 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 		}
 	}
 	if len(r.KeyGrants) != len(active) {
-		return NewProtocolError(CodeInvalidParticipant, "E2EE participant revocation does not grant the next key epoch to every remaining participant")
+		return NewProtocolError(CodeInvalidParticipant, "secure Shared Space revocation does not grant the next key epoch to every remaining participant")
 	}
 
 	seen := make(map[uuid.UUID]struct{}, len(r.KeyGrants))
@@ -811,7 +846,7 @@ func (s ParticipantStatus) Validate() error {
 
 // ManagedContentKey is a server-owned managed-Space content key delivered only
 // to an authenticated, active participant. It is not participant authority and
-// it is never used by E2EE Spaces.
+// it is never used by content-blind Private or Secure Spaces.
 type ManagedContentKey struct {
 	Version       int       `json:"version"`
 	SpaceID       uuid.UUID `json:"spaceID"`
@@ -832,9 +867,10 @@ func (k ManagedContentKey) Validate() error {
 }
 
 // ParticipantBootstrap is an atomic participant-scoped recovery snapshot. An
-// E2EE Space includes the caller's opaque participant grant. A managed Space
-// includes the service-owned content key. Exactly one key form must match the
-// security mode and key epoch reported by Status.
+// A content-blind Private or Secure Space includes the caller's opaque
+// participant grant. A managed Space includes the service-owned content key.
+// Exactly one key form must match the security mode and key epoch reported by
+// Status.
 type ParticipantBootstrap struct {
 	Version           int                        `json:"version"`
 	Status            ParticipantStatus          `json:"status"`
@@ -865,7 +901,7 @@ func (b ParticipantBootstrap) Validate() error {
 		b.KeyGrant.KeyGrant.SpaceID != b.Status.SpaceID ||
 		b.KeyGrant.KeyGrant.ParticipantID != b.Status.Participant.ParticipantID ||
 		b.KeyGrant.KeyGrant.KeyEpoch != b.Status.CurrentKeyEpoch {
-		return NewProtocolError(CodeInvalidParticipant, "E2EE Shared Space participant bootstrap key grant is inconsistent")
+		return NewProtocolError(CodeInvalidParticipant, "content-blind Shared Space participant bootstrap key grant is inconsistent")
 	}
 	if err := b.KeyGrant.KeyGrant.Validate(); err != nil {
 		return err

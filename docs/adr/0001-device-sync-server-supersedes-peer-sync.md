@@ -68,7 +68,7 @@ peer-to-peer product mode.
 ## Non-goals
 
 - This decision does not make Shared Spaces server-readable. Shared Spaces
-  retains its own immutable E2EE or managed security mode.
+  retains its own immutable Private, Secure, or managed protocol mode.
 - This decision does not introduce a public discovery storefront, billing, or
   compute marketplace.
 - This decision does not make a server the source of Facets semantic truth.

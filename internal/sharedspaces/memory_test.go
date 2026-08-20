@@ -21,11 +21,11 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
 	store := sharedspaces.NewMemoryStore(relayStore)
-	_, provisioning, admin := testSpaceProvisioning(t, 1_000, sharedspaces.SecurityModeE2EE)
+	_, provisioning, admin := testSpaceProvisioning(t, 1_000, sharedspaces.SecurityModeSecure)
 
 	created, err := store.ProvisionSpace(ctx, provisioning, 1_000)
 	if err != nil || created.Acceptance != relay.AcceptanceAccepted ||
-		created.SecurityMode != sharedspaces.SecurityModeE2EE ||
+		created.SecurityMode != sharedspaces.SecurityModeSecure ||
 		created.InitialParticipant.Role != sharedspaces.RoleHost {
 		t.Fatalf("provision=%+v err=%v", created, err)
 	}
@@ -113,7 +113,7 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	participantStatus, err := store.GetParticipantStatus(ctx, memberCredential, 1_301)
 	if err != nil || participantStatus.SpaceID != provisioning.SpaceID ||
 		participantStatus.DomainID != provisioning.Domain.Registration.DomainID ||
-		participantStatus.SecurityMode != sharedspaces.SecurityModeE2EE ||
+		participantStatus.SecurityMode != sharedspaces.SecurityModeSecure ||
 		participantStatus.InteractionMode != sharedspaces.InteractionModeCollaborative ||
 		participantStatus.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		!participantStatus.BootstrapReady || participantStatus.ActiveCheckpointEpoch == nil ||
@@ -318,7 +318,7 @@ func TestMemoryStoreComputePoolAuthorityLifecycle(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
 	store := sharedspaces.NewMemoryStore(relayStore)
-	_, provisioning, admin := testSpaceProvisioning(t, 5_000, sharedspaces.SecurityModeE2EE)
+	_, provisioning, admin := testSpaceProvisioning(t, 5_000, sharedspaces.SecurityModeSecure)
 	if _, err := store.ProvisionSpace(ctx, provisioning, 5_000); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestMemoryStoreCancelsUnclaimedInvitation(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
 	store := sharedspaces.NewMemoryStore(relayStore)
-	_, provisioning, admin := testSpaceProvisioning(t, 2_000, sharedspaces.SecurityModeE2EE)
+	_, provisioning, admin := testSpaceProvisioning(t, 2_000, sharedspaces.SecurityModeSecure)
 	if _, err := store.ProvisionSpace(ctx, provisioning, 2_000); err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +474,7 @@ func TestMemoryStoreRejectsInvitationForAnotherInteractionModeAtomically(t *test
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
 	store := sharedspaces.NewMemoryStore(relayStore)
-	_, provisioning, admin := testSpaceProvisioning(t, 2_700, sharedspaces.SecurityModeE2EE)
+	_, provisioning, admin := testSpaceProvisioning(t, 2_700, sharedspaces.SecurityModeSecure)
 	if _, err := store.ProvisionSpace(ctx, provisioning, 2_700); err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestMemoryStoreRejectsStaleRevocationKeyEpoch(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
 	store := sharedspaces.NewMemoryStore(relayStore)
-	_, provisioning, admin := testSpaceProvisioning(t, 4_000, sharedspaces.SecurityModeE2EE)
+	_, provisioning, admin := testSpaceProvisioning(t, 4_000, sharedspaces.SecurityModeSecure)
 	if _, err := store.ProvisionSpace(ctx, provisioning, 4_000); err != nil {
 		t.Fatal(err)
 	}
@@ -767,11 +767,11 @@ func TestMemoryStoreRotatesManagedContentKeyOnParticipantRevocation(t *testing.T
 	}
 }
 
-func TestMemoryStoreRejectsIncompleteE2EERevocationWithoutChangingAuthority(t *testing.T) {
+func TestMemoryStoreRejectsIncompleteSecureRevocationWithoutChangingAuthority(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
 	store := sharedspaces.NewMemoryStore(relayStore)
-	_, provisioning, admin := testSpaceProvisioning(t, 5_000, sharedspaces.SecurityModeE2EE)
+	_, provisioning, admin := testSpaceProvisioning(t, 5_000, sharedspaces.SecurityModeSecure)
 	if _, err := store.ProvisionSpace(ctx, provisioning, 5_000); err != nil {
 		t.Fatal(err)
 	}
@@ -824,6 +824,69 @@ func TestMemoryStoreRejectsIncompleteE2EERevocationWithoutChangingAuthority(t *t
 	}
 	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, 5_301); err != nil {
 		t.Fatalf("member authority changed after rejected revocation: %v", err)
+	}
+}
+
+func TestMemoryStorePrivateRevocationStopsDeliveryWithoutRotatingKeyEpoch(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 5_500, sharedspaces.SecurityModePrivate)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 5_500); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, hostCredential, admin,
+		sharedspaces.InitialKeyEpoch, 5_550,
+	)
+	invitation, invitationCredential := testInvitation(
+		t, provisioning, admin, 5_600, sharedspaces.RoleParticipant,
+	)
+	if invitation.KeyGrant == nil {
+		t.Fatal("private invitation is missing its current static key grant")
+	}
+	if _, err := store.CreateInvitation(ctx, admin, invitation, 5_600); err != nil {
+		t.Fatal(err)
+	}
+	memberCredential := relay.Credential{
+		TenantID: invitation.SpaceID, DomainID: invitation.RelayAdmission.DomainID,
+		MemberID: invitation.ParticipantID, Token: testToken(0x71),
+	}
+	memberDigest, err := relay.AuthorizationDigest(memberCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimInvitation(ctx, invitationCredential, sharedspaces.InvitationClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID,
+		RelayClaim: relay.MemberAdmissionClaim{
+			MemberID: invitation.ParticipantID, AuthorizationDigest: memberDigest,
+		},
+		ClaimedAtMilliseconds: 5_700,
+	}, 5_700); err != nil {
+		t.Fatal(err)
+	}
+
+	revocation := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
+		ParticipantID: invitation.ParticipantID, PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch: sharedspaces.InitialKeyEpoch,
+	}
+	result, err := store.RevokeParticipant(ctx, admin, revocation, 5_800)
+	if err != nil || result.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("private revocation=%+v err=%v", result, err)
+	}
+	if _, err := relayStore.Fetch(ctx, memberCredential, 0, 1, 5_801); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("private revoked relay access err=%v", err)
+	}
+	status, err := store.GetSpaceStatus(ctx, admin)
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		len(status.Participants) != 2 || status.Relay.ActiveSubscriptionCount != 2 {
+		t.Fatalf("private status after revocation=%+v err=%v", status, err)
 	}
 }
 
@@ -943,7 +1006,7 @@ func testInvitation(
 			ExpiresAtMilliseconds: now + 60*60*1_000,
 		},
 	}
-	if space.SecurityMode == sharedspaces.SecurityModeE2EE {
+	if space.SecurityMode.ContentBlind() {
 		invitation.KeyGrant = testParticipantKeyGrant(
 			t, space.SpaceID, invitation.ParticipantID, space.InitialParticipantID,
 			sharedspaces.InitialKeyEpoch, now,

@@ -1068,7 +1068,7 @@ func (s *MemoryStore) GetParticipantBootstrap(
 		status.Presentation = &presentation
 	}
 	result := ParticipantBootstrap{Version: SchemaVersion, Status: status}
-	if space.provisioning.SecurityMode == SecurityModeE2EE {
+	if space.provisioning.SecurityMode.ContentBlind() {
 		grant, found := space.keyGrants[space.keyEpoch][credential.MemberID]
 		if !found {
 			return ParticipantBootstrap{}, NewProtocolError(CodeKeyGrantNotFound, "current participant key grant was not found")
@@ -1124,7 +1124,7 @@ func (s *MemoryStore) GetParticipantKeyGrant(
 	if participant.RevokedAtMilliseconds != nil {
 		return ParticipantKeyGrantResult{}, NewProtocolError(CodeParticipantRevoked, "participant is revoked")
 	}
-	if space.provisioning.SecurityMode != SecurityModeE2EE {
+	if !space.provisioning.SecurityMode.ContentBlind() {
 		return ParticipantKeyGrantResult{}, NewProtocolError(CodeKeyGrantNotFound, "managed Shared Spaces do not have participant key grants")
 	}
 	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {

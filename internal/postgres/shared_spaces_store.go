@@ -1516,7 +1516,7 @@ func (s *SharedSpacesStore) GetParticipantKeyGrant(
 	if err := member.VerifyCredential(credential, nowMilliseconds); err != nil {
 		return sharedspaces.ParticipantKeyGrantResult{}, err
 	}
-	if securityMode != sharedspaces.SecurityModeE2EE {
+	if !securityMode.ContentBlind() {
 		return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeKeyGrantNotFound, "managed Shared Spaces do not have participant key grants",
 		)
@@ -1955,7 +1955,7 @@ func (s *SharedSpacesStore) getParticipantBootstrap(
 		return sharedspaces.ParticipantBootstrap{}, err
 	}
 	result := sharedspaces.ParticipantBootstrap{Version: sharedspaces.SchemaVersion, Status: status}
-	if includeKeyGrant && securityMode == sharedspaces.SecurityModeE2EE {
+	if includeKeyGrant && securityMode.ContentBlind() {
 		grants, err := loadSharedSpaceParticipantKeyGrants(
 			ctx, tx, credential.TenantID, currentKeyEpoch,
 		)

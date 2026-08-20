@@ -2,7 +2,7 @@
 
 Facets Shared Spaces Server's PostgreSQL database and opaque blob volume form
 one recovery unit. PostgreSQL holds Space authority, participant state, relay
-custody, E2EE key-grant ciphertext, wrapped managed-Space content keys, quotas,
+custody, content-blind participant key-grant ciphertext, wrapped managed-Space content keys, quotas,
 receipts, and references to the encrypted blob bytes. A backup of only the
 database or only the blob volume is invalid.
 

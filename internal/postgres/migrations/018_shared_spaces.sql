@@ -2,7 +2,7 @@ CREATE TABLE shared_spaces (
     space_id uuid PRIMARY KEY REFERENCES relay_tenants(tenant_id) ON DELETE CASCADE,
     provisioning_retry_id uuid NOT NULL UNIQUE,
     version smallint NOT NULL CHECK (version = 1),
-    security_mode text NOT NULL CHECK (security_mode IN ('e2ee', 'managed')),
+    security_mode text NOT NULL CHECK (security_mode IN ('private', 'secure', 'managed')),
     domain_id uuid NOT NULL UNIQUE,
     initial_participant_id uuid NOT NULL,
     initial_subscription_id uuid NOT NULL,
