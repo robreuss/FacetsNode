@@ -237,6 +237,7 @@ func (s *MemoryStore) FetchJoinRequestBootstrap(
 }
 
 func (s *MemoryStore) CreateAccountAdmission(_ context.Context, admission AccountAdmission, nowMilliseconds int64) (AdmissionCreateResult, error) {
+	admission = admission.WithEffectiveServiceEntitlement()
 	if err := admission.Validate(); err != nil {
 		return AdmissionCreateResult{}, err
 	}
@@ -265,12 +266,6 @@ func (s *MemoryStore) CreateAccountAdmission(_ context.Context, admission Accoun
 }
 
 func (s *MemoryStore) ClaimAccountAdmission(ctx context.Context, credential AdmissionCredential, provisioning PrincipalProvisioning, nowMilliseconds int64) (PrincipalProvisioningResult, error) {
-	if err := provisioning.Validate(); err != nil {
-		return PrincipalProvisioningResult{}, err
-	}
-	if provisioning.CreatedAtMilliseconds > nowMilliseconds {
-		return PrincipalProvisioningResult{}, NewProtocolError(CodeInvalidPrincipal, "principal starts in the future")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	admission, found := s.admissions[credential.AdmissionID]
@@ -279,6 +274,13 @@ func (s *MemoryStore) ClaimAccountAdmission(ctx context.Context, credential Admi
 	}
 	if err := admission.VerifyCredential(credential); err != nil {
 		return PrincipalProvisioningResult{}, err
+	}
+	provisioning = admission.EffectiveServiceEntitlement().Apply(provisioning)
+	if err := provisioning.Validate(); err != nil {
+		return PrincipalProvisioningResult{}, err
+	}
+	if provisioning.CreatedAtMilliseconds > nowMilliseconds {
+		return PrincipalProvisioningResult{}, NewProtocolError(CodeInvalidPrincipal, "principal starts in the future")
 	}
 	if admission.ClaimedAtMilliseconds != nil {
 		existing, found := s.principals[*admission.ClaimedPrincipalID]

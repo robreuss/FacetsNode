@@ -43,14 +43,15 @@ func AdmissionAuthorizationDigest(credential AdmissionCredential) (string, error
 }
 
 type AccountAdmission struct {
-	Version               int        `json:"version"`
-	RetryID               uuid.UUID  `json:"retryID"`
-	AdmissionID           uuid.UUID  `json:"admissionID"`
-	AuthorizationDigest   string     `json:"authorizationDigest"`
-	CreatedAtMilliseconds int64      `json:"createdAtMilliseconds"`
-	ExpiresAtMilliseconds int64      `json:"expiresAtMilliseconds"`
-	ClaimedAtMilliseconds *int64     `json:"claimedAtMilliseconds,omitempty"`
-	ClaimedPrincipalID    *uuid.UUID `json:"claimedPrincipalID,omitempty"`
+	Version               int                `json:"version"`
+	RetryID               uuid.UUID          `json:"retryID"`
+	AdmissionID           uuid.UUID          `json:"admissionID"`
+	AuthorizationDigest   string             `json:"authorizationDigest"`
+	CreatedAtMilliseconds int64              `json:"createdAtMilliseconds"`
+	ExpiresAtMilliseconds int64              `json:"expiresAtMilliseconds"`
+	Entitlement           ServiceEntitlement `json:"entitlement"`
+	ClaimedAtMilliseconds *int64             `json:"claimedAtMilliseconds,omitempty"`
+	ClaimedPrincipalID    *uuid.UUID         `json:"claimedPrincipalID,omitempty"`
 }
 
 func (a AccountAdmission) Validate() error {
@@ -59,6 +60,9 @@ func (a AccountAdmission) Validate() error {
 		a.ExpiresAtMilliseconds-a.CreatedAtMilliseconds < MinimumAdmissionLifetimeMilliseconds ||
 		a.ExpiresAtMilliseconds-a.CreatedAtMilliseconds > MaximumAdmissionLifetimeMilliseconds {
 		return NewProtocolError(CodeInvalidAdmission, "account admission fields are invalid")
+	}
+	if err := a.EffectiveServiceEntitlement().Validate(); err != nil {
+		return err
 	}
 	if (a.ClaimedAtMilliseconds == nil) != (a.ClaimedPrincipalID == nil) {
 		return NewProtocolError(CodeInvalidAdmission, "account admission claim state is incomplete")

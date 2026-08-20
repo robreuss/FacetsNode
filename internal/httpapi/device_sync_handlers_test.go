@@ -125,6 +125,79 @@ func TestDeviceSyncAccountAdmissionClaimsPrincipalExactlyOnce(t *testing.T) {
 	_ = changed.Body.Close()
 }
 
+func TestDeviceSyncAccountAdmissionAppliesOperatorEntitlement(t *testing.T) {
+	const now = int64(1_250)
+	operatorToken := relayTestToken(207)
+	relayStore := relay.NewMemoryStore()
+	server := newDeviceSyncTestServer(t, relayStore, operatorToken, now)
+	handler := server.Handler()
+
+	credential := deviceSyncAdmissionCredential{
+		AdmissionID:        uuid.New(),
+		AuthorizationToken: relayTestToken(208),
+	}
+	entitlement := devicesync.ServiceEntitlement{
+		Version: devicesync.SchemaVersion,
+		PlanID:  "hosted-starter",
+		TenantQuota: relay.TenantQuota{
+			MaximumDomainCount:               3,
+			MaximumAggregateMessageCount:     40,
+			MaximumAggregateMessageByteCount: 4_000,
+			MaximumAggregateBlobCount:        5,
+			MaximumAggregateBlobByteCount:    5_000,
+		},
+	}
+	admission := deviceSyncAdmissionCreateInput{
+		Version:               devicesync.SchemaVersion,
+		RetryID:               uuid.New(),
+		AdmissionCredential:   credential,
+		ExpiresAtMilliseconds: now + devicesync.MinimumAdmissionLifetimeMilliseconds,
+		Entitlement:           &entitlement,
+	}
+	created := performRelayJSON(
+		t, handler, http.MethodPost, "/v1/device-sync/account-admissions",
+		admission, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, created, http.StatusCreated)
+	var createdResult devicesync.AdmissionCreateResult
+	if err := json.NewDecoder(created.Body).Decode(&createdResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = created.Body.Close()
+	if createdResult.Admission.Entitlement != entitlement {
+		t.Fatalf("created entitlement=%+v want=%+v", createdResult.Admission.Entitlement, entitlement)
+	}
+
+	controlDomain := newRelayDomainProvisioningRequest(now, 209, 210)
+	claim := deviceSyncPrincipalClaimInput{
+		Version:         devicesync.SchemaVersion,
+		RetryID:         uuid.New(),
+		PrincipalID:     controlDomain.AdministrationCredential.TenantID,
+		InitialDeviceID: controlDomain.MemberCredential.MemberID,
+		TenantProvisioning: newRelayTenantProvisioningRequest(
+			controlDomain, relayTestToken(211),
+		),
+	}
+	claimed := performRelayJSON(
+		t, handler, http.MethodPost,
+		"/v1/device-sync/account-admissions/"+credential.AdmissionID.String()+"/claim",
+		claim, credential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, claimed, http.StatusCreated)
+	_ = claimed.Body.Close()
+
+	status, err := relayStore.GetTenantStatus(context.Background(), relay.TenantCredential{
+		TenantID: claim.PrincipalID,
+		Token:    claim.TenantProvisioning.TenantProvisioningCredential.AuthorizationToken,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Quota != entitlement.TenantQuota {
+		t.Fatalf("tenant quota=%+v want=%+v", status.Quota, entitlement.TenantQuota)
+	}
+}
+
 func TestDeviceSyncAccountClaimRejectsWrongAdmissionCredential(t *testing.T) {
 	operatorToken := relayTestToken(211)
 	relayStore := relay.NewMemoryStore()

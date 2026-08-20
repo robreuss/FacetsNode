@@ -327,6 +327,7 @@ func (s *RelayStore) CreateAccountAdmission(
 	admission devicesync.AccountAdmission,
 	nowMilliseconds int64,
 ) (devicesync.AdmissionCreateResult, error) {
+	admission = admission.WithEffectiveServiceEntitlement()
 	if err := admission.Validate(); err != nil {
 		return devicesync.AdmissionCreateResult{}, err
 	}
@@ -339,12 +340,21 @@ func (s *RelayStore) CreateAccountAdmission(
 	result, err := s.pool.Exec(ctx, `
 		INSERT INTO device_sync_account_admissions (
 			admission_id, retry_id, version, authorization_digest,
-			created_at_milliseconds, expires_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6)
+			created_at_milliseconds, expires_at_milliseconds,
+			entitlement_version, entitlement_plan_id,
+			maximum_domain_count, maximum_aggregate_message_count,
+			maximum_aggregate_message_byte_count, maximum_aggregate_blob_count,
+			maximum_aggregate_blob_byte_count
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT DO NOTHING
 	`, admission.AdmissionID, admission.RetryID, admission.Version,
 		admission.AuthorizationDigest, admission.CreatedAtMilliseconds,
-		admission.ExpiresAtMilliseconds)
+		admission.ExpiresAtMilliseconds, admission.Entitlement.Version,
+		admission.Entitlement.PlanID, admission.Entitlement.TenantQuota.MaximumDomainCount,
+		admission.Entitlement.TenantQuota.MaximumAggregateMessageCount,
+		admission.Entitlement.TenantQuota.MaximumAggregateMessageByteCount,
+		admission.Entitlement.TenantQuota.MaximumAggregateBlobCount,
+		admission.Entitlement.TenantQuota.MaximumAggregateBlobByteCount)
 	if err != nil {
 		return devicesync.AdmissionCreateResult{}, fmt.Errorf("insert Device Sync account admission: %w", err)
 	}
@@ -369,14 +379,6 @@ func (s *RelayStore) ClaimAccountAdmission(
 	provisioning devicesync.PrincipalProvisioning,
 	nowMilliseconds int64,
 ) (devicesync.PrincipalProvisioningResult, error) {
-	if err := provisioning.Validate(); err != nil {
-		return devicesync.PrincipalProvisioningResult{}, err
-	}
-	if provisioning.CreatedAtMilliseconds > nowMilliseconds {
-		return devicesync.PrincipalProvisioningResult{}, devicesync.NewProtocolError(
-			devicesync.CodeInvalidPrincipal, "principal starts in the future",
-		)
-	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return devicesync.PrincipalProvisioningResult{}, fmt.Errorf("begin Device Sync principal provisioning: %w", err)
@@ -388,6 +390,15 @@ func (s *RelayStore) ClaimAccountAdmission(
 	}
 	if err := admission.VerifyCredential(credential); err != nil {
 		return devicesync.PrincipalProvisioningResult{}, err
+	}
+	provisioning = admission.EffectiveServiceEntitlement().Apply(provisioning)
+	if err := provisioning.Validate(); err != nil {
+		return devicesync.PrincipalProvisioningResult{}, err
+	}
+	if provisioning.CreatedAtMilliseconds > nowMilliseconds {
+		return devicesync.PrincipalProvisioningResult{}, devicesync.NewProtocolError(
+			devicesync.CodeInvalidPrincipal, "principal starts in the future",
+		)
 	}
 	if admission.ClaimedAtMilliseconds != nil {
 		exact, err := deviceSyncPrincipalProvisioningEqual(ctx, tx, admission.AdmissionID, provisioning)
@@ -1377,6 +1388,10 @@ func loadDeviceSyncAdmission(
 	query := `
 		SELECT version,retry_id,admission_id,authorization_digest,
 			created_at_milliseconds,expires_at_milliseconds,
+			entitlement_version,entitlement_plan_id,
+			maximum_domain_count,maximum_aggregate_message_count,
+			maximum_aggregate_message_byte_count,maximum_aggregate_blob_count,
+			maximum_aggregate_blob_byte_count,
 			claimed_at_milliseconds,claimed_principal_id
 		FROM device_sync_account_admissions
 		WHERE admission_id=$1`
@@ -1391,7 +1406,13 @@ func loadDeviceSyncAdmission(
 	err := querier.QueryRow(ctx, query, arguments...).Scan(
 		&admission.Version, &admission.RetryID, &admission.AdmissionID,
 		&admission.AuthorizationDigest, &admission.CreatedAtMilliseconds,
-		&admission.ExpiresAtMilliseconds, &admission.ClaimedAtMilliseconds,
+		&admission.ExpiresAtMilliseconds, &admission.Entitlement.Version,
+		&admission.Entitlement.PlanID, &admission.Entitlement.TenantQuota.MaximumDomainCount,
+		&admission.Entitlement.TenantQuota.MaximumAggregateMessageCount,
+		&admission.Entitlement.TenantQuota.MaximumAggregateMessageByteCount,
+		&admission.Entitlement.TenantQuota.MaximumAggregateBlobCount,
+		&admission.Entitlement.TenantQuota.MaximumAggregateBlobByteCount,
+		&admission.ClaimedAtMilliseconds,
 		&admission.ClaimedPrincipalID,
 	)
 	if err == pgx.ErrNoRows {

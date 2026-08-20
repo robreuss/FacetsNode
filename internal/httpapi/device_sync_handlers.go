@@ -16,10 +16,11 @@ type deviceSyncAdmissionCredential struct {
 }
 
 type deviceSyncAdmissionCreateInput struct {
-	Version               int                           `json:"version"`
-	RetryID               uuid.UUID                     `json:"retryID"`
-	AdmissionCredential   deviceSyncAdmissionCredential `json:"admissionCredential"`
-	ExpiresAtMilliseconds int64                         `json:"expiresAtMilliseconds"`
+	Version               int                            `json:"version"`
+	RetryID               uuid.UUID                      `json:"retryID"`
+	AdmissionCredential   deviceSyncAdmissionCredential  `json:"admissionCredential"`
+	ExpiresAtMilliseconds int64                          `json:"expiresAtMilliseconds"`
+	Entitlement           *devicesync.ServiceEntitlement `json:"entitlement,omitempty"`
 }
 
 type deviceSyncPrincipalClaimInput struct {
@@ -294,10 +295,15 @@ func (s *Server) handleCreateDeviceSyncAccountAdmission(writer http.ResponseWrit
 		return
 	}
 	now := s.nowMilliseconds()
+	entitlement := devicesync.DefaultServiceEntitlement()
+	if input.Entitlement != nil {
+		entitlement = *input.Entitlement
+	}
 	admission := devicesync.AccountAdmission{
 		Version: devicesync.SchemaVersion, RetryID: input.RetryID,
 		AdmissionID: credential.AdmissionID, AuthorizationDigest: digest,
 		CreatedAtMilliseconds: now, ExpiresAtMilliseconds: input.ExpiresAtMilliseconds,
+		Entitlement: entitlement,
 	}
 	if input.Version != devicesync.SchemaVersion {
 		s.writeError(writer, devicesync.NewProtocolError(

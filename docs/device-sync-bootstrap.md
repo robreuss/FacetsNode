@@ -8,8 +8,13 @@ an isolated relay domain, admits an already enrolled device to that Space
 transport, and gives a newly admitted device the active opaque checkpoint plus
 the subsequent mutation tail. The Swift client now transfers client-held
 content trust over the protected control channel and applies received content
-through the canonical FEF importer. Hosted account-admission UX, commercial
-entitlements, and zero-device key recovery remain later gates.
+through the canonical FEF importer. Hosted account-admission UX and
+zero-device key recovery remain later gates.
+
+The service already persists an operator-issued entitlement snapshot with every
+account admission. It fixes the principal's relay capacity independently of the
+claimant; a later commercial ledger will decide which plan to issue, renew,
+change, or revoke without becoming a content or key authority.
 
 ## Authority boundary
 
@@ -74,6 +79,26 @@ server-assigned creation time. The response contains the admission metadata and
 its acceptance (`accepted` or `duplicate`), but never echoes the bearer token.
 An exact retry is idempotent. Reusing an admission or retry ID for different
 material is rejected.
+
+The operator may attach a service entitlement. Omitting it issues the standard
+`self-hosted` entitlement. The bearer holder cannot submit a quota during claim;
+the service overwrites the relay tenant capacity with this stored snapshot.
+
+```json
+{
+  "entitlement": {
+    "version": 1,
+    "planID": "hosted-starter",
+    "tenantQuota": {
+      "maximumDomainCount": 3,
+      "maximumAggregateMessageCount": 40,
+      "maximumAggregateMessageByteCount": 4000,
+      "maximumAggregateBlobCount": 5,
+      "maximumAggregateBlobByteCount": 5000
+    }
+  }
+}
+```
 
 ## Claim the admission
 
