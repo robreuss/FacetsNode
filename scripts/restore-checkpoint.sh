@@ -21,6 +21,10 @@ published_port=${4:-18081}
 }
 [[ $published_port =~ ^[0-9]+$ && $published_port -ge 1024 && $published_port -le 65535 ]] || usage
 
+script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+deployment_directory=$(cd -- "$script_directory/.." && pwd)
+cd -- "$deployment_directory"
+
 restore_directory=$(mktemp -d "${TMPDIR:-/tmp}/facets-device-sync-restore.XXXXXX")
 checkpoint_placeholder=$(mktemp -d "${TMPDIR:-/tmp}/facets-device-sync-checkpoint-placeholder.XXXXXX")
 chmod 0700 -- "$restore_directory" "$checkpoint_placeholder"

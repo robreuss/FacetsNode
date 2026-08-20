@@ -13,6 +13,8 @@ password_file=$2
 [[ $password_file == /* && -f $password_file && -r $password_file ]] || usage
 
 script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+deployment_directory=$(cd -- "$script_directory/.." && pwd)
+cd -- "$deployment_directory"
 # shellcheck source=revision-attestation.sh
 source "$script_directory/revision-attestation.sh"
 

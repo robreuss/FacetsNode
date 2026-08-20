@@ -77,8 +77,53 @@ func TestSharedSpacesOperationsUseOnlySharedSpacesAuthority(t *testing.T) {
 	}
 }
 
+func TestDeviceSyncOperationsUseOnlyDeviceSyncAuthority(t *testing.T) {
+	backupCompose := readDeploymentFile(t, "../compose.backup.yaml")
+	backupScript := readDeploymentFile(t, "../scripts/backup-checkpoint.sh")
+	restoreScript := readDeploymentFile(t, "../scripts/restore-checkpoint.sh")
+
+	assertContainsAll(t, "Device Sync backup Compose", backupCompose, []string{
+		"--username=facets_device_sync",
+		"--dbname=facets_device_sync",
+		"FACETS_DEVICE_SYNC_POSTGRES_PASSWORD:",
+		"FACETS_DEVICE_SYNC_CHECKPOINT_REVISION:",
+		"facets-device-sync-blobs:/blobs:ro",
+		"FACETS_DEVICE_SYNC_RUNTIME_UID:",
+	})
+	assertContainsAll(t, "Device Sync backup script", backupScript, []string{
+		"deployment_directory=$(cd -- \"$script_directory/..\" && pwd)",
+		"cd -- \"$deployment_directory\"",
+		"facets_device_sync_resolve_checkpoint_revision",
+		"--host facets-device-sync",
+		"--tag facets-device-sync-checkpoint",
+		"source Facets Device Sync Server did not become ready after checkpoint",
+	})
+	assertContainsAll(t, "Device Sync restore script", restoreScript, []string{
+		"deployment_directory=$(cd -- \"$script_directory/..\" && pwd)",
+		"cd -- \"$deployment_directory\"",
+		"target_project != facets-device-sync",
+		"${target_project}_facets-device-sync-${volume_name}",
+		"pg_isready -U facets_device_sync -d facets_device_sync",
+		"restored Facets Device Sync Server did not become ready",
+	})
+
+	for name, contents := range map[string]string{
+		"backup Compose": backupCompose,
+		"backup script":  backupScript,
+		"restore script": restoreScript,
+	} {
+		if strings.Contains(contents, "FACETS_SHARED_SPACES_") ||
+			strings.Contains(contents, "facets-shared-spaces") {
+			t.Errorf("Device Sync %s references Shared Spaces deployment authority", name)
+		}
+	}
+}
+
 func TestSharedSpacesOperationsScriptsParse(t *testing.T) {
 	for _, path := range []string{
+		"../scripts/revision-attestation.sh",
+		"../scripts/backup-checkpoint.sh",
+		"../scripts/restore-checkpoint.sh",
 		"shared-spaces/scripts/revision-attestation.sh",
 		"shared-spaces/scripts/backup-checkpoint.sh",
 		"shared-spaces/scripts/restore-checkpoint.sh",
