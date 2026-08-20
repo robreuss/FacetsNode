@@ -1,8 +1,10 @@
 package protocol
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"testing"
@@ -54,6 +56,9 @@ func TestPortableTransportFixture(t *testing.T) {
 	data, err := os.ReadFile("testdata/facets-server-transport-portable-v1.json")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if digest := fmt.Sprintf("%x", sha256.Sum256(data)); digest != "1102b3f64c007b9bbf66c9eb74cb87b6b512e84241419df8827f7149b4e3ea26" {
+		t.Fatalf("portable fixture digest = %s", digest)
 	}
 	var fixture struct {
 		Format    string              `json:"format"`
