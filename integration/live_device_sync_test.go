@@ -79,6 +79,105 @@ func TestLiveDeviceSyncVerticalSlice(t *testing.T) {
 		t.Fatalf("unexpected Device Sync principal result: %+v", principalResult)
 	}
 
+	// A new device begins enrollment through the public, content-blind PIN
+	// mailbox. Exercise that complete HTTP/PostgreSQL flow here rather than
+	// relying only on the in-memory handler contract: the service may index the
+	// displayed PIN and retain opaque ciphertext, but it must never interpret or
+	// alter the protected handoff encrypted to the candidate device.
+	joinRequestID := uuid.New()
+	joinCandidateDeviceID := uuid.New()
+	joinPollingToken := encodedBytes(56)
+	joinPIN := "482501"
+	joinRequest := liveDeviceSyncJoinRequestCreateInput{
+		Version:                     devicesync.SchemaVersion,
+		RetryID:                     uuid.New(),
+		RequestID:                   joinRequestID,
+		CandidateDeviceID:           joinCandidateDeviceID,
+		CandidateBootstrapPublicKey: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x31}, 65)),
+		PollingAuthorizationToken:   joinPollingToken,
+		PIN:                         joinPIN,
+		ExpiresAtMilliseconds:       expiresAt,
+	}
+	joinCreateResponse := requestRelayJSON(
+		t, client, http.MethodPost, baseURL+"/v1/device-sync/join-requests",
+		joinRequest, "", uuid.Nil,
+	)
+	requireStatus(t, joinCreateResponse, http.StatusCreated)
+	var joinCreateResult devicesync.JoinRequestCreateResult
+	decodeLiveJSON(t, joinCreateResponse, &joinCreateResult)
+	if joinCreateResult.Acceptance != relay.AcceptanceAccepted ||
+		joinCreateResult.RequestID != joinRequestID {
+		t.Fatalf("unexpected live Device Sync join-request create result: %+v", joinCreateResult)
+	}
+
+	joinLookupPath := fmt.Sprintf(
+		"%s/v1/device-sync/principals/%s/control-domains/%s/join-requests/%s",
+		baseURL, principalID, controlDomain.AdministrationCredential.DomainID, joinPIN,
+	)
+	joinLookupResponse := requestRelayJSON(
+		t, client, http.MethodGet, joinLookupPath, nil,
+		controlDomain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, joinLookupResponse, http.StatusOK)
+	var joinPresentation devicesync.JoinRequestSponsorPresentation
+	decodeLiveJSON(t, joinLookupResponse, &joinPresentation)
+	if joinPresentation.RequestID != joinRequestID ||
+		joinPresentation.CandidateDeviceID != joinCandidateDeviceID ||
+		joinPresentation.CandidateBootstrapPublicKey != joinRequest.CandidateBootstrapPublicKey {
+		t.Fatalf("unexpected live Device Sync join-request presentation: %+v", joinPresentation)
+	}
+
+	joinBootstrap := devicesync.JoinBootstrapEnvelope{
+		Version:               devicesync.SchemaVersion,
+		RequestID:             joinRequestID,
+		Algorithm:             "P256+ChaCha20Poly1305",
+		EphemeralPublicKey:    base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 65)),
+		Nonce:                 base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 12)),
+		Ciphertext:            base64.RawURLEncoding.EncodeToString([]byte("opaque encrypted protected Device Sync handoff")),
+		AuthenticationTag:     base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x43}, 16)),
+		CreatedAtMilliseconds: now,
+		ExpiresAtMilliseconds: expiresAt,
+	}
+	joinBootstrapPath := fmt.Sprintf(
+		"%s/v1/device-sync/principals/%s/control-domains/%s/join-requests/%s/bootstrap",
+		baseURL, principalID, controlDomain.AdministrationCredential.DomainID, joinRequestID,
+	)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut, joinBootstrapPath,
+		liveDeviceSyncJoinBootstrapInput{JoinBootstrapEnvelope: joinBootstrap},
+		controlDomain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusCreated)
+
+	joinFetchPath := fmt.Sprintf("%s/v1/device-sync/join-requests/%s/bootstrap", baseURL, joinRequestID)
+	joinBootstrapResponse := requestRelayJSON(
+		t, client, http.MethodGet, joinFetchPath, nil, joinPollingToken, uuid.Nil,
+	)
+	requireStatus(t, joinBootstrapResponse, http.StatusOK)
+	var fetchedJoinBootstrap devicesync.JoinBootstrapEnvelope
+	decodeLiveJSON(t, joinBootstrapResponse, &fetchedJoinBootstrap)
+	if fetchedJoinBootstrap != joinBootstrap {
+		t.Fatalf("live Device Sync join bootstrap changed in transit: got=%+v want=%+v", fetchedJoinBootstrap, joinBootstrap)
+	}
+	// Repeating the same opaque envelope is safe. A replacement ciphertext is
+	// rejected, so an administrator cannot silently redirect the candidate.
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut, joinBootstrapPath,
+		liveDeviceSyncJoinBootstrapInput{JoinBootstrapEnvelope: joinBootstrap},
+		controlDomain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusOK)
+	replacementJoinBootstrap := joinBootstrap
+	replacementJoinBootstrap.Ciphertext = base64.RawURLEncoding.EncodeToString(
+		[]byte("different opaque encrypted protected Device Sync handoff"),
+	)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPut, joinBootstrapPath,
+		liveDeviceSyncJoinBootstrapInput{JoinBootstrapEnvelope: replacementJoinBootstrap},
+		controlDomain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusConflict)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodGet, joinFetchPath, nil, encodedBytes(88), uuid.Nil,
+	), http.StatusUnauthorized)
+
 	secondDeviceID := uuid.New()
 	secondControlCredential := liveDeviceSyncAdmitDevice(
 		t, client, baseURL, principalID, secondDeviceID, controlDomain,
@@ -372,6 +471,21 @@ type liveDeviceSyncSpaceProvisioningInput struct {
 	RetryID         uuid.UUID                          `json:"retryID"`
 	InitialDeviceID uuid.UUID                          `json:"initialDeviceID"`
 	Domain          liveRelayDomainProvisioningRequest `json:"domain"`
+}
+
+type liveDeviceSyncJoinRequestCreateInput struct {
+	Version                     int       `json:"version"`
+	RetryID                     uuid.UUID `json:"retryID"`
+	RequestID                   uuid.UUID `json:"requestID"`
+	CandidateDeviceID           uuid.UUID `json:"candidateDeviceID"`
+	CandidateBootstrapPublicKey string    `json:"candidateBootstrapPublicKey"`
+	PollingAuthorizationToken   string    `json:"pollingAuthorizationToken"`
+	PIN                         string    `json:"pin"`
+	ExpiresAtMilliseconds       int64     `json:"expiresAtMilliseconds"`
+}
+
+type liveDeviceSyncJoinBootstrapInput struct {
+	devicesync.JoinBootstrapEnvelope
 }
 
 func liveDeviceSyncAdmitDevice(
