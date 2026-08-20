@@ -1,0 +1,39 @@
+{
+  "format": "facets.device-sync-join-request-fixture.v1",
+  "warning": "All values in this fixture are synthetic protocol test material. The encrypted bootstrap is intentionally opaque and does not contain Facets content or keys.",
+  "request": {
+    "version": 1,
+    "retryID": "11111111-1111-4111-8111-111111111111",
+    "requestID": "22222222-2222-4222-8222-222222222222",
+    "candidateDeviceID": "33333333-3333-4333-8333-333333333333",
+    "candidateBootstrapPrivateKey": "cqM1O25Q-YSl_1XbinHIpqqrY4OmmS88xF0dHRkURZg",
+    "candidateBootstrapPublicKey": "GvoFePTFpVsAgnmt7xkZFyuYd5vvdLu6blNMBqD--98DlYsUPQqEInwFVUnhkal0pIcRI_ZwuiRiKPTipz1osg",
+    "pollingAuthorizationToken": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "pin": "482501",
+    "createdAtMilliseconds": 1710000000000,
+    "expiresAtMilliseconds": 1710000600000
+  },
+  "createResult": {
+    "acceptance": "accepted",
+    "requestID": "22222222-2222-4222-8222-222222222222",
+    "expiresAtMilliseconds": 1710000600000
+  },
+  "sponsorPresentation": {
+    "version": 1,
+    "requestID": "22222222-2222-4222-8222-222222222222",
+    "candidateDeviceID": "33333333-3333-4333-8333-333333333333",
+    "candidateBootstrapPublicKey": "GvoFePTFpVsAgnmt7xkZFyuYd5vvdLu6blNMBqD--98DlYsUPQqEInwFVUnhkal0pIcRI_ZwuiRiKPTipz1osg",
+    "expiresAtMilliseconds": 1710000600000
+  },
+  "bootstrap": {
+    "version": 1,
+    "requestID": "22222222-2222-4222-8222-222222222222",
+    "algorithm": "P256+ChaCha20Poly1305",
+    "ephemeralPublicKey": "GvoFePTFpVsAgnmt7xkZFyuYd5vvdLu6blNMBqD--98DlYsUPQqEInwFVUnhkal0pIcRI_ZwuiRiKPTipz1osg",
+    "nonce": "AAECAwQFBgcICQoL",
+    "ciphertext": "AAECAw",
+    "authenticationTag": "AAECAwQFBgcICQoLDA0ODw",
+    "createdAtMilliseconds": 1710000001000,
+    "expiresAtMilliseconds": 1710000500000
+  }
+}
