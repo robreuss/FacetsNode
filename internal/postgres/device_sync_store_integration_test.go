@@ -264,6 +264,37 @@ func TestPostgresDeviceSyncSpaceAndRelayDomainCommitAtomically(t *testing.T) {
 		!postgresSpaceDeviceRevoked(status, spaceID, additionalDeviceID) {
 		t.Fatalf("revoked device is missing from content-blind status: %+v", status)
 	}
+
+	// A Device Sync service restart must preserve both product-level enrollment
+	// state and the underlying opaque relay authorization state. Reopen the
+	// store to exercise the persisted path rather than merely reusing in-memory
+	// transaction state from the original handle.
+	restartedStore := postgresstore.NewRelayStore(pool)
+	restartedStatus, err := restartedStore.GetPrincipalStatus(ctx, authority.TenantCredential)
+	if err != nil {
+		t.Fatalf("get Device Sync status after restart: %v", err)
+	}
+	if !postgresPrincipalDeviceRevoked(restartedStatus, additionalDeviceID) ||
+		!postgresSpaceDeviceRevoked(restartedStatus, spaceID, additionalDeviceID) {
+		t.Fatalf("restarted status lost Device Sync revocation: %+v", restartedStatus)
+	}
+	if _, err := restartedStore.Fetch(ctx, additionalControlCredential, 0, 1, now+4); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("restarted revoked control member fetch error=%v", err)
+	}
+	if _, err := restartedStore.Fetch(ctx, spaceMemberCredential, 0, 1, now+4); !relay.ErrorHasCode(err, relay.CodeMemberRevoked) {
+		t.Fatalf("restarted revoked Space member fetch error=%v", err)
+	}
+	if _, err := restartedStore.Fetch(ctx, relay.Credential{
+		TenantID: principalID, DomainID: authority.ControlDomain.Registration.DomainID,
+		MemberID: initialDeviceID, Token: postgresRelayToken(24),
+	}, 0, 1, now+4); err != nil {
+		t.Fatalf("restarted active control member fetch: %v", err)
+	}
+	if retried, err := restartedStore.RevokeDevice(
+		ctx, authority.TenantCredential, revocation, now+4,
+	); err != nil || retried.Acceptance != relay.AcceptanceDuplicate || len(retried.Memberships) != 2 {
+		t.Fatalf("restarted Device Sync revocation retry=%+v err=%v", retried, err)
+	}
 	changedRetry := revocation
 	changedRetry.RetryID = uuid.New()
 	if _, err := store.RevokeDevice(
