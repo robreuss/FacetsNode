@@ -168,6 +168,16 @@ func (s *Server) Handler() http.Handler {
 			s.handleChangeRelaySubscriptionStatus,
 		)
 		register(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscription-rebootstrap",
+			traffic.SurfaceRelayMessage,
+			s.handleRequestRelaySubscriptionRebootstrap,
+		)
+		register(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscription-rebootstrap/completion",
+			traffic.SurfaceRelayMessage,
+			s.handleCompleteRelaySubscriptionRebootstrap,
+		)
+		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/status",
 			traffic.SurfaceCheckpointAdmin,
 			s.handleRelayDomainStatus,
@@ -735,7 +745,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 					relay.CodeMessageCollision, relay.CodeBlobCollision, relay.CodeBlobUploadCollision,
 					relay.CodeInvalidAcknowledgment, relay.CodeCheckpointCollision, relay.CodeCheckpointFenceCollision,
 					relay.CodeCheckpointFenceActive,
-					relay.CodeCheckpointNotEligible, relay.CodeCollectionPlanStale:
+					relay.CodeCheckpointNotEligible, relay.CodeCheckpointUnavailable,
+					relay.CodeRebootstrapIncomplete, relay.CodeCollectionPlanStale:
 					status = http.StatusConflict
 				case relay.CodeTenantFull, relay.CodeDomainFull:
 					status = http.StatusTooManyRequests

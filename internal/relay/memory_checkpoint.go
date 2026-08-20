@@ -322,6 +322,9 @@ func memoryCheckpointPlan(domain *memoryDomain, checkpointID uuid.UUID) (Checkpo
 			if message.publisherSubscription == id {
 				continue
 			}
+			if memoryRebootstrapCompletionCovers(domain, id, message.message.Sequence) {
+				continue
+			}
 			if _, ok := message.acknowledgments[id]; !ok {
 				missingForSubscription = true
 				break
@@ -345,4 +348,18 @@ func memoryCheckpointPlan(domain *memoryDomain, checkpointID uuid.UUID) (Checkpo
 	}
 	response.PlanDigest = CheckpointPlanDigest(checkpoint.candidate.TenantID, checkpoint.candidate.DomainID, checkpointID, checkpoint.activationOrdinal, messages, blobs)
 	return response, nil
+}
+
+// memoryRebootstrapCompletionCovers records checkpoint provenance, rather than
+// weakening receipt custody. A device that completed a rebootstrap from an
+// activated checkpoint has reconstructed all messages at or before that
+// checkpoint's start sequence. Later messages still require their own applied
+// acknowledgement before retention may collect them.
+func memoryRebootstrapCompletionCovers(domain *memoryDomain, subscriptionID uuid.UUID, sequence uint64) bool {
+	for _, completion := range domain.rebootstrapCompletions {
+		if completion.subscriptionID == subscriptionID && completion.recoveryStartSequence >= sequence {
+			return true
+		}
+	}
+	return false
 }

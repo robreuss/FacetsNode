@@ -26,6 +26,8 @@ const (
 	CodeCheckpointNotFound          ErrorCode = "checkpoint_not_found"
 	CodeCheckpointCollision         ErrorCode = "checkpoint_collision"
 	CodeCheckpointNotEligible       ErrorCode = "checkpoint_not_eligible"
+	CodeCheckpointUnavailable       ErrorCode = "checkpoint_unavailable"
+	CodeRebootstrapIncomplete       ErrorCode = "rebootstrap_incomplete"
 	CodeCollectionPlanStale         ErrorCode = "collection_plan_stale"
 	CodeInvalidCredentialRotation   ErrorCode = "invalid_credential_rotation"
 	CodeUnauthorized                ErrorCode = "unauthorized"

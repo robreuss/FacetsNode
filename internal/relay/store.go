@@ -45,6 +45,18 @@ type Store interface {
 		uuid.UUID,
 		SubscriptionStatusChangeRequest,
 	) (SubscriptionStatusChangeResponse, error)
+	RequestSubscriptionRebootstrap(
+		context.Context,
+		Credential,
+		SubscriptionRebootstrapRequest,
+		int64,
+	) (SubscriptionRebootstrapResponse, error)
+	CompleteSubscriptionRebootstrap(
+		context.Context,
+		Credential,
+		SubscriptionRebootstrapCompletion,
+		int64,
+	) (SubscriptionRebootstrapCompletionResponse, error)
 	GetDomainStatus(context.Context, AdministrationCredential) (DomainStatus, error)
 	CreateCheckpointFence(context.Context, Credential, CheckpointFenceRequest, int64) (CheckpointFenceResponse, error)
 	GetCheckpointFence(context.Context, Credential, uuid.UUID, int64) (CheckpointFenceState, error)

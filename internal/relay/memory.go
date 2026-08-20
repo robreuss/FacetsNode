@@ -36,6 +36,8 @@ type memoryDomain struct {
 	subscriptions           map[uuid.UUID]Subscription
 	subscriptionCreates     map[uuid.UUID]SubscriptionCreateRequest
 	subscriptionChanges     map[uuid.UUID]memorySubscriptionChange
+	rebootstrapRequests     map[uuid.UUID]memorySubscriptionRebootstrapRequest
+	rebootstrapCompletions  map[uuid.UUID]memorySubscriptionRebootstrapCompletion
 	memberSubscriptions     map[uuid.UUID]uuid.UUID
 	admissionSubscriptions  map[uuid.UUID]uuid.UUID
 	members                 map[uuid.UUID]MemberRegistration
@@ -70,6 +72,19 @@ type memorySubscriptionChange struct {
 	subscriptionID uuid.UUID
 	request        SubscriptionStatusChangeRequest
 	result         Subscription
+}
+
+type memorySubscriptionRebootstrapRequest struct {
+	subscriptionID uuid.UUID
+	request        SubscriptionRebootstrapRequest
+	result         Subscription
+}
+
+type memorySubscriptionRebootstrapCompletion struct {
+	subscriptionID        uuid.UUID
+	recoveryStartSequence uint64
+	request               SubscriptionRebootstrapCompletion
+	result                Subscription
 }
 
 type memoryTenant struct {
@@ -269,8 +284,10 @@ func (s *MemoryStore) createDomainLocked(
 		subscriptions: map[uuid.UUID]Subscription{
 			provisioning.Subscription.SubscriptionID: provisioning.Subscription,
 		},
-		subscriptionCreates: make(map[uuid.UUID]SubscriptionCreateRequest),
-		subscriptionChanges: make(map[uuid.UUID]memorySubscriptionChange),
+		subscriptionCreates:    make(map[uuid.UUID]SubscriptionCreateRequest),
+		subscriptionChanges:    make(map[uuid.UUID]memorySubscriptionChange),
+		rebootstrapRequests:    make(map[uuid.UUID]memorySubscriptionRebootstrapRequest),
+		rebootstrapCompletions: make(map[uuid.UUID]memorySubscriptionRebootstrapCompletion),
 		memberSubscriptions: map[uuid.UUID]uuid.UUID{
 			initialMember.MemberID: provisioning.Subscription.SubscriptionID,
 		},
@@ -1206,6 +1223,130 @@ func (s *MemoryStore) ChangeSubscriptionStatus(
 	return SubscriptionStatusChangeResponse{
 		Acceptance: AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription,
 	}, nil
+}
+
+// RequestSubscriptionRebootstrap lets a member fence only its own replica at
+// the latest activated checkpoint boundary.  The caller can continue to read
+// and acknowledge the retained checkpoint tail, but cannot publish until it
+// completes the corresponding recovery.
+func (s *MemoryStore) RequestSubscriptionRebootstrap(
+	_ context.Context,
+	credential Credential,
+	request SubscriptionRebootstrapRequest,
+	nowMilliseconds int64,
+) (SubscriptionRebootstrapResponse, error) {
+	if err := request.Validate(); err != nil {
+		return SubscriptionRebootstrapResponse{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedMember(credential, CapabilityFetchMessage, nowMilliseconds)
+	if err != nil {
+		return SubscriptionRebootstrapResponse{}, err
+	}
+	subscription, err := readableMemberSubscription(domain, credential.MemberID)
+	if err != nil {
+		return SubscriptionRebootstrapResponse{}, err
+	}
+	if existing, ok := domain.rebootstrapRequests[request.RetryID]; ok {
+		if existing.subscriptionID == subscription.SubscriptionID && existing.request == request {
+			return SubscriptionRebootstrapResponse{Acceptance: AcceptanceDuplicate, RetryID: request.RetryID, Subscription: existing.result}, nil
+		}
+		return SubscriptionRebootstrapResponse{}, protocolError(CodeSubscriptionCollision, "subscription rebootstrap retry ID was reused")
+	}
+	if subscription.Status == SubscriptionRevoked {
+		return SubscriptionRebootstrapResponse{}, protocolError(CodeSubscriptionNotFound, "revoked subscription cannot rebootstrap")
+	}
+	if subscription.Status == SubscriptionRebootstrapRequired {
+		domain.rebootstrapRequests[request.RetryID] = memorySubscriptionRebootstrapRequest{
+			subscriptionID: subscription.SubscriptionID, request: request, result: subscription,
+		}
+		return SubscriptionRebootstrapResponse{Acceptance: AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription}, nil
+	}
+	startCursor := latestCheckpointStartCursor(domain)
+	if startCursor == nil {
+		return SubscriptionRebootstrapResponse{}, protocolError(CodeCheckpointUnavailable, "no activated checkpoint is available for replica recovery")
+	}
+	subscription.Status = SubscriptionRebootstrapRequired
+	subscription.StartCursor = startCursor
+	subscription.UpdatedAtMilliseconds = nowMilliseconds
+	domain.subscriptions[subscription.SubscriptionID] = subscription
+	domain.rebootstrapRequests[request.RetryID] = memorySubscriptionRebootstrapRequest{
+		subscriptionID: subscription.SubscriptionID, request: request, result: subscription,
+	}
+	return SubscriptionRebootstrapResponse{Acceptance: AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription}, nil
+}
+
+// CompleteSubscriptionRebootstrap restores publication only after every
+// readable, externally published envelope in the recovery tail has an applied
+// receipt for this subscription.  The relay checks delivery state only; it
+// never parses the encrypted content.
+func (s *MemoryStore) CompleteSubscriptionRebootstrap(
+	_ context.Context,
+	credential Credential,
+	completion SubscriptionRebootstrapCompletion,
+	nowMilliseconds int64,
+) (SubscriptionRebootstrapCompletionResponse, error) {
+	if err := completion.Validate(); err != nil {
+		return SubscriptionRebootstrapCompletionResponse{}, err
+	}
+	throughSequence, err := DecodeCursor(completion.CompletedThroughCursor)
+	if err != nil {
+		return SubscriptionRebootstrapCompletionResponse{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedMember(credential, CapabilityAcknowledgeMessage, nowMilliseconds)
+	if err != nil {
+		return SubscriptionRebootstrapCompletionResponse{}, err
+	}
+	refreshMemoryFence(domain, nowMilliseconds)
+	subscription, err := readableMemberSubscription(domain, credential.MemberID)
+	if err != nil {
+		return SubscriptionRebootstrapCompletionResponse{}, err
+	}
+	if existing, ok := domain.rebootstrapCompletions[completion.RetryID]; ok {
+		if existing.subscriptionID == subscription.SubscriptionID && existing.request == completion {
+			return SubscriptionRebootstrapCompletionResponse{Acceptance: AcceptanceDuplicate, RetryID: completion.RetryID, Subscription: existing.result}, nil
+		}
+		return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeSubscriptionCollision, "subscription rebootstrap completion retry ID was reused")
+	}
+	if subscription.Status != SubscriptionRebootstrapRequired || subscription.StartCursor == nil {
+		return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeInvalidSubscription, "subscription is not awaiting rebootstrap completion")
+	}
+	startSequence, err := DecodeCursor(*subscription.StartCursor)
+	if err != nil {
+		return SubscriptionRebootstrapCompletionResponse{}, err
+	}
+	if throughSequence < startSequence || throughSequence > domain.nextSequence {
+		return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeInvalidCursor, "rebootstrap completion cursor is outside the retained history")
+	}
+	for _, message := range domain.messages {
+		if message.message.Sequence <= startSequence || message.message.Sequence > throughSequence ||
+			message.publisherSubscription == subscription.SubscriptionID {
+			continue
+		}
+		if message.checkpointFenceID != nil {
+			fence := domain.checkpointFences[*message.checkpointFenceID]
+			if fence == nil || fence.state.Status != CheckpointFenceActivated {
+				continue
+			}
+		}
+		if message.acknowledgments[subscription.SubscriptionID] != AcknowledgmentApplied {
+			return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeRebootstrapIncomplete, "rebootstrap tail has not been durably applied")
+		}
+	}
+	subscription.Status = SubscriptionActive
+	subscription.StartCursor = nil
+	subscription.UpdatedAtMilliseconds = nowMilliseconds
+	domain.subscriptions[subscription.SubscriptionID] = subscription
+	domain.rebootstrapCompletions[completion.RetryID] = memorySubscriptionRebootstrapCompletion{
+		subscriptionID:        subscription.SubscriptionID,
+		recoveryStartSequence: startSequence,
+		request:               completion,
+		result:                subscription,
+	}
+	return SubscriptionRebootstrapCompletionResponse{Acceptance: AcceptanceAccepted, RetryID: completion.RetryID, Subscription: subscription}, nil
 }
 
 func (s *MemoryStore) RevokeTenantMemberships(

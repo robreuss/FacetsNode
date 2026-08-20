@@ -312,9 +312,13 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	if err != nil || blocked.Eligible || len(blocked.MissingCustodySubscriptionIDs) != 1 {
 		t.Fatalf("blocked=%+v err=%v", blocked, err)
 	}
-	changed, err := store.ChangeSubscriptionStatus(ctx, admin, recipient.MemberID, relay.SubscriptionStatusChangeRequest{RetryID: uuid.New(), Status: relay.SubscriptionRebootstrapRequired, ChangedAtMilliseconds: 1_600})
-	if err != nil || changed.Subscription.StartCursor == nil || *changed.Subscription.StartCursor != activation.StartCursor {
-		t.Fatalf("rebootstrap=%+v err=%v", changed, err)
+	request := relay.SubscriptionRebootstrapRequest{RetryID: uuid.New(), RequestedAtMilliseconds: 1_600}
+	rebootstrap, err := store.RequestSubscriptionRebootstrap(ctx, recipient, request, 1_600)
+	if err != nil || rebootstrap.Subscription.StartCursor == nil || *rebootstrap.Subscription.StartCursor != activation.StartCursor {
+		t.Fatalf("rebootstrap=%+v err=%v", rebootstrap, err)
+	}
+	if duplicate, err := store.RequestSubscriptionRebootstrap(ctx, recipient, request, 1_600); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != rebootstrap.Subscription {
+		t.Fatalf("rebootstrap retry=%+v err=%v", duplicate, err)
 	}
 	// A rebootstrap-required subscription is intentionally read-only, but it
 	// must be able to force its stale local cursor back to the checkpoint
@@ -326,9 +330,33 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentAccepted, 1_601); err != nil {
 		t.Fatalf("rebootstrap acknowledge err=%v", err)
 	}
+	completion := relay.SubscriptionRebootstrapCompletion{
+		RetryID: uuid.New(), CompletedThroughCursor: relay.EncodeCursor(fetched.NextSequence),
+		CompletedAtMilliseconds: 1_602,
+	}
+	if _, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_602); !relay.ErrorHasCode(err, relay.CodeRebootstrapIncomplete) {
+		t.Fatalf("rebootstrap completion before applied err=%v", err)
+	}
+	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentApplied, 1_603); err != nil {
+		t.Fatalf("rebootstrap applied receipt err=%v", err)
+	}
+	completed, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_604)
+	if err != nil || completed.Subscription.Status != relay.SubscriptionActive || completed.Subscription.StartCursor != nil {
+		t.Fatalf("rebootstrap completion=%+v err=%v", completed, err)
+	}
+	if duplicate, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_604); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != completed.Subscription {
+		t.Fatalf("rebootstrap completion retry=%+v err=%v", duplicate, err)
+	}
 	eligible, err := store.DryRunCheckpointCollection(ctx, admin, relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID})
 	if err != nil || !eligible.Eligible {
 		t.Fatalf("eligible=%+v err=%v first=%s", eligible, err, first.MessageID)
+	}
+	recoveredPublish := retained
+	recoveredPublish.MessageID = uuid.New()
+	recoveredPublish.PublisherMemberID = recipient.MemberID
+	recoveredPublish.CreatedAtMilliseconds = 1_605
+	if _, err := store.Publish(ctx, recipient, recoveredPublish, 1_605); err != nil {
+		t.Fatalf("rebootstrap publish after completion err=%v", err)
 	}
 }
 
@@ -433,7 +461,7 @@ func checkpointMemoryFixture(t *testing.T) (*relay.MemoryStore, relay.Administra
 	}
 	recipient := relay.Credential{TenantID: tenantID, DomainID: domainID, MemberID: uuid.New(), Token: token(92)}
 	recipientDigest, _ := relay.AuthorizationDigest(recipient)
-	_, err = store.CreateMember(ctx, admin, relay.MemberRegistration{Version: 1, TenantID: tenantID, DomainID: domainID, MemberID: recipient.MemberID, AuthorizationDigest: recipientDigest, Capabilities: []relay.Capability{relay.CapabilityFetchBlob, relay.CapabilityAcknowledgeMessage, relay.CapabilityFetchMessage}, CreatedAtMilliseconds: 1_000}, 1_100)
+	_, err = store.CreateMember(ctx, admin, relay.MemberRegistration{Version: 1, TenantID: tenantID, DomainID: domainID, MemberID: recipient.MemberID, AuthorizationDigest: recipientDigest, Capabilities: []relay.Capability{relay.CapabilityFetchBlob, relay.CapabilityAcknowledgeMessage, relay.CapabilityFetchMessage, relay.CapabilityPublishMessage}, CreatedAtMilliseconds: 1_000}, 1_100)
 	if err != nil {
 		t.Fatal(err)
 	}

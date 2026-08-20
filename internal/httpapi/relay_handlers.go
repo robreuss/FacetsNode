@@ -385,6 +385,64 @@ func (s *Server) handleChangeRelaySubscriptionStatus(writer http.ResponseWriter,
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
+func (s *Server) handleRequestRelaySubscriptionRebootstrap(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.SubscriptionRebootstrapRequest
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.RequestedAtMilliseconds > s.nowMilliseconds() {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription rebootstrap request is in the future"))
+		return
+	}
+	result, err := s.relayStore.RequestSubscriptionRebootstrap(request.Context(), credential, input, s.nowMilliseconds())
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceRelayMessage, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleCompleteRelaySubscriptionRebootstrap(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input relay.SubscriptionRebootstrapCompletion
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.CompletedAtMilliseconds > s.nowMilliseconds() {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription rebootstrap completion is in the future"))
+		return
+	}
+	result, err := s.relayStore.CompleteSubscriptionRebootstrap(request.Context(), credential, input, s.nowMilliseconds())
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceRelayMessage, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
 func (s *Server) handleRelayDomainStatus(writer http.ResponseWriter, request *http.Request) {
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {

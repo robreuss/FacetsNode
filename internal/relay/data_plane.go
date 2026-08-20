@@ -139,6 +139,53 @@ type SubscriptionStatusChangeResponse struct {
 	Subscription Subscription `json:"subscription"`
 }
 
+// SubscriptionRebootstrapRequest lets an enrolled member fence only its own
+// replica and restart at the relay's latest opaque checkpoint boundary.  The
+// relay selects the cursor; it never inspects the checkpoint payload.
+type SubscriptionRebootstrapRequest struct {
+	RetryID                 uuid.UUID `json:"retryID"`
+	RequestedAtMilliseconds int64     `json:"requestedAtMilliseconds"`
+}
+
+func (r SubscriptionRebootstrapRequest) Validate() error {
+	if r.RetryID == uuid.Nil || r.RequestedAtMilliseconds < 0 {
+		return protocolError(CodeInvalidSubscription, "subscription rebootstrap request is invalid")
+	}
+	return nil
+}
+
+type SubscriptionRebootstrapResponse struct {
+	Acceptance   Acceptance   `json:"acceptance"`
+	RetryID      uuid.UUID    `json:"retryID"`
+	Subscription Subscription `json:"subscription"`
+}
+
+// SubscriptionRebootstrapCompletion is accepted only after the member has
+// durably acknowledged every relay message in the checkpoint-tail interval.
+// The cursor is opaque to the client, but sequence-backed to the relay so it
+// can establish delivery completeness without parsing FEF content.
+type SubscriptionRebootstrapCompletion struct {
+	RetryID                 uuid.UUID `json:"retryID"`
+	CompletedThroughCursor  string    `json:"completedThroughCursor"`
+	CompletedAtMilliseconds int64     `json:"completedAtMilliseconds"`
+}
+
+func (r SubscriptionRebootstrapCompletion) Validate() error {
+	if r.RetryID == uuid.Nil || r.CompletedAtMilliseconds < 0 {
+		return protocolError(CodeInvalidSubscription, "subscription rebootstrap completion is invalid")
+	}
+	if err := ValidateOpaqueCursor(r.CompletedThroughCursor); err != nil {
+		return protocolError(CodeInvalidCursor, "rebootstrap completion cursor is invalid")
+	}
+	return nil
+}
+
+type SubscriptionRebootstrapCompletionResponse struct {
+	Acceptance   Acceptance   `json:"acceptance"`
+	RetryID      uuid.UUID    `json:"retryID"`
+	Subscription Subscription `json:"subscription"`
+}
+
 // TenantMembershipRevocation is an internal, tenant-authorized operation used
 // by products such as Device Sync to fence one logical client from every relay
 // domain it can reach. It intentionally carries only opaque relay identifiers.
