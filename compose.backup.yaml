@@ -99,7 +99,9 @@ services:
         cd /restore/checkpoint
         sha256sum --check database.sha256
         cd /restore/blobs
-        sha256sum --check /restore/checkpoint/blob-digests.sha256
+        if test -s /restore/checkpoint/blob-digests.sha256; then
+          sha256sum --check /restore/checkpoint/blob-digests.sha256
+        fi
         find . -type f ! -path './.staging/*' -print0 \
           | sort -z \
           | xargs -0 -r sha256sum \

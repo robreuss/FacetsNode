@@ -51,6 +51,7 @@ func TestSharedSpacesOperationsUseOnlySharedSpacesAuthority(t *testing.T) {
 		"FACETS_SHARED_SPACES_CHECKPOINT_REVISION:",
 		"facets-shared-spaces-blobs:/blobs:ro",
 		"FACETS_SHARED_SPACES_RUNTIME_UID:",
+		"if test -s /restore/checkpoint/blob-digests.sha256; then",
 	})
 	assertContainsAll(t, "Shared Spaces backup script", backupScript, []string{
 		"facets_shared_spaces_resolve_checkpoint_revision",
@@ -89,6 +90,7 @@ func TestDeviceSyncOperationsUseOnlyDeviceSyncAuthority(t *testing.T) {
 		"FACETS_DEVICE_SYNC_CHECKPOINT_REVISION:",
 		"facets-device-sync-blobs:/blobs:ro",
 		"FACETS_DEVICE_SYNC_RUNTIME_UID:",
+		"if test -s /restore/checkpoint/blob-digests.sha256; then",
 	})
 	assertContainsAll(t, "Device Sync backup script", backupScript, []string{
 		"deployment_directory=$(cd -- \"$script_directory/..\" && pwd)",
