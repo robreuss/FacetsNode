@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"os"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -210,7 +211,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	if err != nil || rebootstrap.Acceptance != relay.AcceptanceAccepted || rebootstrap.Subscription.StartCursor == nil || *rebootstrap.Subscription.StartCursor != activatedResponse.StartCursor {
 		t.Fatalf("rebootstrap request=%+v err=%v", rebootstrap, err)
 	}
-	if duplicate, err := store.RequestSubscriptionRebootstrap(ctx, recipient, rebootstrapRequest, 1_252); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != rebootstrap.Subscription {
+	if duplicate, err := store.RequestSubscriptionRebootstrap(ctx, recipient, rebootstrapRequest, 1_252); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || !reflect.DeepEqual(duplicate.Subscription, rebootstrap.Subscription) {
 		t.Fatalf("rebootstrap request retry=%+v err=%v", duplicate, err)
 	}
 	rebootstrapFetch, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_252)

@@ -520,7 +520,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 	if participantCount != 1 || relayMemberCount != 1 || revokedSubscriptionCount != 1 ||
 		cancellationCount != 1 || revokedAdmissionCount != 1 || cancelledSubscriptionCount != 1 ||
-		keyGrantCount != 2 || computePoolCount != 1 || computeChangeCount != 1 {
+		keyGrantCount != 5 || computePoolCount != 1 || computeChangeCount != 1 {
 		t.Fatalf(
 			"product=%d member=%d subscription=%d cancellation=%d admission=%d cancelled subscription=%d key grants=%d compute pools=%d compute changes=%d",
 			participantCount, relayMemberCount, revokedSubscriptionCount,
@@ -555,6 +555,7 @@ func TestPostgresManagedSharedSpaceKeyCustodyIsAtomicWithAuthority(t *testing.T)
 	const now = int64(20_000)
 	provisioning, admin := postgresSharedSpaceProvisioning(t, now)
 	provisioning.SecurityMode = sharedspaces.SecurityModeManaged
+	provisioning.InitialSecureRosterAttestation = nil
 	created, err := store.ProvisionSpace(ctx, provisioning, now)
 	if err != nil || created.Acceptance != relay.AcceptanceAccepted ||
 		created.SecurityMode != sharedspaces.SecurityModeManaged {
@@ -681,7 +682,7 @@ func TestPostgresSharedSpaceParticipantDeviceRevocationIsAtomic(t *testing.T) {
 	)
 	secondDevice := postgresParticipantDeviceKeyWithID(
 		t, provisioning.SpaceID, provisioning.InitialParticipantID,
-		postgresParticipantSecondaryDeviceID(provisioning.InitialParticipantID), now+20,
+		postgresParticipantTertiaryDeviceID(provisioning.InitialParticipantID), now+20,
 	)
 	enrollment := sharedspaces.ParticipantDeviceEnrollment{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
