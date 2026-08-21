@@ -85,7 +85,9 @@ On 2026-08-21, committed revision
   24 authority events, and 8 relay messages;
 - an encrypted coordinated PostgreSQL/blob checkpoint passed `restic check`,
   restored into a fresh Compose project, matched all five counts, and served
-  readiness from both source and recovery instances.
+  readiness from both source and recovery instances;
+- a live Proxmox snapshot backup was written to `local-recovery` and the
+  Shared Spaces service remained healthy after the guest filesystem freeze.
 
 The temporary recovery containers, networks, and recovery volumes were removed
 after comparison. The encrypted checkpoint and canonical service volumes were
