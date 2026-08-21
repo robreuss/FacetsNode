@@ -707,10 +707,12 @@ func TestPostgresSharedSpaceParticipantDeviceRevocationIsAtomic(t *testing.T) {
 		DeviceKey:        postgresRevokedParticipantDeviceKey(t, secondDevice, now+30),
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
 		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 1,
-		KeyGrants: []sharedspaces.ParticipantKeyGrant{*postgresParticipantKeyGrantForDevice(
-			t, provisioning.SpaceID, provisioning.InitialParticipantID, initialDevice.DeviceID,
+	}
+	for _, device := range provisioning.InitialParticipantDeviceKeys {
+		revocation.KeyGrants = append(revocation.KeyGrants, *postgresParticipantKeyGrantForDevice(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID, device.DeviceID,
 			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, now+30,
-		)},
+		))
 	}
 	revocation.SecureRosterAttestation = postgresDeviceRevocationRosterAttestation(
 		t, provisioning, *enrollment.SecureRosterAttestation,
