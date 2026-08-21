@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"math/big"
 	"os"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -162,6 +163,19 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	gotRosterDigest, err := roster.AuthorityAttestation.Digest()
 	if err != nil || gotRosterDigest != wantRosterDigest {
 		t.Fatalf("persisted secure roster digest=%q want=%q err=%v", gotRosterDigest, wantRosterDigest, err)
+	}
+	deviceKeysByParticipant := make(map[uuid.UUID][]sharedspaces.ParticipantDeviceKey)
+	for _, participant := range roster.AuthorityAttestation.Participants {
+		deviceKeysByParticipant[participant.ParticipantID] = participant.DeviceKeys
+	}
+	if !reflect.DeepEqual(
+		deviceKeysByParticipant[provisioning.InitialParticipantID],
+		provisioning.InitialParticipantDeviceKeys,
+	) || !reflect.DeepEqual(
+		deviceKeysByParticipant[invitation.ParticipantID],
+		invitation.ParticipantDeviceKeys,
+	) {
+		t.Fatalf("persisted participant device keys=%+v", deviceKeysByParticipant)
 	}
 	claimRetry, err := store.ClaimInvitation(ctx, credential, claim, now+201)
 	if err != nil || claimRetry.Acceptance != relay.AcceptanceDuplicate ||
@@ -638,6 +652,9 @@ func postgresSharedSpaceProvisioning(
 		InitialParticipantID:         hostID,
 		InitialParticipantKind:       sharedspaces.ParticipantPerson,
 		InitialParticipantSigningKey: postgresParticipantSigningKey(t, hostID),
+		InitialParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			postgresParticipantDeviceKey(t, spaceID, hostID, now),
+		},
 		Tenant: relay.TenantRegistration{
 			Version: relay.SchemaVersion, RetryID: uuid.New(), TenantID: spaceID,
 			AuthorizationDigest: tenantDigest, CreatedAtMilliseconds: now,
@@ -704,7 +721,10 @@ func postgresSharedSpaceInvitation(
 		InvitationID: invitationID, ParticipantID: participantID, SubscriptionID: uuid.New(),
 		Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleParticipant,
 		ParticipantSigningKey: postgresParticipantSigningKey(t, participantID),
-		InteractionMode:       space.InteractionMode, CreatedAtMilliseconds: now,
+		ParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			postgresParticipantDeviceKey(t, space.SpaceID, participantID, now),
+		},
+		InteractionMode: space.InteractionMode, CreatedAtMilliseconds: now,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: space.SpaceID, DomainID: admin.DomainID,
 			AdmissionID: invitationID, AuthorizationDigest: digest,
@@ -725,6 +745,7 @@ func postgresSharedSpaceInvitation(
 			ParticipantID: participantID, SubscriptionID: invitation.SubscriptionID,
 			Kind: invitation.Kind, Role: invitation.Role,
 			SigningKey:            invitation.ParticipantSigningKey,
+			DeviceKeys:            invitation.ParticipantDeviceKeys,
 			CreatedAtMilliseconds: now,
 		}
 		previousDigest, err := space.InitialSecureRosterAttestation.Digest()
@@ -748,6 +769,7 @@ func postgresInitialSharedSpaceParticipant(space sharedspaces.SpaceProvisioning)
 		SubscriptionID: space.Domain.Subscription.SubscriptionID,
 		Kind:           space.InitialParticipantKind, Role: sharedspaces.RoleHost,
 		SigningKey:            space.InitialParticipantSigningKey,
+		DeviceKeys:            space.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: space.CreatedAtMilliseconds,
 	}
 }
@@ -840,12 +862,13 @@ func postgresParticipantKeyGrant(
 	privateKey := postgresParticipantSigningPrivateKey(t, issuerParticipantID)
 	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
 	signingFingerprint := sha256.Sum256(publicKey)
-	recipientFingerprint := sha256.Sum256([]byte("recipient agreement key"))
+	recipientDeviceKey := postgresParticipantDeviceKey(t, spaceID, participantID, now)
 	grant := sharedspaces.ParticipantKeyGrant{
 		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
-		ParticipantID: participantID, IssuerParticipantID: issuerParticipantID,
-		KeyEpoch: keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
-		RecipientAgreementKeyFingerprint: hex.EncodeToString(recipientFingerprint[:]),
+		ParticipantID: participantID, RecipientDeviceID: recipientDeviceKey.DeviceID,
+		IssuerParticipantID: issuerParticipantID,
+		KeyEpoch:            keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
+		RecipientAgreementKeyFingerprint: recipientDeviceKey.AgreementKeyFingerprint,
 		EphemeralAgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
 		Nonce:                            base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
 		Ciphertext:                       base64.RawURLEncoding.EncodeToString([]byte("opaque wrapped content key")),
@@ -871,6 +894,61 @@ func postgresParticipantKeyGrant(
 	s.FillBytes(signature[32:])
 	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
 	return &grant
+}
+
+func postgresParticipantDeviceID(participantID uuid.UUID) uuid.UUID {
+	digest := sha256.Sum256(append([]byte("facets-shared-space-device:"), participantID[:]...))
+	deviceID, err := uuid.FromBytes(digest[:16])
+	if err != nil {
+		panic(err)
+	}
+	return deviceID
+}
+
+func postgresParticipantDeviceKey(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	createdAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	deviceID := postgresParticipantDeviceID(participantID)
+	agreementPrivateKey := postgresParticipantSigningPrivateKey(t, deviceID)
+	agreementPublicKey := elliptic.Marshal(
+		elliptic.P256(), agreementPrivateKey.PublicKey.X, agreementPrivateKey.PublicKey.Y,
+	)
+	agreementFingerprint := sha256.Sum256(agreementPublicKey)
+	signingPrivateKey := postgresParticipantSigningPrivateKey(t, participantID)
+	signingPublicKey := elliptic.Marshal(
+		elliptic.P256(), signingPrivateKey.PublicKey.X, signingPrivateKey.PublicKey.Y,
+	)
+	signingFingerprint := sha256.Sum256(signingPublicKey)
+	key := sharedspaces.ParticipantDeviceKey{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
+		ParticipantID: participantID, DeviceID: deviceID, Algorithm: "P256",
+		AgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(agreementPublicKey),
+		AgreementKeyFingerprint: hex.EncodeToString(agreementFingerprint[:]),
+		CreatedAtMilliseconds:   createdAtMilliseconds,
+		Signature: sharedspaces.ParticipantKeyGrantSignature{
+			Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(signingPublicKey),
+			SigningKeyFingerprint: hex.EncodeToString(signingFingerprint[:]),
+		},
+	}
+	payload, err := key.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, signingPrivateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return key
 }
 
 func postgresParticipantSigningPrivateKey(t *testing.T, participantID uuid.UUID) *ecdsa.PrivateKey {

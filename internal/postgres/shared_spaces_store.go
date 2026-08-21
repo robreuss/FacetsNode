@@ -149,6 +149,7 @@ func participantFromSharedSpaceInvitation(invitation sharedspaces.Invitation) sh
 		Version: sharedspaces.SchemaVersion, SpaceID: invitation.SpaceID,
 		ParticipantID: invitation.ParticipantID, SubscriptionID: invitation.SubscriptionID,
 		Kind: invitation.Kind, Role: invitation.Role, SigningKey: invitation.ParticipantSigningKey,
+		DeviceKeys:            invitation.ParticipantDeviceKeys,
 		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
 	}
 }
@@ -310,6 +311,7 @@ func (s *SharedSpacesStore) ProvisionSpace(
 		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
 		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	if _, err := tx.Exec(ctx, `
@@ -378,6 +380,7 @@ func postgresSharedSpaceProvisioningResult(
 		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
 		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	return sharedspaces.SpaceProvisioningResult{
@@ -404,6 +407,28 @@ func insertSharedSpaceParticipant(ctx context.Context, tx pgx.Tx, participant sh
 		participant.SigningKey.SigningKeyFingerprint,
 		participant.CreatedAtMilliseconds, participant.RevokedAtMilliseconds); err != nil {
 		return fmt.Errorf("insert Shared Space participant: %w", err)
+	}
+	for _, deviceKey := range participant.DeviceKeys {
+		if err := deviceKey.Validate(participant); err != nil {
+			return fmt.Errorf("validate Shared Space participant device key: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO shared_space_participant_device_keys (
+				space_id,participant_id,device_id,version,algorithm,
+				agreement_public_key_x963,agreement_key_fingerprint,
+				created_at_milliseconds,revoked_at_milliseconds,
+				signature_algorithm,signature_public_signing_key_x963,
+				signature_signing_key_fingerprint,signature
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		`, deviceKey.SpaceID, deviceKey.ParticipantID, deviceKey.DeviceID,
+			deviceKey.Version, deviceKey.Algorithm,
+			deviceKey.AgreementPublicKeyX963, deviceKey.AgreementKeyFingerprint,
+			deviceKey.CreatedAtMilliseconds, deviceKey.RevokedAtMilliseconds,
+			deviceKey.Signature.Algorithm, deviceKey.Signature.PublicSigningKeyX963,
+			deviceKey.Signature.SigningKeyFingerprint, deviceKey.Signature.Signature,
+		); err != nil {
+			return fmt.Errorf("insert Shared Space participant device key: %w", err)
+		}
 	}
 	return nil
 }
@@ -744,6 +769,7 @@ func (s *SharedSpacesStore) ClaimInvitation(
 		ParticipantID: claim.ParticipantID, SubscriptionID: invitation.SubscriptionID,
 		Kind: invitation.Kind, Role: invitation.Role,
 		SigningKey:            invitation.ParticipantSigningKey,
+		DeviceKeys:            invitation.ParticipantDeviceKeys,
 		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
 	}
 	if err := insertSharedSpaceParticipant(ctx, tx, participant); err != nil {
@@ -2810,6 +2836,11 @@ func loadSharedSpaceParticipant(
 	} else if err != nil {
 		return sharedspaces.Participant{}, fmt.Errorf("load Shared Space participant: %w", err)
 	}
+	deviceKeys, err := loadSharedSpaceParticipantDeviceKeys(ctx, tx, participant)
+	if err != nil {
+		return sharedspaces.Participant{}, err
+	}
+	participant.DeviceKeys = deviceKeys
 	return participant, nil
 }
 
@@ -2847,10 +2878,60 @@ func loadSharedSpaceParticipants(
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate Shared Space participants: %w", err)
 	}
+	for index := range participants {
+		deviceKeys, err := loadSharedSpaceParticipantDeviceKeys(ctx, tx, participants[index])
+		if err != nil {
+			return nil, err
+		}
+		participants[index].DeviceKeys = deviceKeys
+	}
 	sort.Slice(participants, func(left, right int) bool {
 		return participants[left].ParticipantID.String() < participants[right].ParticipantID.String()
 	})
 	return participants, nil
+}
+
+func loadSharedSpaceParticipantDeviceKeys(
+	ctx context.Context,
+	tx pgx.Tx,
+	participant sharedspaces.Participant,
+) ([]sharedspaces.ParticipantDeviceKey, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT version,space_id,participant_id,device_id,algorithm,
+		       agreement_public_key_x963,agreement_key_fingerprint,
+		       created_at_milliseconds,revoked_at_milliseconds,
+		       signature_algorithm,signature_public_signing_key_x963,
+		       signature_signing_key_fingerprint,signature
+		FROM shared_space_participant_device_keys
+		WHERE space_id=$1 AND participant_id=$2
+		ORDER BY device_id
+	`, participant.SpaceID, participant.ParticipantID)
+	if err != nil {
+		return nil, fmt.Errorf("query Shared Space participant device keys: %w", err)
+	}
+	defer rows.Close()
+	deviceKeys := []sharedspaces.ParticipantDeviceKey{}
+	for rows.Next() {
+		var deviceKey sharedspaces.ParticipantDeviceKey
+		if err := rows.Scan(
+			&deviceKey.Version, &deviceKey.SpaceID, &deviceKey.ParticipantID,
+			&deviceKey.DeviceID, &deviceKey.Algorithm,
+			&deviceKey.AgreementPublicKeyX963, &deviceKey.AgreementKeyFingerprint,
+			&deviceKey.CreatedAtMilliseconds, &deviceKey.RevokedAtMilliseconds,
+			&deviceKey.Signature.Algorithm, &deviceKey.Signature.PublicSigningKeyX963,
+			&deviceKey.Signature.SigningKeyFingerprint, &deviceKey.Signature.Signature,
+		); err != nil {
+			return nil, fmt.Errorf("scan Shared Space participant device key: %w", err)
+		}
+		if err := deviceKey.Validate(participant); err != nil {
+			return nil, fmt.Errorf("stored Shared Space participant device key failed validation: %w", err)
+		}
+		deviceKeys = append(deviceKeys, deviceKey)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate Shared Space participant device keys: %w", err)
+	}
+	return deviceKeys, nil
 }
 
 func loadSharedSpaceParticipantPresentation(
