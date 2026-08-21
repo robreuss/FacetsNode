@@ -98,7 +98,7 @@ services:
       - /data:size=16m,mode=0755
     volumes:
       - ../Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../tls:/etc/facets-server/tls:ro
+      - ${FACETS_SHARED_SPACES_TLS_DIRECTORY:-../tls}:/etc/facets-server/tls:ro
     cap_drop:
       - ALL
     cap_add:
