@@ -381,7 +381,8 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		t.Fatalf("Shared Space key epoch did not advance: %+v", status)
 	}
 	historyResponse = requestRelayJSON(
-		t, client, http.MethodGet, rosterHistoryPath, nil,
+		t, client, http.MethodGet,
+		spaceRoot+"/participants/"+hostID.String()+"/roster-attestations", nil,
 		domain.MemberCredential.AuthorizationToken, hostID,
 	)
 	requireStatus(t, historyResponse, http.StatusOK)
