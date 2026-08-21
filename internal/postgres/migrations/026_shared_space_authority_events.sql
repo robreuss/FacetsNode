@@ -15,7 +15,7 @@ CREATE TABLE shared_space_authority_events (
     subject_participant_id uuid,
     invitation_id uuid,
     previous_role text CHECK (previous_role IN ('host', 'moderator', 'participant', 'reader')),
-    current_role text CHECK (current_role IN ('host', 'moderator', 'participant', 'reader')),
+    resulting_role text CHECK (resulting_role IN ('host', 'moderator', 'participant', 'reader')),
     previous_key_epoch bigint CHECK (previous_key_epoch > 0),
     current_key_epoch bigint CHECK (current_key_epoch > 0),
     occurred_at_milliseconds bigint NOT NULL CHECK (occurred_at_milliseconds >= 0),

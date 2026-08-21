@@ -1387,7 +1387,7 @@ func (s *SharedSpacesStore) ListAuthorityEvents(
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT sequence,event_id,space_id,domain_id,version,event_type,
-		       subject_participant_id,subject_device_id,invitation_id,previous_role,current_role,
+		       subject_participant_id,subject_device_id,invitation_id,previous_role,resulting_role,
 		       previous_key_epoch,current_key_epoch,compute_pool_id,
 		       previous_binding_revision,current_binding_revision,
 		       secure_roster_digest,
@@ -3618,7 +3618,7 @@ func insertSharedSpaceAuthorityEvent(
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_space_authority_events (
 			space_id,domain_id,event_id,version,event_type,subject_participant_id,
-			subject_device_id,invitation_id,previous_role,current_role,previous_key_epoch,current_key_epoch,
+			subject_device_id,invitation_id,previous_role,resulting_role,previous_key_epoch,current_key_epoch,
 			compute_pool_id,previous_binding_revision,current_binding_revision,
 			secure_roster_digest,
 			occurred_at_milliseconds
