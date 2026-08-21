@@ -248,10 +248,11 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	// A role change is both a data-plane authorization change and a Secure
 	// membership-authority transition. Exercise it against the running service
 	// before testing the participant's newly granted capability.
+	promotionTime := time.Now().UnixMilli()
 	promotion := sharedspaces.ParticipantRoleChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
 		ParticipantID: participantID, PreviousRole: sharedspaces.RoleReader,
-		NextRole: sharedspaces.RoleParticipant, ChangedAtMilliseconds: now + 1,
+		NextRole: sharedspaces.RoleParticipant, ChangedAtMilliseconds: promotionTime,
 	}
 	promotion.SecureRosterAttestation = liveSharedSpaceRoleChangeRosterAttestation(
 		t, provisioning, domainID, promotion, *claimResult.SecureRosterAttestation,
