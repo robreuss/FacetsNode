@@ -463,7 +463,7 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	requireStatusAndClose(t, requestRelayJSON(
 		t, client, http.MethodGet, rosterHistoryPath, nil,
 		participantCredential.Token, participantID,
-	), http.StatusForbidden)
+	), http.StatusConflict)
 }
 
 func publishLiveSharedSpaceBootstrapCheckpoint(
