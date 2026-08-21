@@ -111,7 +111,9 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		t, client, http.MethodPost, spaceRoot+"/invitations", invitation,
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
 	), http.StatusConflict)
-	publishLiveSharedSpaceBootstrapCheckpoint(t, client, relayRoot, domain, now)
+	publishLiveSharedSpaceBootstrapCheckpoint(
+		t, client, relayRoot, domain, sharedspaces.InitialKeyEpoch, now,
+	)
 	secondaryHostDeviceID := liveSharedSpaceParticipantSecondaryDeviceID(hostID)
 	secondaryHostDeviceKey := liveSharedSpaceParticipantDeviceKeyWithID(
 		t, spaceID, hostID, secondaryHostDeviceID, now,
@@ -404,6 +406,54 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		relayRoot+"/messages/"+currentMessage.MessageID.String(), currentMessage,
 		domain.MemberCredential.AuthorizationToken, hostID,
 	), http.StatusCreated)
+	deviceRevokedAt := time.Now().UnixMilli()
+	publishLiveSharedSpaceBootstrapCheckpoint(
+		t, client, relayRoot, domain, sharedspaces.InitialKeyEpoch+1, deviceRevokedAt,
+	)
+	revokedDeviceKey := liveSharedSpaceRevokedParticipantDeviceKey(
+		t, secondaryHostDeviceKey, deviceRevokedAt,
+	)
+	deviceRevocation := sharedspaces.ParticipantDeviceRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		ParticipantID: hostID, DeviceID: secondaryHostDeviceID, DeviceKey: revokedDeviceKey,
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 2,
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{*liveSharedSpaceParticipantKeyGrant(
+			t, spaceID, hostID, hostID, sharedspaces.InitialKeyEpoch+2, deviceRevokedAt,
+		)},
+	}
+	deviceRevocation.SecureRosterAttestation = liveSharedSpaceDeviceRevocationRosterAttestation(
+		t, provisioning, domainID, *revocation.SecureRosterAttestation,
+		revokedDeviceKey, deviceRevocation.NextKeyEpoch, deviceRevokedAt,
+	)
+	deviceRevocationPath := spaceRoot + "/participants/" + hostID.String() +
+		"/devices/" + secondaryHostDeviceID.String() + "/revocation"
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, deviceRevocationPath, deviceRevocation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusCreated)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, deviceRevocationPath, deviceRevocation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusOK)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodGet,
+		spaceRoot+"/participants/"+hostID.String()+"/key-grant?recipientDeviceID="+
+			secondaryHostDeviceID.String(), nil,
+		domain.MemberCredential.AuthorizationToken, hostID,
+	), http.StatusNotFound)
+	initialHostGrantResponse := requestRelayJSON(
+		t, client, http.MethodGet,
+		spaceRoot+"/participants/"+hostID.String()+"/key-grant?recipientDeviceID="+
+			liveSharedSpaceParticipantDeviceID(hostID).String(), nil,
+		domain.MemberCredential.AuthorizationToken, hostID,
+	)
+	requireStatus(t, initialHostGrantResponse, http.StatusOK)
+	var initialHostGrant sharedspaces.ParticipantKeyGrantResult
+	decodeLiveJSON(t, initialHostGrantResponse, &initialHostGrant)
+	if initialHostGrant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+2 {
+		t.Fatalf("remaining host device did not receive the rotated grant: %+v", initialHostGrant)
+	}
 	requireStatusAndClose(t, requestRelayJSON(
 		t, client, http.MethodGet, relayRoot+"/messages?limit=1", nil,
 		participantCredential.Token, participantID,
@@ -419,6 +469,7 @@ func publishLiveSharedSpaceBootstrapCheckpoint(
 	client *http.Client,
 	relayRoot string,
 	domain liveRelayDomainProvisioningRequest,
+	keyEpoch uint64,
 	now int64,
 ) {
 	t.Helper()
@@ -438,7 +489,7 @@ func publishLiveSharedSpaceBootstrapCheckpoint(
 		TenantID:                domain.AdministrationCredential.TenantID,
 		DomainID:                domain.AdministrationCredential.DomainID,
 		PublisherSubscriptionID: domain.SubscriptionID,
-		KeyEpoch:                sharedspaces.InitialKeyEpoch, CoveredThroughCursor: fence.BoundaryCursor,
+		KeyEpoch:                keyEpoch, CoveredThroughCursor: fence.BoundaryCursor,
 		CreatedAtMilliseconds: now,
 	}
 	requireStatusAndClose(t, requestRelayJSON(
@@ -661,6 +712,31 @@ func liveSharedSpaceParticipantDeviceKeyWithID(
 	return key
 }
 
+func liveSharedSpaceRevokedParticipantDeviceKey(
+	t *testing.T,
+	current sharedspaces.ParticipantDeviceKey,
+	revokedAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	key := current
+	key.RevokedAtMilliseconds = &revokedAtMilliseconds
+	privateKey := liveSharedSpaceParticipantSigningPrivateKey(t, key.ParticipantID)
+	payload, err := key.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return key
+}
+
 func liveSharedSpaceInitialRosterAttestation(
 	t *testing.T,
 	provisioning liveSharedSpaceProvisioningInput,
@@ -753,6 +829,36 @@ func liveSharedSpaceRevocationRosterAttestation(
 	}
 	return liveSharedSpaceSuccessorRosterAttestation(
 		t, provisioning, domainID, previous, revocation.NextKeyEpoch, participants,
+		createdAtMilliseconds,
+	)
+}
+
+func liveSharedSpaceDeviceRevocationRosterAttestation(
+	t *testing.T,
+	provisioning liveSharedSpaceProvisioningInput,
+	domainID uuid.UUID,
+	previous sharedspaces.SecureRosterAttestation,
+	revokedDeviceKey sharedspaces.ParticipantDeviceKey,
+	nextKeyEpoch uint64,
+	createdAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for participantIndex := range participants {
+		participants[participantIndex].DeviceKeys = append(
+			[]sharedspaces.ParticipantDeviceKey(nil), participants[participantIndex].DeviceKeys...,
+		)
+		if participants[participantIndex].ParticipantID != revokedDeviceKey.ParticipantID {
+			continue
+		}
+		for deviceIndex := range participants[participantIndex].DeviceKeys {
+			if participants[participantIndex].DeviceKeys[deviceIndex].DeviceID == revokedDeviceKey.DeviceID {
+				participants[participantIndex].DeviceKeys[deviceIndex] = revokedDeviceKey
+			}
+		}
+	}
+	return liveSharedSpaceSuccessorRosterAttestation(
+		t, provisioning, domainID, previous, nextKeyEpoch, participants,
 		createdAtMilliseconds,
 	)
 }

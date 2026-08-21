@@ -902,6 +902,57 @@ func TestSharedSpacesAPIEnrollsAdditionalSecureParticipantDevice(t *testing.T) {
 	if grant.KeyGrant.RecipientDeviceID != deviceID {
 		t.Fatalf("enrolled device grant=%+v", grant)
 	}
+	initialDevice := provisioning.InitialParticipantDeviceKeys[0]
+	deviceRevocation := sharedspaces.ParticipantDeviceRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		ParticipantID: enrollment.ParticipantID, DeviceID: deviceID,
+		DeviceKey:        sharedSpaceRevokedParticipantDeviceKey(t, deviceKey, nowMilliseconds),
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 1,
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{*sharedSpaceParticipantKeyGrantForDevice(
+			t, spaceID, enrollment.ParticipantID, initialDevice.DeviceID,
+			enrollment.ParticipantID, sharedspaces.InitialKeyEpoch+1, nowMilliseconds,
+		)},
+	}
+	deviceRevocation.SecureRosterAttestation = sharedSpaceDeviceRevocationRosterAttestation(
+		t, provisioning, domainID, *enrollment.SecureRosterAttestation,
+		deviceRevocation.DeviceKey, deviceRevocation.NextKeyEpoch, nowMilliseconds,
+	)
+	revocationPath := enrollmentPath + "/revocation"
+	revocationResponse := performRelayJSON(
+		t, handler, http.MethodPost, revocationPath, deviceRevocation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, revocationResponse, http.StatusCreated)
+	var revocationResult sharedspaces.ParticipantDeviceRevocationResult
+	if err := json.NewDecoder(revocationResponse.Body).Decode(&revocationResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = revocationResponse.Body.Close()
+	if revocationResult.DeviceID != deviceID ||
+		revocationResult.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("device revocation result=%+v", revocationResult)
+	}
+	revocationRetry := performRelayJSON(
+		t, handler, http.MethodPost, revocationPath, deviceRevocation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, revocationRetry, http.StatusOK)
+	_ = revocationRetry.Body.Close()
+	revokedGrantResponse := performRelayJSON(
+		t, handler, http.MethodGet, grantPath, nil,
+		domain.MemberCredential.AuthorizationToken, enrollment.ParticipantID,
+	)
+	requireStatus(t, revokedGrantResponse, http.StatusNotFound)
+	_ = revokedGrantResponse.Body.Close()
+	wrongRevocationPath := spaceRoot + "/participants/" + enrollment.ParticipantID.String() +
+		"/devices/" + uuid.NewString() + "/revocation"
+	wrongRevocationResponse := performRelayJSON(
+		t, handler, http.MethodPost, wrongRevocationPath, deviceRevocation,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, wrongRevocationResponse, http.StatusBadRequest)
+	_ = wrongRevocationResponse.Body.Close()
 	wrongPath := spaceRoot + "/participants/" + enrollment.ParticipantID.String() +
 		"/devices/" + uuid.NewString()
 	wrongResponse := performRelayJSON(
@@ -1204,6 +1255,31 @@ func sharedSpaceParticipantDeviceKeyWithID(
 	return key
 }
 
+func sharedSpaceRevokedParticipantDeviceKey(
+	t *testing.T,
+	current sharedspaces.ParticipantDeviceKey,
+	revokedAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	key := current
+	key.RevokedAtMilliseconds = &revokedAtMilliseconds
+	privateKey := sharedSpaceParticipantSigningPrivateKey(t, key.ParticipantID)
+	payload, err := key.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return key
+}
+
 func sharedSpaceParticipantSigningPrivateKey(t *testing.T, participantID uuid.UUID) *ecdsa.PrivateKey {
 	t.Helper()
 	curve := elliptic.P256()
@@ -1373,6 +1449,41 @@ func sharedSpaceRevocationRosterAttestation(
 		t, provisioning.SpaceID, domainID, previous.Revision+1, previousDigest,
 		revocation.NextKeyEpoch, participants, provisioning.InitialParticipantID,
 		previous.CreatedAtMilliseconds,
+	)
+}
+
+func sharedSpaceDeviceRevocationRosterAttestation(
+	t *testing.T,
+	provisioning sharedSpaceProvisioningInput,
+	domainID uuid.UUID,
+	previous sharedspaces.SecureRosterAttestation,
+	revokedDeviceKey sharedspaces.ParticipantDeviceKey,
+	nextKeyEpoch uint64,
+	createdAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for participantIndex := range participants {
+		participants[participantIndex].DeviceKeys = append(
+			[]sharedspaces.ParticipantDeviceKey(nil), participants[participantIndex].DeviceKeys...,
+		)
+		if participants[participantIndex].ParticipantID != revokedDeviceKey.ParticipantID {
+			continue
+		}
+		for deviceIndex := range participants[participantIndex].DeviceKeys {
+			if participants[participantIndex].DeviceKeys[deviceIndex].DeviceID == revokedDeviceKey.DeviceID {
+				participants[participantIndex].DeviceKeys[deviceIndex] = revokedDeviceKey
+			}
+		}
+	}
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sharedSpaceSignedRosterAttestation(
+		t, provisioning.SpaceID, domainID, previous.Revision+1, previousDigest,
+		nextKeyEpoch, participants, provisioning.InitialParticipantID,
+		createdAtMilliseconds,
 	)
 }
 

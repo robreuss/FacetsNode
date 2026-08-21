@@ -649,6 +649,102 @@ func TestPostgresManagedSharedSpaceKeyCustodyIsAtomicWithAuthority(t *testing.T)
 	}
 }
 
+func TestPostgresSharedSpaceParticipantDeviceRevocationIsAtomic(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_SERVER_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
+	pool := openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `TRUNCATE relay_tenants CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	store := postgresstore.NewSharedSpacesStore(pool)
+	relayStore := postgresstore.NewRelayStore(pool)
+	const now = int64(40_000)
+	provisioning, admin := postgresSharedSpaceProvisioning(t, now)
+	if _, err := store.ProvisionSpace(ctx, provisioning, now); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: postgresRelayToken(0x31),
+	}
+	activatePostgresSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, admin, hostCredential, now+10,
+	)
+	secondDevice := postgresParticipantDeviceKeyWithID(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		postgresParticipantSecondaryDeviceID(provisioning.InitialParticipantID), now+20,
+	)
+	enrollment := sharedspaces.ParticipantDeviceEnrollment{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceKey: secondDevice,
+		KeyGrant: postgresParticipantKeyGrantForDevice(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID, secondDevice.DeviceID,
+			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch, now+20,
+		),
+		EnrolledAtMilliseconds: now + 20,
+	}
+	enrollment.SecureRosterAttestation = postgresDeviceEnrollmentRosterAttestation(
+		t, provisioning, *provisioning.InitialSecureRosterAttestation,
+		enrollment.ParticipantID, secondDevice, now+20,
+	)
+	if _, err := store.EnrollParticipantDevice(ctx, admin, enrollment, now+20); err != nil {
+		t.Fatal(err)
+	}
+	initialDevice := provisioning.InitialParticipantDeviceKeys[0]
+	revocation := sharedspaces.ParticipantDeviceRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceID: secondDevice.DeviceID,
+		DeviceKey:        postgresRevokedParticipantDeviceKey(t, secondDevice, now+30),
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 1,
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{*postgresParticipantKeyGrantForDevice(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID, initialDevice.DeviceID,
+			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, now+30,
+		)},
+	}
+	revocation.SecureRosterAttestation = postgresDeviceRevocationRosterAttestation(
+		t, provisioning, *enrollment.SecureRosterAttestation,
+		revocation.DeviceKey, revocation.NextKeyEpoch, now+30,
+	)
+	result, err := store.RevokeParticipantDevice(ctx, admin, revocation, now+30)
+	if err != nil || result.Acceptance != relay.AcceptanceAccepted ||
+		result.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("device revocation=%+v err=%v", result, err)
+	}
+	retry, err := store.RevokeParticipantDevice(ctx, admin, revocation, now+31)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate ||
+		retry.RevokedAtMilliseconds != now+30 {
+		t.Fatalf("device revocation retry=%+v err=%v", retry, err)
+	}
+	status, err := store.GetParticipantStatus(ctx, hostCredential, now+31)
+	if err != nil || status.BootstrapReady || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("status after device revocation=%+v err=%v", status, err)
+	}
+	if _, err := store.GetParticipantKeyGrant(ctx, hostCredential, secondDevice.DeviceID, now+31); !sharedspaces.ErrorHasCode(
+		err, sharedspaces.CodeKeyGrantNotFound,
+	) {
+		t.Fatalf("revoked device grant err=%v", err)
+	}
+	grant, err := store.GetParticipantKeyGrant(ctx, hostCredential, initialDevice.DeviceID, now+31)
+	if err != nil || grant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("remaining device grant=%+v err=%v", grant, err)
+	}
+	events, err := store.ListAuthorityEvents(ctx, admin, 0, 10)
+	if err != nil || len(events.Events) != 3 ||
+		events.Events[2].EventType != sharedspaces.AuthorityEventParticipantDeviceRevoked {
+		t.Fatalf("authority events=%+v err=%v", events, err)
+	}
+}
+
 func activatePostgresSharedSpaceCheckpoint(
 	t *testing.T,
 	ctx context.Context,
@@ -956,6 +1052,39 @@ func postgresDeviceEnrollmentRosterAttestation(
 	)
 }
 
+func postgresDeviceRevocationRosterAttestation(
+	t *testing.T,
+	space sharedspaces.SpaceProvisioning,
+	previous sharedspaces.SecureRosterAttestation,
+	revokedDeviceKey sharedspaces.ParticipantDeviceKey,
+	nextKeyEpoch uint64,
+	createdAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for participantIndex := range participants {
+		participants[participantIndex].DeviceKeys = append(
+			[]sharedspaces.ParticipantDeviceKey(nil), participants[participantIndex].DeviceKeys...,
+		)
+		if participants[participantIndex].ParticipantID != revokedDeviceKey.ParticipantID {
+			continue
+		}
+		for deviceIndex := range participants[participantIndex].DeviceKeys {
+			if participants[participantIndex].DeviceKeys[deviceIndex].DeviceID == revokedDeviceKey.DeviceID {
+				participants[participantIndex].DeviceKeys[deviceIndex] = revokedDeviceKey
+			}
+		}
+	}
+	return postgresSecureRosterAttestation(
+		t, space, previous.Revision+1, previousDigest, nextKeyEpoch,
+		participants, space.InitialParticipantID, createdAtMilliseconds,
+	)
+}
+
 func postgresParticipantKeyGrant(
 	t *testing.T,
 	spaceID uuid.UUID,
@@ -1077,6 +1206,31 @@ func postgresParticipantDeviceKeyWithID(
 	}
 	digest := sha256.Sum256(payload)
 	r, s, err := ecdsa.Sign(rand.Reader, signingPrivateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return key
+}
+
+func postgresRevokedParticipantDeviceKey(
+	t *testing.T,
+	current sharedspaces.ParticipantDeviceKey,
+	revokedAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	key := current
+	key.RevokedAtMilliseconds = &revokedAtMilliseconds
+	privateKey := postgresParticipantSigningPrivateKey(t, key.ParticipantID)
+	payload, err := key.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}

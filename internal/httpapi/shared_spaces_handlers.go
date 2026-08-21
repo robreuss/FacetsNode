@@ -573,6 +573,50 @@ func (s *Server) handleRevokeSharedSpaceParticipant(writer http.ResponseWriter, 
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
+func (s *Server) handleRevokeSharedSpaceParticipantDevice(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	participantID, err := parseSharedSpacesUUID(request.PathValue("participantID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	deviceID, err := parseSharedSpacesUUID(request.PathValue("deviceID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var revocation sharedspaces.ParticipantDeviceRevocation
+	if err := readSharedSpacesJSON(writer, request, &revocation); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if revocation.SpaceID != spaceID || revocation.ParticipantID != participantID ||
+		revocation.DeviceID != deviceID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "Shared Space participant device revocation path and body differ",
+		))
+		return
+	}
+	result, err := s.sharedSpacesStore.RevokeParticipantDevice(
+		request.Context(), credential, revocation, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
 func (s *Server) handleGetSharedSpaceParticipantKeyGrant(writer http.ResponseWriter, request *http.Request) {
 	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
 	if err != nil {

@@ -55,6 +55,8 @@ type MemoryStore struct {
 	roleChangeResponses             map[uuid.UUID]ParticipantRoleChangeResult
 	deviceEnrollmentRequests        map[uuid.UUID]ParticipantDeviceEnrollment
 	deviceEnrollmentResponses       map[uuid.UUID]ParticipantDeviceEnrollmentResult
+	deviceRevocationRequests        map[uuid.UUID]ParticipantDeviceRevocation
+	deviceRevocationResponses       map[uuid.UUID]ParticipantDeviceRevocationResult
 	presentationUpdateRequests      map[uuid.UUID]ParticipantPresentationUpdate
 	presentationUpdateResponses     map[uuid.UUID]ParticipantPresentationUpdateResult
 	computePoolChangeRequests       map[uuid.UUID]ComputePoolChange
@@ -85,6 +87,8 @@ func NewMemoryStore(relayStore relay.Store, custodians ...*keycustody.ManagedCon
 		roleChangeResponses:             make(map[uuid.UUID]ParticipantRoleChangeResult),
 		deviceEnrollmentRequests:        make(map[uuid.UUID]ParticipantDeviceEnrollment),
 		deviceEnrollmentResponses:       make(map[uuid.UUID]ParticipantDeviceEnrollmentResult),
+		deviceRevocationRequests:        make(map[uuid.UUID]ParticipantDeviceRevocation),
+		deviceRevocationResponses:       make(map[uuid.UUID]ParticipantDeviceRevocationResult),
 		presentationUpdateRequests:      make(map[uuid.UUID]ParticipantPresentationUpdate),
 		presentationUpdateResponses:     make(map[uuid.UUID]ParticipantPresentationUpdateResult),
 		computePoolChangeRequests:       make(map[uuid.UUID]ComputePoolChange),
@@ -314,6 +318,43 @@ func validateRevocationRosterAttestation(space *memorySpace, revocation Particip
 		if participant.ParticipantID != revocation.ParticipantID {
 			expected = append(expected, participant)
 		}
+	}
+	return revocation.SecureRosterAttestation.ValidateSuccessor(
+		*space.secureRosterAttestation, expected, revocation.NextKeyEpoch,
+	)
+}
+
+func validateDeviceRevocationRosterAttestation(
+	space *memorySpace,
+	revocation ParticipantDeviceRevocation,
+) error {
+	if space.provisioning.SecurityMode != SecurityModeSecure {
+		if revocation.SecureRosterAttestation != nil {
+			return NewProtocolError(CodeInvalidParticipant, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if space.secureRosterAttestation == nil || revocation.SecureRosterAttestation == nil {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space device revocation is missing its roster authority attestation")
+	}
+	expected := activeMemoryParticipants(space)
+	found := false
+	for participantIndex := range expected {
+		if expected[participantIndex].ParticipantID != revocation.ParticipantID {
+			continue
+		}
+		for deviceIndex := range expected[participantIndex].DeviceKeys {
+			if expected[participantIndex].DeviceKeys[deviceIndex].DeviceID == revocation.DeviceID &&
+				expected[participantIndex].DeviceKeys[deviceIndex].RevokedAtMilliseconds == nil {
+				expected[participantIndex].DeviceKeys[deviceIndex] = revocation.DeviceKey
+				found = true
+				break
+			}
+		}
+		break
+	}
+	if !found {
+		return NewProtocolError(CodeParticipantNotFound, "active participant device was not found")
 	}
 	return revocation.SecureRosterAttestation.ValidateSuccessor(
 		*space.secureRosterAttestation, expected, revocation.NextKeyEpoch,
@@ -1072,6 +1113,116 @@ func (s *MemoryStore) EnrollParticipantDevice(
 		CurrentKeyEpoch:        uint64Pointer(space.keyEpoch),
 		SecureRosterDigest:     secureRosterDigest(enrollment.SecureRosterAttestation),
 		OccurredAtMilliseconds: enrollment.EnrolledAtMilliseconds,
+	})
+	return result, nil
+}
+
+func (s *MemoryStore) RevokeParticipantDevice(
+	_ context.Context,
+	credential relay.AdministrationCredential,
+	revocation ParticipantDeviceRevocation,
+	nowMilliseconds int64,
+) (ParticipantDeviceRevocationResult, error) {
+	if err := revocation.Validate(); err != nil {
+		return ParticipantDeviceRevocationResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[revocation.SpaceID]
+	if space == nil {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.TenantID != revocation.SpaceID ||
+		credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeWrongScope, "device revocation belongs to another Shared Space")
+	}
+	if existing, found := s.deviceRevocationResponses[revocation.RetryID]; found {
+		if s.deviceRevocationRequests[revocation.RetryID].Equivalent(revocation) {
+			existing.Acceptance = relay.AcceptanceDuplicate
+			return existing, nil
+		}
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeParticipantCollision, "participant device revocation retry ID was reused")
+	}
+	if space.provisioning.SecurityMode == SecurityModeManaged {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeInvalidParticipant, "managed Shared Spaces do not revoke participant agreement-key devices")
+	}
+	if revocation.PreviousKeyEpoch != space.keyEpoch {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeWrongKeyEpoch, "participant device revocation key epoch is stale")
+	}
+	if space.activeCheckpointEpoch != space.keyEpoch {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(
+			CodeBootstrapNotReady, "Shared Space does not have an activated checkpoint for the current key epoch",
+		)
+	}
+	participant, found := space.participants[revocation.ParticipantID]
+	if !found {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeParticipantNotFound, "participant was not found")
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeParticipantRevoked, "participant is revoked")
+	}
+	activeDeviceCount := 0
+	targetIndex := -1
+	for index, deviceKey := range participant.DeviceKeys {
+		if deviceKey.RevokedAtMilliseconds == nil {
+			activeDeviceCount++
+			if deviceKey.DeviceID == revocation.DeviceID {
+				targetIndex = index
+			}
+		}
+	}
+	if targetIndex < 0 {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeParticipantNotFound, "active participant device was not found")
+	}
+	if activeDeviceCount == 1 {
+		return ParticipantDeviceRevocationResult{}, NewProtocolError(CodeInvalidParticipant, "participant's last active device cannot be revoked")
+	}
+	if err := revocation.ValidateDeviceKey(participant, participant.DeviceKeys[targetIndex], nowMilliseconds); err != nil {
+		return ParticipantDeviceRevocationResult{}, err
+	}
+	participants := make([]Participant, 0, len(space.participants))
+	for _, candidate := range space.participants {
+		participants = append(participants, candidate)
+	}
+	if err := revocation.ValidateKeyGrants(space.provisioning.SecurityMode, participants, nowMilliseconds); err != nil {
+		return ParticipantDeviceRevocationResult{}, err
+	}
+	if err := validateDeviceRevocationRosterAttestation(space, revocation); err != nil {
+		return ParticipantDeviceRevocationResult{}, err
+	}
+	participant.DeviceKeys[targetIndex] = revocation.DeviceKey
+	revokedAtMilliseconds := *revocation.DeviceKey.RevokedAtMilliseconds
+	space.participants[participant.ParticipantID] = participant
+	space.keyEpoch = revocation.NextKeyEpoch
+	if revocation.SecureRosterAttestation != nil {
+		attestation := *revocation.SecureRosterAttestation
+		space.secureRosterAttestation = &attestation
+		space.secureRosterHistory = append(space.secureRosterHistory, attestation)
+	}
+	if len(revocation.KeyGrants) > 0 {
+		space.keyGrants[revocation.NextKeyEpoch] = make(map[participantDeviceGrantTarget]ParticipantKeyGrant, len(revocation.KeyGrants))
+		for _, grant := range revocation.KeyGrants {
+			space.keyGrants[revocation.NextKeyEpoch][participantDeviceGrantTarget{
+				participantID: grant.ParticipantID,
+				deviceID:      grant.RecipientDeviceID,
+			}] = grant
+		}
+	}
+	result := ParticipantDeviceRevocationResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: revocation.RetryID,
+		SpaceID: revocation.SpaceID, ParticipantID: revocation.ParticipantID,
+		DeviceID: revocation.DeviceID, PreviousKeyEpoch: revocation.PreviousKeyEpoch,
+		CurrentKeyEpoch: revocation.NextKeyEpoch, RevokedAtMilliseconds: revokedAtMilliseconds,
+	}
+	s.deviceRevocationRequests[revocation.RetryID] = revocation
+	s.deviceRevocationResponses[revocation.RetryID] = result
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: revocation.RetryID, SpaceID: revocation.SpaceID, DomainID: credential.DomainID,
+		EventType:            AuthorityEventParticipantDeviceRevoked,
+		SubjectParticipantID: &revocation.ParticipantID, SubjectDeviceID: &revocation.DeviceID,
+		PreviousKeyEpoch: &revocation.PreviousKeyEpoch, CurrentKeyEpoch: &revocation.NextKeyEpoch,
+		SecureRosterDigest:     secureRosterDigest(revocation.SecureRosterAttestation),
+		OccurredAtMilliseconds: revokedAtMilliseconds,
 	})
 	return result, nil
 }

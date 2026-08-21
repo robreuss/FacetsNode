@@ -158,6 +158,7 @@ const (
 	AuthorityEventInvitationCancelled        AuthorityEventType = "invitation_cancelled"
 	AuthorityEventParticipantRoleChanged     AuthorityEventType = "participant_role_changed"
 	AuthorityEventParticipantDeviceEnrolled  AuthorityEventType = "participant_device_enrolled"
+	AuthorityEventParticipantDeviceRevoked   AuthorityEventType = "participant_device_revoked"
 	AuthorityEventParticipantRevoked         AuthorityEventType = "participant_revoked"
 	AuthorityEventSpaceComputeBindingChanged AuthorityEventType = "space_compute_binding_changed"
 )
@@ -167,6 +168,7 @@ func (t AuthorityEventType) Valid() bool {
 	case AuthorityEventSpaceProvisioned, AuthorityEventInvitationCreated,
 		AuthorityEventInvitationClaimed, AuthorityEventInvitationCancelled,
 		AuthorityEventParticipantRoleChanged, AuthorityEventParticipantDeviceEnrolled,
+		AuthorityEventParticipantDeviceRevoked,
 		AuthorityEventParticipantRevoked,
 		AuthorityEventSpaceComputeBindingChanged:
 		return true
@@ -248,6 +250,10 @@ func (e AuthorityEvent) validTransitionShape() bool {
 		return e.SubjectParticipantID != nil && e.SubjectDeviceID != nil && e.InvitationID == nil &&
 			e.PreviousRole == nil && e.CurrentRole == nil &&
 			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
+	case AuthorityEventParticipantDeviceRevoked:
+		return e.SubjectParticipantID != nil && e.SubjectDeviceID != nil && e.InvitationID == nil &&
+			e.PreviousRole == nil && e.CurrentRole == nil &&
+			e.PreviousKeyEpoch != nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
 	case AuthorityEventParticipantRevoked:
 		return e.SubjectParticipantID != nil && e.SubjectDeviceID == nil && e.InvitationID == nil &&
 			e.PreviousRole == nil && e.CurrentRole == nil &&
@@ -1194,6 +1200,185 @@ type ParticipantDeviceEnrollmentResult struct {
 	DeviceID               uuid.UUID        `json:"deviceID"`
 	CurrentKeyEpoch        uint64           `json:"currentKeyEpoch"`
 	EnrolledAtMilliseconds int64            `json:"enrolledAtMilliseconds"`
+}
+
+// ParticipantDeviceRevocation removes one agreement-key device from an active
+// participant without revoking that participant's relay membership. Private
+// Spaces retain their static epoch. Secure Spaces advance one epoch and grant
+// it to every remaining active device, while the Node validates coverage and
+// signatures without learning the content key.
+type ParticipantDeviceRevocation struct {
+	Version                 int                      `json:"version"`
+	RetryID                 uuid.UUID                `json:"retryID"`
+	SpaceID                 uuid.UUID                `json:"spaceID"`
+	ParticipantID           uuid.UUID                `json:"participantID"`
+	DeviceID                uuid.UUID                `json:"deviceID"`
+	DeviceKey               ParticipantDeviceKey     `json:"deviceKey"`
+	PreviousKeyEpoch        uint64                   `json:"previousKeyEpoch"`
+	NextKeyEpoch            uint64                   `json:"nextKeyEpoch"`
+	KeyGrants               []ParticipantKeyGrant    `json:"keyGrants,omitempty"`
+	SecureRosterAttestation *SecureRosterAttestation `json:"secureRosterAttestation,omitempty"`
+}
+
+func (r ParticipantDeviceRevocation) Validate() error {
+	if r.Version != SchemaVersion || r.RetryID == uuid.Nil || r.SpaceID == uuid.Nil ||
+		r.ParticipantID == uuid.Nil || r.DeviceID == uuid.Nil ||
+		r.DeviceKey.SpaceID != r.SpaceID || r.DeviceKey.ParticipantID != r.ParticipantID ||
+		r.DeviceKey.DeviceID != r.DeviceID || r.DeviceKey.RevokedAtMilliseconds == nil ||
+		r.PreviousKeyEpoch < InitialKeyEpoch || r.NextKeyEpoch < r.PreviousKeyEpoch ||
+		r.NextKeyEpoch > r.PreviousKeyEpoch+1 {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device revocation fields are invalid")
+	}
+	if r.SecureRosterAttestation != nil &&
+		r.SecureRosterAttestation.CreatedAtMilliseconds != *r.DeviceKey.RevokedAtMilliseconds {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device revocation roster time is invalid")
+	}
+	return nil
+}
+
+func (r ParticipantDeviceRevocation) ValidateDeviceKey(
+	participant Participant,
+	current ParticipantDeviceKey,
+	nowMilliseconds int64,
+) error {
+	if current.RevokedAtMilliseconds != nil || r.DeviceKey.RevokedAtMilliseconds == nil ||
+		*r.DeviceKey.RevokedAtMilliseconds > nowMilliseconds ||
+		r.DeviceKey.Version != current.Version || r.DeviceKey.SpaceID != current.SpaceID ||
+		r.DeviceKey.ParticipantID != current.ParticipantID || r.DeviceKey.DeviceID != current.DeviceID ||
+		r.DeviceKey.Algorithm != current.Algorithm ||
+		r.DeviceKey.AgreementPublicKeyX963 != current.AgreementPublicKeyX963 ||
+		r.DeviceKey.AgreementKeyFingerprint != current.AgreementKeyFingerprint ||
+		r.DeviceKey.CreatedAtMilliseconds != current.CreatedAtMilliseconds {
+		return NewProtocolError(CodeWrongScope, "Shared Space participant device revocation key differs from the enrolled device")
+	}
+	if err := r.DeviceKey.Validate(participant); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r ParticipantDeviceRevocation) ValidateKeyGrants(
+	mode SecurityMode,
+	participants []Participant,
+	nowMilliseconds int64,
+) error {
+	if mode == SecurityModeManaged {
+		return NewProtocolError(CodeInvalidParticipant, "managed Shared Spaces do not revoke participant agreement-key devices")
+	}
+	if mode == SecurityModePrivate {
+		if r.NextKeyEpoch != r.PreviousKeyEpoch || len(r.KeyGrants) != 0 {
+			return NewProtocolError(CodeInvalidParticipant, "private Shared Space device revocation must retain its static key epoch without key grants")
+		}
+		return nil
+	}
+	if mode != SecurityModeSecure || r.NextKeyEpoch != r.PreviousKeyEpoch+1 {
+		return NewProtocolError(CodeInvalidParticipant, "secure Shared Space device revocation must advance its key epoch")
+	}
+
+	type grantTarget struct {
+		participantID uuid.UUID
+		deviceID      uuid.UUID
+	}
+	expectedTargets := make(map[grantTarget]string)
+	authorizedIssuers := make(map[uuid.UUID]ParticipantSigningKey)
+	targetFound := false
+	for _, participant := range participants {
+		if participant.SpaceID != r.SpaceID {
+			return NewProtocolError(CodeWrongScope, "Shared Space participant belongs to another Space")
+		}
+		if participant.RevokedAtMilliseconds != nil {
+			continue
+		}
+		if participant.Role == RoleHost || participant.Role == RoleModerator {
+			authorizedIssuers[participant.ParticipantID] = participant.SigningKey
+		}
+		for _, deviceKey := range participant.DeviceKeys {
+			if participant.ParticipantID == r.ParticipantID && deviceKey.DeviceID == r.DeviceID {
+				targetFound = deviceKey.RevokedAtMilliseconds == nil
+				continue
+			}
+			if deviceKey.RevokedAtMilliseconds == nil {
+				expectedTargets[grantTarget{participantID: participant.ParticipantID, deviceID: deviceKey.DeviceID}] = deviceKey.AgreementKeyFingerprint
+			}
+		}
+	}
+	if !targetFound {
+		return NewProtocolError(CodeParticipantNotFound, "active participant device was not found")
+	}
+	if len(r.KeyGrants) != len(expectedTargets) {
+		return NewProtocolError(CodeInvalidParticipant, "secure Shared Space device revocation does not grant the next key epoch to every remaining device")
+	}
+	seen := make(map[grantTarget]struct{}, len(r.KeyGrants))
+	for _, grant := range r.KeyGrants {
+		if err := grant.Validate(); err != nil {
+			return err
+		}
+		target := grantTarget{participantID: grant.ParticipantID, deviceID: grant.RecipientDeviceID}
+		expectedFingerprint, found := expectedTargets[target]
+		if grant.SpaceID != r.SpaceID || !found ||
+			grant.RecipientAgreementKeyFingerprint != expectedFingerprint {
+			return NewProtocolError(CodeWrongScope, "Shared Space device revocation key grant does not target a remaining active device")
+		}
+		if grant.KeyEpoch != r.NextKeyEpoch {
+			return NewProtocolError(CodeWrongKeyEpoch, "Shared Space device revocation key grant is not for the next key epoch")
+		}
+		if grant.CreatedAtMilliseconds > nowMilliseconds {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space device revocation key grant was created in the future")
+		}
+		if grant.CreatedAtMilliseconds > *r.DeviceKey.RevokedAtMilliseconds {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space device revocation key grant postdates revocation")
+		}
+		issuerKey, found := authorizedIssuers[grant.IssuerParticipantID]
+		if !found || !issuerKey.MatchesGrantSignature(grant.Signature) {
+			return NewProtocolError(CodeUnauthorized, "Shared Space device revocation key grant issuer is not an active host or moderator")
+		}
+		if _, found := seen[target]; found {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space device revocation contains duplicate device key grants")
+		}
+		seen[target] = struct{}{}
+	}
+	return nil
+}
+
+func (r ParticipantDeviceRevocation) Equivalent(other ParticipantDeviceRevocation) bool {
+	if r.Version != other.Version || r.RetryID != other.RetryID || r.SpaceID != other.SpaceID ||
+		r.ParticipantID != other.ParticipantID || r.DeviceID != other.DeviceID ||
+		!reflect.DeepEqual(r.DeviceKey, other.DeviceKey) ||
+		r.PreviousKeyEpoch != other.PreviousKeyEpoch || r.NextKeyEpoch != other.NextKeyEpoch ||
+		len(r.KeyGrants) != len(other.KeyGrants) ||
+		!sameOptionalSecureRosterAttestation(r.SecureRosterAttestation, other.SecureRosterAttestation) {
+		return false
+	}
+	type grantTarget struct {
+		participantID uuid.UUID
+		deviceID      uuid.UUID
+	}
+	grants := make(map[grantTarget]ParticipantKeyGrant, len(r.KeyGrants))
+	for _, grant := range r.KeyGrants {
+		target := grantTarget{participantID: grant.ParticipantID, deviceID: grant.RecipientDeviceID}
+		if _, found := grants[target]; found {
+			return false
+		}
+		grants[target] = grant
+	}
+	for _, grant := range other.KeyGrants {
+		target := grantTarget{participantID: grant.ParticipantID, deviceID: grant.RecipientDeviceID}
+		if existing, found := grants[target]; !found || existing != grant {
+			return false
+		}
+	}
+	return true
+}
+
+type ParticipantDeviceRevocationResult struct {
+	Acceptance            relay.Acceptance `json:"acceptance"`
+	RetryID               uuid.UUID        `json:"retryID"`
+	SpaceID               uuid.UUID        `json:"spaceID"`
+	ParticipantID         uuid.UUID        `json:"participantID"`
+	DeviceID              uuid.UUID        `json:"deviceID"`
+	PreviousKeyEpoch      uint64           `json:"previousKeyEpoch"`
+	CurrentKeyEpoch       uint64           `json:"currentKeyEpoch"`
+	RevokedAtMilliseconds int64            `json:"revokedAtMilliseconds"`
 }
 
 type ParticipantRevocation struct {

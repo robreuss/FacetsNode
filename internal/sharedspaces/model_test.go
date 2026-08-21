@@ -458,6 +458,69 @@ func TestParticipantRevocationRequiresCompleteSecureGrantSet(t *testing.T) {
 	}
 }
 
+func TestParticipantDeviceRevocationRequiresCompleteSecureGrantSet(t *testing.T) {
+	_, provisioning, _ := testSpaceProvisioning(t, 3_025, sharedspaces.SecurityModeSecure)
+	host := sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID,
+		Kind:          sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            append([]sharedspaces.ParticipantDeviceKey(nil), provisioning.InitialParticipantDeviceKeys...),
+		CreatedAtMilliseconds: 3_025,
+	}
+	secondDeviceID := uuid.New()
+	host.DeviceKeys = append(host.DeviceKeys, testParticipantDeviceKeyWithID(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID, secondDeviceID, 3_026,
+	))
+	revocation := sharedspaces.ParticipantDeviceRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceID: secondDeviceID,
+		DeviceKey:        testRevokedParticipantDeviceKey(t, host.DeviceKeys[1], 3_100),
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 1,
+	}
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeSecure, []sharedspaces.Participant{host}, 3_100,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("missing surviving-device grant err=%v", err)
+	}
+	remaining := host.DeviceKeys[0]
+	revocation.KeyGrants = []sharedspaces.ParticipantKeyGrant{*testParticipantKeyGrantForDeviceSignedBy(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID, remaining.DeviceID,
+		provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+		revocation.NextKeyEpoch, 3_100,
+	)}
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeSecure, []sharedspaces.Participant{host}, 3_100,
+	); err != nil {
+		t.Fatalf("complete device-revocation grant set err=%v", err)
+	}
+	targetGrant := testParticipantKeyGrantForDeviceSignedBy(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID, secondDeviceID,
+		provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+		revocation.NextKeyEpoch, 3_100,
+	)
+	revocation.KeyGrants = []sharedspaces.ParticipantKeyGrant{*targetGrant}
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeSecure, []sharedspaces.Participant{host}, 3_100,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongScope) {
+		t.Fatalf("grant to revoked device err=%v", err)
+	}
+	private := revocation
+	private.NextKeyEpoch = private.PreviousKeyEpoch
+	private.KeyGrants = nil
+	if err := private.ValidateKeyGrants(
+		sharedspaces.SecurityModePrivate, []sharedspaces.Participant{host}, 3_100,
+	); err != nil {
+		t.Fatalf("private static-epoch device revocation err=%v", err)
+	}
+	if err := private.ValidateKeyGrants(
+		sharedspaces.SecurityModeManaged, []sharedspaces.Participant{host}, 3_100,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("managed device revocation err=%v", err)
+	}
+}
+
 func TestParticipantRevocationRequiresAGrantForEveryActiveDevice(t *testing.T) {
 	_, provisioning, _ := testSpaceProvisioning(t, 3_250, sharedspaces.SecurityModeSecure)
 	host := sharedspaces.Participant{

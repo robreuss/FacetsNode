@@ -265,6 +265,45 @@ func validateSharedSpaceRevocationRosterAttestation(
 	return revocation.SecureRosterAttestation.ValidateSuccessor(*current, expected, revocation.NextKeyEpoch)
 }
 
+func validateSharedSpaceDeviceRevocationRosterAttestation(
+	securityMode sharedspaces.SecurityMode,
+	current *sharedspaces.SecureRosterAttestation,
+	participants []sharedspaces.Participant,
+	revocation sharedspaces.ParticipantDeviceRevocation,
+) error {
+	if securityMode != sharedspaces.SecurityModeSecure {
+		if revocation.SecureRosterAttestation != nil {
+			return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidParticipant, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if current == nil || revocation.SecureRosterAttestation == nil {
+		return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidParticipant, "Secure Shared Space device revocation is missing its roster authority attestation")
+	}
+	expected := activeSharedSpaceParticipants(participants)
+	found := false
+	for participantIndex := range expected {
+		if expected[participantIndex].ParticipantID != revocation.ParticipantID {
+			continue
+		}
+		for deviceIndex := range expected[participantIndex].DeviceKeys {
+			if expected[participantIndex].DeviceKeys[deviceIndex].DeviceID == revocation.DeviceID &&
+				expected[participantIndex].DeviceKeys[deviceIndex].RevokedAtMilliseconds == nil {
+				expected[participantIndex].DeviceKeys[deviceIndex] = revocation.DeviceKey
+				found = true
+				break
+			}
+		}
+		break
+	}
+	if !found {
+		return sharedspaces.NewProtocolError(sharedspaces.CodeParticipantNotFound, "active participant device was not found")
+	}
+	return revocation.SecureRosterAttestation.ValidateSuccessor(
+		*current, expected, revocation.NextKeyEpoch,
+	)
+}
+
 func (s *SharedSpacesStore) ProvisionSpace(
 	ctx context.Context,
 	provisioning sharedspaces.SpaceProvisioning,
@@ -1784,6 +1823,217 @@ func (s *SharedSpacesStore) EnrollParticipantDevice(
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("commit Shared Space participant device enrollment: %w", err)
+	}
+	return result, nil
+}
+
+func (s *SharedSpacesStore) RevokeParticipantDevice(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	revocation sharedspaces.ParticipantDeviceRevocation,
+	nowMilliseconds int64,
+) (sharedspaces.ParticipantDeviceRevocationResult, error) {
+	if err := revocation.Validate(); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("begin Shared Space participant device revocation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	domainID, provisioning, _, err := loadSharedSpaceAuthority(
+		ctx, tx, revocation.SpaceID, credential, "FOR UPDATE",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+
+	var existingRequestPayload, existingResponsePayload []byte
+	err = tx.QueryRow(ctx, `
+		SELECT request_payload,response_payload
+		FROM shared_space_participant_device_revocations
+		WHERE space_id=$1 AND retry_id=$2
+		FOR UPDATE
+	`, revocation.SpaceID, revocation.RetryID).Scan(&existingRequestPayload, &existingResponsePayload)
+	if err == nil {
+		var existingRequest sharedspaces.ParticipantDeviceRevocation
+		var existingResponse sharedspaces.ParticipantDeviceRevocationResult
+		if decodeErr := json.Unmarshal(existingRequestPayload, &existingRequest); decodeErr != nil {
+			return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("decode Shared Space participant device revocation request: %w", decodeErr)
+		}
+		if decodeErr := json.Unmarshal(existingResponsePayload, &existingResponse); decodeErr != nil {
+			return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("decode Shared Space participant device revocation response: %w", decodeErr)
+		}
+		if !existingRequest.Equivalent(revocation) {
+			return sharedspaces.ParticipantDeviceRevocationResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeParticipantCollision, "participant device revocation retry ID was reused",
+			)
+		}
+		existingResponse.Acceptance = relay.AcceptanceDuplicate
+		return existingResponse, nil
+	}
+	if err != pgx.ErrNoRows {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("load Shared Space participant device revocation: %w", err)
+	}
+	if provisioning.SecurityMode == sharedspaces.SecurityModeManaged {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant, "managed Shared Spaces do not revoke participant agreement-key devices",
+		)
+	}
+	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, revocation.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	if currentKeyEpoch != revocation.PreviousKeyEpoch {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongKeyEpoch, "participant device revocation key epoch is stale",
+		)
+	}
+	var bootstrapReady bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM relay_checkpoints
+			WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' AND key_epoch=$3
+		)
+	`, revocation.SpaceID, domainID, currentKeyEpoch).Scan(&bootstrapReady); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("check Shared Space bootstrap checkpoint: %w", err)
+	}
+	if !bootstrapReady {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeBootstrapNotReady, "Shared Space does not have an activated checkpoint for the current key epoch",
+		)
+	}
+	participant, err := loadSharedSpaceParticipant(
+		ctx, tx, revocation.SpaceID, revocation.ParticipantID, "FOR UPDATE",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	activeDeviceCount := 0
+	var targetDevice *sharedspaces.ParticipantDeviceKey
+	for index := range participant.DeviceKeys {
+		deviceKey := &participant.DeviceKeys[index]
+		if deviceKey.RevokedAtMilliseconds == nil {
+			activeDeviceCount++
+			if deviceKey.DeviceID == revocation.DeviceID {
+				targetDevice = deviceKey
+			}
+		}
+	}
+	if targetDevice == nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantNotFound, "active participant device was not found",
+		)
+	}
+	if activeDeviceCount == 1 {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant, "participant's last active device cannot be revoked",
+		)
+	}
+	if nowMilliseconds < targetDevice.CreatedAtMilliseconds {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant, "participant device revocation predates device enrollment",
+		)
+	}
+	if err := revocation.ValidateDeviceKey(participant, *targetDevice, nowMilliseconds); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	participants, err := loadSharedSpaceParticipants(ctx, tx, revocation.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	if err := revocation.ValidateKeyGrants(provisioning.SecurityMode, participants, nowMilliseconds); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	currentRosterAttestation, err := loadSharedSpaceSecureRosterAttestation(ctx, tx, revocation.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	if err := validateSharedSpaceDeviceRevocationRosterAttestation(
+		provisioning.SecurityMode, currentRosterAttestation, participants, revocation,
+	); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	revokedAtMilliseconds := *revocation.DeviceKey.RevokedAtMilliseconds
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE shared_space_participant_device_keys
+		SET revoked_at_milliseconds=$4,
+		    signature_algorithm=$5,
+		    signature_public_signing_key_x963=$6,
+		    signature_signing_key_fingerprint=$7,
+		    signature=$8
+		WHERE space_id=$1 AND participant_id=$2 AND device_id=$3 AND revoked_at_milliseconds IS NULL
+	`, revocation.SpaceID, revocation.ParticipantID, revocation.DeviceID,
+		*revocation.DeviceKey.RevokedAtMilliseconds,
+		revocation.DeviceKey.Signature.Algorithm,
+		revocation.DeviceKey.Signature.PublicSigningKeyX963,
+		revocation.DeviceKey.Signature.SigningKeyFingerprint,
+		revocation.DeviceKey.Signature.Signature); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("revoke Shared Space participant device: %w", err)
+	}
+	for _, grant := range revocation.KeyGrants {
+		if err := insertSharedSpaceParticipantKeyGrant(ctx, tx, grant); err != nil {
+			return sharedspaces.ParticipantDeviceRevocationResult{}, err
+		}
+	}
+	newRosterPayload, err := encodeSecureRosterAttestation(revocation.SecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("encode Shared Space participant device revocation roster attestation: %w", err)
+	}
+	newRosterDigest, err := secureRosterAttestationDigest(revocation.SecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE shared_spaces
+		SET current_key_epoch=$2,secure_roster_attestation=$3
+		WHERE space_id=$1
+	`, revocation.SpaceID, revocation.NextKeyEpoch, newRosterPayload); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("advance Shared Space device revocation authority: %w", err)
+	}
+	if err := insertSharedSpaceSecureRosterAttestation(ctx, tx, revocation.SecureRosterAttestation); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	result := sharedspaces.ParticipantDeviceRevocationResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: revocation.RetryID,
+		SpaceID: revocation.SpaceID, ParticipantID: revocation.ParticipantID,
+		DeviceID: revocation.DeviceID, PreviousKeyEpoch: revocation.PreviousKeyEpoch,
+		CurrentKeyEpoch: revocation.NextKeyEpoch, RevokedAtMilliseconds: revokedAtMilliseconds,
+	}
+	requestPayload, err := json.Marshal(revocation)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("encode Shared Space participant device revocation request: %w", err)
+	}
+	responsePayload, err := json.Marshal(result)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("encode Shared Space participant device revocation response: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_participant_device_revocations (
+			space_id,retry_id,participant_id,device_id,request_payload,response_payload,
+			revoked_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+	`, revocation.SpaceID, revocation.RetryID, revocation.ParticipantID,
+		revocation.DeviceID, requestPayload, responsePayload, revokedAtMilliseconds); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("record Shared Space participant device revocation: %w", err)
+	}
+	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
+		EventID: revocation.RetryID, SpaceID: revocation.SpaceID, DomainID: domainID,
+		EventType:            sharedspaces.AuthorityEventParticipantDeviceRevoked,
+		SubjectParticipantID: &revocation.ParticipantID, SubjectDeviceID: &revocation.DeviceID,
+		PreviousKeyEpoch: &revocation.PreviousKeyEpoch, CurrentKeyEpoch: &revocation.NextKeyEpoch,
+		SecureRosterDigest: newRosterDigest, OccurredAtMilliseconds: revokedAtMilliseconds,
+	}); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ParticipantDeviceRevocationResult{}, fmt.Errorf("commit Shared Space participant device revocation: %w", err)
 	}
 	return result, nil
 }

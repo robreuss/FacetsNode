@@ -38,7 +38,10 @@ Space creation:
    Additional devices are separate authority transitions: the participant
    signs the new agreement-key binding, a current host or moderator signs its
    current-epoch grant, and the Secure roster advances atomically without a key
-   rotation. Device-key revocation remains a distinct rotation transition.
+   rotation. Device-key revocation is a distinct transition: the participant
+   signs a revoked successor of the enrolled device record, the roster advances,
+   the key epoch rotates, and every remaining active device receives a new
+   opaque grant. A participant must retain at least one active device.
 3. **Managed** remains a reserved protocol mode for a future server-readable,
    high-scale public profile. It is not a current user-facing Shared Space
    option. Its service-managed content custody boundary is distinct from the

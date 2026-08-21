@@ -95,6 +95,13 @@ binding, a current host or moderator signs its current-epoch opaque grant, and
 a Secure Space advances its signed roster revision without rotating the key
 epoch. Managed Spaces do not use this device-grant enrollment route.
 
+An administrator may also revoke one participant device without removing the
+participant. The replacement device record is signed by the participant. A
+Private Space retains its static epoch and stops serving that device's grant;
+a Secure Space rotates one epoch, advances its signed roster, and requires a
+replacement opaque grant for every remaining active device. The last active
+device of a participant cannot be revoked through this transition.
+
 ## Development
 
 Requirements are Go 1.26 or newer and PostgreSQL 17 or newer.

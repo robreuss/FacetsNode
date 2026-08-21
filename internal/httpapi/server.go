@@ -432,6 +432,11 @@ func (s *Server) Handler() http.Handler {
 			s.handleEnrollSharedSpaceParticipantDevice,
 		)
 		register(
+			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/devices/{deviceID}/revocation",
+			traffic.SurfaceManagement,
+			s.handleRevokeSharedSpaceParticipantDevice,
+		)
+		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/revocation",
 			traffic.SurfaceManagement,
 			s.handleRevokeSharedSpaceParticipant,

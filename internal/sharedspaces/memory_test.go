@@ -1137,6 +1137,164 @@ func TestMemoryStorePrivateRevocationStopsDeliveryWithoutRotatingKeyEpoch(t *tes
 	}
 }
 
+func TestMemoryStoreRevokesSecureParticipantDeviceAndRotatesRemainingGrants(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 5_900, sharedspaces.SecurityModeSecure)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 5_900); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, hostCredential, admin,
+		sharedspaces.InitialKeyEpoch, 5_950,
+	)
+	secondDevice := testParticipantDeviceKeyWithID(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		testParticipantSecondaryDeviceID(provisioning.InitialParticipantID), 6_000,
+	)
+	enrollment := sharedspaces.ParticipantDeviceEnrollment{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceKey: secondDevice,
+		KeyGrant: testParticipantKeyGrantForDeviceSignedBy(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID, secondDevice.DeviceID,
+			provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+			sharedspaces.InitialKeyEpoch, 6_000,
+		),
+		EnrolledAtMilliseconds: 6_000,
+	}
+	enrollment.SecureRosterAttestation = testDeviceEnrollmentRosterAttestation(
+		t, provisioning, *provisioning.InitialSecureRosterAttestation,
+		enrollment.ParticipantID, secondDevice, enrollment.EnrolledAtMilliseconds,
+	)
+	if _, err := store.EnrollParticipantDevice(ctx, admin, enrollment, 6_000); err != nil {
+		t.Fatal(err)
+	}
+	initialDevice := provisioning.InitialParticipantDeviceKeys[0]
+	revocation := sharedspaces.ParticipantDeviceRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceID: secondDevice.DeviceID,
+		DeviceKey:        testRevokedParticipantDeviceKey(t, secondDevice, 6_100),
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 1,
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{*testParticipantKeyGrantForDeviceSignedBy(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID, initialDevice.DeviceID,
+			provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+			sharedspaces.InitialKeyEpoch+1, 6_100,
+		)},
+	}
+	revocation.SecureRosterAttestation = testDeviceRevocationRosterAttestation(
+		t, provisioning, *enrollment.SecureRosterAttestation,
+		revocation.DeviceKey, revocation.NextKeyEpoch, 6_100,
+	)
+	result, err := store.RevokeParticipantDevice(ctx, admin, revocation, 6_100)
+	if err != nil || result.Acceptance != relay.AcceptanceAccepted ||
+		result.DeviceID != secondDevice.DeviceID || result.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("device revocation=%+v err=%v", result, err)
+	}
+	retry, err := store.RevokeParticipantDevice(ctx, admin, revocation, 6_200)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate || retry.RevokedAtMilliseconds != 6_100 {
+		t.Fatalf("device revocation retry=%+v err=%v", retry, err)
+	}
+	status, err := store.GetParticipantStatus(ctx, hostCredential, 6_200)
+	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 || status.BootstrapReady {
+		t.Fatalf("status after device revocation=%+v err=%v", status, err)
+	}
+	revokedFound := false
+	for _, device := range status.Participant.DeviceKeys {
+		if device.DeviceID == secondDevice.DeviceID {
+			revokedFound = device.RevokedAtMilliseconds != nil && *device.RevokedAtMilliseconds == 6_100
+		}
+	}
+	if !revokedFound {
+		t.Fatalf("revoked device missing from participant status=%+v", status.Participant.DeviceKeys)
+	}
+	grant, err := store.GetParticipantKeyGrant(ctx, hostCredential, initialDevice.DeviceID, 6_200)
+	if err != nil || grant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("remaining device grant=%+v err=%v", grant, err)
+	}
+	if _, err := store.GetParticipantKeyGrant(ctx, hostCredential, secondDevice.DeviceID, 6_200); !sharedspaces.ErrorHasCode(
+		err, sharedspaces.CodeKeyGrantNotFound,
+	) {
+		t.Fatalf("revoked device grant err=%v", err)
+	}
+	if _, err := store.RevokeParticipantDevice(ctx, admin, sharedspaces.ParticipantDeviceRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceID: initialDevice.DeviceID,
+		DeviceKey:        testRevokedParticipantDeviceKey(t, initialDevice, 6_200),
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch + 2,
+	}, 6_200); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeBootstrapNotReady) {
+		t.Fatalf("uncheckpointed follow-on revocation err=%v", err)
+	}
+	events, err := store.ListAuthorityEvents(ctx, admin, 0, 10)
+	if err != nil || len(events.Events) != 3 ||
+		events.Events[2].EventType != sharedspaces.AuthorityEventParticipantDeviceRevoked ||
+		events.Events[2].SubjectDeviceID == nil || *events.Events[2].SubjectDeviceID != secondDevice.DeviceID {
+		t.Fatalf("authority events after device revocation=%+v err=%v", events, err)
+	}
+}
+
+func TestMemoryStoreRevokesPrivateParticipantDeviceWithoutRotatingEpoch(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 6_300, sharedspaces.SecurityModePrivate)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 6_300); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, hostCredential, admin,
+		sharedspaces.InitialKeyEpoch, 6_350,
+	)
+	secondDevice := testParticipantDeviceKeyWithID(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		testParticipantSecondaryDeviceID(provisioning.InitialParticipantID), 6_400,
+	)
+	enrollment := sharedspaces.ParticipantDeviceEnrollment{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceKey: secondDevice,
+		KeyGrant: testParticipantKeyGrantForDeviceSignedBy(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID, secondDevice.DeviceID,
+			provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+			sharedspaces.InitialKeyEpoch, 6_400,
+		),
+		EnrolledAtMilliseconds: 6_400,
+	}
+	if _, err := store.EnrollParticipantDevice(ctx, admin, enrollment, 6_400); err != nil {
+		t.Fatal(err)
+	}
+	revocation := sharedspaces.ParticipantDeviceRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceID: secondDevice.DeviceID,
+		DeviceKey:        testRevokedParticipantDeviceKey(t, secondDevice, 6_500),
+		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch:     sharedspaces.InitialKeyEpoch,
+	}
+	result, err := store.RevokeParticipantDevice(ctx, admin, revocation, 6_500)
+	if err != nil || result.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
+		result.RevokedAtMilliseconds != 6_500 {
+		t.Fatalf("private device revocation=%+v err=%v", result, err)
+	}
+	status, err := store.GetParticipantStatus(ctx, hostCredential, 6_501)
+	if err != nil || !status.BootstrapReady || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("private status after device revocation=%+v err=%v", status, err)
+	}
+	if _, err := store.GetParticipantKeyGrant(ctx, hostCredential, secondDevice.DeviceID, 6_501); !sharedspaces.ErrorHasCode(
+		err, sharedspaces.CodeKeyGrantNotFound,
+	) {
+		t.Fatalf("private revoked device grant err=%v", err)
+	}
+}
+
 func testSpaceProvisioning(
 	t *testing.T,
 	now int64,
@@ -1420,6 +1578,40 @@ func testDeviceEnrollmentRosterAttestation(
 	)
 }
 
+func testDeviceRevocationRosterAttestation(
+	t *testing.T,
+	space sharedspaces.SpaceProvisioning,
+	previous sharedspaces.SecureRosterAttestation,
+	revokedDeviceKey sharedspaces.ParticipantDeviceKey,
+	nextKeyEpoch uint64,
+	revokedAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for participantIndex := range participants {
+		participants[participantIndex].DeviceKeys = append(
+			[]sharedspaces.ParticipantDeviceKey(nil), participants[participantIndex].DeviceKeys...,
+		)
+		if participants[participantIndex].ParticipantID != revokedDeviceKey.ParticipantID {
+			continue
+		}
+		for deviceIndex := range participants[participantIndex].DeviceKeys {
+			if participants[participantIndex].DeviceKeys[deviceIndex].DeviceID == revokedDeviceKey.DeviceID {
+				participants[participantIndex].DeviceKeys[deviceIndex] = revokedDeviceKey
+			}
+		}
+	}
+	return testSecureRosterAttestation(
+		t, space.SpaceID, space.Domain.Registration.DomainID, previous.Revision+1,
+		previousDigest, nextKeyEpoch, participants,
+		space.InitialParticipantID, revokedAtMilliseconds,
+	)
+}
+
 func testParticipantKeyGrant(
 	t *testing.T,
 	spaceID uuid.UUID,
@@ -1558,6 +1750,31 @@ func testParticipantDeviceKeyWithID(
 			SigningKeyFingerprint: hex.EncodeToString(signingFingerprint[:]),
 		},
 	}
+	payload, err := key.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, signingPrivateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return key
+}
+
+func testRevokedParticipantDeviceKey(
+	t *testing.T,
+	current sharedspaces.ParticipantDeviceKey,
+	revokedAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	key := current
+	key.RevokedAtMilliseconds = &revokedAtMilliseconds
+	signingPrivateKey := testParticipantSigningPrivateKey(t, key.ParticipantID)
 	payload, err := key.SigningPayload()
 	if err != nil {
 		t.Fatal(err)

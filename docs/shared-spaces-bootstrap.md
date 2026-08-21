@@ -130,8 +130,9 @@ authority history at:
 
 The optional `afterSequence` cursor and bounded `limit` parameter provide a
 stable chronological stream. Accepted provisioning, invitation creation,
-claim, cancellation, role change, participant-device enrollment, and
-participant revocation transactions append exactly one event in the same
+claim, cancellation, role change, participant-device enrollment,
+participant-device revocation, and participant revocation transactions append
+exactly one event in the same
 database transaction as the authority change. Exact request retries do not
 append duplicate events. Device enrollment records the participant and device
 identifiers and current key epoch. Records otherwise contain only routing
@@ -153,6 +154,22 @@ roster, durable device record, and authority event commit atomically. Exact
 retry returns the original result without duplicating the device or event.
 Managed Spaces reject this operation because they do not distribute
 participant device grants.
+
+An administrator revokes one device while retaining its participant at:
+
+`POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/devices/{deviceID}/revocation`
+
+The request replaces the active device binding with a participant-signed
+successor carrying its revocation time. The service verifies that every
+immutable key field matches the enrolled device, so it cannot invent or alter
+participant device authority. The current epoch must have an activated
+checkpoint and the participant must retain at least one other active device.
+Private Spaces keep their static epoch, store no replacement grants, and stop
+returning the revoked device's grant. Secure Spaces advance exactly one epoch,
+carry the immediate signed roster successor, and include one host- or
+moderator-signed opaque grant for every remaining active device. The signed
+device record, grants, roster, epoch, retry result, and authority event commit
+atomically. Managed Spaces reject this agreement-key operation.
 
 Participant revocation is submitted at:
 
