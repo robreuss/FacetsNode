@@ -20,6 +20,7 @@ type sharedSpaceProvisioningInput struct {
 	InitialParticipantID           uuid.UUID                             `json:"initialParticipantID"`
 	InitialParticipantKind         sharedspaces.ParticipantKind          `json:"initialParticipantKind"`
 	InitialParticipantSigningKey   sharedspaces.ParticipantSigningKey    `json:"initialParticipantSigningKey"`
+	InitialParticipantDeviceKeys   []sharedspaces.ParticipantDeviceKey   `json:"initialParticipantDeviceKeys"`
 	InitialSecureRosterAttestation *sharedspaces.SecureRosterAttestation `json:"initialSecureRosterAttestation,omitempty"`
 	TenantProvisioning             relayTenantProvisioningInput          `json:"tenantProvisioning"`
 }
@@ -38,6 +39,7 @@ type sharedSpaceInvitationCreateInput struct {
 	Role                              sharedspaces.Role                     `json:"role"`
 	InteractionMode                   sharedspaces.InteractionMode          `json:"interactionMode"`
 	ParticipantSigningKey             sharedspaces.ParticipantSigningKey    `json:"participantSigningKey"`
+	ParticipantDeviceKeys             []sharedspaces.ParticipantDeviceKey   `json:"participantDeviceKeys"`
 	KeyGrant                          *sharedspaces.ParticipantKeyGrant     `json:"keyGrant,omitempty"`
 	ActivationSecureRosterAttestation *sharedspaces.SecureRosterAttestation `json:"activationSecureRosterAttestation,omitempty"`
 	InvitationCredential              sharedSpaceInvitationCredential       `json:"invitationCredential"`
@@ -81,6 +83,7 @@ func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request 
 		InitialParticipantID:           input.InitialParticipantID,
 		InitialParticipantKind:         input.InitialParticipantKind,
 		InitialParticipantSigningKey:   input.InitialParticipantSigningKey,
+		InitialParticipantDeviceKeys:   input.InitialParticipantDeviceKeys,
 		InitialSecureRosterAttestation: input.InitialSecureRosterAttestation,
 		Tenant:                         tenant, Domain: domain,
 		CreatedAtMilliseconds: tenant.CreatedAtMilliseconds,
@@ -301,6 +304,7 @@ func (s *Server) handleCreateSharedSpaceInvitation(writer http.ResponseWriter, r
 		ParticipantID: input.ParticipantID, SubscriptionID: input.SubscriptionID,
 		Kind: input.Kind, Role: input.Role, InteractionMode: input.InteractionMode,
 		ParticipantSigningKey:             input.ParticipantSigningKey,
+		ParticipantDeviceKeys:             input.ParticipantDeviceKeys,
 		KeyGrant:                          input.KeyGrant,
 		ActivationSecureRosterAttestation: input.ActivationSecureRosterAttestation,
 		RelayAdmission: relay.MemberAdmission{

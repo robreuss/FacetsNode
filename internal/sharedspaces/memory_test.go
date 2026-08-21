@@ -222,6 +222,7 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
 		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	revocation.SecureRosterAttestation = testSecureRosterAttestation(
@@ -1055,6 +1056,9 @@ func testSpaceProvisioning(
 		},
 		CreatedAtMilliseconds: now,
 	}
+	provisioning.InitialParticipantDeviceKeys = []sharedspaces.ParticipantDeviceKey{
+		testParticipantDeviceKey(t, spaceID, hostID, now),
+	}
 	provisioning.Domain = relay.DomainProvisioning{
 		Version: relay.SchemaVersion, RetryID: uuid.New(),
 		Registration: relay.DomainRegistration{
@@ -1083,6 +1087,7 @@ func testSpaceProvisioning(
 			ParticipantID: hostID, SubscriptionID: subscriptionID,
 			Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
 			SigningKey:            provisioning.InitialParticipantSigningKey,
+			DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 			CreatedAtMilliseconds: now,
 		}
 		provisioning.InitialSecureRosterAttestation = testSecureRosterAttestation(
@@ -1136,7 +1141,10 @@ func testInvitation(
 		InvitationID: invitationID, ParticipantID: participantID, SubscriptionID: uuid.New(),
 		Kind: sharedspaces.ParticipantPerson, Role: role,
 		ParticipantSigningKey: participantSigningKey,
-		InteractionMode:       space.InteractionMode, CreatedAtMilliseconds: now,
+		ParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			testParticipantDeviceKey(t, space.SpaceID, participantID, now),
+		},
+		InteractionMode: space.InteractionMode, CreatedAtMilliseconds: now,
 		RelayAdmission: relay.MemberAdmission{
 			Version: relay.SchemaVersion, TenantID: space.SpaceID, DomainID: admin.DomainID,
 			AdmissionID: invitationID, AuthorizationDigest: digest,
@@ -1157,6 +1165,7 @@ func testInvitation(
 			SubscriptionID: space.Domain.Subscription.SubscriptionID,
 			Kind:           space.InitialParticipantKind, Role: sharedspaces.RoleHost,
 			SigningKey:            space.InitialParticipantSigningKey,
+			DeviceKeys:            space.InitialParticipantDeviceKeys,
 			CreatedAtMilliseconds: space.CreatedAtMilliseconds,
 		}
 		participant := sharedspaces.Participant{
@@ -1164,6 +1173,7 @@ func testInvitation(
 			ParticipantID: participantID, SubscriptionID: invitation.SubscriptionID,
 			Kind: invitation.Kind, Role: invitation.Role,
 			SigningKey:            participantSigningKey,
+			DeviceKeys:            invitation.ParticipantDeviceKeys,
 			CreatedAtMilliseconds: now,
 		}
 		initial := *space.InitialSecureRosterAttestation
@@ -1273,16 +1283,35 @@ func testParticipantKeyGrantSignedBy(
 	keyEpoch uint64,
 	now int64,
 ) *sharedspaces.ParticipantKeyGrant {
+	return testParticipantKeyGrantForDeviceSignedBy(
+		t, spaceID, participantID, testParticipantDeviceID(participantID),
+		issuerParticipantID, signingParticipantID, keyEpoch, now,
+	)
+}
+
+func testParticipantKeyGrantForDeviceSignedBy(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	recipientDeviceID uuid.UUID,
+	issuerParticipantID uuid.UUID,
+	signingParticipantID uuid.UUID,
+	keyEpoch uint64,
+	now int64,
+) *sharedspaces.ParticipantKeyGrant {
 	t.Helper()
 	privateKey := testParticipantSigningPrivateKey(t, signingParticipantID)
 	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
 	signingFingerprint := sha256.Sum256(publicKey)
-	recipientFingerprint := sha256.Sum256([]byte("recipient agreement key"))
+	recipientDeviceKey := testParticipantDeviceKeyWithID(
+		t, spaceID, participantID, recipientDeviceID, now,
+	)
 	grant := sharedspaces.ParticipantKeyGrant{
 		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
-		ParticipantID: participantID, IssuerParticipantID: issuerParticipantID,
-		KeyEpoch: keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
-		RecipientAgreementKeyFingerprint: hex.EncodeToString(recipientFingerprint[:]),
+		ParticipantID: participantID, RecipientDeviceID: recipientDeviceKey.DeviceID,
+		IssuerParticipantID: issuerParticipantID,
+		KeyEpoch:            keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
+		RecipientAgreementKeyFingerprint: recipientDeviceKey.AgreementKeyFingerprint,
 		EphemeralAgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
 		Nonce:                            base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
 		Ciphertext:                       base64.RawURLEncoding.EncodeToString([]byte("opaque wrapped content key")),
@@ -1308,6 +1337,73 @@ func testParticipantKeyGrantSignedBy(
 	s.FillBytes(signature[32:])
 	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
 	return &grant
+}
+
+func testParticipantDeviceID(participantID uuid.UUID) uuid.UUID {
+	digest := sha256.Sum256(append([]byte("facets-shared-space-device:"), participantID[:]...))
+	deviceID, err := uuid.FromBytes(digest[:16])
+	if err != nil {
+		panic(err)
+	}
+	return deviceID
+}
+
+func testParticipantDeviceKey(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	createdAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	return testParticipantDeviceKeyWithID(
+		t, spaceID, participantID, testParticipantDeviceID(participantID), createdAtMilliseconds,
+	)
+}
+
+func testParticipantDeviceKeyWithID(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	deviceID uuid.UUID,
+	createdAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	agreementPrivateKey := testParticipantSigningPrivateKey(t, deviceID)
+	agreementPublicKey := elliptic.Marshal(
+		elliptic.P256(), agreementPrivateKey.PublicKey.X, agreementPrivateKey.PublicKey.Y,
+	)
+	agreementFingerprint := sha256.Sum256(agreementPublicKey)
+	signingPrivateKey := testParticipantSigningPrivateKey(t, participantID)
+	signingPublicKey := elliptic.Marshal(
+		elliptic.P256(), signingPrivateKey.PublicKey.X, signingPrivateKey.PublicKey.Y,
+	)
+	signingFingerprint := sha256.Sum256(signingPublicKey)
+	key := sharedspaces.ParticipantDeviceKey{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID, ParticipantID: participantID,
+		DeviceID: deviceID, Algorithm: "P256",
+		AgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(agreementPublicKey),
+		AgreementKeyFingerprint: hex.EncodeToString(agreementFingerprint[:]),
+		CreatedAtMilliseconds:   createdAtMilliseconds,
+		Signature: sharedspaces.ParticipantKeyGrantSignature{
+			Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(signingPublicKey),
+			SigningKeyFingerprint: hex.EncodeToString(signingFingerprint[:]),
+		},
+	}
+	payload, err := key.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, signingPrivateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return key
 }
 
 func testParticipantSigningPrivateKey(t *testing.T, participantID uuid.UUID) *ecdsa.PrivateKey {

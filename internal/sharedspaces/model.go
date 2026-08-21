@@ -45,6 +45,86 @@ type ParticipantSigningKey struct {
 	SigningKeyFingerprint string `json:"signingKeyFingerprint"`
 }
 
+// ParticipantDeviceKey binds a participant-owned agreement key to one physical
+// Facets device. Its signature is made by the participant signing key, while
+// the enclosing Secure roster makes that binding part of the durable authority
+// history. The service stores only this public metadata, never agreement
+// private keys or unwrapped Space keys.
+type ParticipantDeviceKey struct {
+	Version                 int                          `json:"version"`
+	SpaceID                 uuid.UUID                    `json:"spaceID"`
+	ParticipantID           uuid.UUID                    `json:"participantID"`
+	DeviceID                uuid.UUID                    `json:"deviceID"`
+	Algorithm               string                       `json:"algorithm"`
+	AgreementPublicKeyX963  string                       `json:"agreementPublicKeyX963"`
+	AgreementKeyFingerprint string                       `json:"agreementKeyFingerprint"`
+	CreatedAtMilliseconds   int64                        `json:"createdAtMilliseconds"`
+	RevokedAtMilliseconds   *int64                       `json:"revokedAtMilliseconds,omitempty"`
+	Signature               ParticipantKeyGrantSignature `json:"signature"`
+}
+
+type participantDeviceKeySigningFields struct {
+	Version                 int       `json:"version"`
+	SpaceID                 uuid.UUID `json:"spaceID"`
+	ParticipantID           uuid.UUID `json:"participantID"`
+	DeviceID                uuid.UUID `json:"deviceID"`
+	Algorithm               string    `json:"algorithm"`
+	AgreementPublicKeyX963  string    `json:"agreementPublicKeyX963"`
+	AgreementKeyFingerprint string    `json:"agreementKeyFingerprint"`
+	CreatedAtMilliseconds   int64     `json:"createdAtMilliseconds"`
+	RevokedAtMilliseconds   *int64    `json:"revokedAtMilliseconds,omitempty"`
+}
+
+// SigningPayload returns the exact portable JSON bytes signed by the
+// participant signing key. Swift emits the same declared-field order.
+func (k ParticipantDeviceKey) SigningPayload() ([]byte, error) {
+	return json.Marshal(participantDeviceKeySigningFields{
+		Version: k.Version, SpaceID: k.SpaceID, ParticipantID: k.ParticipantID,
+		DeviceID: k.DeviceID, Algorithm: k.Algorithm,
+		AgreementPublicKeyX963:  k.AgreementPublicKeyX963,
+		AgreementKeyFingerprint: k.AgreementKeyFingerprint,
+		CreatedAtMilliseconds:   k.CreatedAtMilliseconds,
+		RevokedAtMilliseconds:   k.RevokedAtMilliseconds,
+	})
+}
+
+func (k ParticipantDeviceKey) Validate(participant Participant) error {
+	if k.Version != SchemaVersion || k.SpaceID != participant.SpaceID ||
+		k.ParticipantID != participant.ParticipantID || k.DeviceID == uuid.Nil ||
+		k.Algorithm != "P256" || k.CreatedAtMilliseconds < participant.CreatedAtMilliseconds ||
+		(k.RevokedAtMilliseconds != nil && *k.RevokedAtMilliseconds < k.CreatedAtMilliseconds) ||
+		!validFingerprint(k.AgreementKeyFingerprint) ||
+		!validBase64URLSize(k.AgreementPublicKeyX963, 65, 65) ||
+		!participant.SigningKey.MatchesGrantSignature(k.Signature) ||
+		k.Signature.Algorithm != ParticipantKeyGrantSignatureAlgorithm ||
+		!validBase64URLSize(k.Signature.Signature, 64, 64) {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device-key fields are invalid")
+	}
+	agreementPublicKeyBytes, _ := base64.RawURLEncoding.Strict().DecodeString(k.AgreementPublicKeyX963)
+	fingerprint := sha256.Sum256(agreementPublicKeyBytes)
+	if hex.EncodeToString(fingerprint[:]) != k.AgreementKeyFingerprint {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant agreement-key fingerprint differs")
+	}
+	if x, y := elliptic.Unmarshal(elliptic.P256(), agreementPublicKeyBytes); x == nil || y == nil {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant agreement key is invalid")
+	}
+	signingPublicKeyBytes, _ := base64.RawURLEncoding.Strict().DecodeString(participant.SigningKey.PublicKeyX963)
+	x, y := elliptic.Unmarshal(elliptic.P256(), signingPublicKeyBytes)
+	signatureBytes, _ := base64.RawURLEncoding.Strict().DecodeString(k.Signature.Signature)
+	payload, err := k.SigningPayload()
+	if err != nil {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device-key payload cannot be encoded")
+	}
+	digest := sha256.Sum256(payload)
+	if x == nil || y == nil || !ecdsa.Verify(
+		&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, digest[:],
+		new(big.Int).SetBytes(signatureBytes[:32]), new(big.Int).SetBytes(signatureBytes[32:]),
+	) {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device-key signature is invalid")
+	}
+	return nil
+}
+
 func (k ParticipantSigningKey) Validate() error {
 	if k.Algorithm != ParticipantKeyGrantSignatureAlgorithm ||
 		!validFingerprint(k.SigningKeyFingerprint) ||
@@ -309,6 +389,7 @@ type SpaceProvisioning struct {
 	InitialParticipantID           uuid.UUID                `json:"initialParticipantID"`
 	InitialParticipantKind         ParticipantKind          `json:"initialParticipantKind"`
 	InitialParticipantSigningKey   ParticipantSigningKey    `json:"initialParticipantSigningKey"`
+	InitialParticipantDeviceKeys   []ParticipantDeviceKey   `json:"initialParticipantDeviceKeys"`
 	InitialSecureRosterAttestation *SecureRosterAttestation `json:"initialSecureRosterAttestation,omitempty"`
 	Tenant                         relay.TenantRegistration `json:"tenant"`
 	Domain                         relay.DomainProvisioning `json:"-"`
@@ -337,7 +418,7 @@ func (p SpaceProvisioning) Validate() error {
 		host := Participant{
 			Version: SchemaVersion, SpaceID: p.SpaceID, ParticipantID: p.InitialParticipantID,
 			SubscriptionID: p.Domain.Subscription.SubscriptionID, Kind: p.InitialParticipantKind,
-			Role: RoleHost, SigningKey: p.InitialParticipantSigningKey,
+			Role: RoleHost, SigningKey: p.InitialParticipantSigningKey, DeviceKeys: p.InitialParticipantDeviceKeys,
 			CreatedAtMilliseconds: p.CreatedAtMilliseconds,
 		}
 		if err := p.InitialSecureRosterAttestation.ValidateInitial(host); err != nil {
@@ -360,15 +441,16 @@ func (p SpaceProvisioning) Validate() error {
 }
 
 type Participant struct {
-	Version               int                   `json:"version"`
-	SpaceID               uuid.UUID             `json:"spaceID"`
-	ParticipantID         uuid.UUID             `json:"participantID"`
-	SubscriptionID        uuid.UUID             `json:"subscriptionID"`
-	Kind                  ParticipantKind       `json:"kind"`
-	Role                  Role                  `json:"role"`
-	SigningKey            ParticipantSigningKey `json:"signingKey"`
-	CreatedAtMilliseconds int64                 `json:"createdAtMilliseconds"`
-	RevokedAtMilliseconds *int64                `json:"revokedAtMilliseconds,omitempty"`
+	Version               int                    `json:"version"`
+	SpaceID               uuid.UUID              `json:"spaceID"`
+	ParticipantID         uuid.UUID              `json:"participantID"`
+	SubscriptionID        uuid.UUID              `json:"subscriptionID"`
+	Kind                  ParticipantKind        `json:"kind"`
+	Role                  Role                   `json:"role"`
+	SigningKey            ParticipantSigningKey  `json:"signingKey"`
+	DeviceKeys            []ParticipantDeviceKey `json:"deviceKeys"`
+	CreatedAtMilliseconds int64                  `json:"createdAtMilliseconds"`
+	RevokedAtMilliseconds *int64                 `json:"revokedAtMilliseconds,omitempty"`
 }
 
 func (p Participant) Validate() error {
@@ -465,6 +547,7 @@ type Invitation struct {
 	Role                              Role                     `json:"role"`
 	InteractionMode                   InteractionMode          `json:"interactionMode"`
 	ParticipantSigningKey             ParticipantSigningKey    `json:"participantSigningKey"`
+	ParticipantDeviceKeys             []ParticipantDeviceKey   `json:"participantDeviceKeys"`
 	KeyGrant                          *ParticipantKeyGrant     `json:"keyGrant,omitempty"`
 	ActivationSecureRosterAttestation *SecureRosterAttestation `json:"activationSecureRosterAttestation,omitempty"`
 	RelayAdmission                    relay.MemberAdmission    `json:"relayAdmission"`
@@ -509,6 +592,7 @@ type ParticipantKeyGrant struct {
 	Version                          int                          `json:"version"`
 	SpaceID                          uuid.UUID                    `json:"spaceID"`
 	ParticipantID                    uuid.UUID                    `json:"participantID"`
+	RecipientDeviceID                uuid.UUID                    `json:"recipientDeviceID"`
 	IssuerParticipantID              uuid.UUID                    `json:"issuerParticipantID"`
 	KeyEpoch                         uint64                       `json:"keyEpoch"`
 	Algorithm                        string                       `json:"algorithm"`
@@ -605,6 +689,24 @@ func (a SecureRosterAttestation) Validate() error {
 		if err := participant.Validate(); err != nil {
 			return err
 		}
+		if len(participant.DeviceKeys) == 0 {
+			return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster participant has no device key")
+		}
+		activeDeviceKeys := 0
+		previousDeviceID := ""
+		for _, deviceKey := range participant.DeviceKeys {
+			if err := deviceKey.Validate(participant); err != nil ||
+				(previousDeviceID != "" && previousDeviceID >= deviceKey.DeviceID.String()) {
+				return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster participant device keys are invalid")
+			}
+			previousDeviceID = deviceKey.DeviceID.String()
+			if deviceKey.RevokedAtMilliseconds == nil {
+				activeDeviceKeys++
+			}
+		}
+		if activeDeviceKeys == 0 {
+			return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster participant has no active device key")
+		}
 		if participant.SpaceID != a.SpaceID || participant.RevokedAtMilliseconds != nil ||
 			(index > 0 && a.Participants[index-1].ParticipantID.String() >= participant.ParticipantID.String()) {
 			return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space roster attestation participants are invalid")
@@ -654,7 +756,7 @@ func (a SecureRosterAttestation) ValidateInitial(host Participant) error {
 	if a.Revision != 1 || a.PreviousDigest != "" || a.CurrentKeyEpoch != InitialKeyEpoch ||
 		a.IssuerParticipantID != host.ParticipantID || host.Role != RoleHost ||
 		!host.SigningKey.MatchesGrantSignature(a.Signature) || len(a.Participants) != 1 ||
-		a.Participants[0] != host {
+		!reflect.DeepEqual(a.Participants[0], host) {
 		return NewProtocolError(CodeUnauthorized, "Secure Shared Space initial roster attestation is not bound to its host")
 	}
 	return nil
@@ -706,7 +808,7 @@ func sameParticipants(left, right []Participant) bool {
 		return false
 	}
 	for index := range left {
-		if left[index] != right[index] {
+		if !reflect.DeepEqual(left[index], right[index]) {
 			return false
 		}
 	}
@@ -717,6 +819,7 @@ type participantKeyGrantSigningFields struct {
 	Version                          int       `json:"version"`
 	SpaceID                          uuid.UUID `json:"spaceID"`
 	ParticipantID                    uuid.UUID `json:"participantID"`
+	RecipientDeviceID                uuid.UUID `json:"recipientDeviceID"`
 	IssuerParticipantID              uuid.UUID `json:"issuerParticipantID"`
 	KeyEpoch                         uint64    `json:"keyEpoch"`
 	Algorithm                        string    `json:"algorithm"`
@@ -731,6 +834,7 @@ type participantKeyGrantSigningFields struct {
 func (g ParticipantKeyGrant) signingPayload() ([]byte, error) {
 	return json.Marshal(participantKeyGrantSigningFields{
 		Version: g.Version, SpaceID: g.SpaceID, ParticipantID: g.ParticipantID,
+		RecipientDeviceID:   g.RecipientDeviceID,
 		IssuerParticipantID: g.IssuerParticipantID, KeyEpoch: g.KeyEpoch,
 		Algorithm:                        g.Algorithm,
 		RecipientAgreementKeyFingerprint: g.RecipientAgreementKeyFingerprint,
@@ -748,7 +852,7 @@ func (g ParticipantKeyGrant) SigningPayload() ([]byte, error) {
 }
 
 func (g ParticipantKeyGrant) Validate() error {
-	if g.Version != SchemaVersion || g.SpaceID == uuid.Nil || g.ParticipantID == uuid.Nil ||
+	if g.Version != SchemaVersion || g.SpaceID == uuid.Nil || g.ParticipantID == uuid.Nil || g.RecipientDeviceID == uuid.Nil ||
 		g.IssuerParticipantID == uuid.Nil || g.KeyEpoch == 0 ||
 		g.Algorithm != ParticipantKeyGrantAlgorithm || g.CreatedAtMilliseconds < 0 ||
 		!validFingerprint(g.RecipientAgreementKeyFingerprint) ||
@@ -807,7 +911,24 @@ func (i Invitation) ValidateKeyGrant(mode SecurityMode, currentKeyEpoch uint64) 
 	if grant.KeyEpoch != currentKeyEpoch {
 		return NewProtocolError(CodeWrongKeyEpoch, "Shared Space participant key grant is not for the current key epoch")
 	}
+	if !hasActiveParticipantDeviceKey(
+		i.ParticipantDeviceKeys,
+		grant.RecipientDeviceID,
+		grant.RecipientAgreementKeyFingerprint,
+	) {
+		return NewProtocolError(CodeWrongScope, "Shared Space participant key grant does not target an active invited device key")
+	}
 	return nil
+}
+
+func hasActiveParticipantDeviceKey(keys []ParticipantDeviceKey, deviceID uuid.UUID, fingerprint string) bool {
+	for _, key := range keys {
+		if key.DeviceID == deviceID && key.RevokedAtMilliseconds == nil &&
+			key.AgreementKeyFingerprint == fingerprint {
+			return true
+		}
+	}
+	return false
 }
 
 func validFingerprint(value string) bool {
@@ -975,7 +1096,12 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 		return NewProtocolError(CodeInvalidParticipant, "secure Shared Space revocation must advance its key epoch")
 	}
 
+	type grantTarget struct {
+		participantID uuid.UUID
+		deviceID      uuid.UUID
+	}
 	active := make(map[uuid.UUID]Participant)
+	expectedTargets := make(map[grantTarget]string)
 	authorizedIssuers := make(map[uuid.UUID]ParticipantSigningKey)
 	for _, participant := range participants {
 		if participant.SpaceID != r.SpaceID {
@@ -985,15 +1111,23 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 			continue
 		}
 		active[participant.ParticipantID] = participant
+		for _, deviceKey := range participant.DeviceKeys {
+			if deviceKey.RevokedAtMilliseconds == nil {
+				expectedTargets[grantTarget{
+					participantID: participant.ParticipantID,
+					deviceID:      deviceKey.DeviceID,
+				}] = deviceKey.AgreementKeyFingerprint
+			}
+		}
 		if participant.Role == RoleHost || participant.Role == RoleModerator {
 			authorizedIssuers[participant.ParticipantID] = participant.SigningKey
 		}
 	}
-	if len(r.KeyGrants) != len(active) {
-		return NewProtocolError(CodeInvalidParticipant, "secure Shared Space revocation does not grant the next key epoch to every remaining participant")
+	if len(r.KeyGrants) != len(expectedTargets) {
+		return NewProtocolError(CodeInvalidParticipant, "secure Shared Space revocation does not grant the next key epoch to every remaining participant device")
 	}
 
-	seen := make(map[uuid.UUID]struct{}, len(r.KeyGrants))
+	seen := make(map[grantTarget]struct{}, len(r.KeyGrants))
 	for _, grant := range r.KeyGrants {
 		if err := grant.Validate(); err != nil {
 			return err
@@ -1010,6 +1144,10 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 		if _, found := active[grant.ParticipantID]; !found {
 			return NewProtocolError(CodeWrongScope, "Shared Space revocation key grant targets an inactive participant")
 		}
+		target := grantTarget{participantID: grant.ParticipantID, deviceID: grant.RecipientDeviceID}
+		if expectedFingerprint, found := expectedTargets[target]; !found || expectedFingerprint != grant.RecipientAgreementKeyFingerprint {
+			return NewProtocolError(CodeWrongScope, "Shared Space revocation key grant does not target an active participant device key")
+		}
 		issuerKey, found := authorizedIssuers[grant.IssuerParticipantID]
 		if !found {
 			return NewProtocolError(CodeUnauthorized, "Shared Space revocation key grant issuer is not an active host or moderator")
@@ -1017,10 +1155,10 @@ func (r ParticipantRevocation) ValidateKeyGrants(
 		if !issuerKey.MatchesGrantSignature(grant.Signature) {
 			return NewProtocolError(CodeUnauthorized, "Shared Space revocation key grant signature is not bound to its issuer")
 		}
-		if _, found := seen[grant.ParticipantID]; found {
-			return NewProtocolError(CodeInvalidParticipant, "Shared Space revocation contains duplicate participant key grants")
+		if _, found := seen[target]; found {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space revocation contains duplicate participant device key grants")
 		}
-		seen[grant.ParticipantID] = struct{}{}
+		seen[target] = struct{}{}
 	}
 	return nil
 }
@@ -1035,15 +1173,21 @@ func (r ParticipantRevocation) Equivalent(other ParticipantRevocation) bool {
 		!sameOptionalSecureRosterAttestation(r.SecureRosterAttestation, other.SecureRosterAttestation) {
 		return false
 	}
-	grants := make(map[uuid.UUID]ParticipantKeyGrant, len(r.KeyGrants))
+	type grantTarget struct {
+		participantID uuid.UUID
+		deviceID      uuid.UUID
+	}
+	grants := make(map[grantTarget]ParticipantKeyGrant, len(r.KeyGrants))
 	for _, grant := range r.KeyGrants {
-		if _, found := grants[grant.ParticipantID]; found {
+		target := grantTarget{participantID: grant.ParticipantID, deviceID: grant.RecipientDeviceID}
+		if _, found := grants[target]; found {
 			return false
 		}
-		grants[grant.ParticipantID] = grant
+		grants[target] = grant
 	}
 	for _, grant := range other.KeyGrants {
-		if existing, found := grants[grant.ParticipantID]; !found || existing != grant {
+		target := grantTarget{participantID: grant.ParticipantID, deviceID: grant.RecipientDeviceID}
+		if existing, found := grants[target]; !found || existing != grant {
 			return false
 		}
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
-const secureRosterFixtureSHA256 = "aad269a61cff902b857dea7b64a423ce52a97f57a918bfbe43c8a58945bd1b1a"
+const secureRosterFixtureSHA256 = "0a6a21ca7bb79821137bd9a039fe6c17a082c19be3fbf40eb4daadb55098a172"
 
 func TestSecureSharedSpaceRosterFixtureIsExactPortableAuthorityContract(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("shared-space-secure-roster-attestation-portable-v1.json"))

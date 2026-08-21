@@ -134,6 +134,7 @@ func (s *MemoryStore) ProvisionSpace(
 		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: RoleHost,
 		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
 	space := &memorySpace{
@@ -198,6 +199,7 @@ func participantFromInvitation(invitation Invitation) Participant {
 		ParticipantID: invitation.ParticipantID, SubscriptionID: invitation.SubscriptionID,
 		Kind: invitation.Kind, Role: invitation.Role,
 		SigningKey: invitation.ParticipantSigningKey,
+		DeviceKeys: invitation.ParticipantDeviceKeys,
 		// The Secure roster authority record is signed before the relay claim.
 		// Its creation time is therefore the invitation's durable authority time,
 		// not the later transport-delivery time of a claim.
@@ -428,6 +430,7 @@ func (s *MemoryStore) ClaimInvitation(
 		SubscriptionID: record.invitation.SubscriptionID, Kind: record.invitation.Kind,
 		Role: record.invitation.Role, CreatedAtMilliseconds: participantCreationTime(space, record.invitation, nowMilliseconds),
 		SigningKey: record.invitation.ParticipantSigningKey,
+		DeviceKeys: record.invitation.ParticipantDeviceKeys,
 	}
 	space.participants[participant.ParticipantID] = participant
 	if record.invitation.ActivationSecureRosterAttestation != nil {

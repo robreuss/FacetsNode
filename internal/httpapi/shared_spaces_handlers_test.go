@@ -53,6 +53,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		InitialParticipantSigningKey: sharedSpaceParticipantSigningKey(
 			t, domain.MemberCredential.MemberID,
 		),
+		InitialParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			sharedSpaceParticipantDeviceKey(t, spaceID, domain.MemberCredential.MemberID, nowMilliseconds),
+		},
 		TenantProvisioning: newRelayTenantProvisioningRequest(
 			domain,
 			relayTestToken(0x41),
@@ -96,7 +99,10 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		Kind:                  sharedspaces.ParticipantPerson,
 		Role:                  sharedspaces.RoleReader,
 		ParticipantSigningKey: sharedSpaceParticipantSigningKey(t, participantID),
-		InteractionMode:       provisioning.InteractionMode,
+		ParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			sharedSpaceParticipantDeviceKey(t, spaceID, participantID, nowMilliseconds),
+		},
+		InteractionMode: provisioning.InteractionMode,
 		InvitationCredential: sharedSpaceInvitationCredential{
 			InvitationID:       invitationID,
 			AuthorizationToken: invitationToken,
@@ -127,7 +133,10 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		ParticipantID: cancelledParticipantID, SubscriptionID: uuid.New(),
 		Kind: sharedspaces.ParticipantPerson, Role: sharedspaces.RoleReader,
 		ParticipantSigningKey: sharedSpaceParticipantSigningKey(t, cancelledParticipantID),
-		InteractionMode:       provisioning.InteractionMode,
+		ParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			sharedSpaceParticipantDeviceKey(t, spaceID, cancelledParticipantID, nowMilliseconds),
+		},
+		InteractionMode: provisioning.InteractionMode,
 		InvitationCredential: sharedSpaceInvitationCredential{
 			InvitationID: cancelledInvitationID, AuthorizationToken: cancelledToken,
 		},
@@ -801,6 +810,9 @@ func TestSharedSpacesAPIManagedBootstrapDistributesAndRotatesServiceKey(t *testi
 		InitialParticipantSigningKey: sharedSpaceParticipantSigningKey(
 			t, domain.MemberCredential.MemberID,
 		),
+		InitialParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			sharedSpaceParticipantDeviceKey(t, spaceID, domain.MemberCredential.MemberID, nowMilliseconds),
+		},
 		TenantProvisioning: newRelayTenantProvisioningRequest(domain, relayTestToken(0x42)),
 	}
 	created := performRelayJSON(
@@ -822,7 +834,10 @@ func TestSharedSpacesAPIManagedBootstrapDistributesAndRotatesServiceKey(t *testi
 		Kind:                  sharedspaces.ParticipantPerson,
 		Role:                  sharedspaces.RoleParticipant,
 		ParticipantSigningKey: sharedSpaceParticipantSigningKey(t, participantID),
-		InteractionMode:       provisioning.InteractionMode,
+		ParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			sharedSpaceParticipantDeviceKey(t, spaceID, participantID, nowMilliseconds),
+		},
+		InteractionMode: provisioning.InteractionMode,
 		InvitationCredential: sharedSpaceInvitationCredential{
 			InvitationID:       invitationID,
 			AuthorizationToken: invitationToken,
@@ -944,12 +959,13 @@ func sharedSpaceParticipantKeyGrant(
 	privateKey := sharedSpaceParticipantSigningPrivateKey(t, issuerParticipantID)
 	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
 	signingFingerprint := sha256.Sum256(publicKey)
-	recipientFingerprint := sha256.Sum256([]byte("recipient agreement key"))
+	recipientDeviceKey := sharedSpaceParticipantDeviceKey(t, spaceID, participantID, now)
 	grant := sharedspaces.ParticipantKeyGrant{
 		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
-		ParticipantID: participantID, IssuerParticipantID: issuerParticipantID,
-		KeyEpoch: keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
-		RecipientAgreementKeyFingerprint: hex.EncodeToString(recipientFingerprint[:]),
+		ParticipantID: participantID, RecipientDeviceID: recipientDeviceKey.DeviceID,
+		IssuerParticipantID: issuerParticipantID,
+		KeyEpoch:            keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
+		RecipientAgreementKeyFingerprint: recipientDeviceKey.AgreementKeyFingerprint,
 		EphemeralAgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
 		Nonce:                            base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
 		Ciphertext:                       base64.RawURLEncoding.EncodeToString([]byte("opaque wrapped content key")),
@@ -975,6 +991,58 @@ func sharedSpaceParticipantKeyGrant(
 	s.FillBytes(signature[32:])
 	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
 	return &grant
+}
+
+func sharedSpaceParticipantDeviceID(participantID uuid.UUID) uuid.UUID {
+	digest := sha256.Sum256(append([]byte("shared-space-participant-device:"), participantID[:]...))
+	deviceID, _ := uuid.FromBytes(digest[:16])
+	return deviceID
+}
+
+func sharedSpaceParticipantDeviceKey(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	createdAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	deviceID := sharedSpaceParticipantDeviceID(participantID)
+	agreementPrivateKey := sharedSpaceParticipantSigningPrivateKey(t, deviceID)
+	agreementPublicKey := elliptic.Marshal(
+		elliptic.P256(), agreementPrivateKey.PublicKey.X, agreementPrivateKey.PublicKey.Y,
+	)
+	agreementFingerprint := sha256.Sum256(agreementPublicKey)
+	signingPrivateKey := sharedSpaceParticipantSigningPrivateKey(t, participantID)
+	signingPublicKey := elliptic.Marshal(
+		elliptic.P256(), signingPrivateKey.PublicKey.X, signingPrivateKey.PublicKey.Y,
+	)
+	signingFingerprint := sha256.Sum256(signingPublicKey)
+	key := sharedspaces.ParticipantDeviceKey{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
+		ParticipantID: participantID, DeviceID: deviceID, Algorithm: "P256",
+		AgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(agreementPublicKey),
+		AgreementKeyFingerprint: hex.EncodeToString(agreementFingerprint[:]),
+		CreatedAtMilliseconds:   createdAtMilliseconds,
+		Signature: sharedspaces.ParticipantKeyGrantSignature{
+			Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(signingPublicKey),
+			SigningKeyFingerprint: hex.EncodeToString(signingFingerprint[:]),
+		},
+	}
+	payload, err := key.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, signingPrivateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return key
 }
 
 func sharedSpaceParticipantSigningPrivateKey(t *testing.T, participantID uuid.UUID) *ecdsa.PrivateKey {
@@ -1017,6 +1085,7 @@ func sharedSpaceInitialRosterAttestation(
 		SubscriptionID: provisioning.TenantProvisioning.InitialDomain.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
 		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: nowMilliseconds,
 	}
 	return sharedSpaceSignedRosterAttestation(
@@ -1039,12 +1108,14 @@ func sharedSpaceInvitationRosterAttestation(
 		SubscriptionID: provisioning.TenantProvisioning.InitialDomain.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
 		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: previous.CreatedAtMilliseconds,
 	}
 	member := sharedspaces.Participant{
 		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 		ParticipantID: invitation.ParticipantID, SubscriptionID: invitation.SubscriptionID,
 		Kind: invitation.Kind, Role: invitation.Role, SigningKey: invitation.ParticipantSigningKey,
+		DeviceKeys:            invitation.ParticipantDeviceKeys,
 		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
 	}
 	previousDigest, err := previous.Digest()

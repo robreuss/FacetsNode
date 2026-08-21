@@ -317,6 +317,7 @@ func TestParticipantRevocationRequiresCompleteSecureGrantSet(t *testing.T) {
 			ParticipantID: provisioning.InitialParticipantID,
 			Kind:          sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
 			SigningKey:            provisioning.InitialParticipantSigningKey,
+			DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 			CreatedAtMilliseconds: 3_000,
 		},
 		{
@@ -324,6 +325,9 @@ func TestParticipantRevocationRequiresCompleteSecureGrantSet(t *testing.T) {
 			ParticipantID: participantID, Kind: sharedspaces.ParticipantPerson,
 			Role: sharedspaces.RoleParticipant, CreatedAtMilliseconds: 3_100,
 			SigningKey: testParticipantSigningKey(t, participantID),
+			DeviceKeys: []sharedspaces.ParticipantDeviceKey{
+				testParticipantDeviceKey(t, provisioning.SpaceID, participantID, 3_100),
+			},
 		},
 	}
 	revocation := sharedspaces.ParticipantRevocation{
@@ -368,6 +372,52 @@ func TestParticipantRevocationRequiresCompleteSecureGrantSet(t *testing.T) {
 		sharedspaces.SecurityModeManaged, participants, 3_200,
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
 		t.Fatalf("managed grant set err=%v", err)
+	}
+}
+
+func TestParticipantRevocationRequiresAGrantForEveryActiveDevice(t *testing.T) {
+	_, provisioning, _ := testSpaceProvisioning(t, 3_250, sharedspaces.SecurityModeSecure)
+	host := sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID,
+		Kind:          sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
+		SigningKey: provisioning.InitialParticipantSigningKey,
+		DeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			testParticipantDeviceKey(t, provisioning.SpaceID, provisioning.InitialParticipantID, 3_250),
+		},
+		CreatedAtMilliseconds: 3_250,
+	}
+	secondDeviceID := uuid.New()
+	host.DeviceKeys = append(host.DeviceKeys, testParticipantDeviceKeyWithID(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID, secondDeviceID, 3_251,
+	))
+	if host.DeviceKeys[0].DeviceID.String() > host.DeviceKeys[1].DeviceID.String() {
+		host.DeviceKeys[0], host.DeviceKeys[1] = host.DeviceKeys[1], host.DeviceKeys[0]
+	}
+	revocation := sharedspaces.ParticipantRevocation{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: uuid.New(), PreviousKeyEpoch: sharedspaces.InitialKeyEpoch,
+		NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
+	}
+	firstDeviceGrant := testParticipantKeyGrantForDeviceSignedBy(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID, host.DeviceKeys[0].DeviceID,
+		provisioning.InitialParticipantID, provisioning.InitialParticipantID, revocation.NextKeyEpoch, 3_260,
+	)
+	revocation.KeyGrants = []sharedspaces.ParticipantKeyGrant{*firstDeviceGrant}
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeSecure, []sharedspaces.Participant{host}, 3_260,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("missing second-device grant err=%v", err)
+	}
+	secondDeviceGrant := testParticipantKeyGrantForDeviceSignedBy(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID, host.DeviceKeys[1].DeviceID,
+		provisioning.InitialParticipantID, provisioning.InitialParticipantID, revocation.NextKeyEpoch, 3_260,
+	)
+	revocation.KeyGrants = append(revocation.KeyGrants, *secondDeviceGrant)
+	if err := revocation.ValidateKeyGrants(
+		sharedspaces.SecurityModeSecure, []sharedspaces.Participant{host}, 3_260,
+	); err != nil {
+		t.Fatalf("complete per-device grant set err=%v", err)
 	}
 }
 
@@ -487,6 +537,7 @@ func TestParticipantBootstrapRequiresExactlyOneModeAppropriateKey(t *testing.T) 
 		SubscriptionID: secureProvisioning.Domain.Subscription.SubscriptionID,
 		Kind:           sharedspaces.ParticipantPerson, Role: sharedspaces.RoleHost,
 		SigningKey:            secureProvisioning.InitialParticipantSigningKey,
+		DeviceKeys:            secureProvisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: secureProvisioning.CreatedAtMilliseconds,
 	}
 	secure = sharedspaces.ParticipantBootstrap{
