@@ -133,6 +133,30 @@ and exercises admission collection. The PostgreSQL gate additionally proves
 rotation records across a pool restart and serializes concurrent admission
 issuance at the domain limit.
 
+### Swift-to-Go Device Sync enrollment gate
+
+The ordinary Swift package tests validate local enrollment cryptography and
+mailbox handling. The following explicit gate proves the Swift client uses the
+same public HTTPS admission and PIN-mailbox routes as the Go service. It
+creates a fresh single-use Device Sync principal, writes the temporary
+sponsor-only descriptor with mode `0600`, invokes the Swift test, and requires
+the test to remove the descriptor before success:
+
+```sh
+FACETS_SERVER_TEST_BASE_URL='https://<node-name>:8443' \
+FACETS_SERVER_TEST_OPERATOR_TOKEN='<operator-token>' \
+FACETS_SWIFT_REPOSITORY='/absolute/path/to/Facets' \
+  ./scripts/run-swift-device-sync-enrollment-gate.sh
+```
+
+Run it only against a disposable tenant or an explicitly designated
+development service: it intentionally creates a new Device Sync principal.
+The operator token never crosses into the Swift process, and neither the Go
+test nor the descriptor contains a content-encryption key or an account
+admission credential. The script uses the service's public HTTPS endpoint;
+do not substitute the loopback-only management listener or disable TLS
+verification.
+
 The tenant-provisioning PostgreSQL gate closes and recreates its pool between
 initial and additional domain creation, proves exact retry after another
 restart, and rejects the wrong tenant secret. The live provisioning/wake gate
