@@ -551,8 +551,13 @@ func (s *Server) handleGetSharedSpaceParticipantKeyGrant(writer http.ResponseWri
 		))
 		return
 	}
+	recipientDeviceID, err := parseSharedSpacesUUID(request.URL.Query().Get("recipientDeviceID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
 	result, err := s.sharedSpacesStore.GetParticipantKeyGrant(
-		request.Context(), credential, s.nowMilliseconds(),
+		request.Context(), credential, recipientDeviceID, s.nowMilliseconds(),
 	)
 	if err != nil {
 		s.writeError(writer, err)
@@ -754,8 +759,13 @@ func (s *Server) handleGetSharedSpaceParticipantBootstrap(writer http.ResponseWr
 		))
 		return
 	}
+	recipientDeviceID, err := parseSharedSpacesUUID(request.URL.Query().Get("recipientDeviceID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
 	result, err := s.sharedSpacesStore.GetParticipantBootstrap(
-		request.Context(), credential, s.nowMilliseconds(),
+		request.Context(), credential, recipientDeviceID, s.nowMilliseconds(),
 	)
 	if err != nil {
 		s.writeError(writer, err)

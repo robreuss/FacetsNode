@@ -292,6 +292,19 @@ func TestParticipantKeyGrantRejectsTamperingAndWrongScope(t *testing.T) {
 	if err := missing.ValidateKeyGrant(sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
 		t.Fatalf("missing Secure grant err=%v", err)
 	}
+	multipleDevices := invitation
+	multipleDevices.ParticipantDeviceKeys = append(
+		multipleDevices.ParticipantDeviceKeys,
+		testParticipantDeviceKeyWithID(
+			t, invitation.SpaceID, invitation.ParticipantID,
+			testParticipantSecondaryDeviceID(invitation.ParticipantID), invitation.CreatedAtMilliseconds,
+		),
+	)
+	if err := multipleDevices.ValidateKeyGrant(
+		sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidInvitation) {
+		t.Fatalf("multi-device invitation without per-device grants err=%v", err)
+	}
 }
 
 func TestParticipantRevocationRejectsInvalidKeyEpochTransition(t *testing.T) {

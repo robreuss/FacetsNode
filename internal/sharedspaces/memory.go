@@ -20,12 +20,17 @@ type memorySpace struct {
 	secureRosterAttestation *SecureRosterAttestation
 	secureRosterHistory     []SecureRosterAttestation
 	presentations           map[uuid.UUID]ParticipantPresentation
-	keyGrants               map[uint64]map[uuid.UUID]ParticipantKeyGrant
+	keyGrants               map[uint64]map[participantDeviceGrantTarget]ParticipantKeyGrant
 	managedContentKeys      map[uint64][]byte
 	computePools            map[uuid.UUID]ComputePool
 	computeBindings         map[uuid.UUID]SpaceComputeBinding
 	keyEpoch                uint64
 	activeCheckpointEpoch   uint64
+}
+
+type participantDeviceGrantTarget struct {
+	participantID uuid.UUID
+	deviceID      uuid.UUID
 }
 
 type memoryInvitation struct {
@@ -141,7 +146,7 @@ func (s *MemoryStore) ProvisionSpace(
 		provisioning: provisioning, result: relayResult,
 		participants:       map[uuid.UUID]Participant{participant.ParticipantID: participant},
 		presentations:      make(map[uuid.UUID]ParticipantPresentation),
-		keyGrants:          make(map[uint64]map[uuid.UUID]ParticipantKeyGrant),
+		keyGrants:          make(map[uint64]map[participantDeviceGrantTarget]ParticipantKeyGrant),
 		managedContentKeys: make(map[uint64][]byte),
 		computePools:       make(map[uuid.UUID]ComputePool),
 		computeBindings:    make(map[uuid.UUID]SpaceComputeBinding),
@@ -440,9 +445,13 @@ func (s *MemoryStore) ClaimInvitation(
 	}
 	if record.invitation.KeyGrant != nil {
 		if space.keyGrants[space.keyEpoch] == nil {
-			space.keyGrants[space.keyEpoch] = make(map[uuid.UUID]ParticipantKeyGrant)
+			space.keyGrants[space.keyEpoch] = make(map[participantDeviceGrantTarget]ParticipantKeyGrant)
 		}
-		space.keyGrants[space.keyEpoch][participant.ParticipantID] = *record.invitation.KeyGrant
+		grant := *record.invitation.KeyGrant
+		space.keyGrants[space.keyEpoch][participantDeviceGrantTarget{
+			participantID: grant.ParticipantID,
+			deviceID:      grant.RecipientDeviceID,
+		}] = grant
 	}
 	result := InvitationClaimResult{
 		Acceptance: relayResult.Acceptance, CurrentKeyEpoch: space.keyEpoch,
@@ -1000,9 +1009,12 @@ func (s *MemoryStore) RevokeParticipant(
 	if managedWrappedKey != nil {
 		space.managedContentKeys[revocation.NextKeyEpoch] = managedWrappedKey
 	} else if len(revocation.KeyGrants) > 0 {
-		space.keyGrants[revocation.NextKeyEpoch] = make(map[uuid.UUID]ParticipantKeyGrant, len(revocation.KeyGrants))
+		space.keyGrants[revocation.NextKeyEpoch] = make(map[participantDeviceGrantTarget]ParticipantKeyGrant, len(revocation.KeyGrants))
 		for _, grant := range revocation.KeyGrants {
-			space.keyGrants[revocation.NextKeyEpoch][grant.ParticipantID] = grant
+			space.keyGrants[revocation.NextKeyEpoch][participantDeviceGrantTarget{
+				participantID: grant.ParticipantID,
+				deviceID:      grant.RecipientDeviceID,
+			}] = grant
 		}
 	}
 	result := ParticipantRevocationResult{
@@ -1338,9 +1350,10 @@ func (s *MemoryStore) UpdateParticipantPresentation(
 func (s *MemoryStore) GetParticipantBootstrap(
 	ctx context.Context,
 	credential relay.Credential,
+	recipientDeviceID uuid.UUID,
 	nowMilliseconds int64,
 ) (ParticipantBootstrap, error) {
-	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil || recipientDeviceID == uuid.Nil {
 		return ParticipantBootstrap{}, NewProtocolError(CodeWrongScope, "participant bootstrap credential scope is invalid")
 	}
 	s.mu.Lock()
@@ -1382,8 +1395,13 @@ func (s *MemoryStore) GetParticipantBootstrap(
 	}
 	result := ParticipantBootstrap{Version: SchemaVersion, Status: status}
 	if space.provisioning.SecurityMode.ContentBlind() {
-		grant, found := space.keyGrants[space.keyEpoch][credential.MemberID]
-		if !found {
+		grant, found := space.keyGrants[space.keyEpoch][participantDeviceGrantTarget{
+			participantID: credential.MemberID,
+			deviceID:      recipientDeviceID,
+		}]
+		if !found || !participant.HasActiveDeviceKey(
+			grant.RecipientDeviceID, grant.RecipientAgreementKeyFingerprint,
+		) {
 			return ParticipantBootstrap{}, NewProtocolError(CodeKeyGrantNotFound, "current participant key grant was not found")
 		}
 		result.KeyGrant = &ParticipantKeyGrantResult{
@@ -1423,9 +1441,10 @@ func (s *MemoryStore) GetParticipantBootstrap(
 func (s *MemoryStore) GetParticipantKeyGrant(
 	ctx context.Context,
 	credential relay.Credential,
+	recipientDeviceID uuid.UUID,
 	nowMilliseconds int64,
 ) (ParticipantKeyGrantResult, error) {
-	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil || recipientDeviceID == uuid.Nil {
 		return ParticipantKeyGrantResult{}, NewProtocolError(CodeWrongScope, "participant key grant credential scope is invalid")
 	}
 	s.mu.Lock()
@@ -1450,8 +1469,13 @@ func (s *MemoryStore) GetParticipantKeyGrant(
 	if _, err := s.relay.Fetch(ctx, credential, 0, 1, nowMilliseconds); err != nil {
 		return ParticipantKeyGrantResult{}, err
 	}
-	grant, found := space.keyGrants[space.keyEpoch][credential.MemberID]
-	if !found {
+	grant, found := space.keyGrants[space.keyEpoch][participantDeviceGrantTarget{
+		participantID: credential.MemberID,
+		deviceID:      recipientDeviceID,
+	}]
+	if !found || !participant.HasActiveDeviceKey(
+		grant.RecipientDeviceID, grant.RecipientAgreementKeyFingerprint,
+	) {
 		return ParticipantKeyGrantResult{}, NewProtocolError(CodeKeyGrantNotFound, "current participant key grant was not found")
 	}
 	return ParticipantKeyGrantResult{

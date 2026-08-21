@@ -54,6 +54,9 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		},
 	}
 	provisioning.InitialParticipantSigningKey = liveSharedSpaceParticipantSigningKey(t, hostID)
+	provisioning.InitialParticipantDeviceKeys = []sharedspaces.ParticipantDeviceKey{
+		liveSharedSpaceParticipantDeviceKey(t, spaceID, hostID, now),
+	}
 	provisioning.InitialSecureRosterAttestation = liveSharedSpaceInitialRosterAttestation(
 		t, provisioning, domainID, now,
 	)
@@ -91,6 +94,9 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		CreatedAtMilliseconds: now,
 	}
 	invitation.ParticipantSigningKey = liveSharedSpaceParticipantSigningKey(t, participantID)
+	invitation.ParticipantDeviceKeys = []sharedspaces.ParticipantDeviceKey{
+		liveSharedSpaceParticipantDeviceKey(t, spaceID, participantID, now),
+	}
 	invitation.KeyGrant = liveSharedSpaceParticipantKeyGrant(
 		t, spaceID, participantID, hostID, sharedspaces.InitialKeyEpoch, now,
 	)
@@ -144,7 +150,8 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	}
 	bootstrapResponse := requestRelayJSON(
 		t, client, http.MethodGet,
-		spaceRoot+"/participants/"+participantID.String()+"/bootstrap", nil,
+		spaceRoot+"/participants/"+participantID.String()+"/bootstrap?recipientDeviceID="+
+			liveSharedSpaceParticipantDeviceID(participantID).String(), nil,
 		participantToken, participantID,
 	)
 	requireStatus(t, bootstrapResponse, http.StatusOK)
@@ -207,7 +214,8 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	}
 	promotedBootstrapResponse := requestRelayJSON(
 		t, client, http.MethodGet,
-		spaceRoot+"/participants/"+participantID.String()+"/bootstrap", nil,
+		spaceRoot+"/participants/"+participantID.String()+"/bootstrap?recipientDeviceID="+
+			liveSharedSpaceParticipantDeviceID(participantID).String(), nil,
 		participantToken, participantID,
 	)
 	requireStatus(t, promotedBootstrapResponse, http.StatusOK)
@@ -397,6 +405,7 @@ type liveSharedSpaceProvisioningInput struct {
 	InitialParticipantID           uuid.UUID                             `json:"initialParticipantID"`
 	InitialParticipantKind         sharedspaces.ParticipantKind          `json:"initialParticipantKind"`
 	InitialParticipantSigningKey   sharedspaces.ParticipantSigningKey    `json:"initialParticipantSigningKey"`
+	InitialParticipantDeviceKeys   []sharedspaces.ParticipantDeviceKey   `json:"initialParticipantDeviceKeys"`
 	InitialSecureRosterAttestation *sharedspaces.SecureRosterAttestation `json:"initialSecureRosterAttestation,omitempty"`
 	TenantProvisioning             liveRelayTenantProvisioningRequest    `json:"tenantProvisioning"`
 }
@@ -415,6 +424,7 @@ type liveSharedSpaceInvitationCreateInput struct {
 	Role                              sharedspaces.Role                     `json:"role"`
 	InteractionMode                   sharedspaces.InteractionMode          `json:"interactionMode"`
 	ParticipantSigningKey             sharedspaces.ParticipantSigningKey    `json:"participantSigningKey"`
+	ParticipantDeviceKeys             []sharedspaces.ParticipantDeviceKey   `json:"participantDeviceKeys"`
 	KeyGrant                          *sharedspaces.ParticipantKeyGrant     `json:"keyGrant,omitempty"`
 	ActivationSecureRosterAttestation *sharedspaces.SecureRosterAttestation `json:"activationSecureRosterAttestation,omitempty"`
 	InvitationCredential              liveSharedSpaceInvitationCredential   `json:"invitationCredential"`
@@ -435,12 +445,13 @@ func liveSharedSpaceParticipantKeyGrant(
 	privateKey := liveSharedSpaceParticipantSigningPrivateKey(t, issuerParticipantID)
 	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
 	signingFingerprint := sha256.Sum256(publicKey)
-	recipientFingerprint := sha256.Sum256([]byte("live recipient agreement key"))
+	recipientDeviceKey := liveSharedSpaceParticipantDeviceKey(t, spaceID, participantID, now)
 	grant := sharedspaces.ParticipantKeyGrant{
 		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
-		ParticipantID: participantID, IssuerParticipantID: issuerParticipantID,
-		KeyEpoch: keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
-		RecipientAgreementKeyFingerprint: hex.EncodeToString(recipientFingerprint[:]),
+		ParticipantID: participantID, RecipientDeviceID: recipientDeviceKey.DeviceID,
+		IssuerParticipantID: issuerParticipantID,
+		KeyEpoch:            keyEpoch, Algorithm: sharedspaces.ParticipantKeyGrantAlgorithm,
+		RecipientAgreementKeyFingerprint: recipientDeviceKey.AgreementKeyFingerprint,
 		EphemeralAgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
 		Nonce:                            base64.RawURLEncoding.EncodeToString(make([]byte, 12)),
 		Ciphertext:                       base64.RawURLEncoding.EncodeToString([]byte("opaque wrapped content key")),
@@ -495,6 +506,61 @@ func liveSharedSpaceParticipantSigningKey(t *testing.T, participantID uuid.UUID)
 	}
 }
 
+func liveSharedSpaceParticipantDeviceID(participantID uuid.UUID) uuid.UUID {
+	digest := sha256.Sum256(append([]byte("facets-shared-space-live-device:"), participantID[:]...))
+	deviceID, err := uuid.FromBytes(digest[:16])
+	if err != nil {
+		panic(err)
+	}
+	return deviceID
+}
+
+func liveSharedSpaceParticipantDeviceKey(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	createdAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
+	deviceID := liveSharedSpaceParticipantDeviceID(participantID)
+	agreementPrivateKey := liveSharedSpaceParticipantSigningPrivateKey(t, deviceID)
+	agreementPublicKey := elliptic.Marshal(
+		elliptic.P256(), agreementPrivateKey.PublicKey.X, agreementPrivateKey.PublicKey.Y,
+	)
+	agreementFingerprint := sha256.Sum256(agreementPublicKey)
+	signingPrivateKey := liveSharedSpaceParticipantSigningPrivateKey(t, participantID)
+	signingPublicKey := elliptic.Marshal(
+		elliptic.P256(), signingPrivateKey.PublicKey.X, signingPrivateKey.PublicKey.Y,
+	)
+	signingFingerprint := sha256.Sum256(signingPublicKey)
+	key := sharedspaces.ParticipantDeviceKey{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
+		ParticipantID: participantID, DeviceID: deviceID, Algorithm: "P256",
+		AgreementPublicKeyX963:  base64.RawURLEncoding.EncodeToString(agreementPublicKey),
+		AgreementKeyFingerprint: hex.EncodeToString(agreementFingerprint[:]),
+		CreatedAtMilliseconds:   createdAtMilliseconds,
+		Signature: sharedspaces.ParticipantKeyGrantSignature{
+			Algorithm:             sharedspaces.ParticipantKeyGrantSignatureAlgorithm,
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(signingPublicKey),
+			SigningKeyFingerprint: hex.EncodeToString(signingFingerprint[:]),
+		},
+	}
+	payload, err := key.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	r, s, err := ecdsa.Sign(rand.Reader, signingPrivateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return key
+}
+
 func liveSharedSpaceInitialRosterAttestation(
 	t *testing.T,
 	provisioning liveSharedSpaceProvisioningInput,
@@ -508,6 +574,7 @@ func liveSharedSpaceInitialRosterAttestation(
 		SubscriptionID: provisioning.TenantProvisioning.InitialDomain.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
 		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: nowMilliseconds,
 	}
 	return liveSharedSpaceSignedRosterAttestation(
@@ -530,12 +597,14 @@ func liveSharedSpaceInvitationRosterAttestation(
 		SubscriptionID: provisioning.TenantProvisioning.InitialDomain.SubscriptionID,
 		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
 		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: previous.CreatedAtMilliseconds,
 	}
 	member := sharedspaces.Participant{
 		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 		ParticipantID: invitation.ParticipantID, SubscriptionID: invitation.SubscriptionID,
 		Kind: invitation.Kind, Role: invitation.Role, SigningKey: invitation.ParticipantSigningKey,
+		DeviceKeys:            invitation.ParticipantDeviceKeys,
 		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
 	}
 	return liveSharedSpaceSuccessorRosterAttestation(

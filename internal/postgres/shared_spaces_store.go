@@ -1813,9 +1813,10 @@ func (s *SharedSpacesStore) RevokeParticipant(
 func (s *SharedSpacesStore) GetParticipantKeyGrant(
 	ctx context.Context,
 	credential relay.Credential,
+	recipientDeviceID uuid.UUID,
 	nowMilliseconds int64,
 ) (sharedspaces.ParticipantKeyGrantResult, error) {
-	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
+	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil || recipientDeviceID == uuid.Nil {
 		return sharedspaces.ParticipantKeyGrantResult{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeWrongScope, "participant key grant credential scope is invalid",
 		)
@@ -1882,7 +1883,12 @@ func (s *SharedSpacesStore) GetParticipantKeyGrant(
 		return sharedspaces.ParticipantKeyGrantResult{}, err
 	}
 	for _, grant := range grants {
-		if grant.ParticipantID != credential.MemberID {
+		if grant.ParticipantID != credential.MemberID || grant.RecipientDeviceID != recipientDeviceID {
+			continue
+		}
+		if !participant.HasActiveDeviceKey(
+			grant.RecipientDeviceID, grant.RecipientAgreementKeyFingerprint,
+		) {
 			continue
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1904,7 +1910,7 @@ func (s *SharedSpacesStore) GetParticipantStatus(
 	credential relay.Credential,
 	nowMilliseconds int64,
 ) (sharedspaces.ParticipantStatus, error) {
-	bootstrap, err := s.getParticipantBootstrap(ctx, credential, nowMilliseconds, false)
+	bootstrap, err := s.getParticipantBootstrap(ctx, credential, uuid.Nil, nowMilliseconds, false)
 	if err != nil {
 		return sharedspaces.ParticipantStatus{}, err
 	}
@@ -2394,20 +2400,27 @@ func (s *SharedSpacesStore) UpdateParticipantPresentation(
 func (s *SharedSpacesStore) GetParticipantBootstrap(
 	ctx context.Context,
 	credential relay.Credential,
+	recipientDeviceID uuid.UUID,
 	nowMilliseconds int64,
 ) (sharedspaces.ParticipantBootstrap, error) {
-	return s.getParticipantBootstrap(ctx, credential, nowMilliseconds, true)
+	return s.getParticipantBootstrap(ctx, credential, recipientDeviceID, nowMilliseconds, true)
 }
 
 func (s *SharedSpacesStore) getParticipantBootstrap(
 	ctx context.Context,
 	credential relay.Credential,
+	recipientDeviceID uuid.UUID,
 	nowMilliseconds int64,
 	includeKeyGrant bool,
 ) (sharedspaces.ParticipantBootstrap, error) {
 	if credential.TenantID == uuid.Nil || credential.DomainID == uuid.Nil || credential.MemberID == uuid.Nil {
 		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
 			sharedspaces.CodeWrongScope, "participant bootstrap credential scope is invalid",
+		)
+	}
+	if includeKeyGrant && recipientDeviceID == uuid.Nil {
+		return sharedspaces.ParticipantBootstrap{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "participant bootstrap recipient device is invalid",
 		)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
@@ -2518,7 +2531,12 @@ func (s *SharedSpacesStore) getParticipantBootstrap(
 			return sharedspaces.ParticipantBootstrap{}, err
 		}
 		for _, grant := range grants {
-			if grant.ParticipantID == credential.MemberID {
+			if grant.ParticipantID == credential.MemberID && grant.RecipientDeviceID == recipientDeviceID {
+				if !participant.HasActiveDeviceKey(
+					grant.RecipientDeviceID, grant.RecipientAgreementKeyFingerprint,
+				) {
+					continue
+				}
 				result.KeyGrant = &sharedspaces.ParticipantKeyGrantResult{
 					Version: sharedspaces.SchemaVersion, SpaceID: credential.TenantID,
 					ParticipantID: credential.MemberID, CurrentKeyEpoch: currentKeyEpoch,
@@ -3171,7 +3189,7 @@ func loadSharedSpaceParticipantKeyGrants(
 		SELECT grant_payload
 		FROM shared_space_participant_key_grants
 		WHERE space_id=$1 AND key_epoch=$2
-		ORDER BY participant_id
+		ORDER BY participant_id,(grant_payload->>'recipientDeviceID')
 	`, spaceID, keyEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("query Shared Space participant key grants: %w", err)

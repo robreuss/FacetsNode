@@ -55,7 +55,8 @@ reserved for the later server-readable public tier:
   community. Revocation stops future delivery but does not rotate a key that a
   former participant may already possess;
 - `secure`: a content-blind high-assurance Space. Revocation advances the key
-  epoch and requires a new opaque grant for every remaining participant;
+  epoch and requires a new opaque grant for every active device of every
+  remaining participant;
 - `managed`: the service generates and distributes the Space content key under
   an explicit managed-Space contract. Semantic inspection and moderation
   policy remain a later gate.
@@ -86,12 +87,14 @@ invitation secret. The secret itself is not stored. The invitation's relay
 capabilities must exactly match those derived from the Space's interaction
 mode and invited role.
 
-For a Private or Secure Space, the invitation also carries an opaque,
-participant-specific grant for the current content-key epoch. Each participant registers a
-public signing key with its authority record. The server validates that grant metadata is
-signed by the current host or moderator's registered key and stores the ciphertext atomically
-with the invitation, but never
-receives the group content key in plaintext. Managed Spaces reject key grants.
+For a Private or Secure Space, the invitation also carries an opaque grant for
+the invited participant's initial registered device at the current content-key
+epoch. Each participant registers a public signing key and a participant-signed
+device agreement-key binding with its authority record. The server validates
+that the grant targets that active device, that its metadata is signed by the
+current host or moderator's registered key, and stores the ciphertext
+atomically with the invitation, but never receives the group content key in
+plaintext. Managed Spaces reject key grants.
 Their current service-managed content key is instead released only after the
 participant has successfully claimed membership and authenticates bootstrap.
 
@@ -102,6 +105,11 @@ The invited client claims it at:
 The invitation bearer token authorizes only that claim. A successful claim
 atomically activates the participant and relay member. Exact replay returns the
 same accepted result; conflicting replay is rejected.
+
+The v1 invitation admits exactly one initial active device. Additional-device
+enrollment and device-key revocation are separate future authority transitions;
+they must not be approximated by attaching extra device keys to an invitation
+without matching key grants and a signed roster transition.
 
 ## Inspect and revoke
 
@@ -136,8 +144,9 @@ Participant revocation is submitted at:
 The authority participant and all of that participant's relay access are
 revoked in one transaction. Revocation does not erase ciphertext already
 downloaded by a participant. For a Secure Space, revocation must include
-exactly one signed opaque grant for every remaining active participant at the
-next content-key epoch. The participant revocation, relay revocation, epoch
+exactly one signed opaque grant for every active device of every remaining
+active participant at the next content-key epoch. The participant revocation,
+relay revocation, epoch
 advance, and new grants commit atomically. A Private Space records revocation
 and stops future relay access without changing its static key epoch or storing
 replacement grants. A current member may retrieve only its own current grant
@@ -156,13 +165,16 @@ already obtained by that participant.
 An active participant should recover its complete current bootstrap authority
 after relaunch with one atomic request at:
 
-`GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/bootstrap`
+`GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/bootstrap?recipientDeviceID={deviceID}`
 
 The response contains the participant status described below and exactly one
-mode-appropriate key result from the same repeatable-read snapshot: an opaque
-participant grant for a Private or Secure Space, or the current raw content key for a
-managed Space. For a Secure Space it also contains the active participant
-roster and its signed current authority attestation from that same snapshot.
+mode-appropriate key result from the same repeatable-read snapshot: the opaque
+grant addressed to the requested active device for a Private or Secure Space,
+or the current raw content key for a managed Space. The device selector is
+required for every mode so clients cannot accidentally depend on arbitrary
+stored-grant ordering. For a Secure Space it also contains the active
+participant roster and its signed current authority attestation from that same
+snapshot.
 This prevents a key rotation or roster change from producing status for one
 epoch or revision and bootstrap authority for another. A managed key is
 returned only to the active participant whose authenticated member identifier
@@ -181,6 +193,15 @@ for Private, Secure, and managed Spaces. The separate current-key-grant endpoint
 retained for a focused key refresh, but clients should use the atomic bootstrap
 endpoint for relaunch and recovery.
 
+That focused endpoint is device-addressed as well:
+
+`GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/key-grant?recipientDeviceID={deviceID}`
+
+It returns only a grant whose recipient device identifier and agreement-key
+fingerprint match the participant's registered active device binding. Missing,
+unknown, revoked, or another participant's device cannot fall back to a
+different stored grant.
+
 The status-only response never exposes the roster, other participants,
 invitations, administration authority, bearer tokens, FEF content, or content
 key material. The atomic bootstrap response adds only the caller's
@@ -198,7 +219,8 @@ participant roster at:
 
 The request uses the participant's relay credential, and the credential member
 identifier must equal the participant in the path. The response contains only
-the current active participants, their roles and kinds, any current participant
+the current active participants, their roles, kinds, participant signing keys,
+registered device agreement-key bindings, any current participant
 recognition presentation, and the signed `authorityAttestation` whose exact
 participant set and key epoch match that roster. It does not disclose invitations,
 revoked participants, administration authority, bearer credentials, relay

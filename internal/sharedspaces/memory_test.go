@@ -24,6 +24,31 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	relayStore := relay.NewMemoryStore()
 	store := sharedspaces.NewMemoryStore(relayStore)
 	_, provisioning, admin := testSpaceProvisioning(t, 1_000, sharedspaces.SecurityModeSecure)
+	provisioning.InitialParticipantDeviceKeys = append(
+		provisioning.InitialParticipantDeviceKeys,
+		testParticipantDeviceKeyWithID(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID,
+			testParticipantSecondaryDeviceID(provisioning.InitialParticipantID), 1_000,
+		),
+	)
+	sort.Slice(provisioning.InitialParticipantDeviceKeys, func(left, right int) bool {
+		return provisioning.InitialParticipantDeviceKeys[left].DeviceID.String() <
+			provisioning.InitialParticipantDeviceKeys[right].DeviceID.String()
+	})
+	host := sharedspaces.Participant{
+		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
+		ParticipantID:  provisioning.InitialParticipantID,
+		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
+		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
+		SigningKey:            provisioning.InitialParticipantSigningKey,
+		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
+		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
+	}
+	provisioning.InitialSecureRosterAttestation = testSecureRosterAttestation(
+		t, provisioning.SpaceID, provisioning.Domain.Registration.DomainID, 1, "",
+		sharedspaces.InitialKeyEpoch, []sharedspaces.Participant{host},
+		provisioning.InitialParticipantID, provisioning.CreatedAtMilliseconds,
+	)
 
 	created, err := store.ProvisionSpace(ctx, provisioning, 1_000)
 	if err != nil || created.Acceptance != relay.AcceptanceAccepted ||
@@ -141,7 +166,7 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		t.Fatalf("participant roster=%+v err=%v", participantRoster, err)
 	}
 	participantRosterSequenceBeforeRevocation := participantRoster.AuthoritySequence
-	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, 1_301)
+	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, testParticipantDeviceID(memberCredential.MemberID), 1_301)
 	if err != nil || !reflect.DeepEqual(participantBootstrap.Status, participantStatus) ||
 		participantBootstrap.KeyGrant == nil ||
 		participantBootstrap.Roster == nil ||
@@ -207,16 +232,24 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: invitation.SpaceID,
 		ParticipantID:    invitation.ParticipantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
-		KeyGrants: []sharedspaces.ParticipantKeyGrant{*testParticipantKeyGrant(
-			t, provisioning.SpaceID, provisioning.InitialParticipantID,
-			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, 1_400,
-		)},
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{
+			*testParticipantKeyGrant(
+				t, provisioning.SpaceID, provisioning.InitialParticipantID,
+				provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, 1_400,
+			),
+			*testParticipantKeyGrantForDeviceSignedBy(
+				t, provisioning.SpaceID, provisioning.InitialParticipantID,
+				testParticipantSecondaryDeviceID(provisioning.InitialParticipantID),
+				provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+				sharedspaces.InitialKeyEpoch+1, 1_400,
+			),
+		},
 	}
 	previousDigest, err := invitation.ActivationSecureRosterAttestation.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := sharedspaces.Participant{
+	host = sharedspaces.Participant{
 		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 		ParticipantID:  provisioning.InitialParticipantID,
 		SubscriptionID: provisioning.Domain.Subscription.SubscriptionID,
@@ -274,11 +307,17 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if _, err := store.ListSecureRosterAttestations(ctx, hostCredential, 0, 0, 1_400); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
 		t.Fatalf("invalid Secure roster history page size err=%v", err)
 	}
-	hostGrant, err := store.GetParticipantKeyGrant(ctx, hostCredential, 1_401)
+	hostGrant, err := store.GetParticipantKeyGrant(ctx, hostCredential, testParticipantDeviceID(hostCredential.MemberID), 1_401)
 	if err != nil || hostGrant.ParticipantID != provisioning.InitialParticipantID ||
 		hostGrant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
 		hostGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("host key grant=%+v err=%v", hostGrant, err)
+	}
+	secondHostGrant, err := store.GetParticipantKeyGrant(
+		ctx, hostCredential, testParticipantSecondaryDeviceID(hostCredential.MemberID), 1_401,
+	)
+	if err != nil || secondHostGrant.KeyGrant.RecipientDeviceID != testParticipantSecondaryDeviceID(hostCredential.MemberID) {
+		t.Fatalf("second host device key grant=%+v err=%v", secondHostGrant, err)
 	}
 	revokedRetry, err := store.RevokeParticipant(ctx, admin, revocation, 1_500)
 	if err != nil || revokedRetry.Acceptance != relay.AcceptanceDuplicate {
@@ -290,7 +329,7 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	if _, err := store.GetParticipantStatus(ctx, memberCredential, 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked participant status err=%v", err)
 	}
-	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, testParticipantDeviceID(memberCredential.MemberID), 1_500); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked participant bootstrap err=%v", err)
 	}
 	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
@@ -312,7 +351,7 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 		hostStatus.Participant.Role != sharedspaces.RoleHost {
 		t.Fatalf("host participant status awaiting rotated checkpoint=%+v err=%v", hostStatus, err)
 	}
-	hostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, 1_500)
+	hostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, testParticipantDeviceID(hostCredential.MemberID), 1_500)
 	if err != nil || !reflect.DeepEqual(hostBootstrap.Status, hostStatus) || hostBootstrap.KeyGrant == nil ||
 		hostBootstrap.KeyGrant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
 		hostBootstrap.KeyGrant.KeyGrant.KeyEpoch != hostBootstrap.Status.CurrentKeyEpoch {
@@ -773,7 +812,7 @@ func TestMemoryStoreRejectsCrossSpaceAuthorityAndInitialHostRevocation(t *testin
 		participantStatus.Participant.Role != sharedspaces.RoleHost {
 		t.Fatalf("managed participant status=%+v err=%v", participantStatus, err)
 	}
-	participantBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, 3_001)
+	participantBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, testParticipantDeviceID(hostCredential.MemberID), 3_001)
 	var managedKey []byte
 	var decodeErr error
 	if participantBootstrap.ManagedContentKey != nil {
@@ -849,11 +888,11 @@ func TestMemoryStoreRotatesManagedContentKeyOnParticipantRevocation(t *testing.T
 		t.Fatal(err)
 	}
 
-	hostBefore, err := store.GetParticipantBootstrap(ctx, hostCredential, 6_201)
+	hostBefore, err := store.GetParticipantBootstrap(ctx, hostCredential, testParticipantDeviceID(hostCredential.MemberID), 6_201)
 	if err != nil {
 		t.Fatal(err)
 	}
-	memberBefore, err := store.GetParticipantBootstrap(ctx, memberCredential, 6_201)
+	memberBefore, err := store.GetParticipantBootstrap(ctx, memberCredential, testParticipantDeviceID(memberCredential.MemberID), 6_201)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -871,10 +910,10 @@ func TestMemoryStoreRotatesManagedContentKeyOnParticipantRevocation(t *testing.T
 	if _, err := store.RevokeParticipant(ctx, admin, revocation, 6_300); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, 6_301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, testParticipantDeviceID(memberCredential.MemberID), 6_301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked managed participant bootstrap err=%v", err)
 	}
-	hostAfter, err := store.GetParticipantBootstrap(ctx, hostCredential, 6_301)
+	hostAfter, err := store.GetParticipantBootstrap(ctx, hostCredential, testParticipantDeviceID(hostCredential.MemberID), 6_301)
 	if err != nil || hostAfter.ManagedContentKey == nil ||
 		hostAfter.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
 		hostAfter.ManagedContentKey.KeyMaterial == hostBefore.ManagedContentKey.KeyMaterial ||
@@ -1341,6 +1380,15 @@ func testParticipantKeyGrantForDeviceSignedBy(
 
 func testParticipantDeviceID(participantID uuid.UUID) uuid.UUID {
 	digest := sha256.Sum256(append([]byte("facets-shared-space-device:"), participantID[:]...))
+	deviceID, err := uuid.FromBytes(digest[:16])
+	if err != nil {
+		panic(err)
+	}
+	return deviceID
+}
+
+func testParticipantSecondaryDeviceID(participantID uuid.UUID) uuid.UUID {
+	digest := sha256.Sum256(append([]byte("facets-shared-space-secondary-device:"), participantID[:]...))
 	deviceID, err := uuid.FromBytes(digest[:16])
 	if err != nil {
 		panic(err)

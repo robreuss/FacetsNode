@@ -3,6 +3,8 @@ package sharedspaces
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
@@ -16,14 +18,14 @@ type Store interface {
 	ListAuthorityEvents(context.Context, relay.AdministrationCredential, uint64, int) (AuthorityEventPage, error)
 	ChangeParticipantRole(context.Context, relay.AdministrationCredential, ParticipantRoleChange, int64) (ParticipantRoleChangeResult, error)
 	RevokeParticipant(context.Context, relay.AdministrationCredential, ParticipantRevocation, int64) (ParticipantRevocationResult, error)
-	GetParticipantBootstrap(context.Context, relay.Credential, int64) (ParticipantBootstrap, error)
+	GetParticipantBootstrap(context.Context, relay.Credential, uuid.UUID, int64) (ParticipantBootstrap, error)
 	GetParticipantStatus(context.Context, relay.Credential, int64) (ParticipantStatus, error)
 	GetParticipantRoster(context.Context, relay.Credential, int64) (ParticipantRoster, error)
 	ListSecureRosterAttestations(context.Context, relay.Credential, uint64, int, int64) (SecureRosterAttestationPage, error)
 	UpdateParticipantPresentation(context.Context, relay.Credential, ParticipantPresentationUpdate, int64) (ParticipantPresentationUpdateResult, error)
 	ChangeComputePool(context.Context, relay.AdministrationCredential, ComputePoolChange, int64) (ComputePoolChangeResult, error)
 	AuthorizeComputeCapability(context.Context, relay.Credential, ComputeCapabilityRequest, int64) (ComputeCapabilityAuthorization, error)
-	GetParticipantKeyGrant(context.Context, relay.Credential, int64) (ParticipantKeyGrantResult, error)
+	GetParticipantKeyGrant(context.Context, relay.Credential, uuid.UUID, int64) (ParticipantKeyGrantResult, error)
 	PublishEnvelope(context.Context, relay.Credential, relay.Envelope, int64) (relay.PublishResult, error)
 	StageCheckpoint(context.Context, relay.Credential, relay.CheckpointCandidate, int64) (relay.CheckpointStageResponse, error)
 	ActivateCheckpoint(context.Context, relay.AdministrationCredential, relay.CheckpointActivationRequest, int64) (relay.CheckpointActivationResponse, error)

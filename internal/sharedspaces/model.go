@@ -91,7 +91,7 @@ func (k ParticipantDeviceKey) SigningPayload() ([]byte, error) {
 func (k ParticipantDeviceKey) Validate(participant Participant) error {
 	if k.Version != SchemaVersion || k.SpaceID != participant.SpaceID ||
 		k.ParticipantID != participant.ParticipantID || k.DeviceID == uuid.Nil ||
-		k.Algorithm != "P256" || k.CreatedAtMilliseconds < participant.CreatedAtMilliseconds ||
+		k.Algorithm != "P256" || k.CreatedAtMilliseconds < 0 ||
 		(k.RevokedAtMilliseconds != nil && *k.RevokedAtMilliseconds < k.CreatedAtMilliseconds) ||
 		!validFingerprint(k.AgreementKeyFingerprint) ||
 		!validBase64URLSize(k.AgreementPublicKeyX963, 65, 65) ||
@@ -411,15 +411,19 @@ func (p SpaceProvisioning) Validate() error {
 	if err := p.InitialParticipantSigningKey.Validate(); err != nil {
 		return err
 	}
+	host := Participant{
+		Version: SchemaVersion, SpaceID: p.SpaceID, ParticipantID: p.InitialParticipantID,
+		SubscriptionID: p.Domain.Subscription.SubscriptionID, Kind: p.InitialParticipantKind,
+		Role: RoleHost, SigningKey: p.InitialParticipantSigningKey,
+		DeviceKeys:            p.InitialParticipantDeviceKeys,
+		CreatedAtMilliseconds: p.CreatedAtMilliseconds,
+	}
+	if err := host.Validate(); err != nil {
+		return err
+	}
 	if p.SecurityMode == SecurityModeSecure {
 		if p.InitialSecureRosterAttestation == nil {
 			return NewProtocolError(CodeInvalidSpace, "Secure Shared Space provisioning is missing its initial roster attestation")
-		}
-		host := Participant{
-			Version: SchemaVersion, SpaceID: p.SpaceID, ParticipantID: p.InitialParticipantID,
-			SubscriptionID: p.Domain.Subscription.SubscriptionID, Kind: p.InitialParticipantKind,
-			Role: RoleHost, SigningKey: p.InitialParticipantSigningKey, DeviceKeys: p.InitialParticipantDeviceKeys,
-			CreatedAtMilliseconds: p.CreatedAtMilliseconds,
 		}
 		if err := p.InitialSecureRosterAttestation.ValidateInitial(host); err != nil {
 			return err
@@ -463,7 +467,28 @@ func (p Participant) Validate() error {
 	if err := p.SigningKey.Validate(); err != nil {
 		return err
 	}
+	previousDeviceID := ""
+	for _, deviceKey := range p.DeviceKeys {
+		if deviceKey.SpaceID != p.SpaceID || deviceKey.ParticipantID != p.ParticipantID {
+			return NewProtocolError(CodeWrongScope, "Shared Space participant device key has the wrong scope")
+		}
+		if err := deviceKey.Validate(p); err != nil {
+			return err
+		}
+		if previousDeviceID != "" && previousDeviceID >= deviceKey.DeviceID.String() {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device keys are invalid")
+		}
+		previousDeviceID = deviceKey.DeviceID.String()
+	}
 	return nil
+}
+
+// HasActiveDeviceKey reports whether the participant's signed authority binds
+// the exact agreement-key recipient. It deliberately compares both the device
+// identifier and fingerprint so a stale or substituted key cannot select a
+// stored opaque grant.
+func (p Participant) HasActiveDeviceKey(deviceID uuid.UUID, fingerprint string) bool {
+	return hasActiveParticipantDeviceKey(p.DeviceKeys, deviceID, fingerprint)
 }
 
 // ParticipantPresentation is mutable recognition metadata for one participant.
@@ -564,6 +589,15 @@ func (i Invitation) Validate() error {
 		return err
 	}
 	if err := i.ParticipantSigningKey.Validate(); err != nil {
+		return err
+	}
+	participant := Participant{
+		Version: SchemaVersion, SpaceID: i.SpaceID, ParticipantID: i.ParticipantID,
+		SubscriptionID: i.SubscriptionID, Kind: i.Kind, Role: i.Role,
+		SigningKey: i.ParticipantSigningKey, DeviceKeys: i.ParticipantDeviceKeys,
+		CreatedAtMilliseconds: i.CreatedAtMilliseconds,
+	}
+	if err := participant.Validate(); err != nil {
 		return err
 	}
 	if i.KeyGrant != nil {
@@ -903,6 +937,15 @@ func (i Invitation) ValidateKeyGrant(mode SecurityMode, currentKeyEpoch uint64) 
 	if i.KeyGrant == nil {
 		return NewProtocolError(CodeInvalidInvitation, "content-blind Shared Space invitation is missing its participant key grant")
 	}
+	activeDeviceKeys := 0
+	for _, deviceKey := range i.ParticipantDeviceKeys {
+		if deviceKey.RevokedAtMilliseconds == nil {
+			activeDeviceKeys++
+		}
+	}
+	if activeDeviceKeys != 1 {
+		return NewProtocolError(CodeInvalidInvitation, "content-blind Shared Space invitation must admit exactly one active participant device")
+	}
 	grant := i.KeyGrant
 	if grant.SpaceID != i.SpaceID || grant.ParticipantID != i.ParticipantID ||
 		grant.CreatedAtMilliseconds != i.CreatedAtMilliseconds {
@@ -1068,10 +1111,11 @@ func (r ParticipantRevocation) Validate() error {
 }
 
 // ValidateKeyGrants enforces the security profile's revocation rule. Secure
-// Spaces rotate atomically: every remaining active participant must receive a
-// valid opaque grant for the next epoch. Private Spaces retain their static
-// epoch and carry no rotation grants. The server validates authority and
-// coverage without learning a content key in either content-blind profile.
+// Spaces rotate atomically: every active device of every remaining active
+// participant must receive a valid opaque grant for the next epoch. Private
+// Spaces retain their static epoch and carry no rotation grants. The server
+// validates authority and coverage without learning a content key in either
+// content-blind profile.
 func (r ParticipantRevocation) ValidateKeyGrants(
 	mode SecurityMode,
 	participants []Participant,
@@ -1437,7 +1481,12 @@ func (b ParticipantBootstrap) Validate() error {
 		b.KeyGrant.CurrentKeyEpoch != b.Status.CurrentKeyEpoch ||
 		b.KeyGrant.KeyGrant.SpaceID != b.Status.SpaceID ||
 		b.KeyGrant.KeyGrant.ParticipantID != b.Status.Participant.ParticipantID ||
-		b.KeyGrant.KeyGrant.KeyEpoch != b.Status.CurrentKeyEpoch {
+		b.KeyGrant.KeyGrant.KeyEpoch != b.Status.CurrentKeyEpoch ||
+		!hasActiveParticipantDeviceKey(
+			b.Status.Participant.DeviceKeys,
+			b.KeyGrant.KeyGrant.RecipientDeviceID,
+			b.KeyGrant.KeyGrant.RecipientAgreementKeyFingerprint,
+		) {
 		return NewProtocolError(CodeInvalidParticipant, "content-blind Shared Space participant bootstrap key grant is inconsistent")
 	}
 	if err := b.KeyGrant.KeyGrant.Validate(); err != nil {

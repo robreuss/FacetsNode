@@ -66,12 +66,15 @@ The first Shared Spaces authority lifecycle is specified in
 Immutable interaction modes and participant roles derive relay operations.
 Private Spaces store a static participant group-key epoch: revocation stops
 future delivery but cannot remove a key already received. Secure Spaces
-atomically store participant-specific encrypted key grants and advance key
-epochs on revocation. In both cases plaintext content keys remain a client
+atomically store device-specific encrypted key grants and advance key epochs
+on revocation, with one replacement grant for every active device of every
+remaining participant. In both cases plaintext content keys remain a client
 concern and never pass through the Shared Spaces operator credential.
 Authenticated participants can recover their own current role, derived
 capabilities, key epoch, and bootstrap readiness after relaunch without using a
-Space administration credential. A Secure participant's atomic bootstrap also
+Space administration credential. Content-blind bootstrap names the requesting
+registered device and returns only that device's opaque grant. A Secure
+participant's atomic bootstrap also
 returns the signed current active roster, including optional recognition names,
 so its membership authority and key epoch share one consistent snapshot. The
 separate Secure roster endpoint remains available for later authenticated

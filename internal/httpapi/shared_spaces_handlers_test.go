@@ -235,7 +235,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, claimRetry, http.StatusOK)
 	_ = claimRetry.Body.Close()
-	keyGrantPath := spaceRoot + "/participants/" + participantID.String() + "/key-grant"
+	keyGrantPath := spaceRoot + "/participants/" + participantID.String() + "/key-grant" +
+		"?recipientDeviceID=" + sharedSpaceParticipantDeviceID(participantID).String()
 	currentMemberGrantResponse := performRelayJSON(
 		t, handler, http.MethodGet, keyGrantPath, nil, memberToken, participantID,
 	)
@@ -249,6 +250,21 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		currentMemberGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("member key grant=%+v", currentMemberGrant)
 	}
+	missingDeviceGrantResponse := performRelayJSON(
+		t, handler, http.MethodGet,
+		spaceRoot+"/participants/"+participantID.String()+"/key-grant",
+		nil, memberToken, participantID,
+	)
+	requireStatus(t, missingDeviceGrantResponse, http.StatusBadRequest)
+	_ = missingDeviceGrantResponse.Body.Close()
+	wrongDeviceGrantResponse := performRelayJSON(
+		t, handler, http.MethodGet,
+		spaceRoot+"/participants/"+participantID.String()+"/key-grant?recipientDeviceID="+
+			sharedSpaceParticipantDeviceID(provisioning.InitialParticipantID).String(),
+		nil, memberToken, participantID,
+	)
+	requireStatus(t, wrongDeviceGrantResponse, http.StatusNotFound)
+	_ = wrongDeviceGrantResponse.Body.Close()
 	wrongMemberGrantResponse := performRelayJSON(
 		t, handler, http.MethodGet, keyGrantPath, nil,
 		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
@@ -449,7 +465,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		participantRosterHistoryResume.NextRevision != 2 {
 		t.Fatalf("resumed participant roster history=%+v", participantRosterHistoryResume)
 	}
-	participantBootstrapPath := spaceRoot + "/participants/" + participantID.String() + "/bootstrap"
+	participantBootstrapPath := spaceRoot + "/participants/" + participantID.String() + "/bootstrap" +
+		"?recipientDeviceID=" + sharedSpaceParticipantDeviceID(participantID).String()
 	participantBootstrapResponse := performRelayJSON(
 		t, handler, http.MethodGet, participantBootstrapPath, nil, memberToken, participantID,
 	)
@@ -677,7 +694,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, revokedParticipantPresentationResponse, http.StatusConflict)
 	_ = revokedParticipantPresentationResponse.Body.Close()
-	hostKeyGrantPath := spaceRoot + "/participants/" + provisioning.InitialParticipantID.String() + "/key-grant"
+	hostKeyGrantPath := spaceRoot + "/participants/" + provisioning.InitialParticipantID.String() + "/key-grant" +
+		"?recipientDeviceID=" + sharedSpaceParticipantDeviceID(provisioning.InitialParticipantID).String()
 	currentHostGrantResponse := performRelayJSON(
 		t, handler, http.MethodGet, hostKeyGrantPath, nil,
 		domain.MemberCredential.AuthorizationToken, provisioning.InitialParticipantID,
@@ -923,7 +941,9 @@ func TestSharedSpacesAPIManagedBootstrapDistributesAndRotatesServiceKey(t *testi
 		t.Fatalf("rotated host bootstrap=%+v", rotatedHostBootstrap)
 	}
 	revokedMemberBootstrap := performRelayJSON(
-		t, handler, http.MethodGet, memberBootstrapPath, nil, memberToken, participantID,
+		t, handler, http.MethodGet,
+		memberBootstrapPath+"?recipientDeviceID="+sharedSpaceParticipantDeviceID(participantID).String(),
+		nil, memberToken, participantID,
 	)
 	requireStatus(t, revokedMemberBootstrap, http.StatusConflict)
 	_ = revokedMemberBootstrap.Body.Close()
@@ -937,6 +957,7 @@ func fetchSharedSpaceParticipantBootstrap(
 	participantID uuid.UUID,
 ) sharedspaces.ParticipantBootstrap {
 	t.Helper()
+	path += "?recipientDeviceID=" + sharedSpaceParticipantDeviceID(participantID).String()
 	response := performRelayJSON(t, handler, http.MethodGet, path, nil, token, participantID)
 	requireStatus(t, response, http.StatusOK)
 	var bootstrap sharedspaces.ParticipantBootstrap

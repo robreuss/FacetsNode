@@ -27,11 +27,12 @@ Space creation:
    delivery and authority but cannot revoke a key or content already received.
    Participant rosters remain an administration concern.
 2. **Secure** is a content-blind E2EE profile for high-assurance groups. It
-   uses participant-specific opaque key grants. Revocation atomically advances
-   the key epoch and requires a replacement grant for every remaining active
-   participant. Active participants can retrieve the current active roster so
-   they can verify operational membership awareness; the roster carries no
-   keys, invitations, historical membership, or content. Each key grant is
+   uses device-specific opaque key grants. Revocation atomically advances the
+   key epoch and requires a replacement grant for every active device of every
+   remaining active participant. Active participants can retrieve the current
+   active roster so they can verify operational membership awareness; the
+   roster carries no keys, invitations, historical membership, or content.
+   Each key grant is
    signed by a host or moderator key already registered in that participant's
    durable authority record; a valid but substituted signing key is rejected.
 3. **Managed** remains a reserved protocol mode for a future server-readable,

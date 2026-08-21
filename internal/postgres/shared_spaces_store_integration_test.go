@@ -224,7 +224,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantPresentationCollision) {
 		t.Fatalf("participant presentation collision err=%v", err)
 	}
-	memberKeyGrant, err := store.GetParticipantKeyGrant(ctx, memberCredential, now+210)
+	memberKeyGrant, err := store.GetParticipantKeyGrant(ctx, memberCredential, postgresParticipantDeviceID(memberCredential.MemberID), now+210)
 	if err != nil || memberKeyGrant.KeyGrant.ParticipantID != invitation.ParticipantID ||
 		memberKeyGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("member key grant=%+v err=%v", memberKeyGrant, err)
@@ -245,7 +245,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		) {
 		t.Fatalf("member participant status=%+v err=%v", participantStatus, err)
 	}
-	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, now+212)
+	participantBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, postgresParticipantDeviceID(memberCredential.MemberID), now+212)
 	if err != nil || participantBootstrap.Status.Participant.ParticipantID != invitation.ParticipantID ||
 		participantBootstrap.Status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch ||
 		participantBootstrap.Status.Presentation == nil ||
@@ -330,10 +330,17 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: invitation.SpaceID, ParticipantID: invitation.ParticipantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
-		KeyGrants: []sharedspaces.ParticipantKeyGrant{*postgresParticipantKeyGrant(
-			t, invitation.SpaceID, provisioning.InitialParticipantID,
-			provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, now+300,
-		)},
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{
+			*postgresParticipantKeyGrant(
+				t, invitation.SpaceID, provisioning.InitialParticipantID,
+				provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, now+300,
+			),
+			*postgresParticipantKeyGrantForDevice(
+				t, invitation.SpaceID, provisioning.InitialParticipantID,
+				postgresParticipantSecondaryDeviceID(provisioning.InitialParticipantID),
+				provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, now+300,
+			),
+		},
 	}
 	previousRevocationDigest, err := promotion.SecureRosterAttestation.Digest()
 	if err != nil {
@@ -353,10 +360,16 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	if err != nil || revokedRetry.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("revoke retry=%+v err=%v", revokedRetry, err)
 	}
-	hostKeyGrant, err := store.GetParticipantKeyGrant(ctx, hostCredential, now+301)
+	hostKeyGrant, err := store.GetParticipantKeyGrant(ctx, hostCredential, postgresParticipantDeviceID(hostCredential.MemberID), now+301)
 	if err != nil || hostKeyGrant.KeyGrant.ParticipantID != provisioning.InitialParticipantID ||
 		hostKeyGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("host key grant=%+v err=%v", hostKeyGrant, err)
+	}
+	secondHostKeyGrant, err := store.GetParticipantKeyGrant(
+		ctx, hostCredential, postgresParticipantSecondaryDeviceID(hostCredential.MemberID), now+301,
+	)
+	if err != nil || secondHostKeyGrant.KeyGrant.RecipientDeviceID != postgresParticipantSecondaryDeviceID(hostCredential.MemberID) {
+		t.Fatalf("second host device key grant=%+v err=%v", secondHostKeyGrant, err)
 	}
 	status, err = store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
@@ -375,7 +388,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	if _, err := store.GetParticipantStatus(ctx, memberCredential, now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked participant status err=%v", err)
 	}
-	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, postgresParticipantDeviceID(memberCredential.MemberID), now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked participant bootstrap err=%v", err)
 	}
 	if _, err := store.UpdateParticipantPresentation(
@@ -532,11 +545,11 @@ func TestPostgresManagedSharedSpaceKeyCustodyIsAtomicWithAuthority(t *testing.T)
 		t.Fatalf("managed claim=%+v err=%v", claimed, err)
 	}
 
-	hostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, now+210)
+	hostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, postgresParticipantDeviceID(hostCredential.MemberID), now+210)
 	if err != nil {
 		t.Fatalf("managed host bootstrap: %v", err)
 	}
-	memberBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, now+211)
+	memberBootstrap, err := store.GetParticipantBootstrap(ctx, memberCredential, postgresParticipantDeviceID(memberCredential.MemberID), now+211)
 	if err != nil {
 		t.Fatalf("managed member bootstrap: %v", err)
 	}
@@ -559,10 +572,10 @@ func TestPostgresManagedSharedSpaceKeyCustodyIsAtomicWithAuthority(t *testing.T)
 	if err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("managed revoke=%+v err=%v", revoked, err)
 	}
-	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
+	if _, err := store.GetParticipantBootstrap(ctx, memberCredential, postgresParticipantDeviceID(memberCredential.MemberID), now+301); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeParticipantRevoked) {
 		t.Fatalf("revoked managed participant bootstrap err=%v", err)
 	}
-	rotatedHostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, now+302)
+	rotatedHostBootstrap, err := store.GetParticipantBootstrap(ctx, hostCredential, postgresParticipantDeviceID(hostCredential.MemberID), now+302)
 	if err != nil || rotatedHostBootstrap.ManagedContentKey == nil ||
 		rotatedHostBootstrap.ManagedContentKey.KeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
 		rotatedHostBootstrap.ManagedContentKey.KeyMaterial == previousKeyMaterial ||
@@ -654,6 +667,9 @@ func postgresSharedSpaceProvisioning(
 		InitialParticipantSigningKey: postgresParticipantSigningKey(t, hostID),
 		InitialParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
 			postgresParticipantDeviceKey(t, spaceID, hostID, now),
+			postgresParticipantDeviceKeyWithID(
+				t, spaceID, hostID, postgresParticipantSecondaryDeviceID(hostID), now,
+			),
 		},
 		Tenant: relay.TenantRegistration{
 			Version: relay.SchemaVersion, RetryID: uuid.New(), TenantID: spaceID,
@@ -666,6 +682,10 @@ func postgresSharedSpaceProvisioning(
 		},
 		CreatedAtMilliseconds: now,
 	}
+	sort.Slice(provisioning.InitialParticipantDeviceKeys, func(left, right int) bool {
+		return provisioning.InitialParticipantDeviceKeys[left].DeviceID.String() <
+			provisioning.InitialParticipantDeviceKeys[right].DeviceID.String()
+	})
 	provisioning.Domain = relay.DomainProvisioning{
 		Version: relay.SchemaVersion, RetryID: uuid.New(),
 		Registration: relay.DomainRegistration{
@@ -905,6 +925,15 @@ func postgresParticipantDeviceID(participantID uuid.UUID) uuid.UUID {
 	return deviceID
 }
 
+func postgresParticipantSecondaryDeviceID(participantID uuid.UUID) uuid.UUID {
+	digest := sha256.Sum256(append([]byte("facets-shared-space-secondary-device:"), participantID[:]...))
+	deviceID, err := uuid.FromBytes(digest[:16])
+	if err != nil {
+		panic(err)
+	}
+	return deviceID
+}
+
 func postgresParticipantDeviceKey(
 	t *testing.T,
 	spaceID uuid.UUID,
@@ -912,7 +941,19 @@ func postgresParticipantDeviceKey(
 	createdAtMilliseconds int64,
 ) sharedspaces.ParticipantDeviceKey {
 	t.Helper()
-	deviceID := postgresParticipantDeviceID(participantID)
+	return postgresParticipantDeviceKeyWithID(
+		t, spaceID, participantID, postgresParticipantDeviceID(participantID), createdAtMilliseconds,
+	)
+}
+
+func postgresParticipantDeviceKeyWithID(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	deviceID uuid.UUID,
+	createdAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
 	agreementPrivateKey := postgresParticipantSigningPrivateKey(t, deviceID)
 	agreementPublicKey := elliptic.Marshal(
 		elliptic.P256(), agreementPrivateKey.PublicKey.X, agreementPrivateKey.PublicKey.Y,
@@ -949,6 +990,40 @@ func postgresParticipantDeviceKey(
 	s.FillBytes(signature[32:])
 	key.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
 	return key
+}
+
+func postgresParticipantKeyGrantForDevice(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	recipientDeviceID uuid.UUID,
+	issuerParticipantID uuid.UUID,
+	keyEpoch uint64,
+	now int64,
+) *sharedspaces.ParticipantKeyGrant {
+	grant := postgresParticipantKeyGrant(
+		t, spaceID, participantID, issuerParticipantID, keyEpoch, now,
+	)
+	recipientDeviceKey := postgresParticipantDeviceKeyWithID(
+		t, spaceID, participantID, recipientDeviceID, now,
+	)
+	grant.RecipientDeviceID = recipientDeviceID
+	grant.RecipientAgreementKeyFingerprint = recipientDeviceKey.AgreementKeyFingerprint
+	payload, err := grant.SigningPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	privateKey := postgresParticipantSigningPrivateKey(t, issuerParticipantID)
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	grant.Signature.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return grant
 }
 
 func postgresParticipantSigningPrivateKey(t *testing.T, participantID uuid.UUID) *ecdsa.PrivateKey {
