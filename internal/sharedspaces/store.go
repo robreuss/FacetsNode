@@ -17,6 +17,7 @@ type Store interface {
 	GetSpaceStatus(context.Context, relay.AdministrationCredential) (SpaceStatus, error)
 	ListAuthorityEvents(context.Context, relay.AdministrationCredential, uint64, int) (AuthorityEventPage, error)
 	ChangeParticipantRole(context.Context, relay.AdministrationCredential, ParticipantRoleChange, int64) (ParticipantRoleChangeResult, error)
+	EnrollParticipantDevice(context.Context, relay.AdministrationCredential, ParticipantDeviceEnrollment, int64) (ParticipantDeviceEnrollmentResult, error)
 	RevokeParticipant(context.Context, relay.AdministrationCredential, ParticipantRevocation, int64) (ParticipantRevocationResult, error)
 	GetParticipantBootstrap(context.Context, relay.Credential, uuid.UUID, int64) (ParticipantBootstrap, error)
 	GetParticipantStatus(context.Context, relay.Credential, int64) (ParticipantStatus, error)

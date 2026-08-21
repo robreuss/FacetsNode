@@ -35,6 +35,10 @@ Space creation:
    Each key grant is
    signed by a host or moderator key already registered in that participant's
    durable authority record; a valid but substituted signing key is rejected.
+   Additional devices are separate authority transitions: the participant
+   signs the new agreement-key binding, a current host or moderator signs its
+   current-epoch grant, and the Secure roster advances atomically without a key
+   rotation. Device-key revocation remains a distinct rotation transition.
 3. **Managed** remains a reserved protocol mode for a future server-readable,
    high-scale public profile. It is not a current user-facing Shared Space
    option. Its service-managed content custody boundary is distinct from the

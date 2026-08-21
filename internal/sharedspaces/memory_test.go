@@ -985,6 +985,92 @@ func TestMemoryStoreRejectsIncompleteSecureRevocationWithoutChangingAuthority(t 
 	}
 }
 
+func TestMemoryStoreEnrollsAdditionalSecureParticipantDeviceAtomically(t *testing.T) {
+	ctx := context.Background()
+	relayStore := relay.NewMemoryStore()
+	store := sharedspaces.NewMemoryStore(relayStore)
+	_, provisioning, admin := testSpaceProvisioning(t, 5_400, sharedspaces.SecurityModeSecure)
+	if _, err := store.ProvisionSpace(ctx, provisioning, 5_400); err != nil {
+		t.Fatal(err)
+	}
+	hostCredential := relay.Credential{
+		TenantID: provisioning.SpaceID, DomainID: provisioning.Domain.Registration.DomainID,
+		MemberID: provisioning.InitialParticipantID, Token: testToken(0x31),
+	}
+	activateSharedSpaceCheckpoint(
+		t, ctx, relayStore, store, provisioning, hostCredential, admin,
+		sharedspaces.InitialKeyEpoch, 5_450,
+	)
+	deviceKey := testParticipantDeviceKeyWithID(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		testParticipantSecondaryDeviceID(provisioning.InitialParticipantID), 5_500,
+	)
+	enrollment := sharedspaces.ParticipantDeviceEnrollment{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceKey: deviceKey,
+		KeyGrant: testParticipantKeyGrantForDeviceSignedBy(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID, deviceKey.DeviceID,
+			provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+			sharedspaces.InitialKeyEpoch, 5_500,
+		),
+		EnrolledAtMilliseconds: 5_500,
+	}
+	enrollment.SecureRosterAttestation = testDeviceEnrollmentRosterAttestation(
+		t, provisioning, *provisioning.InitialSecureRosterAttestation,
+		enrollment.ParticipantID, deviceKey, enrollment.EnrolledAtMilliseconds,
+	)
+	result, err := store.EnrollParticipantDevice(ctx, admin, enrollment, 5_500)
+	if err != nil || result.Acceptance != relay.AcceptanceAccepted ||
+		result.DeviceID != deviceKey.DeviceID ||
+		result.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("device enrollment=%+v err=%v", result, err)
+	}
+	retry, err := store.EnrollParticipantDevice(ctx, admin, enrollment, 5_600)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate || retry.DeviceID != deviceKey.DeviceID {
+		t.Fatalf("device enrollment retry=%+v err=%v", retry, err)
+	}
+	status, err := store.GetParticipantStatus(ctx, hostCredential, 5_600)
+	foundDevice := false
+	for _, candidate := range status.Participant.DeviceKeys {
+		foundDevice = foundDevice || candidate.DeviceID == deviceKey.DeviceID
+	}
+	if err != nil || len(status.Participant.DeviceKeys) != 2 || !foundDevice {
+		t.Fatalf("participant status after device enrollment=%+v err=%v", status, err)
+	}
+	grant, err := store.GetParticipantKeyGrant(ctx, hostCredential, deviceKey.DeviceID, 5_600)
+	if err != nil || grant.KeyGrant.RecipientDeviceID != deviceKey.DeviceID ||
+		grant.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
+		t.Fatalf("enrolled device grant=%+v err=%v", grant, err)
+	}
+	roster, err := store.GetParticipantRoster(ctx, hostCredential, 5_600)
+	if err != nil || roster.AuthorityAttestation.Revision != 2 ||
+		len(roster.Participants) != 1 || len(roster.Participants[0].DeviceKeys) != 2 {
+		t.Fatalf("roster after device enrollment=%+v err=%v", roster, err)
+	}
+	events, err := store.ListAuthorityEvents(ctx, admin, 0, 10)
+	if err != nil || len(events.Events) != 2 ||
+		events.Events[1].EventType != sharedspaces.AuthorityEventParticipantDeviceEnrolled ||
+		events.Events[1].SubjectDeviceID == nil || *events.Events[1].SubjectDeviceID != deviceKey.DeviceID {
+		t.Fatalf("authority events after device enrollment=%+v err=%v", events, err)
+	}
+	collision := enrollment
+	collision.EnrolledAtMilliseconds++
+	collision.KeyGrant = testParticipantKeyGrantForDeviceSignedBy(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID, deviceKey.DeviceID,
+		provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+		sharedspaces.InitialKeyEpoch, collision.EnrolledAtMilliseconds,
+	)
+	collision.SecureRosterAttestation = testDeviceEnrollmentRosterAttestation(
+		t, provisioning, *provisioning.InitialSecureRosterAttestation,
+		collision.ParticipantID, deviceKey, collision.EnrolledAtMilliseconds,
+	)
+	if _, err := store.EnrollParticipantDevice(ctx, admin, collision, 5_600); !sharedspaces.ErrorHasCode(
+		err, sharedspaces.CodeParticipantCollision,
+	) {
+		t.Fatalf("device enrollment retry collision err=%v", err)
+	}
+}
+
 func TestMemoryStorePrivateRevocationStopsDeliveryWithoutRotatingKeyEpoch(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
@@ -1297,6 +1383,40 @@ func testRoleChangeRosterAttestation(
 		t, space.SpaceID, space.Domain.Registration.DomainID, previous.Revision+1,
 		previousDigest, previous.CurrentKeyEpoch, participants,
 		space.InitialParticipantID, changedAtMilliseconds,
+	)
+}
+
+func testDeviceEnrollmentRosterAttestation(
+	t *testing.T,
+	space sharedspaces.SpaceProvisioning,
+	previous sharedspaces.SecureRosterAttestation,
+	participantID uuid.UUID,
+	deviceKey sharedspaces.ParticipantDeviceKey,
+	enrolledAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for index := range participants {
+		if participants[index].ParticipantID != participantID {
+			continue
+		}
+		participants[index].DeviceKeys = append(
+			[]sharedspaces.ParticipantDeviceKey(nil), participants[index].DeviceKeys...,
+		)
+		participants[index].DeviceKeys = append(participants[index].DeviceKeys, deviceKey)
+		sort.Slice(participants[index].DeviceKeys, func(left, right int) bool {
+			return participants[index].DeviceKeys[left].DeviceID.String() <
+				participants[index].DeviceKeys[right].DeviceID.String()
+		})
+	}
+	return testSecureRosterAttestation(
+		t, space.SpaceID, space.Domain.Registration.DomainID, previous.Revision+1,
+		previousDigest, previous.CurrentKeyEpoch, participants,
+		space.InitialParticipantID, enrolledAtMilliseconds,
 	)
 }
 

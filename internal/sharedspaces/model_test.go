@@ -187,7 +187,25 @@ func TestAuthorityEventRequiresFieldsForItsTransition(t *testing.T) {
 	if err := invalidRosterDigest.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidAuthorityEvent) {
 		t.Fatalf("invalid secure roster digest err=%v", err)
 	}
+	deviceID := uuid.New()
+	deviceEnrollment := sharedspaces.AuthorityEvent{
+		Version: sharedspaces.SchemaVersion, Sequence: 2,
+		EventID: uuid.New(), SpaceID: valid.SpaceID, DomainID: valid.DomainID,
+		EventType:            sharedspaces.AuthorityEventParticipantDeviceEnrolled,
+		SubjectParticipantID: &participantID, SubjectDeviceID: &deviceID,
+		CurrentKeyEpoch:        uint64PointerForTest(sharedspaces.InitialKeyEpoch),
+		OccurredAtMilliseconds: 1_100,
+	}
+	if err := deviceEnrollment.Validate(); err != nil {
+		t.Fatalf("valid device enrollment authority event: %v", err)
+	}
+	deviceEnrollment.SubjectDeviceID = nil
+	if err := deviceEnrollment.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidAuthorityEvent) {
+		t.Fatalf("missing device enrollment subject err=%v", err)
+	}
 }
+
+func uint64PointerForTest(value uint64) *uint64 { return &value }
 
 func TestParticipantPresentationValidatesRecognitionMetadataAndStatusScope(t *testing.T) {
 	spaceID := uuid.New()
@@ -318,6 +336,58 @@ func TestParticipantRevocationRejectsInvalidKeyEpochTransition(t *testing.T) {
 	}
 	if err := revocation.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
 		t.Fatalf("invalid key epoch transition err=%v", err)
+	}
+}
+
+func TestParticipantDeviceEnrollmentRequiresCurrentHostAuthorizedGrant(t *testing.T) {
+	_, provisioning, _ := testSpaceProvisioning(t, 2_800, sharedspaces.SecurityModeSecure)
+	host := provisioning.InitialSecureRosterAttestation.Participants[0]
+	deviceKey := testParticipantDeviceKeyWithID(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		testParticipantSecondaryDeviceID(provisioning.InitialParticipantID), 2_900,
+	)
+	enrollment := sharedspaces.ParticipantDeviceEnrollment{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceKey: deviceKey,
+		KeyGrant: testParticipantKeyGrantForDeviceSignedBy(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID, deviceKey.DeviceID,
+			provisioning.InitialParticipantID, provisioning.InitialParticipantID,
+			sharedspaces.InitialKeyEpoch, 2_900,
+		),
+		EnrolledAtMilliseconds: 2_900,
+	}
+	if err := enrollment.Validate(); err != nil {
+		t.Fatalf("valid participant device enrollment: %v", err)
+	}
+	if err := enrollment.ValidateKeyGrant(
+		sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch,
+		[]sharedspaces.Participant{host}, 2_900,
+	); err != nil {
+		t.Fatalf("valid participant device enrollment grant: %v", err)
+	}
+	if err := enrollment.ValidateKeyGrant(
+		sharedspaces.SecurityModeManaged, sharedspaces.InitialKeyEpoch,
+		[]sharedspaces.Participant{host}, 2_900,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidParticipant) {
+		t.Fatalf("managed participant device enrollment err=%v", err)
+	}
+	wrongEpoch := enrollment
+	if err := wrongEpoch.ValidateKeyGrant(
+		sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch+1,
+		[]sharedspaces.Participant{host}, 2_900,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeWrongKeyEpoch) {
+		t.Fatalf("stale participant device enrollment grant err=%v", err)
+	}
+	unauthorized := enrollment
+	unauthorized.KeyGrant = testParticipantKeyGrantForDeviceSignedBy(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID, deviceKey.DeviceID,
+		provisioning.InitialParticipantID, uuid.New(), sharedspaces.InitialKeyEpoch, 2_900,
+	)
+	if err := unauthorized.ValidateKeyGrant(
+		sharedspaces.SecurityModeSecure, sharedspaces.InitialKeyEpoch,
+		[]sharedspaces.Participant{host}, 2_900,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeUnauthorized) {
+		t.Fatalf("unauthorized participant device enrollment grant err=%v", err)
 	}
 }
 

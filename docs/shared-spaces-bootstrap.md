@@ -106,12 +106,12 @@ The invitation bearer token authorizes only that claim. A successful claim
 atomically activates the participant and relay member. Exact replay returns the
 same accepted result; conflicting replay is rejected.
 
-The v1 invitation admits exactly one initial active device. Additional-device
-enrollment and device-key revocation are separate future authority transitions;
-they must not be approximated by attaching extra device keys to an invitation
-without matching key grants and a signed roster transition.
+The v1 invitation admits exactly one initial active device. Additional devices
+are enrolled only through the separate authority transition below; they must
+not be approximated by attaching extra device keys to an invitation. Device-key
+revocation remains a separate later transition.
 
-## Inspect and revoke
+## Inspect and change authority
 
 An authenticated Space administrator reads the content-blind authority status
 at:
@@ -130,12 +130,29 @@ authority history at:
 
 The optional `afterSequence` cursor and bounded `limit` parameter provide a
 stable chronological stream. Accepted provisioning, invitation creation,
-claim, cancellation, role change, and participant revocation transactions
-append exactly one event in the same database transaction as the authority
-change. Exact request retries do not append duplicate events. Records contain
-only routing identifiers, role and key-epoch transitions, event time, and the
-monotonic stream cursor; credentials, encrypted content, key material,
-payment/contact state, and Persona claims are deliberately excluded.
+claim, cancellation, role change, participant-device enrollment, and
+participant revocation transactions append exactly one event in the same
+database transaction as the authority change. Exact request retries do not
+append duplicate events. Device enrollment records the participant and device
+identifiers and current key epoch. Records otherwise contain only routing
+identifiers, role and key-epoch transitions, event time, and the monotonic
+stream cursor; credentials, encrypted content, key material, payment/contact
+state, and Persona claims are deliberately excluded.
+
+An administrator enrolls an additional device for an existing participant at:
+
+`POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/devices/{deviceID}`
+
+This transition is available only to Private and Secure content-blind Spaces.
+The request carries a new participant-signed device agreement-key binding and
+one host- or moderator-signed opaque grant for that device at the current key
+epoch. The current epoch must already have an activated checkpoint. A Secure
+Space request also carries the immediate signed roster successor containing the
+new device; a Private Space carries no roster. The device binding, grant,
+roster, durable device record, and authority event commit atomically. Exact
+retry returns the original result without duplicating the device or event.
+Managed Spaces reject this operation because they do not distribute
+participant device grants.
 
 Participant revocation is submitted at:
 

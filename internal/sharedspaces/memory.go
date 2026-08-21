@@ -53,6 +53,8 @@ type MemoryStore struct {
 	revocationResponses             map[uuid.UUID]ParticipantRevocationResult
 	roleChangeRequests              map[uuid.UUID]ParticipantRoleChange
 	roleChangeResponses             map[uuid.UUID]ParticipantRoleChangeResult
+	deviceEnrollmentRequests        map[uuid.UUID]ParticipantDeviceEnrollment
+	deviceEnrollmentResponses       map[uuid.UUID]ParticipantDeviceEnrollmentResult
 	presentationUpdateRequests      map[uuid.UUID]ParticipantPresentationUpdate
 	presentationUpdateResponses     map[uuid.UUID]ParticipantPresentationUpdateResult
 	computePoolChangeRequests       map[uuid.UUID]ComputePoolChange
@@ -81,6 +83,8 @@ func NewMemoryStore(relayStore relay.Store, custodians ...*keycustody.ManagedCon
 		revocationResponses:             make(map[uuid.UUID]ParticipantRevocationResult),
 		roleChangeRequests:              make(map[uuid.UUID]ParticipantRoleChange),
 		roleChangeResponses:             make(map[uuid.UUID]ParticipantRoleChangeResult),
+		deviceEnrollmentRequests:        make(map[uuid.UUID]ParticipantDeviceEnrollment),
+		deviceEnrollmentResponses:       make(map[uuid.UUID]ParticipantDeviceEnrollmentResult),
 		presentationUpdateRequests:      make(map[uuid.UUID]ParticipantPresentationUpdate),
 		presentationUpdateResponses:     make(map[uuid.UUID]ParticipantPresentationUpdateResult),
 		computePoolChangeRequests:       make(map[uuid.UUID]ComputePoolChange),
@@ -256,6 +260,41 @@ func validateRoleChangeRosterAttestation(space *memorySpace, change ParticipantR
 		}
 	}
 	return change.SecureRosterAttestation.ValidateSuccessor(
+		*space.secureRosterAttestation, expected, space.keyEpoch,
+	)
+}
+
+func validateDeviceEnrollmentRosterAttestation(
+	space *memorySpace,
+	enrollment ParticipantDeviceEnrollment,
+) error {
+	if space.provisioning.SecurityMode != SecurityModeSecure {
+		if enrollment.SecureRosterAttestation != nil {
+			return NewProtocolError(CodeInvalidParticipant, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if space.secureRosterAttestation == nil || enrollment.SecureRosterAttestation == nil {
+		return NewProtocolError(CodeInvalidParticipant, "Secure Shared Space device enrollment is missing its roster authority attestation")
+	}
+	expected := activeMemoryParticipants(space)
+	found := false
+	for index := range expected {
+		if expected[index].ParticipantID != enrollment.ParticipantID {
+			continue
+		}
+		expected[index].DeviceKeys = append(expected[index].DeviceKeys, enrollment.DeviceKey)
+		sort.Slice(expected[index].DeviceKeys, func(left, right int) bool {
+			return expected[index].DeviceKeys[left].DeviceID.String() <
+				expected[index].DeviceKeys[right].DeviceID.String()
+		})
+		found = true
+		break
+	}
+	if !found {
+		return NewProtocolError(CodeParticipantNotFound, "participant was not found")
+	}
+	return enrollment.SecureRosterAttestation.ValidateSuccessor(
 		*space.secureRosterAttestation, expected, space.keyEpoch,
 	)
 }
@@ -928,6 +967,111 @@ func (s *MemoryStore) ChangeParticipantRole(
 		PreviousRole:         &change.PreviousRole, CurrentRole: &change.NextRole,
 		SecureRosterDigest:     secureRosterDigest(change.SecureRosterAttestation),
 		OccurredAtMilliseconds: change.ChangedAtMilliseconds,
+	})
+	return result, nil
+}
+
+func (s *MemoryStore) EnrollParticipantDevice(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	enrollment ParticipantDeviceEnrollment,
+	nowMilliseconds int64,
+) (ParticipantDeviceEnrollmentResult, error) {
+	if err := enrollment.Validate(); err != nil {
+		return ParticipantDeviceEnrollmentResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[enrollment.SpaceID]
+	if space == nil {
+		return ParticipantDeviceEnrollmentResult{}, NewProtocolError(CodeSpaceNotFound, "Shared Space was not found")
+	}
+	if credential.TenantID != enrollment.SpaceID ||
+		credential.DomainID != space.provisioning.Domain.Registration.DomainID {
+		return ParticipantDeviceEnrollmentResult{}, NewProtocolError(CodeWrongScope, "device enrollment belongs to another Shared Space")
+	}
+	if existing, found := s.deviceEnrollmentResponses[enrollment.RetryID]; found {
+		if reflect.DeepEqual(s.deviceEnrollmentRequests[enrollment.RetryID], enrollment) {
+			existing.Acceptance = relay.AcceptanceDuplicate
+			return existing, nil
+		}
+		return ParticipantDeviceEnrollmentResult{}, NewProtocolError(
+			CodeParticipantCollision, "participant device enrollment retry ID was reused",
+		)
+	}
+	participant, found := space.participants[enrollment.ParticipantID]
+	if !found {
+		return ParticipantDeviceEnrollmentResult{}, NewProtocolError(CodeParticipantNotFound, "participant was not found")
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return ParticipantDeviceEnrollmentResult{}, NewProtocolError(CodeParticipantRevoked, "participant is revoked")
+	}
+	if enrollment.EnrolledAtMilliseconds > nowMilliseconds ||
+		enrollment.EnrolledAtMilliseconds < participant.CreatedAtMilliseconds {
+		return ParticipantDeviceEnrollmentResult{}, NewProtocolError(CodeInvalidParticipant, "participant device enrollment time is invalid")
+	}
+	if space.activeCheckpointEpoch != space.keyEpoch {
+		return ParticipantDeviceEnrollmentResult{}, NewProtocolError(
+			CodeBootstrapNotReady,
+			"Shared Space does not have an activated checkpoint for the current key epoch",
+		)
+	}
+	for _, deviceKey := range participant.DeviceKeys {
+		if deviceKey.DeviceID == enrollment.DeviceKey.DeviceID {
+			return ParticipantDeviceEnrollmentResult{}, NewProtocolError(
+				CodeParticipantCollision, "participant device is already registered",
+			)
+		}
+	}
+	if err := enrollment.DeviceKey.Validate(participant); err != nil {
+		return ParticipantDeviceEnrollmentResult{}, err
+	}
+	participants := make([]Participant, 0, len(space.participants))
+	for _, candidate := range space.participants {
+		participants = append(participants, candidate)
+	}
+	if err := enrollment.ValidateKeyGrant(
+		space.provisioning.SecurityMode, space.keyEpoch, participants, nowMilliseconds,
+	); err != nil {
+		return ParticipantDeviceEnrollmentResult{}, err
+	}
+	if err := validateDeviceEnrollmentRosterAttestation(space, enrollment); err != nil {
+		return ParticipantDeviceEnrollmentResult{}, err
+	}
+	participant.DeviceKeys = append(participant.DeviceKeys, enrollment.DeviceKey)
+	sort.Slice(participant.DeviceKeys, func(left, right int) bool {
+		return participant.DeviceKeys[left].DeviceID.String() < participant.DeviceKeys[right].DeviceID.String()
+	})
+	space.participants[participant.ParticipantID] = participant
+	grant := *enrollment.KeyGrant
+	if space.keyGrants[space.keyEpoch] == nil {
+		space.keyGrants[space.keyEpoch] = make(map[participantDeviceGrantTarget]ParticipantKeyGrant)
+	}
+	space.keyGrants[space.keyEpoch][participantDeviceGrantTarget{
+		participantID: participant.ParticipantID,
+		deviceID:      enrollment.DeviceKey.DeviceID,
+	}] = grant
+	if enrollment.SecureRosterAttestation != nil {
+		attestation := *enrollment.SecureRosterAttestation
+		space.secureRosterAttestation = &attestation
+		space.secureRosterHistory = append(space.secureRosterHistory, attestation)
+	}
+	result := ParticipantDeviceEnrollmentResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: enrollment.RetryID,
+		SpaceID: enrollment.SpaceID, ParticipantID: enrollment.ParticipantID,
+		DeviceID: enrollment.DeviceKey.DeviceID, CurrentKeyEpoch: space.keyEpoch,
+		EnrolledAtMilliseconds: enrollment.EnrolledAtMilliseconds,
+	}
+	s.deviceEnrollmentRequests[enrollment.RetryID] = enrollment
+	s.deviceEnrollmentResponses[enrollment.RetryID] = result
+	s.appendAuthorityEvent(AuthorityEvent{
+		EventID: enrollment.RetryID, SpaceID: enrollment.SpaceID,
+		DomainID: credential.DomainID, EventType: AuthorityEventParticipantDeviceEnrolled,
+		SubjectParticipantID:   &enrollment.ParticipantID,
+		SubjectDeviceID:        &enrollment.DeviceKey.DeviceID,
+		CurrentKeyEpoch:        uint64Pointer(space.keyEpoch),
+		SecureRosterDigest:     secureRosterDigest(enrollment.SecureRosterAttestation),
+		OccurredAtMilliseconds: enrollment.EnrolledAtMilliseconds,
 	})
 	return result, nil
 }

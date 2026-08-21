@@ -157,6 +157,7 @@ const (
 	AuthorityEventInvitationClaimed          AuthorityEventType = "invitation_claimed"
 	AuthorityEventInvitationCancelled        AuthorityEventType = "invitation_cancelled"
 	AuthorityEventParticipantRoleChanged     AuthorityEventType = "participant_role_changed"
+	AuthorityEventParticipantDeviceEnrolled  AuthorityEventType = "participant_device_enrolled"
 	AuthorityEventParticipantRevoked         AuthorityEventType = "participant_revoked"
 	AuthorityEventSpaceComputeBindingChanged AuthorityEventType = "space_compute_binding_changed"
 )
@@ -165,7 +166,8 @@ func (t AuthorityEventType) Valid() bool {
 	switch t {
 	case AuthorityEventSpaceProvisioned, AuthorityEventInvitationCreated,
 		AuthorityEventInvitationClaimed, AuthorityEventInvitationCancelled,
-		AuthorityEventParticipantRoleChanged, AuthorityEventParticipantRevoked,
+		AuthorityEventParticipantRoleChanged, AuthorityEventParticipantDeviceEnrolled,
+		AuthorityEventParticipantRevoked,
 		AuthorityEventSpaceComputeBindingChanged:
 		return true
 	default:
@@ -184,6 +186,7 @@ type AuthorityEvent struct {
 	DomainID                uuid.UUID          `json:"domainID"`
 	EventType               AuthorityEventType `json:"eventType"`
 	SubjectParticipantID    *uuid.UUID         `json:"subjectParticipantID,omitempty"`
+	SubjectDeviceID         *uuid.UUID         `json:"subjectDeviceID,omitempty"`
 	InvitationID            *uuid.UUID         `json:"invitationID,omitempty"`
 	PreviousRole            *Role              `json:"previousRole,omitempty"`
 	CurrentRole             *Role              `json:"currentRole,omitempty"`
@@ -204,6 +207,7 @@ func (e AuthorityEvent) Validate() error {
 		e.SpaceID == uuid.Nil || e.DomainID == uuid.Nil || !e.EventType.Valid() ||
 		e.OccurredAtMilliseconds < 0 ||
 		(e.SubjectParticipantID != nil && *e.SubjectParticipantID == uuid.Nil) ||
+		(e.SubjectDeviceID != nil && *e.SubjectDeviceID == uuid.Nil) ||
 		(e.InvitationID != nil && *e.InvitationID == uuid.Nil) ||
 		(e.PreviousRole != nil && !e.PreviousRole.Valid()) ||
 		(e.CurrentRole != nil && !e.CurrentRole.Valid()) ||
@@ -225,27 +229,31 @@ func (e AuthorityEvent) validTransitionShape() bool {
 		e.CurrentBindingRevision == nil
 	switch e.EventType {
 	case AuthorityEventSpaceProvisioned:
-		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
+		return e.SubjectParticipantID != nil && e.SubjectDeviceID == nil && e.InvitationID == nil &&
 			e.PreviousRole == nil && e.CurrentRole != nil && *e.CurrentRole == RoleHost &&
 			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
 	case AuthorityEventInvitationCreated, AuthorityEventInvitationClaimed:
-		return e.SubjectParticipantID != nil && e.InvitationID != nil &&
+		return e.SubjectParticipantID != nil && e.SubjectDeviceID == nil && e.InvitationID != nil &&
 			e.PreviousRole == nil && e.CurrentRole != nil &&
 			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
 	case AuthorityEventInvitationCancelled:
-		return e.SubjectParticipantID != nil && e.InvitationID != nil &&
+		return e.SubjectParticipantID != nil && e.SubjectDeviceID == nil && e.InvitationID != nil &&
 			e.PreviousRole == nil && e.CurrentRole == nil &&
 			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil && computeFieldsAbsent
 	case AuthorityEventParticipantRoleChanged:
-		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
+		return e.SubjectParticipantID != nil && e.SubjectDeviceID == nil && e.InvitationID == nil &&
 			e.PreviousRole != nil && e.CurrentRole != nil &&
 			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil && computeFieldsAbsent
+	case AuthorityEventParticipantDeviceEnrolled:
+		return e.SubjectParticipantID != nil && e.SubjectDeviceID != nil && e.InvitationID == nil &&
+			e.PreviousRole == nil && e.CurrentRole == nil &&
+			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
 	case AuthorityEventParticipantRevoked:
-		return e.SubjectParticipantID != nil && e.InvitationID == nil &&
+		return e.SubjectParticipantID != nil && e.SubjectDeviceID == nil && e.InvitationID == nil &&
 			e.PreviousRole == nil && e.CurrentRole == nil &&
 			e.PreviousKeyEpoch != nil && e.CurrentKeyEpoch != nil && computeFieldsAbsent
 	case AuthorityEventSpaceComputeBindingChanged:
-		return e.SubjectParticipantID == nil && e.InvitationID == nil &&
+		return e.SubjectParticipantID == nil && e.SubjectDeviceID == nil && e.InvitationID == nil &&
 			e.PreviousRole == nil && e.CurrentRole == nil &&
 			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil &&
 			e.ComputePoolID != nil && e.PreviousBindingRevision != nil &&
@@ -1088,6 +1096,104 @@ type InvitationList struct {
 	Version     int                `json:"version"`
 	SpaceID     uuid.UUID          `json:"spaceID"`
 	Invitations []InvitationStatus `json:"invitations"`
+}
+
+// ParticipantDeviceEnrollment atomically extends one active participant's
+// device authority. The participant signs DeviceKey, while an active host or
+// moderator signs the opaque current-epoch KeyGrant. Secure Spaces additionally
+// carry the immediate signed roster successor. The Node validates those public
+// authority bindings without receiving the content key.
+type ParticipantDeviceEnrollment struct {
+	Version                 int                      `json:"version"`
+	RetryID                 uuid.UUID                `json:"retryID"`
+	SpaceID                 uuid.UUID                `json:"spaceID"`
+	ParticipantID           uuid.UUID                `json:"participantID"`
+	DeviceKey               ParticipantDeviceKey     `json:"deviceKey"`
+	KeyGrant                *ParticipantKeyGrant     `json:"keyGrant,omitempty"`
+	EnrolledAtMilliseconds  int64                    `json:"enrolledAtMilliseconds"`
+	SecureRosterAttestation *SecureRosterAttestation `json:"secureRosterAttestation,omitempty"`
+}
+
+func (e ParticipantDeviceEnrollment) Validate() error {
+	if e.Version != SchemaVersion || e.RetryID == uuid.Nil || e.SpaceID == uuid.Nil ||
+		e.ParticipantID == uuid.Nil || e.DeviceKey.DeviceID == uuid.Nil ||
+		e.EnrolledAtMilliseconds < 0 || e.DeviceKey.CreatedAtMilliseconds < 0 ||
+		e.DeviceKey.CreatedAtMilliseconds > e.EnrolledAtMilliseconds ||
+		e.DeviceKey.RevokedAtMilliseconds != nil {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device enrollment fields are invalid")
+	}
+	if e.DeviceKey.SpaceID != e.SpaceID || e.DeviceKey.ParticipantID != e.ParticipantID {
+		return NewProtocolError(CodeWrongScope, "Shared Space participant device enrollment key has the wrong scope")
+	}
+	if e.KeyGrant != nil {
+		if err := e.KeyGrant.Validate(); err != nil {
+			return err
+		}
+		if e.KeyGrant.SpaceID != e.SpaceID || e.KeyGrant.ParticipantID != e.ParticipantID ||
+			e.KeyGrant.RecipientDeviceID != e.DeviceKey.DeviceID ||
+			e.KeyGrant.RecipientAgreementKeyFingerprint != e.DeviceKey.AgreementKeyFingerprint ||
+			e.KeyGrant.CreatedAtMilliseconds < e.DeviceKey.CreatedAtMilliseconds ||
+			e.KeyGrant.CreatedAtMilliseconds > e.EnrolledAtMilliseconds {
+			return NewProtocolError(CodeWrongScope, "Shared Space participant device enrollment grant has the wrong scope")
+		}
+	}
+	if e.SecureRosterAttestation != nil {
+		if e.SecureRosterAttestation.SpaceID != e.SpaceID {
+			return NewProtocolError(CodeWrongScope, "Shared Space participant device enrollment roster has the wrong scope")
+		}
+		if e.SecureRosterAttestation.CreatedAtMilliseconds != e.EnrolledAtMilliseconds {
+			return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device enrollment roster time is invalid")
+		}
+	}
+	return nil
+}
+
+// ValidateKeyGrant applies the profile and current authority rules that need
+// the stored participant roster. Device enrollment is intentionally limited to
+// content-blind profiles: Managed Spaces do not distribute participant grants.
+func (e ParticipantDeviceEnrollment) ValidateKeyGrant(
+	mode SecurityMode,
+	currentKeyEpoch uint64,
+	participants []Participant,
+	nowMilliseconds int64,
+) error {
+	if mode != SecurityModePrivate && mode != SecurityModeSecure {
+		return NewProtocolError(CodeInvalidParticipant, "managed Shared Spaces do not enroll participant agreement-key devices")
+	}
+	if e.KeyGrant == nil {
+		return NewProtocolError(CodeInvalidParticipant, "content-blind Shared Space device enrollment is missing its key grant")
+	}
+	grant := *e.KeyGrant
+	if grant.KeyEpoch != currentKeyEpoch {
+		return NewProtocolError(CodeWrongKeyEpoch, "Shared Space participant device enrollment grant is not current")
+	}
+	if grant.CreatedAtMilliseconds > nowMilliseconds {
+		return NewProtocolError(CodeInvalidParticipant, "Shared Space participant device enrollment grant was created in the future")
+	}
+	var issuer *Participant
+	for index := range participants {
+		candidate := &participants[index]
+		if candidate.ParticipantID == grant.IssuerParticipantID &&
+			candidate.RevokedAtMilliseconds == nil {
+			issuer = candidate
+			break
+		}
+	}
+	if issuer == nil || (issuer.Role != RoleHost && issuer.Role != RoleModerator) ||
+		!issuer.SigningKey.MatchesGrantSignature(grant.Signature) {
+		return NewProtocolError(CodeUnauthorized, "Shared Space participant device enrollment grant issuer is not an active host or moderator")
+	}
+	return nil
+}
+
+type ParticipantDeviceEnrollmentResult struct {
+	Acceptance             relay.Acceptance `json:"acceptance"`
+	RetryID                uuid.UUID        `json:"retryID"`
+	SpaceID                uuid.UUID        `json:"spaceID"`
+	ParticipantID          uuid.UUID        `json:"participantID"`
+	DeviceID               uuid.UUID        `json:"deviceID"`
+	CurrentKeyEpoch        uint64           `json:"currentKeyEpoch"`
+	EnrolledAtMilliseconds int64            `json:"enrolledAtMilliseconds"`
 }
 
 type ParticipantRevocation struct {

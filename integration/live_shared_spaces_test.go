@@ -112,6 +112,48 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
 	), http.StatusConflict)
 	publishLiveSharedSpaceBootstrapCheckpoint(t, client, relayRoot, domain, now)
+	secondaryHostDeviceID := liveSharedSpaceParticipantSecondaryDeviceID(hostID)
+	secondaryHostDeviceKey := liveSharedSpaceParticipantDeviceKeyWithID(
+		t, spaceID, hostID, secondaryHostDeviceID, now,
+	)
+	deviceEnrollment := sharedspaces.ParticipantDeviceEnrollment{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
+		ParticipantID: hostID, DeviceKey: secondaryHostDeviceKey,
+		KeyGrant: liveSharedSpaceParticipantKeyGrantForDevice(
+			t, spaceID, hostID, secondaryHostDeviceID, hostID,
+			sharedspaces.InitialKeyEpoch, now,
+		),
+		EnrolledAtMilliseconds: now,
+	}
+	deviceEnrollment.SecureRosterAttestation = liveSharedSpaceDeviceEnrollmentRosterAttestation(
+		t, provisioning, domainID, *provisioning.InitialSecureRosterAttestation,
+		hostID, secondaryHostDeviceKey, now,
+	)
+	deviceEnrollmentPath := spaceRoot + "/participants/" + hostID.String() +
+		"/devices/" + secondaryHostDeviceID.String()
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, deviceEnrollmentPath, deviceEnrollment,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusCreated)
+	requireStatusAndClose(t, requestRelayJSON(
+		t, client, http.MethodPost, deviceEnrollmentPath, deviceEnrollment,
+		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	), http.StatusOK)
+	secondaryGrantResponse := requestRelayJSON(
+		t, client, http.MethodGet,
+		spaceRoot+"/participants/"+hostID.String()+"/key-grant?recipientDeviceID="+
+			secondaryHostDeviceID.String(), nil,
+		domain.MemberCredential.AuthorizationToken, hostID,
+	)
+	requireStatus(t, secondaryGrantResponse, http.StatusOK)
+	var secondaryGrant sharedspaces.ParticipantKeyGrantResult
+	decodeLiveJSON(t, secondaryGrantResponse, &secondaryGrant)
+	if secondaryGrant.KeyGrant.RecipientDeviceID != secondaryHostDeviceID {
+		t.Fatalf("additional host device grant was not addressable: %+v", secondaryGrant)
+	}
+	invitation.ActivationSecureRosterAttestation = liveSharedSpaceInvitationRosterAttestation(
+		t, provisioning, domainID, invitation, *deviceEnrollment.SecureRosterAttestation,
+	)
 	requireStatusAndClose(t, requestRelayJSON(
 		t, client, http.MethodPost, spaceRoot+"/invitations", invitation,
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
@@ -134,7 +176,7 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	var claimResult sharedspaces.InvitationClaimResult
 	decodeLiveJSON(t, claimResponse, &claimResult)
 	if claimResult.SecureRosterAttestation == nil ||
-		claimResult.SecureRosterAttestation.Revision != 2 ||
+		claimResult.SecureRosterAttestation.Revision != 3 ||
 		claimResult.SecureRosterAttestation.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch {
 		t.Fatalf("Secure claim did not return its signed roster authority: %+v", claimResult)
 	}
@@ -177,14 +219,26 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		t.Fatalf("unexpected initial Secure roster history: page=%+v error=%v", initialRosterPage, err)
 	}
 	historyResponse = requestRelayJSON(
-		t, client, http.MethodGet, rosterHistoryPath+"?afterRevision="+"1", nil,
+		t, client, http.MethodGet, rosterHistoryPath+"?afterRevision=1&limit=1", nil,
+		participantToken, participantID,
+	)
+	requireStatus(t, historyResponse, http.StatusOK)
+	var enrollmentRosterPage sharedspaces.SecureRosterAttestationPage
+	decodeLiveJSON(t, historyResponse, &enrollmentRosterPage)
+	if err := enrollmentRosterPage.Validate(); err != nil || len(enrollmentRosterPage.Attestations) != 1 ||
+		enrollmentRosterPage.Attestations[0].Revision != 2 ||
+		mustLiveSecureRosterDigest(t, enrollmentRosterPage.Attestations[0]) != mustLiveSecureRosterDigest(t, *deviceEnrollment.SecureRosterAttestation) {
+		t.Fatalf("unexpected device enrollment Secure roster history: page=%+v error=%v", enrollmentRosterPage, err)
+	}
+	historyResponse = requestRelayJSON(
+		t, client, http.MethodGet, rosterHistoryPath+"?afterRevision=2", nil,
 		participantToken, participantID,
 	)
 	requireStatus(t, historyResponse, http.StatusOK)
 	var activationRosterPage sharedspaces.SecureRosterAttestationPage
 	decodeLiveJSON(t, historyResponse, &activationRosterPage)
 	if err := activationRosterPage.Validate(); err != nil || len(activationRosterPage.Attestations) != 1 ||
-		activationRosterPage.Attestations[0].Revision != 2 ||
+		activationRosterPage.Attestations[0].Revision != 3 ||
 		mustLiveSecureRosterDigest(t, activationRosterPage.Attestations[0]) != mustLiveSecureRosterDigest(t, *claimResult.SecureRosterAttestation) {
 		t.Fatalf("unexpected activation Secure roster history: page=%+v error=%v", activationRosterPage, err)
 	}
@@ -223,7 +277,7 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	decodeLiveJSON(t, promotedBootstrapResponse, &promotedBootstrap)
 	if err := promotedBootstrap.Validate(); err != nil ||
 		promotedBootstrap.Status.Participant.Role != sharedspaces.RoleParticipant ||
-		promotedBootstrap.Roster == nil || promotedBootstrap.Roster.AuthorityAttestation.Revision != 3 {
+		promotedBootstrap.Roster == nil || promotedBootstrap.Roster.AuthorityAttestation.Revision != 4 {
 		t.Fatalf("Secure promotion bootstrap did not converge: bootstrap=%+v error=%v", promotedBootstrap, err)
 	}
 
@@ -289,9 +343,15 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
 		SpaceID: spaceID, ParticipantID: participantID,
 		PreviousKeyEpoch: sharedspaces.InitialKeyEpoch, NextKeyEpoch: sharedspaces.InitialKeyEpoch + 1,
-		KeyGrants: []sharedspaces.ParticipantKeyGrant{*liveSharedSpaceParticipantKeyGrant(
-			t, spaceID, hostID, hostID, sharedspaces.InitialKeyEpoch+1, now,
-		)},
+		KeyGrants: []sharedspaces.ParticipantKeyGrant{
+			*liveSharedSpaceParticipantKeyGrant(
+				t, spaceID, hostID, hostID, sharedspaces.InitialKeyEpoch+1, now,
+			),
+			*liveSharedSpaceParticipantKeyGrantForDevice(
+				t, spaceID, hostID, secondaryHostDeviceID, hostID,
+				sharedspaces.InitialKeyEpoch+1, now,
+			),
+		},
 	}
 	revocation.SecureRosterAttestation = liveSharedSpaceRevocationRosterAttestation(
 		t, provisioning, domainID, revocation, *promotion.SecureRosterAttestation, now,
@@ -324,9 +384,9 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	requireStatus(t, historyResponse, http.StatusOK)
 	var hostRosterHistory sharedspaces.SecureRosterAttestationPage
 	decodeLiveJSON(t, historyResponse, &hostRosterHistory)
-	if err := hostRosterHistory.Validate(); err != nil || len(hostRosterHistory.Attestations) != 4 ||
-		hostRosterHistory.Attestations[3].Revision != 4 ||
-		hostRosterHistory.Attestations[3].CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+	if err := hostRosterHistory.Validate(); err != nil || len(hostRosterHistory.Attestations) != 5 ||
+		hostRosterHistory.Attestations[4].Revision != 5 ||
+		hostRosterHistory.Attestations[4].CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 {
 		t.Fatalf("unexpected post-revocation Secure roster history: page=%+v error=%v", hostRosterHistory, err)
 	}
 	staleMessage := message
@@ -442,10 +502,28 @@ func liveSharedSpaceParticipantKeyGrant(
 	now int64,
 ) *sharedspaces.ParticipantKeyGrant {
 	t.Helper()
+	return liveSharedSpaceParticipantKeyGrantForDevice(
+		t, spaceID, participantID, liveSharedSpaceParticipantDeviceID(participantID),
+		issuerParticipantID, keyEpoch, now,
+	)
+}
+
+func liveSharedSpaceParticipantKeyGrantForDevice(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	recipientDeviceID uuid.UUID,
+	issuerParticipantID uuid.UUID,
+	keyEpoch uint64,
+	now int64,
+) *sharedspaces.ParticipantKeyGrant {
+	t.Helper()
 	privateKey := liveSharedSpaceParticipantSigningPrivateKey(t, issuerParticipantID)
 	publicKey := elliptic.Marshal(elliptic.P256(), privateKey.PublicKey.X, privateKey.PublicKey.Y)
 	signingFingerprint := sha256.Sum256(publicKey)
-	recipientDeviceKey := liveSharedSpaceParticipantDeviceKey(t, spaceID, participantID, now)
+	recipientDeviceKey := liveSharedSpaceParticipantDeviceKeyWithID(
+		t, spaceID, participantID, recipientDeviceID, now,
+	)
 	grant := sharedspaces.ParticipantKeyGrant{
 		Version: sharedspaces.SchemaVersion, SpaceID: spaceID,
 		ParticipantID: participantID, RecipientDeviceID: recipientDeviceKey.DeviceID,
@@ -515,6 +593,15 @@ func liveSharedSpaceParticipantDeviceID(participantID uuid.UUID) uuid.UUID {
 	return deviceID
 }
 
+func liveSharedSpaceParticipantSecondaryDeviceID(participantID uuid.UUID) uuid.UUID {
+	digest := sha256.Sum256(append([]byte("facets-shared-space-live-secondary-device:"), participantID[:]...))
+	deviceID, err := uuid.FromBytes(digest[:16])
+	if err != nil {
+		panic(err)
+	}
+	return deviceID
+}
+
 func liveSharedSpaceParticipantDeviceKey(
 	t *testing.T,
 	spaceID uuid.UUID,
@@ -522,7 +609,20 @@ func liveSharedSpaceParticipantDeviceKey(
 	createdAtMilliseconds int64,
 ) sharedspaces.ParticipantDeviceKey {
 	t.Helper()
-	deviceID := liveSharedSpaceParticipantDeviceID(participantID)
+	return liveSharedSpaceParticipantDeviceKeyWithID(
+		t, spaceID, participantID, liveSharedSpaceParticipantDeviceID(participantID),
+		createdAtMilliseconds,
+	)
+}
+
+func liveSharedSpaceParticipantDeviceKeyWithID(
+	t *testing.T,
+	spaceID uuid.UUID,
+	participantID uuid.UUID,
+	deviceID uuid.UUID,
+	createdAtMilliseconds int64,
+) sharedspaces.ParticipantDeviceKey {
+	t.Helper()
 	agreementPrivateKey := liveSharedSpaceParticipantSigningPrivateKey(t, deviceID)
 	agreementPublicKey := elliptic.Marshal(
 		elliptic.P256(), agreementPrivateKey.PublicKey.X, agreementPrivateKey.PublicKey.Y,
@@ -591,15 +691,7 @@ func liveSharedSpaceInvitationRosterAttestation(
 	previous sharedspaces.SecureRosterAttestation,
 ) *sharedspaces.SecureRosterAttestation {
 	t.Helper()
-	host := sharedspaces.Participant{
-		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
-		ParticipantID:  provisioning.InitialParticipantID,
-		SubscriptionID: provisioning.TenantProvisioning.InitialDomain.SubscriptionID,
-		Kind:           provisioning.InitialParticipantKind, Role: sharedspaces.RoleHost,
-		SigningKey:            provisioning.InitialParticipantSigningKey,
-		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
-		CreatedAtMilliseconds: previous.CreatedAtMilliseconds,
-	}
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
 	member := sharedspaces.Participant{
 		Version: sharedspaces.SchemaVersion, SpaceID: provisioning.SpaceID,
 		ParticipantID: invitation.ParticipantID, SubscriptionID: invitation.SubscriptionID,
@@ -607,9 +699,40 @@ func liveSharedSpaceInvitationRosterAttestation(
 		DeviceKeys:            invitation.ParticipantDeviceKeys,
 		CreatedAtMilliseconds: invitation.CreatedAtMilliseconds,
 	}
+	participants = append(participants, member)
 	return liveSharedSpaceSuccessorRosterAttestation(
 		t, provisioning, domainID, previous, previous.CurrentKeyEpoch,
-		[]sharedspaces.Participant{host, member}, invitation.CreatedAtMilliseconds,
+		participants, invitation.CreatedAtMilliseconds,
+	)
+}
+
+func liveSharedSpaceDeviceEnrollmentRosterAttestation(
+	t *testing.T,
+	provisioning liveSharedSpaceProvisioningInput,
+	domainID uuid.UUID,
+	previous sharedspaces.SecureRosterAttestation,
+	participantID uuid.UUID,
+	deviceKey sharedspaces.ParticipantDeviceKey,
+	enrolledAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for index := range participants {
+		if participants[index].ParticipantID != participantID {
+			continue
+		}
+		participants[index].DeviceKeys = append(
+			[]sharedspaces.ParticipantDeviceKey(nil), participants[index].DeviceKeys...,
+		)
+		participants[index].DeviceKeys = append(participants[index].DeviceKeys, deviceKey)
+		sort.Slice(participants[index].DeviceKeys, func(left, right int) bool {
+			return participants[index].DeviceKeys[left].DeviceID.String() <
+				participants[index].DeviceKeys[right].DeviceID.String()
+		})
+	}
+	return liveSharedSpaceSuccessorRosterAttestation(
+		t, provisioning, domainID, previous, previous.CurrentKeyEpoch,
+		participants, enrolledAtMilliseconds,
 	)
 }
 

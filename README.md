@@ -89,6 +89,12 @@ and Space bindings with operation, resource, pricing, sensitivity, and
 processing policy. These records grant no execution authority by themselves;
 short-lived signed capabilities and AI job routing are separate gates.
 
+An administrator may atomically enroll an additional participant device in a
+Private or Secure Space. The participant signs the device agreement-key
+binding, a current host or moderator signs its current-epoch opaque grant, and
+a Secure Space advances its signed roster revision without rotating the key
+epoch. Managed Spaces do not use this device-grant enrollment route.
+
 ## Development
 
 Requirements are Go 1.26 or newer and PostgreSQL 17 or newer.

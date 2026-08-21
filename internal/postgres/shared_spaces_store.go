@@ -203,6 +203,44 @@ func validateSharedSpaceRoleChangeRosterAttestation(
 	return change.SecureRosterAttestation.ValidateSuccessor(*current, expected, currentKeyEpoch)
 }
 
+func validateSharedSpaceDeviceEnrollmentRosterAttestation(
+	securityMode sharedspaces.SecurityMode,
+	current *sharedspaces.SecureRosterAttestation,
+	participants []sharedspaces.Participant,
+	currentKeyEpoch uint64,
+	enrollment sharedspaces.ParticipantDeviceEnrollment,
+) error {
+	if securityMode != sharedspaces.SecurityModeSecure {
+		if enrollment.SecureRosterAttestation != nil {
+			return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidParticipant, "only Secure Shared Spaces may carry a roster attestation")
+		}
+		return nil
+	}
+	if current == nil || enrollment.SecureRosterAttestation == nil {
+		return sharedspaces.NewProtocolError(sharedspaces.CodeInvalidParticipant, "Secure Shared Space device enrollment is missing its roster authority attestation")
+	}
+	expected := activeSharedSpaceParticipants(participants)
+	found := false
+	for index := range expected {
+		if expected[index].ParticipantID != enrollment.ParticipantID {
+			continue
+		}
+		expected[index].DeviceKeys = append(expected[index].DeviceKeys, enrollment.DeviceKey)
+		sort.Slice(expected[index].DeviceKeys, func(left, right int) bool {
+			return expected[index].DeviceKeys[left].DeviceID.String() <
+				expected[index].DeviceKeys[right].DeviceID.String()
+		})
+		found = true
+		break
+	}
+	if !found {
+		return sharedspaces.NewProtocolError(sharedspaces.CodeParticipantNotFound, "participant was not found")
+	}
+	return enrollment.SecureRosterAttestation.ValidateSuccessor(
+		*current, expected, currentKeyEpoch,
+	)
+}
+
 func validateSharedSpaceRevocationRosterAttestation(
 	securityMode sharedspaces.SecurityMode,
 	current *sharedspaces.SecureRosterAttestation,
@@ -409,26 +447,38 @@ func insertSharedSpaceParticipant(ctx context.Context, tx pgx.Tx, participant sh
 		return fmt.Errorf("insert Shared Space participant: %w", err)
 	}
 	for _, deviceKey := range participant.DeviceKeys {
-		if err := deviceKey.Validate(participant); err != nil {
-			return fmt.Errorf("validate Shared Space participant device key: %w", err)
+		if err := insertSharedSpaceParticipantDeviceKey(ctx, tx, participant, deviceKey); err != nil {
+			return err
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO shared_space_participant_device_keys (
-				space_id,participant_id,device_id,version,algorithm,
-				agreement_public_key_x963,agreement_key_fingerprint,
-				created_at_milliseconds,revoked_at_milliseconds,
-				signature_algorithm,signature_public_signing_key_x963,
-				signature_signing_key_fingerprint,signature
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-		`, deviceKey.SpaceID, deviceKey.ParticipantID, deviceKey.DeviceID,
-			deviceKey.Version, deviceKey.Algorithm,
-			deviceKey.AgreementPublicKeyX963, deviceKey.AgreementKeyFingerprint,
-			deviceKey.CreatedAtMilliseconds, deviceKey.RevokedAtMilliseconds,
-			deviceKey.Signature.Algorithm, deviceKey.Signature.PublicSigningKeyX963,
-			deviceKey.Signature.SigningKeyFingerprint, deviceKey.Signature.Signature,
-		); err != nil {
-			return fmt.Errorf("insert Shared Space participant device key: %w", err)
-		}
+	}
+	return nil
+}
+
+func insertSharedSpaceParticipantDeviceKey(
+	ctx context.Context,
+	tx pgx.Tx,
+	participant sharedspaces.Participant,
+	deviceKey sharedspaces.ParticipantDeviceKey,
+) error {
+	if err := deviceKey.Validate(participant); err != nil {
+		return fmt.Errorf("validate Shared Space participant device key: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_participant_device_keys (
+			space_id,participant_id,device_id,version,algorithm,
+			agreement_public_key_x963,agreement_key_fingerprint,
+			created_at_milliseconds,revoked_at_milliseconds,
+			signature_algorithm,signature_public_signing_key_x963,
+			signature_signing_key_fingerprint,signature
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	`, deviceKey.SpaceID, deviceKey.ParticipantID, deviceKey.DeviceID,
+		deviceKey.Version, deviceKey.Algorithm,
+		deviceKey.AgreementPublicKeyX963, deviceKey.AgreementKeyFingerprint,
+		deviceKey.CreatedAtMilliseconds, deviceKey.RevokedAtMilliseconds,
+		deviceKey.Signature.Algorithm, deviceKey.Signature.PublicSigningKeyX963,
+		deviceKey.Signature.SigningKeyFingerprint, deviceKey.Signature.Signature,
+	); err != nil {
+		return fmt.Errorf("insert Shared Space participant device key: %w", err)
 	}
 	return nil
 }
@@ -1298,7 +1348,7 @@ func (s *SharedSpacesStore) ListAuthorityEvents(
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT sequence,event_id,space_id,domain_id,version,event_type,
-		       subject_participant_id,invitation_id,previous_role,current_role,
+		       subject_participant_id,subject_device_id,invitation_id,previous_role,current_role,
 		       previous_key_epoch,current_key_epoch,compute_pool_id,
 		       previous_binding_revision,current_binding_revision,
 		       secure_roster_digest,
@@ -1322,7 +1372,7 @@ func (s *SharedSpacesStore) ListAuthorityEvents(
 		var secureRosterDigest *string
 		if err := rows.Scan(
 			&event.Sequence, &event.EventID, &event.SpaceID, &event.DomainID,
-			&event.Version, &event.EventType, &event.SubjectParticipantID,
+			&event.Version, &event.EventType, &event.SubjectParticipantID, &event.SubjectDeviceID,
 			&event.InvitationID, &previousRole, &currentRole,
 			&previousKeyEpoch, &currentKeyEpoch, &event.ComputePoolID,
 			&previousBindingRevision, &currentBindingRevision,
@@ -1553,6 +1603,189 @@ func (s *SharedSpacesStore) ChangeParticipantRole(
 		PreviousRole: change.PreviousRole, CurrentRole: change.NextRole,
 		ChangedAtMilliseconds: change.ChangedAtMilliseconds,
 	}, nil
+}
+
+func (s *SharedSpacesStore) EnrollParticipantDevice(
+	ctx context.Context,
+	credential relay.AdministrationCredential,
+	enrollment sharedspaces.ParticipantDeviceEnrollment,
+	nowMilliseconds int64,
+) (sharedspaces.ParticipantDeviceEnrollmentResult, error) {
+	if err := enrollment.Validate(); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("begin Shared Space participant device enrollment: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	domainID, provisioning, _, err := loadSharedSpaceAuthority(
+		ctx, tx, enrollment.SpaceID, credential, "FOR UPDATE",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+
+	var existingRequestPayload, existingResponsePayload []byte
+	err = tx.QueryRow(ctx, `
+		SELECT request_payload,response_payload
+		FROM shared_space_participant_device_enrollments
+		WHERE space_id=$1 AND retry_id=$2
+		FOR UPDATE
+	`, enrollment.SpaceID, enrollment.RetryID).Scan(
+		&existingRequestPayload, &existingResponsePayload,
+	)
+	if err == nil {
+		var existingRequest sharedspaces.ParticipantDeviceEnrollment
+		var existingResponse sharedspaces.ParticipantDeviceEnrollmentResult
+		if decodeErr := json.Unmarshal(existingRequestPayload, &existingRequest); decodeErr != nil {
+			return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("decode Shared Space participant device enrollment request: %w", decodeErr)
+		}
+		if decodeErr := json.Unmarshal(existingResponsePayload, &existingResponse); decodeErr != nil {
+			return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("decode Shared Space participant device enrollment response: %w", decodeErr)
+		}
+		if !reflect.DeepEqual(existingRequest, enrollment) {
+			return sharedspaces.ParticipantDeviceEnrollmentResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeParticipantCollision, "participant device enrollment retry ID was reused",
+			)
+		}
+		existingResponse.Acceptance = relay.AcceptanceDuplicate
+		return existingResponse, nil
+	}
+	if err != pgx.ErrNoRows {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("load Shared Space participant device enrollment: %w", err)
+	}
+
+	participant, err := loadSharedSpaceParticipant(
+		ctx, tx, enrollment.SpaceID, enrollment.ParticipantID, "FOR UPDATE",
+	)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	if participant.RevokedAtMilliseconds != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeParticipantRevoked, "participant is revoked",
+		)
+	}
+	if enrollment.EnrolledAtMilliseconds > nowMilliseconds ||
+		enrollment.EnrolledAtMilliseconds < participant.CreatedAtMilliseconds {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidParticipant, "participant device enrollment time is invalid",
+		)
+	}
+	for _, deviceKey := range participant.DeviceKeys {
+		if deviceKey.DeviceID == enrollment.DeviceKey.DeviceID {
+			return sharedspaces.ParticipantDeviceEnrollmentResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeParticipantCollision, "participant device is already registered",
+			)
+		}
+	}
+	if err := enrollment.DeviceKey.Validate(participant); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, enrollment.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	var bootstrapReady bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM relay_checkpoints
+			WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' AND key_epoch=$3
+		)
+	`, enrollment.SpaceID, domainID, currentKeyEpoch).Scan(&bootstrapReady); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("check Shared Space bootstrap checkpoint: %w", err)
+	}
+	if !bootstrapReady {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeBootstrapNotReady,
+			"Shared Space does not have an activated checkpoint for the current key epoch",
+		)
+	}
+	participants, err := loadSharedSpaceParticipants(ctx, tx, enrollment.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	if err := enrollment.ValidateKeyGrant(
+		provisioning.SecurityMode, currentKeyEpoch, participants, nowMilliseconds,
+	); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	currentRosterAttestation, err := loadSharedSpaceSecureRosterAttestation(ctx, tx, enrollment.SpaceID)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	if err := validateSharedSpaceDeviceEnrollmentRosterAttestation(
+		provisioning.SecurityMode, currentRosterAttestation, participants,
+		currentKeyEpoch, enrollment,
+	); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	if err := insertSharedSpaceParticipantDeviceKey(
+		ctx, tx, participant, enrollment.DeviceKey,
+	); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	if err := insertSharedSpaceParticipantKeyGrant(ctx, tx, *enrollment.KeyGrant); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	newRosterAttestationPayload, err := encodeSecureRosterAttestation(enrollment.SecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("encode Shared Space participant device enrollment roster attestation: %w", err)
+	}
+	newRosterAttestationDigest, err := secureRosterAttestationDigest(enrollment.SecureRosterAttestation)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE shared_spaces
+		SET secure_roster_attestation=$2
+		WHERE space_id=$1
+	`, enrollment.SpaceID, newRosterAttestationPayload); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("advance Shared Space participant device roster authority: %w", err)
+	}
+	if err := insertSharedSpaceSecureRosterAttestation(ctx, tx, enrollment.SecureRosterAttestation); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	result := sharedspaces.ParticipantDeviceEnrollmentResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: enrollment.RetryID,
+		SpaceID: enrollment.SpaceID, ParticipantID: enrollment.ParticipantID,
+		DeviceID: enrollment.DeviceKey.DeviceID, CurrentKeyEpoch: currentKeyEpoch,
+		EnrolledAtMilliseconds: enrollment.EnrolledAtMilliseconds,
+	}
+	requestPayload, err := json.Marshal(enrollment)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("encode Shared Space participant device enrollment request: %w", err)
+	}
+	responsePayload, err := json.Marshal(result)
+	if err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("encode Shared Space participant device enrollment response: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO shared_space_participant_device_enrollments (
+			space_id,retry_id,participant_id,device_id,request_payload,response_payload,
+			enrolled_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+	`, enrollment.SpaceID, enrollment.RetryID, enrollment.ParticipantID,
+		enrollment.DeviceKey.DeviceID, requestPayload, responsePayload,
+		enrollment.EnrolledAtMilliseconds); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("record Shared Space participant device enrollment: %w", err)
+	}
+	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
+		EventID: enrollment.RetryID, SpaceID: enrollment.SpaceID,
+		DomainID: domainID, EventType: sharedspaces.AuthorityEventParticipantDeviceEnrolled,
+		SubjectParticipantID:   &enrollment.ParticipantID,
+		SubjectDeviceID:        &enrollment.DeviceKey.DeviceID,
+		CurrentKeyEpoch:        &currentKeyEpoch,
+		SecureRosterDigest:     newRosterAttestationDigest,
+		OccurredAtMilliseconds: enrollment.EnrolledAtMilliseconds,
+	}); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ParticipantDeviceEnrollmentResult{}, fmt.Errorf("commit Shared Space participant device enrollment: %w", err)
+	}
+	return result, nil
 }
 
 func (s *SharedSpacesStore) RevokeParticipant(
@@ -3135,20 +3368,19 @@ func insertSharedSpaceAuthorityEvent(
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO shared_space_authority_events (
 			space_id,domain_id,event_id,version,event_type,subject_participant_id,
-			invitation_id,previous_role,current_role,previous_key_epoch,current_key_epoch,
+			subject_device_id,invitation_id,previous_role,current_role,previous_key_epoch,current_key_epoch,
 			compute_pool_id,previous_binding_revision,current_binding_revision,
 			secure_roster_digest,
 			occurred_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 	`, event.SpaceID, event.DomainID, event.EventID, sharedspaces.SchemaVersion,
-		string(event.EventType), event.SubjectParticipantID, event.InvitationID,
+		string(event.EventType), event.SubjectParticipantID, event.SubjectDeviceID, event.InvitationID,
 		nullableSharedSpaceRole(event.PreviousRole), nullableSharedSpaceRole(event.CurrentRole),
 		nullableSharedSpaceKeyEpoch(event.PreviousKeyEpoch),
 		nullableSharedSpaceKeyEpoch(event.CurrentKeyEpoch), event.ComputePoolID,
 		nullableSharedSpaceRevision(event.PreviousBindingRevision),
 		nullableSharedSpaceRevision(event.CurrentBindingRevision),
-		event.SecureRosterDigest,
-		event.OccurredAtMilliseconds); err != nil {
+		event.SecureRosterDigest, event.OccurredAtMilliseconds); err != nil {
 		return fmt.Errorf("insert Shared Space authority event: %w", err)
 	}
 	return nil

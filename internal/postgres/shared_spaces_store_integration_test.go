@@ -291,6 +291,40 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		promoted.CurrentRole != sharedspaces.RoleParticipant {
 		t.Fatalf("promotion=%+v err=%v", promoted, err)
 	}
+	thirdHostDeviceID := postgresParticipantTertiaryDeviceID(provisioning.InitialParticipantID)
+	thirdHostDeviceKey := postgresParticipantDeviceKeyWithID(
+		t, provisioning.SpaceID, provisioning.InitialParticipantID,
+		thirdHostDeviceID, now+235,
+	)
+	deviceEnrollment := sharedspaces.ParticipantDeviceEnrollment{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
+		ParticipantID: provisioning.InitialParticipantID, DeviceKey: thirdHostDeviceKey,
+		KeyGrant: postgresParticipantKeyGrantForDevice(
+			t, provisioning.SpaceID, provisioning.InitialParticipantID,
+			thirdHostDeviceID, provisioning.InitialParticipantID,
+			sharedspaces.InitialKeyEpoch, now+235,
+		),
+		EnrolledAtMilliseconds: now + 235,
+	}
+	deviceEnrollment.SecureRosterAttestation = postgresDeviceEnrollmentRosterAttestation(
+		t, provisioning, *promotion.SecureRosterAttestation,
+		deviceEnrollment.ParticipantID, thirdHostDeviceKey, now+235,
+	)
+	enrolled, err := store.EnrollParticipantDevice(ctx, admin, deviceEnrollment, now+235)
+	if err != nil || enrolled.Acceptance != relay.AcceptanceAccepted ||
+		enrolled.DeviceID != thirdHostDeviceID {
+		t.Fatalf("device enrollment=%+v err=%v", enrolled, err)
+	}
+	enrolledRetry, err := store.EnrollParticipantDevice(ctx, admin, deviceEnrollment, now+236)
+	if err != nil || enrolledRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("device enrollment retry=%+v err=%v", enrolledRetry, err)
+	}
+	thirdHostGrant, err := store.GetParticipantKeyGrant(
+		ctx, hostCredential, thirdHostDeviceID, now+236,
+	)
+	if err != nil || thirdHostGrant.KeyGrant.RecipientDeviceID != thirdHostDeviceID {
+		t.Fatalf("third host device grant=%+v err=%v", thirdHostGrant, err)
+	}
 	computePoolID := uuid.New()
 	computeChange := sharedspaces.ComputePoolChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
@@ -340,15 +374,26 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 				postgresParticipantSecondaryDeviceID(provisioning.InitialParticipantID),
 				provisioning.InitialParticipantID, sharedspaces.InitialKeyEpoch+1, now+300,
 			),
+			*postgresParticipantKeyGrantForDevice(
+				t, invitation.SpaceID, provisioning.InitialParticipantID,
+				thirdHostDeviceID, provisioning.InitialParticipantID,
+				sharedspaces.InitialKeyEpoch+1, now+300,
+			),
 		},
 	}
-	previousRevocationDigest, err := promotion.SecureRosterAttestation.Digest()
+	previousRevocationDigest, err := deviceEnrollment.SecureRosterAttestation.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	remainingParticipants := []sharedspaces.Participant{postgresInitialSharedSpaceParticipant(provisioning)}
+	remainingHost := postgresInitialSharedSpaceParticipant(provisioning)
+	remainingHost.DeviceKeys = append(remainingHost.DeviceKeys, thirdHostDeviceKey)
+	sort.Slice(remainingHost.DeviceKeys, func(left, right int) bool {
+		return remainingHost.DeviceKeys[left].DeviceID.String() <
+			remainingHost.DeviceKeys[right].DeviceID.String()
+	})
+	remainingParticipants := []sharedspaces.Participant{remainingHost}
 	revocation.SecureRosterAttestation = postgresSecureRosterAttestation(
-		t, provisioning, promotion.SecureRosterAttestation.Revision+1,
+		t, provisioning, deviceEnrollment.SecureRosterAttestation.Revision+1,
 		previousRevocationDigest, sharedspaces.InitialKeyEpoch+1, remainingParticipants,
 		provisioning.InitialParticipantID, now+300,
 	)
@@ -370,6 +415,13 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	)
 	if err != nil || secondHostKeyGrant.KeyGrant.RecipientDeviceID != postgresParticipantSecondaryDeviceID(hostCredential.MemberID) {
 		t.Fatalf("second host device key grant=%+v err=%v", secondHostKeyGrant, err)
+	}
+	thirdRotatedHostGrant, err := store.GetParticipantKeyGrant(
+		ctx, hostCredential, thirdHostDeviceID, now+301,
+	)
+	if err != nil || thirdRotatedHostGrant.KeyGrant.RecipientDeviceID != thirdHostDeviceID ||
+		thirdRotatedHostGrant.KeyGrant.KeyEpoch != sharedspaces.InitialKeyEpoch+1 {
+		t.Fatalf("third rotated host device grant=%+v err=%v", thirdRotatedHostGrant, err)
 	}
 	status, err = store.GetSpaceStatus(ctx, admin)
 	if err != nil || status.CurrentKeyEpoch != sharedspaces.InitialKeyEpoch+1 ||
@@ -397,7 +449,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		t.Fatalf("revoked participant presentation err=%v", err)
 	}
 	authorityEvents, err := store.ListAuthorityEvents(ctx, admin, 0, 100)
-	if err != nil || len(authorityEvents.Events) != 9 || authorityEvents.NextSequence == 0 {
+	if err != nil || len(authorityEvents.Events) != 10 || authorityEvents.NextSequence == 0 {
 		t.Fatalf("authority events=%+v err=%v", authorityEvents, err)
 	}
 	wantAuthorityEvents := []sharedspaces.AuthorityEventType{
@@ -408,6 +460,7 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 		sharedspaces.AuthorityEventInvitationClaimed,
 		sharedspaces.AuthorityEventParticipantRoleChanged,
 		sharedspaces.AuthorityEventParticipantRoleChanged,
+		sharedspaces.AuthorityEventParticipantDeviceEnrolled,
 		sharedspaces.AuthorityEventSpaceComputeBindingChanged,
 		sharedspaces.AuthorityEventParticipantRevoked,
 	}
@@ -419,12 +472,12 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 			t.Fatalf("authority event sequences are not strictly increasing: %+v", authorityEvents.Events)
 		}
 	}
-	for _, index := range []int{0, 4, 5, 6, 8} {
+	for _, index := range []int{0, 4, 5, 6, 7, 9} {
 		if authorityEvents.Events[index].SecureRosterDigest == nil {
 			t.Fatalf("secure authority event %d is missing roster digest: %+v", index, authorityEvents.Events[index])
 		}
 	}
-	for _, index := range []int{1, 2, 3, 7} {
+	for _, index := range []int{1, 2, 3, 8} {
 		if authorityEvents.Events[index].SecureRosterDigest != nil {
 			t.Fatalf("non-roster authority event %d unexpectedly has digest: %+v", index, authorityEvents.Events[index])
 		}
@@ -870,6 +923,39 @@ func postgresRoleChangeRosterAttestation(
 	)
 }
 
+func postgresDeviceEnrollmentRosterAttestation(
+	t *testing.T,
+	space sharedspaces.SpaceProvisioning,
+	previous sharedspaces.SecureRosterAttestation,
+	participantID uuid.UUID,
+	deviceKey sharedspaces.ParticipantDeviceKey,
+	enrolledAtMilliseconds int64,
+) *sharedspaces.SecureRosterAttestation {
+	t.Helper()
+	previousDigest, err := previous.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	participants := append([]sharedspaces.Participant(nil), previous.Participants...)
+	for index := range participants {
+		if participants[index].ParticipantID != participantID {
+			continue
+		}
+		participants[index].DeviceKeys = append(
+			[]sharedspaces.ParticipantDeviceKey(nil), participants[index].DeviceKeys...,
+		)
+		participants[index].DeviceKeys = append(participants[index].DeviceKeys, deviceKey)
+		sort.Slice(participants[index].DeviceKeys, func(left, right int) bool {
+			return participants[index].DeviceKeys[left].DeviceID.String() <
+				participants[index].DeviceKeys[right].DeviceID.String()
+		})
+	}
+	return postgresSecureRosterAttestation(
+		t, space, previous.Revision+1, previousDigest, previous.CurrentKeyEpoch,
+		participants, space.InitialParticipantID, enrolledAtMilliseconds,
+	)
+}
+
 func postgresParticipantKeyGrant(
 	t *testing.T,
 	spaceID uuid.UUID,
@@ -927,6 +1013,15 @@ func postgresParticipantDeviceID(participantID uuid.UUID) uuid.UUID {
 
 func postgresParticipantSecondaryDeviceID(participantID uuid.UUID) uuid.UUID {
 	digest := sha256.Sum256(append([]byte("facets-shared-space-secondary-device:"), participantID[:]...))
+	deviceID, err := uuid.FromBytes(digest[:16])
+	if err != nil {
+		panic(err)
+	}
+	return deviceID
+}
+
+func postgresParticipantTertiaryDeviceID(participantID uuid.UUID) uuid.UUID {
+	digest := sha256.Sum256(append([]byte("facets-shared-space-tertiary-device:"), participantID[:]...))
 	deviceID, err := uuid.FromBytes(digest[:16])
 	if err != nil {
 		panic(err)

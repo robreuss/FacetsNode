@@ -491,6 +491,50 @@ func (s *Server) handleChangeSharedSpaceParticipantRole(writer http.ResponseWrit
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
+func (s *Server) handleEnrollSharedSpaceParticipantDevice(writer http.ResponseWriter, request *http.Request) {
+	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	participantID, err := parseSharedSpacesUUID(request.PathValue("participantID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	deviceID, err := parseSharedSpacesUUID(request.PathValue("deviceID"))
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayAdministrationCredentialFromRequest(request, spaceID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var enrollment sharedspaces.ParticipantDeviceEnrollment
+	if err := readSharedSpacesJSON(writer, request, &enrollment); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if enrollment.SpaceID != spaceID || enrollment.ParticipantID != participantID ||
+		enrollment.DeviceKey.DeviceID != deviceID {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeWrongScope, "Shared Space participant device enrollment path and body differ",
+		))
+		return
+	}
+	result, err := s.sharedSpacesStore.EnrollParticipantDevice(
+		request.Context(), credential, enrollment, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
 func (s *Server) handleRevokeSharedSpaceParticipant(writer http.ResponseWriter, request *http.Request) {
 	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
 	if err != nil {
