@@ -113,6 +113,8 @@ go vet ./...
 
 The disposable PostgreSQL and live-stack integration gates are opt-in and
 skipped rather than simulated when their explicit test environment is absent.
+The current Proxmox container-host baseline and its verified boundaries are
+recorded in [Facets Box development host](docs/facets-box-development.md).
 
 ## Run Facets Device Sync Server
 
