@@ -459,6 +459,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		t.Fatal(err)
 	}
 	_ = participantBootstrapResponse.Body.Close()
+	if err := participantBootstrap.Validate(); err != nil {
+		t.Fatalf("invalid participant bootstrap: %v", err)
+	}
 	if participantBootstrap.Status.Participant.ParticipantID != participantID ||
 		participantBootstrap.Status.Participant.Role != sharedspaces.RoleReader ||
 		participantBootstrap.Status.Presentation == nil ||
