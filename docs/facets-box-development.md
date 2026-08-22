@@ -120,6 +120,8 @@ tree `eea5455bf0467027c1d7a9d81ae0316997bf0852` passed these gates:
 - both regular blob files retained their original paths and SHA-256 digest;
 - the complete ordinary Go suite, a focused PostgreSQL suite, and the live
   pairing, relay, and Device Sync vertical slices passed;
+- the FacetsNodeClient Swift-to-Go live enrollment gate completed against an
+  isolated restore of the migrated service;
 - migration 040 corrected the previously unembedded enrollment-mailbox schema,
   and the locked sponsor lookup was exercised against real PostgreSQL;
 - the public Caddy allowlist admits both candidate enrollment-mailbox routes
