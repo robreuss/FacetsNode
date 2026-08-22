@@ -87,7 +87,7 @@ func (s *RelayStore) LookupJoinRequest(
 			devicesync.CodeInvalidJoinRequest, err.Error(),
 		)
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return devicesync.JoinRequestSponsorPresentation{}, fmt.Errorf("begin Device Sync join lookup: %w", err)
 	}
