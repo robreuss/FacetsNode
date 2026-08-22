@@ -96,7 +96,7 @@ services:
       - /data:size=16m,mode=0755
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./deploy/tls:/etc/facets-server/tls:ro
+      - ${FACETS_DEVICE_SYNC_TLS_DIRECTORY:-./deploy/tls}:/etc/facets-server/tls:ro
     cap_drop:
       - ALL
     cap_add:
