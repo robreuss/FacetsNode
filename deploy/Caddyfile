@@ -5,7 +5,7 @@
 	# Operator provisioning and operations endpoints remain available only on
 	# the server's loopback-bound management ingress.
 	route {
-		@application path /v1/pairing/* /v1/relay/tenants/* /v1/device-sync/account-admissions/* /v1/device-sync/principals/* /v1/shared-spaces/*
+		@application path /v1/pairing/* /v1/relay/tenants/* /v1/device-sync/account-admissions/* /v1/device-sync/join-requests /v1/device-sync/join-requests/* /v1/device-sync/principals/* /v1/shared-spaces/*
 		reverse_proxy @application server:8080
 		respond 404
 	}

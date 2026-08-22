@@ -18,6 +18,8 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 		"/v1/pairing/routes/11111111-1111-4111-8111-111111111111/messages",
 		"/v1/relay/tenants/11111111-1111-4111-8111-111111111111/domains/22222222-2222-4222-8222-222222222222/messages",
 		"/v1/device-sync/account-admissions/11111111-1111-4111-8111-111111111111/claim",
+		"/v1/device-sync/join-requests",
+		"/v1/device-sync/join-requests/11111111-1111-4111-8111-111111111111/bootstrap",
 		"/v1/device-sync/principals/11111111-1111-4111-8111-111111111111/status",
 		"/v1/shared-spaces/11111111-1111-4111-8111-111111111111/domains/22222222-2222-4222-8222-222222222222/status",
 		"/v1/shared-spaces/11111111-1111-4111-8111-111111111111/domains/22222222-2222-4222-8222-222222222222/invitations/33333333-3333-4333-8333-333333333333/claim",
