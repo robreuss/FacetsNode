@@ -74,6 +74,24 @@ func TestDeploymentProofUsesCanonicalPayloadAndIndependentKey(t *testing.T) {
 	}
 }
 
+func TestComputePoolIsAnIndependentPortableServiceScope(t *testing.T) {
+	scope := Scope{
+		Kind:    ScopeComputePool,
+		ScopeID: uuid.MustParse("61000000-0000-0000-0000-000000000003"),
+	}
+	if err := scope.Validate(); err != nil {
+		t.Fatalf("compute Pool scope rejected: %v", err)
+	}
+	encoded, err := json.Marshal(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"kind":"compute_pool","scopeID":"61000000-0000-0000-0000-000000000003"}`
+	if string(encoded) != want {
+		t.Fatalf("compute Pool scope=%s; want %s", encoded, want)
+	}
+}
+
 func TestDeploymentSignerLoadsOnlyOwnerProtectedCanonicalKeyFile(t *testing.T) {
 	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
 	seed := make([]byte, 32)

@@ -150,6 +150,16 @@ func TestGoDeploymentProofPortableFixture(t *testing.T) {
 		!bytes.Equal(payload.Request, fixture.Request) {
 		t.Fatalf("unexpected portable deployment proof: %+v", payload)
 	}
+	var request struct {
+		Scope portableScope `json:"scope"`
+	}
+	if err := json.Unmarshal(fixture.Request, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Scope.Kind != "compute_pool" ||
+		request.Scope.ScopeID != "61000000-0000-0000-0000-000000000003" {
+		t.Fatalf("unexpected portable compute Pool scope: %+v", request.Scope)
+	}
 	assertCanonicalJSON(t, fixture.Proof.Payload)
 	assertRawP256Signature(
 		t,

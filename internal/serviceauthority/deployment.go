@@ -40,6 +40,7 @@ const (
 	TrafficBulk                    TrafficClass = "bulk"
 	ScopeDeviceSync                ScopeKind    = "device_sync"
 	ScopeSharedSpace               ScopeKind    = "shared_space"
+	ScopeComputePool               ScopeKind    = "compute_pool"
 )
 
 var ErrInvalid = errors.New("invalid Facets service authority value")
@@ -47,7 +48,7 @@ var ErrInvalid = errors.New("invalid Facets service authority value")
 type ScopeKind string
 
 func (kind ScopeKind) Valid() bool {
-	return kind == ScopeDeviceSync || kind == ScopeSharedSpace
+	return kind == ScopeDeviceSync || kind == ScopeSharedSpace || kind == ScopeComputePool
 }
 
 type TrafficClass string
