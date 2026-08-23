@@ -1,8 +1,10 @@
 .git
 .gitignore
 .env
+**/.env
 .swift-relay-test-access.json
 deploy/tls
+deploy/onion/state
 bin
 coverage.out
 dist

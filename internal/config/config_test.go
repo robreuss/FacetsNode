@@ -255,6 +255,35 @@ func TestDeploymentAuthenticationConfigurationIsAllOrNothing(t *testing.T) {
 	}
 }
 
+func TestOnionIngressTokenIsOptionalStrictAndServiceScoped(t *testing.T) {
+	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/device_sync")
+	token := bytes.Repeat([]byte{0x51}, 32)
+	t.Setenv(
+		"FACETS_DEVICE_SYNC_ONION_INGRESS_TOKEN",
+		base64.RawURLEncoding.EncodeToString(token),
+	)
+	t.Setenv("FACETS_SHARED_SPACES_ONION_INGRESS_TOKEN", "invalid-other-service-value")
+	configuration, err := config.Load(config.DeviceSync)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(configuration.OnionIngressToken, token) {
+		t.Fatal("Device Sync onion ingress token was not decoded")
+	}
+	for _, value := range []string{
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x51}, 31)),
+		base64.URLEncoding.EncodeToString(token),
+		"not-base64url",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("FACETS_DEVICE_SYNC_ONION_INGRESS_TOKEN", value)
+			if _, err := config.Load(config.DeviceSync); err == nil {
+				t.Fatal("invalid onion ingress token accepted")
+			}
+		})
+	}
+}
+
 func TestUnsupportedServiceIsRejected(t *testing.T) {
 	if _, err := config.Load(config.Service("other")); err == nil {
 		t.Fatal("unsupported service accepted")

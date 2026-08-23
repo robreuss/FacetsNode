@@ -1,12 +1,17 @@
 :8443 {
 	tls /etc/facets-server/tls/server.crt /etc/facets-server/tls/server.key
 
-	# Public ingress is deliberately limited to application protocol families.
-	# Operator provisioning and operations endpoints remain available only on
-	# the server's loopback-bound management ingress.
 	route {
 		@application path /v1/service-deployment/proof /v1/pairing/* /v1/relay/tenants/* /v1/device-sync/account-admissions/* /v1/device-sync/join-requests /v1/device-sync/join-requests/* /v1/device-sync/principals/* /v1/shared-spaces/*
-		reverse_proxy @application server:8080
+		reverse_proxy @application server:8080 {
+			header_up -Forwarded
+			header_up -X-Forwarded-For
+			header_up -X-Forwarded-Host
+			header_up -X-Forwarded-Proto
+			header_up -X-Real-IP
+			header_up X-Facets-Ingress-Transport tor-onion
+			header_up X-Facets-Onion-Ingress-Token {$FACETS_ONION_INGRESS_TOKEN}
+		}
 		respond 404
 	}
 }

@@ -89,6 +89,13 @@ func Main(service config.Service) {
 		os.Exit(1)
 	}
 	api.SetServiceIdentity(string(service))
+	if len(configuration.OnionIngressToken) != 0 {
+		if err := api.SetOnionIngressToken(configuration.OnionIngressToken); err != nil {
+			logger.Error("onion ingress configuration rejected", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("privacy-safe onion ingress traffic policy enabled")
+	}
 	if configuration.DeploymentID != uuid.Nil {
 		deploymentSigner, err := serviceauthority.LoadDeploymentSigner(
 			configuration.DeploymentID,

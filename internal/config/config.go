@@ -33,6 +33,7 @@ type Config struct {
 	DeploymentID                 uuid.UUID
 	DeploymentSigningKeyFile     string
 	ServiceAuthorityBindingsFile string
+	OnionIngressToken            []byte
 }
 
 type Service string
@@ -121,6 +122,16 @@ func Load(service Service) (Config, error) {
 		configuration.DeploymentID, err = uuid.Parse(deploymentIDText)
 		if err != nil || configuration.DeploymentID == uuid.Nil {
 			return Config{}, fmt.Errorf("%s must be a nonzero UUID", deploymentIDName)
+		}
+	}
+	onionIngressTokenName := prefix + "_ONION_INGRESS_TOKEN"
+	if encoded := os.Getenv(onionIngressTokenName); encoded != "" {
+		configuration.OnionIngressToken, err = decodeSecret32(
+			onionIngressTokenName,
+			encoded,
+		)
+		if err != nil {
+			return Config{}, err
 		}
 	}
 	if configuration.DatabaseURL == "" {

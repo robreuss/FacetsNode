@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -166,14 +167,66 @@ func TestTrafficKeysIgnoreForwardedAddressAndRetainOnlyDigests(t *testing.T) {
 	second := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	second.RemoteAddr = "192.0.2.4:9999"
 	second.Header.Set("X-Forwarded-For", "203.0.113.200")
-	if requestTrafficConnectionKey(first) != requestTrafficConnectionKey(second) {
+	if requestTrafficConnectionKey(first, traffic.SurfaceManagement, false) !=
+		requestTrafficConnectionKey(second, traffic.SurfaceManagement, false) {
 		t.Fatal("trusted connection key depended on port or forwarded address")
 	}
 	secret := "credential-material-that-must-not-be-retained"
 	first.Header.Set("Authorization", "Bearer "+secret)
-	key := requestTrafficIdentityKey(first, traffic.SurfaceManagement)
+	key := requestTrafficIdentityKey(first, traffic.SurfaceManagement, false)
 	if bytes.Contains(key[:], []byte(secret)) || key == (traffic.Key{}) {
 		t.Fatal("traffic identity key retained raw credential material")
+	}
+}
+
+func TestAuthenticatedOnionIngressUsesPrivacySafeKeysAndStripsMarker(t *testing.T) {
+	server := New(nil, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	token := bytes.Repeat([]byte{0x63}, 32)
+	if err := server.SetOnionIngressToken(token); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/pairing/routes/example/messages", nil)
+	request.Pattern = "GET /v1/pairing/routes/{routeID}/messages"
+	request.RemoteAddr = "172.30.0.2:1234"
+	request.Header.Set(headerIngressTransport, ingressTransportOnion)
+	request.Header.Set(headerOnionIngressToken, base64.RawURLEncoding.EncodeToString(token))
+	if !server.consumeOnionIngressMarker(request) {
+		t.Fatal("valid onion ingress marker rejected")
+	}
+	if request.Header.Get(headerIngressTransport) != "" ||
+		request.Header.Get(headerOnionIngressToken) != "" {
+		t.Fatal("private onion ingress headers reached the application handler")
+	}
+	first := requestTrafficConnectionKey(request, traffic.SurfaceRendezvous, true)
+	request.RemoteAddr = "198.51.100.40:9000"
+	second := requestTrafficConnectionKey(request, traffic.SurfaceRendezvous, true)
+	if first != second {
+		t.Fatal("onion connection bucket retained a connection address")
+	}
+	if first == requestTrafficConnectionKey(request, traffic.SurfaceStorage, true) {
+		t.Fatal("onion connection budget was not isolated by traffic surface")
+	}
+}
+
+func TestSpoofedOnionMarkerDoesNotChangeDirectTrafficIdentity(t *testing.T) {
+	server := New(nil, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	token := bytes.Repeat([]byte{0x63}, 32)
+	if err := server.SetOnionIngressToken(token); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/pairing/routes", nil)
+	request.RemoteAddr = "192.0.2.9:5000"
+	request.Header.Set(headerIngressTransport, ingressTransportOnion)
+	request.Header.Set(
+		headerOnionIngressToken,
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x64}, 32)),
+	)
+	if server.consumeOnionIngressMarker(request) {
+		t.Fatal("spoofed onion ingress marker accepted")
+	}
+	if request.Header.Get(headerIngressTransport) != "" ||
+		request.Header.Get(headerOnionIngressToken) != "" {
+		t.Fatal("spoofed private ingress headers were not stripped")
 	}
 }
 

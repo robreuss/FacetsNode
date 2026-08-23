@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -42,6 +43,8 @@ type Server struct {
 	deploymentSigner                    *serviceauthority.DeploymentSigner
 	serviceAuthorityBindings            *serviceauthority.BindingRegistry
 	serviceAuthorityScopeKind           serviceauthority.ScopeKind
+	onionIngressTokenDigest             [32]byte
+	onionIngressEnabled                 bool
 	now                                 func() time.Time
 }
 
@@ -65,6 +68,18 @@ func (s *Server) SetServiceIdentity(identity string) {
 	if identity = strings.TrimSpace(identity); identity != "" {
 		s.serviceIdentity = identity
 	}
+}
+
+func (s *Server) SetOnionIngressToken(token []byte) error {
+	if len(token) != 32 {
+		return errors.New("onion ingress token must contain exactly 32 bytes")
+	}
+	s.onionIngressTokenDigest = sha256.Sum256(append(
+		[]byte("facets-server-onion-ingress-token-v1\x00"),
+		token...,
+	))
+	s.onionIngressEnabled = true
+	return nil
 }
 
 // SetServiceAuthorityDeployment enables application-level deployment proof

@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"net"
 	"net/http"
 	"net/netip"
@@ -11,6 +13,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/robreuss/FacetsNode/internal/traffic"
+)
+
+const (
+	headerIngressTransport  = "X-Facets-Ingress-Transport"
+	headerOnionIngressToken = "X-Facets-Onion-Ingress-Token"
+	ingressTransportOnion   = "tor-onion"
 )
 
 type trafficSurfaceControl struct {
@@ -59,8 +67,9 @@ func (s *Server) trafficHandler(
 		s.metrics.ObserveRequest(surface)
 		control := &s.traffic.surfaces[surface]
 		now := s.now()
+		onionIngress := s.consumeOnionIngressMarker(request)
 		allowed, retryAfter := control.identityLimiter.Allow(
-			requestTrafficIdentityKey(request, surface), now,
+			requestTrafficIdentityKey(request, surface, onionIngress), now,
 		)
 		if !allowed {
 			s.metrics.ObserveResponse(surface, http.StatusTooManyRequests)
@@ -69,7 +78,7 @@ func (s *Server) trafficHandler(
 			return
 		}
 		allowed, retryAfter = control.connectionLimiter.Allow(
-			requestTrafficConnectionKey(request), now,
+			requestTrafficConnectionKey(request, surface, onionIngress), now,
 		)
 		if !allowed {
 			s.metrics.ObserveResponse(surface, http.StatusTooManyRequests)
@@ -104,7 +113,11 @@ func (s *Server) trafficHandler(
 	})
 }
 
-func requestTrafficIdentityKey(request *http.Request, surface traffic.Surface) traffic.Key {
+func requestTrafficIdentityKey(
+	request *http.Request,
+	surface traffic.Surface,
+	onionIngress bool,
+) traffic.Key {
 	authorization := request.Header.Get("Authorization")
 	if strings.HasPrefix(authorization, "Bearer ") && len(authorization) > len("Bearer ") {
 		return traffic.Key(sha256.Sum256([]byte(
@@ -115,15 +128,51 @@ func requestTrafficIdentityKey(request *http.Request, surface traffic.Surface) t
 	if routeID, err := uuid.Parse(request.PathValue("routeID")); err == nil && routeID != uuid.Nil {
 		scope = "route\x00" + routeID.String()
 	}
-	return traffic.Key(sha256.Sum256([]byte(
-		"facets-server-traffic-route-v1\x00" + trustedConnectionAddress(request.RemoteAddr) + "\x00" + scope,
-	)))
+	address := trustedConnectionAddress(request.RemoteAddr)
+	domain := "facets-server-traffic-route-v1\x00"
+	if onionIngress {
+		address = "concealed"
+		domain = "facets-server-traffic-onion-route-v1\x00"
+	}
+	return traffic.Key(sha256.Sum256([]byte(domain + address + "\x00" + scope)))
 }
 
-func requestTrafficConnectionKey(request *http.Request) traffic.Key {
+func requestTrafficConnectionKey(
+	request *http.Request,
+	surface traffic.Surface,
+	onionIngress bool,
+) traffic.Key {
+	if onionIngress {
+		return traffic.Key(sha256.Sum256([]byte(
+			"facets-server-traffic-onion-surface-v1\x00" + surface.Name(),
+		)))
+	}
 	return traffic.Key(sha256.Sum256([]byte(
 		"facets-server-traffic-address-v1\x00" + trustedConnectionAddress(request.RemoteAddr),
 	)))
+}
+
+func (s *Server) consumeOnionIngressMarker(request *http.Request) bool {
+	transport := request.Header.Get(headerIngressTransport)
+	encodedToken := request.Header.Get(headerOnionIngressToken)
+	request.Header.Del(headerIngressTransport)
+	request.Header.Del(headerOnionIngressToken)
+	if !s.onionIngressEnabled || transport != ingressTransportOnion {
+		return false
+	}
+	token, err := base64.RawURLEncoding.Strict().DecodeString(encodedToken)
+	if err != nil || len(token) != 32 ||
+		base64.RawURLEncoding.EncodeToString(token) != encodedToken {
+		return false
+	}
+	digest := sha256.Sum256(append(
+		[]byte("facets-server-onion-ingress-token-v1\x00"),
+		token...,
+	))
+	return subtle.ConstantTimeCompare(
+		digest[:],
+		s.onionIngressTokenDigest[:],
+	) == 1
 }
 
 func trustedConnectionAddress(remoteAddress string) string {

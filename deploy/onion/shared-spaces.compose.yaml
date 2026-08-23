@@ -1,0 +1,71 @@
+services:
+  server:
+    environment:
+      FACETS_SHARED_SPACES_ONION_INGRESS_TOKEN: ${FACETS_SHARED_SPACES_ONION_INGRESS_TOKEN:?Set a separate 32-byte unpadded base64url onion ingress token}
+    ports: !reset []
+    networks: !override
+      - private
+      - onion-application
+
+  ingress:
+    profiles:
+      - direct-disabled-in-onion-mode
+    ports: !reset []
+
+  onion-ingress:
+    image: caddy:2.10.2-alpine
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      FACETS_ONION_INGRESS_TOKEN: ${FACETS_SHARED_SPACES_ONION_INGRESS_TOKEN:?Set a separate 32-byte unpadded base64url onion ingress token}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /config:size=16m,mode=0755
+      - /data:size=16m,mode=0755
+    volumes:
+      - ../onion/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${FACETS_SHARED_SPACES_TLS_DIRECTORY:-../tls}:/etc/facets-server/tls:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - onion-application
+      - onion-ingress
+
+  tor:
+    build:
+      context: ../onion
+    depends_on:
+      onion-ingress:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /var/lib/tor/facets-onion/hostname"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - facets-shared-spaces-onion:/var/lib/tor/facets-onion
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - onion-ingress
+      - tor-egress
+
+networks:
+  onion-application:
+    internal: true
+  onion-ingress:
+    internal: true
+  tor-egress:
+
+volumes:
+  facets-shared-spaces-onion:

@@ -186,6 +186,9 @@ service prefix followed by
 Portable deployment proof, protected deployment-key custody, and exact
 service-authority request binding are documented in
 [Service authority deployment authentication](docs/service-authority-deployment.md).
+The isolated, no-host-port Tor v3 deployment override and its current
+verification limits are documented in
+[Onion-only Facets Server ingress](docs/onion-only-ingress.md).
 
 `FACETS_SERVER_SOURCE_REVISION` and `FACETS_SERVER_SOURCE_TREE` are OCI build
 arguments shared by both images. A revision-attested deployment supplies full
