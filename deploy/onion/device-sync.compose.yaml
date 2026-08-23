@@ -45,7 +45,7 @@ services:
       onion-ingress:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "test -s /var/lib/tor/facets-onion/hostname"]
+      test: ["CMD-SHELL", "test -s /var/lib/tor/facets-onion/hostname && grep -q 'Bootstrapped 100% (done): Done' /tmp/tor-notices.log"]
       interval: 10s
       timeout: 3s
       retries: 30

@@ -51,6 +51,7 @@ func TestOnionProfilesPublishNoHostPortAndIsolateNetworks(t *testing.T) {
 				"cap_drop:\n      - ALL",
 				"cap_add:\n      - NET_BIND_SERVICE\n      - DAC_READ_SEARCH",
 				"/tmp:size=128m,mode=1777",
+				"grep -q 'Bootstrapped 100% (done): Done' /tmp/tor-notices.log",
 			})
 			if strings.Contains(contents, "127.0.0.1:") ||
 				strings.Contains(contents, "8443:8443") ||
@@ -68,6 +69,7 @@ func TestTorImageHasNoClientProxyOrPublishedListener(t *testing.T) {
 		"ControlPort 0",
 		"ExitPolicy reject *:*",
 		"SafeLogging 1",
+		"Log notice file /tmp/tor-notices.log",
 		"HiddenServiceVersion 3",
 		"HiddenServicePort 443 unix:/run/facets-onion/ingress.sock",
 	})
