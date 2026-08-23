@@ -27,13 +27,16 @@ services:
     volumes:
       - ../onion/Caddyfile:/etc/caddy/Caddyfile:ro
       - ${FACETS_SHARED_SPACES_TLS_DIRECTORY:-../tls}:/etc/facets-server/tls:ro
+      - facets-shared-spaces-onion-socket:/run/facets-onion
     cap_drop:
       - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - DAC_READ_SEARCH
     security_opt:
       - no-new-privileges=true
     networks:
       - onion-application
-      - onion-ingress
 
   tor:
     build:
@@ -52,20 +55,19 @@ services:
       - /tmp:size=16m,mode=1777
     volumes:
       - facets-shared-spaces-onion:/var/lib/tor/facets-onion
+      - facets-shared-spaces-onion-socket:/run/facets-onion
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges=true
     networks:
-      - onion-ingress
       - tor-egress
 
 networks:
   onion-application:
     internal: true
-  onion-ingress:
-    internal: true
   tor-egress:
 
 volumes:
   facets-shared-spaces-onion:
+  facets-shared-spaces-onion-socket:

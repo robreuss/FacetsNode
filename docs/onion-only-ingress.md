@@ -7,16 +7,17 @@ there is no automatic fallback between them.
 
 ## Boundary
 
-The profile creates four network compartments:
+The profile creates three network compartments and one socket boundary:
 
 1. PostgreSQL and FacetsNode share the existing internal `private` network.
 2. FacetsNode and onion Caddy share `onion-application`.
-3. Onion Caddy and Tor share `onion-ingress`.
-4. Only Tor joins the non-internal `tor-egress` network.
+3. Only Tor joins the non-internal `tor-egress` network.
+4. Tor reaches Caddy only through a dedicated Unix-domain socket volume, not
+   through a shared IP network. No other workload mounts that socket.
 
 The ordinary Caddy service is disabled and both inherited host port lists are
 reset. Tor has no SOCKS or control listener and publishes no port. Its only
-onion mapping is virtual port 443 to Caddy. Caddy forwards only the same
+onion mapping is virtual port 443 to Caddy's Unix socket. Caddy forwards only the same
 application allowlist as direct ingress; health, readiness, metrics, operator
 provisioning, PostgreSQL, and blob files remain private.
 

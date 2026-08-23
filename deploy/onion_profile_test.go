@@ -20,6 +20,7 @@ func TestOnionIngressUsesTheReviewedApplicationAllowlist(t *testing.T) {
 		}
 	}
 	assertContainsAll(t, "onion Caddy ingress", onion, []string{
+		"bind unix//run/facets-onion/ingress.sock|0222",
 		"header_up -Forwarded",
 		"header_up -X-Forwarded-For",
 		"header_up -X-Real-IP",
@@ -44,10 +45,11 @@ func TestOnionProfilesPublishNoHostPortAndIsolateNetworks(t *testing.T) {
 				"networks: !override",
 				"direct-disabled-in-onion-mode",
 				"onion-application:\n    internal: true",
-				"onion-ingress:\n    internal: true",
+				"onion-socket:/run/facets-onion",
 				"tor-egress:",
 				"no-new-privileges=true",
 				"cap_drop:\n      - ALL",
+				"cap_add:\n      - NET_BIND_SERVICE\n      - DAC_READ_SEARCH",
 			})
 			if strings.Contains(contents, "127.0.0.1:") ||
 				strings.Contains(contents, "8443:8443") ||
@@ -66,7 +68,7 @@ func TestTorImageHasNoClientProxyOrPublishedListener(t *testing.T) {
 		"ExitPolicy reject *:*",
 		"SafeLogging 1",
 		"HiddenServiceVersion 3",
-		"HiddenServicePort 443 onion-ingress:8443",
+		"HiddenServicePort 443 unix:/run/facets-onion/ingress.sock",
 	})
 	dockerfile := readDeploymentFile(t, "onion/Dockerfile")
 	assertContainsAll(t, "Tor image", dockerfile, []string{

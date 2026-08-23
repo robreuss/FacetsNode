@@ -7,4 +7,4 @@ Log notice stdout
 
 HiddenServiceDir /var/lib/tor/facets-onion
 HiddenServiceVersion 3
-HiddenServicePort 443 onion-ingress:8443
+HiddenServicePort 443 unix:/run/facets-onion/ingress.sock

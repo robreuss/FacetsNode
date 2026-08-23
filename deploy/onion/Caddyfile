@@ -1,4 +1,5 @@
 :8443 {
+	bind unix//run/facets-onion/ingress.sock|0222
 	tls /etc/facets-server/tls/server.crt /etc/facets-server/tls/server.key
 
 	route {
