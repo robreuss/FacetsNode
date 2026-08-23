@@ -14,6 +14,11 @@ and storage interfaces. They do not share a deployment lifecycle, database
 credentials, database namespace, blob namespace, quotas, or authority data.
 Installing one service does not expose the other product.
 
+[ADR 0003](docs/adr/0003-facets-service-authority-and-tor-transport.md)
+freezes the separate Facets service authority, deployment identity, onion
+identity, and relay capability model for portable transport work. FacetsNode
+enforces an authorized deployment revision but never chooses or signs it.
+
 The shared relay foundation is content-blind. It stores opaque routing
 identifiers, capability digests, bounded metadata, encrypted envelopes, and
 encrypted blobs without parsing FEF content. Device Sync and content-blind
