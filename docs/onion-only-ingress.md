@@ -22,7 +22,9 @@ the same application allowlist as direct ingress; health, readiness, metrics,
 operator provisioning, PostgreSQL, and blob files remain private.
 
 Tor consensus, descriptor, and runtime state use a bounded 128 MiB disposable
-tmpfs. Only the much smaller onion identity directory is persistent.
+tmpfs. Container health requires both the persistent onion hostname and Tor's
+explicit `Bootstrapped 100%` notice; creating the onion identity alone is not
+readiness. Only the much smaller onion identity directory is persistent.
 
 The persistent onion volume contains the hostname and Tor master identity
 state and is created mode 0700 for the unprivileged `debian-tor` user. Treat
@@ -92,11 +94,48 @@ Facets-signed route descriptor. Shared Spaces must also use its resulting
 automation will eventually generate these values and manifests; this
 checkpoint does not ask an end user to operate Compose or handle keys.
 
+## Isolated Device Sync runtime checkpoint
+
+On 2026-08-23, committed revision
+`46e1d5831e768d511da18351471d77fbd7c75329` and source tree
+`1e25c1a7d078cbbafb2c0f8bb6ed1c3c805320da` passed an isolated Device Sync
+onion deployment gate on Facets Box development VM 190:
+
+- the exact release archive built both server binaries and ran the complete Go
+  suite inside the image build;
+- PostgreSQL, FacetsNode, onion Caddy, and Tor reached their required running
+  or healthy states, with Tor 0.4.9.11 explicitly reporting 100% bootstrap;
+- the running Device Sync image revision and source-tree labels matched the
+  release, and none of the isolated project's containers published a host
+  port;
+- Tor had the only egress-capable network, Caddy and Tor shared only the
+  dedicated Unix socket, and PostgreSQL remained confined to the internal
+  application network;
+- the onion identity directory was mode 2700, its hostname and secret key were
+  mode 0600, and the Tor-to-Caddy socket was reachable only through its
+  dedicated volume;
+- a separate Tor client reached the onion route through SOCKS with the mounted
+  certificate's SPKI pin: the private readiness path returned 404 and an empty
+  pairing request reached application validation and returned 400;
+- replacing that SPKI pin caused curl to abort with error 90 before receiving
+  an HTTP response;
+- a container-network packet capture of the probe saw only client-to-SOCKS
+  traffic and no direct client DNS, TCP 80, or TCP 443 flow; and
+- restarting all four containers retained the onion hostname, returned to
+  readiness in 31 seconds, and produced no Tor storage error with the 128 MiB
+  runtime tmpfs.
+
+The canonical direct-HTTPS Device Sync and Shared Spaces deployments continued
+running during this isolated checkpoint. This is container and LAN deployment
+evidence, not physical Apple-client or public-network acceptance.
+
 ## Verification boundary
 
-Repository tests currently prove configuration structure, allowlist parity,
-strict ingress-token handling, privacy-safe limiter keys, and the absence of a
-declared host listener. They do not prove a built Tor image, a bootstrapped
-onion descriptor, public Tor reachability, TLS/SPKI behavior, NAT behavior,
-packet non-leakage, onion-state migration, or Apple client operation. Those
-require the exact container runtime and physical-network gates.
+Repository tests prove configuration structure, allowlist parity, strict
+ingress-token handling, privacy-safe limiter keys, and the absence of a
+declared host listener. The isolated checkpoint additionally proves a built
+Tor image, bootstrap, SPKI enforcement, restart identity continuity, and the
+described container packet boundary. It does not prove public/off-LAN Tor
+reachability, a physical iPhone or Mac, Apple-client DNS behavior, full Device
+Sync flows, Shared Spaces onion runtime, onion-state migration, or production
+deployment-authority onboarding. Those remain separate gates.
