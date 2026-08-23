@@ -1,18 +1,19 @@
 # Facets Servers
 
-This repository contains the shared Go foundation for two independently
+This repository contains the shared Go foundation for three independently
 deployed Facets services:
 
 | Service | Executable / image target | Compose application | Configuration prefix |
 | --- | --- | --- | --- |
 | Facets Device Sync Server | `facets-device-sync-server` / `device-sync` | `compose.yaml` | `FACETS_DEVICE_SYNC_` |
 | Facets Shared Spaces Server | `facets-shared-spaces-server` / `shared-spaces` | `deploy/shared-spaces/compose.yaml` | `FACETS_SHARED_SPACES_` |
+| Facets Compute Pool Service | `facets-compute-pool-server` / `compute-pool` | Not packaged yet | `FACETS_COMPUTE_POOL_` |
 
 The services share opaque envelope routing, PostgreSQL persistence, encrypted
 blob custody, cursors, receipts, checkpoints, wake hints, quotas, audit facts,
 and storage interfaces. They do not share a deployment lifecycle, database
 credentials, database namespace, blob namespace, quotas, or authority data.
-Installing one service does not expose the other product.
+Installing one service does not expose either other product.
 
 [ADR 0003](docs/adr/0003-facets-service-authority-and-tor-transport.md)
 freezes the separate Facets service authority, deployment identity, onion
@@ -38,7 +39,11 @@ isolated Space and initial host, the host issues bounded participant
 invitations, invitees claim relay membership, and the host can inspect or
 revoke participants atomically. Every accepted Shared Space authority change
 also appends a content-blind, cursor-paged administrative audit event in the
-same PostgreSQL transaction.
+same PostgreSQL transaction. The Compute Pool executable introduces a third
+service-authority scope with an independent database and Pool, Worker
+enrollment, and offering records. Its first HTTP surface exposes deployment
+proof and operator-authorized status only; job routing and Pool admission are
+not implemented yet.
 
 ## Implemented shared foundation
 
@@ -89,10 +94,13 @@ key. The key is never returned by status, roster, invitation, operator, or
 Space-administration endpoints. Participants may maintain a revisioned
 display name for their own active membership. This recognition metadata is
 returned by status/bootstrap reads but never grants authority or asserts a
-verified Persona. Space administrators may also define retry-safe compute pools
-and Space bindings with operation, resource, pricing, sensitivity, and
-processing policy. These records grant no execution authority by themselves;
-short-lived signed capabilities and AI job routing are separate gates.
+verified Persona. Space administrators may define retry-safe bindings to
+independently owned Compute Pools with operation, participant/role, provider,
+resource, pricing, sensitivity, processing, budget, result, and accepted
+Pool-authority policy. Shared Spaces stores no Pool or Worker record. A
+short-lived signed capability captures current membership and binding
+authority, but independent Pool admission and AI job routing remain separate
+gates.
 
 An administrator may atomically enroll an additional participant device in a
 Private or Secure Space. The participant signs the device agreement-key
@@ -176,6 +184,17 @@ listener. Participant invitation claims, authenticated Space status, and
 participant administration are available through the reviewed HTTPS
 application allowlist on port 9443.
 
+## Facets Compute Pool development skeleton
+
+The `compute-pool` image target and `facets-compute-pool-server` executable use
+their own PostgreSQL migration set and `FACETS_COMPUTE_POOL_` configuration.
+Startup requires a database URL, 32-byte operator token, deployment ID,
+protected deployment signing-key file, and service-authority binding file. The
+current HTTP surface provides health, authority-bound deployment proof, and
+operator-authorized Pool status. It deliberately provides no operator shortcut
+for creating logical Pool authority, no job or blob routing, no Pool admission,
+no onion ingress, and no packaged Compose/backup profile yet.
+
 ## Configuration and provenance
 
 Every service rejects the other service's environment prefix. There is no
@@ -191,7 +210,7 @@ verification limits are documented in
 [Onion-only Facets Server ingress](docs/onion-only-ingress.md).
 
 `FACETS_SERVER_SOURCE_REVISION` and `FACETS_SERVER_SOURCE_TREE` are OCI build
-arguments shared by both images. A revision-attested deployment supplies full
+arguments shared by all images. A revision-attested deployment supplies full
 lowercase 40-character values and verifies the resulting immutable image
 labels and running image ID. Development builds may use `unknown`, but that
 does not pass the deployment gate.

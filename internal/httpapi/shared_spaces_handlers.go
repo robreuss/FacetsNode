@@ -161,13 +161,13 @@ func (s *Server) handleListSharedSpaceAuthorityEvents(writer http.ResponseWriter
 	writeJSON(writer, http.StatusOK, page)
 }
 
-func (s *Server) handleChangeSharedSpaceComputePool(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) handleChangeSharedSpaceComputeBinding(writer http.ResponseWriter, request *http.Request) {
 	spaceID, domainID, err := sharedSpacesScopeFromPath(request)
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	poolID, err := parseSharedSpacesUUID(request.PathValue("poolID"))
+	bindingID, err := parseSharedSpacesUUID(request.PathValue("bindingID"))
 	if err != nil {
 		s.writeError(writer, err)
 		return
@@ -177,19 +177,19 @@ func (s *Server) handleChangeSharedSpaceComputePool(writer http.ResponseWriter, 
 		s.writeError(writer, err)
 		return
 	}
-	var change sharedspaces.ComputePoolChange
+	var change sharedspaces.SpaceComputeBindingChange
 	if err := readSharedSpacesJSON(writer, request, &change); err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	if change.SpaceID != spaceID || change.PoolID != poolID {
+	if change.SpaceID != spaceID || change.BindingID != bindingID {
 		s.writeError(writer, sharedspaces.NewProtocolError(
 			sharedspaces.CodeWrongScope,
-			"Shared Space compute pool body and path differ",
+			"Shared Space compute binding body and path differ",
 		))
 		return
 	}
-	result, err := s.sharedSpacesStore.ChangeComputePool(
+	result, err := s.sharedSpacesStore.ChangeComputeBinding(
 		request.Context(), credential, change, s.nowMilliseconds(),
 	)
 	if err != nil {

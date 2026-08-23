@@ -438,9 +438,9 @@ func (s *Server) Handler() http.Handler {
 			s.handleListSharedSpaceAuthorityEvents,
 		)
 		register(
-			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/compute-pools/{poolID}",
+			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/compute-bindings/{bindingID}",
 			traffic.SurfaceManagement,
-			s.handleChangeSharedSpaceComputePool,
+			s.handleChangeSharedSpaceComputeBinding,
 		)
 		if s.sharedSpacesComputeCapabilitySigner != nil {
 			register(
@@ -747,7 +747,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			switch sharedSpacesProtocol.Code {
 			case sharedspaces.CodeInvalidSpace, sharedspaces.CodeInvalidInvitation,
 				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeInvalidParticipantPresentation,
-				sharedspaces.CodeInvalidAuthorityEvent, sharedspaces.CodeInvalidComputePool,
+				sharedspaces.CodeInvalidAuthorityEvent, sharedspaces.CodeInvalidComputeBinding,
 				sharedspaces.CodeInvalidComputeCapability,
 				sharedspaces.CodeWrongScope:
 				status = http.StatusBadRequest
@@ -755,7 +755,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				status = http.StatusUnauthorized
 			case sharedspaces.CodeSpaceNotFound, sharedspaces.CodeInvitationNotFound,
 				sharedspaces.CodeParticipantNotFound, sharedspaces.CodeKeyGrantNotFound,
-				sharedspaces.CodeComputePoolNotFound:
+				sharedspaces.CodeComputeBindingNotFound:
 				status = http.StatusNotFound
 			case sharedspaces.CodeInvitationCancelled, sharedspaces.CodeComputeCapabilityExpired:
 				status = http.StatusGone
@@ -764,7 +764,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				sharedspaces.CodeInvitationCancellationCollision,
 				sharedspaces.CodeParticipantPresentationCollision,
 				sharedspaces.CodeParticipantRoleCollision,
-				sharedspaces.CodeComputePoolCollision,
+				sharedspaces.CodeComputeBindingCollision,
 				sharedspaces.CodeParticipantRevoked, sharedspaces.CodeInitialHost,
 				sharedspaces.CodeWrongKeyEpoch, sharedspaces.CodeBootstrapNotReady:
 				status = http.StatusConflict

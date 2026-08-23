@@ -322,29 +322,35 @@ cannot update their presentation.
 
 ## Space compute bindings
 
-An authenticated Space administrator creates or replaces the policy joining a
-Shared Space to one compute pool at:
+An authenticated Space administrator creates or replaces the policy edge from
+a Shared Space to an independently owned Compute Pool at:
 
-`POST /v1/shared-spaces/{spaceID}/domains/{domainID}/compute-pools/{poolID}`
+`POST /v1/shared-spaces/{spaceID}/domains/{domainID}/compute-bindings/{bindingID}`
 
-The versioned request contains a retry identifier, the previous pool and binding
-revisions, a recognition-only display name, enabled state, sorted operation
-identifiers, hard resource ceilings, pricing revision, data-sensitivity
-contract, and processing contract. Creation uses zero previous revisions;
-subsequent replacement must name the exact current revision. Exact retry
-returns the prior result, while stale revisions or a retry identifier reused
-with different input are rejected.
+The versioned request contains a retry identifier, binding identifier, accepted
+Pool authority trust anchor and manifest revision/digest, previous binding
+revision, sorted operation and provider identifiers, eligible participant or
+role identifiers, hard resource ceilings, pricing revision, data-sensitivity,
+processing, and budget contracts, result policy, and current source-authority
+revision. Creation uses zero as the previous binding revision; subsequent
+replacement must name the exact current revision. Exact retry returns the prior
+result, while stale revisions, authority rollback, silent Pool replacement, or
+a retry identifier reused with different input are rejected.
 
-Pool and binding changes commit atomically and append one content-blind
+Binding changes commit atomically with one content-blind
 `space_compute_binding_changed` authority event. Administrator status includes
-the current pools and bindings. A binding does not copy membership, enroll a
-Worker, authorize a participant, or contain a Space content-key epoch. A later
-short-lived compute capability will be issued against the Space's current key
-epoch so participant revocation cannot leave a durable binding stale.
+only the current bindings. Shared Spaces stores no Pool record, Worker, offering,
+Pool credential, Pool blob, or cross-database foreign key. Deleting or moving a
+Pool therefore cannot mutate Space authority, and deleting a Space cannot mutate
+Pool authority.
 
-This endpoint establishes authority policy only. AI job/result routing, Worker
-selection, explicit Worker consent, capability issuance, metering, and billing
-remain later slices.
+Participant-authenticated capability issuance evaluates current membership,
+role eligibility, binding revision, source-authority revision, and key epoch in
+one snapshot. Its short-lived signature carries the Pool authority digest,
+provider allowlist, resource and contract limits, budget policy, and result
+policy. The independent Pool must still admit the work under its current Pool,
+offering, capacity, budget, and Worker-consent policy. AI job/result routing,
+Worker selection, Pool admission, metering, and billing remain later slices.
 
 ## Public ingress
 
@@ -355,7 +361,7 @@ operator issuance, and bulk management endpoints are likewise private.
 
 The Device Sync executable does not register Shared Spaces product routes, and
 the Shared Spaces executable does not register Device Sync product routes. The
-two services share protocol and persistence packages but have independent
+two relay services share protocol and persistence packages but have independent
 configuration, databases, blob namespaces, quotas, credentials, and lifecycle.
 
 ## Deferred gates

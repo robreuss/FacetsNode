@@ -194,6 +194,7 @@ type AuthorityEvent struct {
 	CurrentRole             *Role              `json:"currentRole,omitempty"`
 	PreviousKeyEpoch        *uint64            `json:"previousKeyEpoch,omitempty"`
 	CurrentKeyEpoch         *uint64            `json:"currentKeyEpoch,omitempty"`
+	ComputeBindingID        *uuid.UUID         `json:"computeBindingID,omitempty"`
 	ComputePoolID           *uuid.UUID         `json:"computePoolID,omitempty"`
 	PreviousBindingRevision *uint64            `json:"previousBindingRevision,omitempty"`
 	CurrentBindingRevision  *uint64            `json:"currentBindingRevision,omitempty"`
@@ -215,6 +216,7 @@ func (e AuthorityEvent) Validate() error {
 		(e.CurrentRole != nil && !e.CurrentRole.Valid()) ||
 		(e.PreviousKeyEpoch != nil && *e.PreviousKeyEpoch == 0) ||
 		(e.CurrentKeyEpoch != nil && *e.CurrentKeyEpoch == 0) ||
+		(e.ComputeBindingID != nil && *e.ComputeBindingID == uuid.Nil) ||
 		(e.ComputePoolID != nil && *e.ComputePoolID == uuid.Nil) ||
 		(e.CurrentBindingRevision != nil && *e.CurrentBindingRevision == 0) ||
 		(e.SecureRosterDigest != nil && !validFingerprint(*e.SecureRosterDigest)) {
@@ -227,7 +229,8 @@ func (e AuthorityEvent) Validate() error {
 }
 
 func (e AuthorityEvent) validTransitionShape() bool {
-	computeFieldsAbsent := e.ComputePoolID == nil && e.PreviousBindingRevision == nil &&
+	computeFieldsAbsent := e.ComputeBindingID == nil && e.ComputePoolID == nil &&
+		e.PreviousBindingRevision == nil &&
 		e.CurrentBindingRevision == nil
 	switch e.EventType {
 	case AuthorityEventSpaceProvisioned:
@@ -262,7 +265,8 @@ func (e AuthorityEvent) validTransitionShape() bool {
 		return e.SubjectParticipantID == nil && e.SubjectDeviceID == nil && e.InvitationID == nil &&
 			e.PreviousRole == nil && e.CurrentRole == nil &&
 			e.PreviousKeyEpoch == nil && e.CurrentKeyEpoch == nil &&
-			e.ComputePoolID != nil && e.PreviousBindingRevision != nil &&
+			e.ComputeBindingID != nil && e.ComputePoolID != nil &&
+			e.PreviousBindingRevision != nil &&
 			e.CurrentBindingRevision != nil &&
 			*e.CurrentBindingRevision == *e.PreviousBindingRevision+1
 	default:
@@ -1845,7 +1849,6 @@ type SpaceStatus struct {
 	InitialParticipantID  uuid.UUID                 `json:"initialParticipantID"`
 	Participants          []Participant             `json:"participants"`
 	Presentations         []ParticipantPresentation `json:"presentations"`
-	ComputePools          []ComputePool             `json:"computePools"`
 	ComputeBindings       []SpaceComputeBinding     `json:"computeBindings"`
 	Relay                 relay.DomainStatus        `json:"relay"`
 	CreatedAtMilliseconds int64                     `json:"createdAtMilliseconds"`

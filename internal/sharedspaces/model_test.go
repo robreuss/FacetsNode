@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/computepool"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 )
@@ -40,51 +41,46 @@ func TestSecurityModeIsFixedToSupportedValues(t *testing.T) {
 	}
 }
 
-func TestComputePoolChangeAndResultValidation(t *testing.T) {
+func TestComputeBindingChangeAndResultValidation(t *testing.T) {
 	spaceID := uuid.New()
 	poolID := uuid.New()
+	bindingID := uuid.New()
 	retryID := uuid.New()
-	change := sharedspaces.ComputePoolChange{
+	change := sharedspaces.SpaceComputeBindingChange{
 		Version: sharedspaces.SchemaVersion, RetryID: retryID, SpaceID: spaceID,
-		PoolID: poolID, DisplayName: "Nightly Research", Enabled: true,
-		AllowedOperations: []string{"embeddings.generate", "text.classify"},
+		BindingID: bindingID, PoolAuthority: testComputePoolAuthority(poolID),
+		AllowedOperations:          []string{"embeddings.generate", "text.classify"},
+		EligibleRoleIdentifiers:    []string{string(sharedspaces.RoleHost)},
+		AllowedProviderIdentifiers: []string{"facets.local"},
 		ResourceCeiling: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 1 << 20,
 			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
 		},
 		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
-		ProcessingContract: "participant-device-v1", ChangedAtMilliseconds: 1_000,
+		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
+		ResultPolicy:            computepool.ResultPrivateToInvoker,
+		SourceAuthorityRevision: sharedspaces.InitialKeyEpoch,
+		ChangedAtMilliseconds:   1_000,
 	}
 	if err := change.Validate(); err != nil {
 		t.Fatalf("valid compute pool change: %v", err)
 	}
 	unsorted := change
 	unsorted.AllowedOperations = []string{"text.classify", "embeddings.generate"}
-	if err := unsorted.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidComputePool) {
+	if err := unsorted.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidComputeBinding) {
 		t.Fatalf("unsorted operations err=%v", err)
 	}
 
-	result := sharedspaces.ComputePoolChangeResult{
+	result := sharedspaces.SpaceComputeBindingChangeResult{
 		Acceptance: relay.AcceptanceAccepted, RetryID: retryID,
-		Pool: sharedspaces.ComputePool{
-			Version: sharedspaces.SchemaVersion, SpaceID: spaceID, PoolID: poolID,
-			DisplayName: change.DisplayName, Enabled: true, Revision: 1,
-			CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
-		},
-		Binding: sharedspaces.SpaceComputeBinding{
-			Version: sharedspaces.SchemaVersion, SpaceID: spaceID, PoolID: poolID,
-			AllowedOperations: change.AllowedOperations, ResourceCeiling: change.ResourceCeiling,
-			PricingRevision: 1, DataSensitivityContract: change.DataSensitivityContract,
-			ProcessingContract: change.ProcessingContract, Revision: 1,
-			CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
-		},
+		Binding: change.NextBinding(1_000),
 	}
 	if err := result.Validate(); err != nil {
 		t.Fatalf("valid compute pool result: %v", err)
 	}
-	result.Binding.Revision = 2
-	if err := result.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidComputePool) {
-		t.Fatalf("mismatched result err=%v", err)
+	result.Binding.BindingID = uuid.Nil
+	if err := result.Validate(); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeInvalidComputeBinding) {
+		t.Fatalf("invalid result err=%v", err)
 	}
 }
 

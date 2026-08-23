@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"reflect"
 	"sort"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/computepool"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 )
@@ -430,7 +432,7 @@ func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreComputePoolAuthorityLifecycle(t *testing.T) {
+func TestMemoryStoreComputeBindingAuthorityLifecycle(t *testing.T) {
 	ctx := context.Background()
 	relayStore := relay.NewMemoryStore()
 	store := sharedspaces.NewMemoryStore(relayStore)
@@ -439,45 +441,91 @@ func TestMemoryStoreComputePoolAuthorityLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	poolID := uuid.New()
-	change := sharedspaces.ComputePoolChange{
+	bindingID := uuid.New()
+	poolAuthority := testComputePoolAuthority(poolID)
+	poolStore := computepool.NewMemoryStore()
+	independentPool := computepool.Pool{
+		Version: computepool.SchemaVersion, PoolID: poolID,
+		OwnerAuthorityID: uuid.New(), AuthorityRevision: poolAuthority.AcceptedManifestRevision,
+		AuthorityManifestDigest: poolAuthority.AcceptedManifestDigest,
+		DisplayName:             "Household Overnight", Enabled: true, Revision: 1,
+		CreatedAtMilliseconds: 5_050, UpdatedAtMilliseconds: 5_050,
+	}
+	if err := poolStore.CreatePool(ctx, independentPool); err != nil {
+		t.Fatal(err)
+	}
+	change := sharedspaces.SpaceComputeBindingChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
-		PoolID: poolID, DisplayName: "Household Overnight", Enabled: true,
-		AllowedOperations: []string{"embeddings.generate", "text.classify"},
+		BindingID: bindingID, PoolAuthority: poolAuthority,
+		AllowedOperations:          []string{"embeddings.generate", "text.classify"},
+		EligibleRoleIdentifiers:    []string{string(sharedspaces.RoleHost)},
+		AllowedProviderIdentifiers: []string{"facets.local"},
 		ResourceCeiling: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 4 << 20, MaximumOutputBytes: 1 << 20,
 			MaximumMemoryBytes: 4 << 30, MaximumWallTimeMilliseconds: 300_000,
 		},
 		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
-		ProcessingContract: "participant-device-v1", ChangedAtMilliseconds: 5_100,
+		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
+		ResultPolicy:            computepool.ResultPrivateToInvoker,
+		SourceAuthorityRevision: sharedspaces.InitialKeyEpoch,
+		ChangedAtMilliseconds:   5_100,
 	}
-	created, err := store.ChangeComputePool(ctx, admin, change, 5_100)
+	created, err := store.ChangeComputeBinding(ctx, admin, change, 5_100)
 	if err != nil || created.Acceptance != relay.AcceptanceAccepted ||
-		created.Pool.Revision != 1 || created.Binding.Revision != 1 {
-		t.Fatalf("create compute pool=%+v err=%v", created, err)
+		created.Binding.Revision != 1 {
+		t.Fatalf("create compute binding=%+v err=%v", created, err)
 	}
-	retry, err := store.ChangeComputePool(ctx, admin, change, 5_100)
+	retry, err := store.ChangeComputeBinding(ctx, admin, change, 5_100)
 	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
-		t.Fatalf("retry compute pool=%+v err=%v", retry, err)
+		t.Fatalf("retry compute binding=%+v err=%v", retry, err)
 	}
 	update := change
 	update.RetryID = uuid.New()
-	update.PreviousPoolRevision = 1
 	update.PreviousBindingRevision = 1
-	update.DisplayName = "Household Overnight and Weekend"
+	update.PoolAuthority.AcceptedManifestRevision++
+	manifestDigest := sha256.Sum256([]byte("Compute Pool authority revision 4"))
+	update.PoolAuthority.AcceptedManifestDigest = hex.EncodeToString(manifestDigest[:])
+	update.ResourceCeiling.MaximumWallTimeMilliseconds = 600_000
 	update.ChangedAtMilliseconds = 5_200
-	updated, err := store.ChangeComputePool(ctx, admin, update, 5_200)
-	if err != nil || updated.Pool.Revision != 2 ||
-		updated.Pool.DisplayName != update.DisplayName {
-		t.Fatalf("update compute pool=%+v err=%v", updated, err)
+	updated, err := store.ChangeComputeBinding(ctx, admin, update, 5_200)
+	if err != nil || updated.Binding.Revision != 2 ||
+		updated.Binding.ResourceCeiling != update.ResourceCeiling {
+		t.Fatalf("update compute binding=%+v err=%v", updated, err)
 	}
 	stale := update
 	stale.RetryID = uuid.New()
-	if _, err := store.ChangeComputePool(ctx, admin, stale, 5_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputePoolCollision) {
-		t.Fatalf("stale compute pool change err=%v", err)
+	if _, err := store.ChangeComputeBinding(ctx, admin, stale, 5_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeBindingCollision) {
+		t.Fatalf("stale compute binding change err=%v", err)
+	}
+	rollback := update
+	rollback.RetryID = uuid.New()
+	rollback.PreviousBindingRevision = 2
+	rollback.PoolAuthority = poolAuthority
+	rollback.ChangedAtMilliseconds = 5_300
+	if _, err := store.ChangeComputeBinding(ctx, admin, rollback, 5_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeBindingCollision) {
+		t.Fatalf("Pool authority rollback err=%v", err)
+	}
+	conflictingManifest := update
+	conflictingManifest.RetryID = uuid.New()
+	conflictingManifest.PreviousBindingRevision = 2
+	conflictingDigest := sha256.Sum256([]byte("conflicting revision 4 manifest"))
+	conflictingManifest.PoolAuthority.AcceptedManifestDigest = hex.EncodeToString(conflictingDigest[:])
+	conflictingManifest.ChangedAtMilliseconds = 5_300
+	if _, err := store.ChangeComputeBinding(ctx, admin, conflictingManifest, 5_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeBindingCollision) {
+		t.Fatalf("conflicting Pool authority successor err=%v", err)
+	}
+	rerouted := update
+	rerouted.RetryID = uuid.New()
+	rerouted.PreviousBindingRevision = 2
+	rerouted.PoolAuthority = testComputePoolAuthority(uuid.New())
+	rerouted.ChangedAtMilliseconds = 5_300
+	if _, err := store.ChangeComputeBinding(ctx, admin, rerouted, 5_300); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeBindingCollision) {
+		t.Fatalf("silent Pool authority replacement err=%v", err)
 	}
 	status, err := store.GetSpaceStatus(ctx, admin)
-	if err != nil || len(status.ComputePools) != 1 || len(status.ComputeBindings) != 1 ||
-		status.ComputePools[0].Revision != 2 || status.ComputeBindings[0].Revision != 2 {
+	if err != nil || len(status.ComputeBindings) != 1 ||
+		status.ComputeBindings[0].Revision != 2 ||
+		status.ComputeBindings[0].PoolAuthority.PoolID != poolID {
 		t.Fatalf("compute status=%+v err=%v", status, err)
 	}
 	hostCredential := relay.Credential{
@@ -486,7 +534,7 @@ func TestMemoryStoreComputePoolAuthorityLifecycle(t *testing.T) {
 	}
 	capabilityRequest := sharedspaces.ComputeCapabilityRequest{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: provisioning.SpaceID,
-		PoolID: poolID, Operation: "text.classify",
+		BindingID: bindingID, PoolID: poolID, Operation: "text.classify",
 		ResourceRequest: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 256 << 10,
 			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
@@ -511,8 +559,22 @@ func TestMemoryStoreComputePoolAuthorityLifecycle(t *testing.T) {
 	events, err := store.ListAuthorityEvents(ctx, admin, 0, 10)
 	if err != nil || len(events.Events) != 3 ||
 		events.Events[1].EventType != sharedspaces.AuthorityEventSpaceComputeBindingChanged ||
-		events.Events[2].EventType != sharedspaces.AuthorityEventSpaceComputeBindingChanged {
+		events.Events[2].EventType != sharedspaces.AuthorityEventSpaceComputeBindingChanged ||
+		events.Events[2].ComputeBindingID == nil ||
+		*events.Events[2].ComputeBindingID != bindingID ||
+		events.Events[2].ComputePoolID == nil || *events.Events[2].ComputePoolID != poolID {
 		t.Fatalf("compute authority events=%+v err=%v", events, err)
+	}
+	if err := poolStore.DeletePool(ctx, poolID, independentPool.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poolStore.GetPoolStatus(ctx, poolID); !errors.Is(err, computepool.ErrNotFound) {
+		t.Fatalf("deleted independent Pool remained available: %v", err)
+	}
+	statusAfterPoolDeletion, err := store.GetSpaceStatus(ctx, admin)
+	if err != nil || len(statusAfterPoolDeletion.ComputeBindings) != 1 ||
+		statusAfterPoolDeletion.ComputeBindings[0].BindingID != bindingID {
+		t.Fatalf("Pool deletion mutated Shared Space binding: status=%+v err=%v", statusAfterPoolDeletion, err)
 	}
 }
 

@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"github.com/robreuss/FacetsNode/internal/computepool"
 )
 
 const (
@@ -25,22 +28,29 @@ const (
 // only when these claims are issued; the broker never reads Shared Spaces
 // membership storage.
 type ComputeCapabilityClaims struct {
-	Version                 int                    `json:"version"`
-	CapabilityID            uuid.UUID              `json:"capabilityID"`
-	Issuer                  string                 `json:"issuer"`
-	KeyID                   string                 `json:"keyID"`
-	SubjectParticipantID    uuid.UUID              `json:"subjectParticipantID"`
-	SpaceID                 uuid.UUID              `json:"spaceID"`
-	PoolID                  uuid.UUID              `json:"poolID"`
-	Operation               string                 `json:"operation"`
-	ResourceCeiling         ComputeResourceCeiling `json:"resourceCeiling"`
-	PricingRevision         uint64                 `json:"pricingRevision"`
-	DataSensitivityContract string                 `json:"dataSensitivityContract"`
-	ProcessingContract      string                 `json:"processingContract"`
-	BindingRevision         uint64                 `json:"bindingRevision"`
-	KeyEpoch                uint64                 `json:"keyEpoch"`
-	IssuedAtMilliseconds    int64                  `json:"issuedAtMilliseconds"`
-	ExpiresAtMilliseconds   int64                  `json:"expiresAtMilliseconds"`
+	Version                    int                      `json:"version"`
+	CapabilityID               uuid.UUID                `json:"capabilityID"`
+	Issuer                     string                   `json:"issuer"`
+	KeyID                      string                   `json:"keyID"`
+	SubjectParticipantID       uuid.UUID                `json:"subjectParticipantID"`
+	SpaceID                    uuid.UUID                `json:"spaceID"`
+	BindingID                  uuid.UUID                `json:"bindingID"`
+	PoolID                     uuid.UUID                `json:"poolID"`
+	PoolAuthorityRevision      uint64                   `json:"poolAuthorityRevision"`
+	PoolAuthorityDigest        string                   `json:"poolAuthorityDigest"`
+	Operation                  string                   `json:"operation"`
+	AllowedProviderIdentifiers []string                 `json:"allowedProviderIdentifiers"`
+	ResourceCeiling            ComputeResourceCeiling   `json:"resourceCeiling"`
+	PricingRevision            uint64                   `json:"pricingRevision"`
+	DataSensitivityContract    string                   `json:"dataSensitivityContract"`
+	ProcessingContract         string                   `json:"processingContract"`
+	BudgetContract             string                   `json:"budgetContract"`
+	ResultPolicy               computepool.ResultPolicy `json:"resultPolicy"`
+	BindingRevision            uint64                   `json:"bindingRevision"`
+	SourceAuthorityRevision    uint64                   `json:"sourceAuthorityRevision"`
+	KeyEpoch                   uint64                   `json:"keyEpoch"`
+	IssuedAtMilliseconds       int64                    `json:"issuedAtMilliseconds"`
+	ExpiresAtMilliseconds      int64                    `json:"expiresAtMilliseconds"`
 }
 
 // ComputeCapabilityRequest is a participant-authenticated request for one
@@ -50,6 +60,7 @@ type ComputeCapabilityRequest struct {
 	Version                 int                    `json:"version"`
 	RetryID                 uuid.UUID              `json:"retryID"`
 	SpaceID                 uuid.UUID              `json:"spaceID"`
+	BindingID               uuid.UUID              `json:"bindingID"`
 	PoolID                  uuid.UUID              `json:"poolID"`
 	Operation               string                 `json:"operation"`
 	ResourceRequest         ComputeResourceCeiling `json:"resourceRequest"`
@@ -61,7 +72,8 @@ type ComputeCapabilityRequest struct {
 
 func (r ComputeCapabilityRequest) Validate() error {
 	if r.Version != SchemaVersion || r.RetryID == uuid.Nil || r.SpaceID == uuid.Nil ||
-		r.PoolID == uuid.Nil || r.ExpectedBindingRevision == 0 || r.ExpectedKeyEpoch == 0 ||
+		r.BindingID == uuid.Nil || r.PoolID == uuid.Nil ||
+		r.ExpectedBindingRevision == 0 || r.ExpectedKeyEpoch == 0 ||
 		!validComputeOperation(r.Operation) || r.IssuedAtMilliseconds < 0 ||
 		r.ExpiresAtMilliseconds <= r.IssuedAtMilliseconds ||
 		r.ExpiresAtMilliseconds-r.IssuedAtMilliseconds > MaximumComputeCapabilityLifetimeMillis {
@@ -80,35 +92,49 @@ func (r ComputeCapabilityRequest) Validate() error {
 }
 
 // ComputeCapabilityAuthorization is the policy result produced while the
-// participant, pool, binding, and key epoch are read consistently. It is
+// participant, binding, and key epoch are read consistently. It is
 // signed outside the authority store so compute brokers need no membership
 // database access.
 type ComputeCapabilityAuthorization struct {
-	Version                 int                    `json:"version"`
-	CapabilityID            uuid.UUID              `json:"capabilityID"`
-	SubjectParticipantID    uuid.UUID              `json:"subjectParticipantID"`
-	SpaceID                 uuid.UUID              `json:"spaceID"`
-	PoolID                  uuid.UUID              `json:"poolID"`
-	Operation               string                 `json:"operation"`
-	ResourceCeiling         ComputeResourceCeiling `json:"resourceCeiling"`
-	PricingRevision         uint64                 `json:"pricingRevision"`
-	DataSensitivityContract string                 `json:"dataSensitivityContract"`
-	ProcessingContract      string                 `json:"processingContract"`
-	BindingRevision         uint64                 `json:"bindingRevision"`
-	KeyEpoch                uint64                 `json:"keyEpoch"`
-	IssuedAtMilliseconds    int64                  `json:"issuedAtMilliseconds"`
-	ExpiresAtMilliseconds   int64                  `json:"expiresAtMilliseconds"`
+	Version                    int                      `json:"version"`
+	CapabilityID               uuid.UUID                `json:"capabilityID"`
+	SubjectParticipantID       uuid.UUID                `json:"subjectParticipantID"`
+	SpaceID                    uuid.UUID                `json:"spaceID"`
+	BindingID                  uuid.UUID                `json:"bindingID"`
+	PoolID                     uuid.UUID                `json:"poolID"`
+	PoolAuthorityRevision      uint64                   `json:"poolAuthorityRevision"`
+	PoolAuthorityDigest        string                   `json:"poolAuthorityDigest"`
+	Operation                  string                   `json:"operation"`
+	AllowedProviderIdentifiers []string                 `json:"allowedProviderIdentifiers"`
+	ResourceCeiling            ComputeResourceCeiling   `json:"resourceCeiling"`
+	PricingRevision            uint64                   `json:"pricingRevision"`
+	DataSensitivityContract    string                   `json:"dataSensitivityContract"`
+	ProcessingContract         string                   `json:"processingContract"`
+	BudgetContract             string                   `json:"budgetContract"`
+	ResultPolicy               computepool.ResultPolicy `json:"resultPolicy"`
+	BindingRevision            uint64                   `json:"bindingRevision"`
+	SourceAuthorityRevision    uint64                   `json:"sourceAuthorityRevision"`
+	KeyEpoch                   uint64                   `json:"keyEpoch"`
+	IssuedAtMilliseconds       int64                    `json:"issuedAtMilliseconds"`
+	ExpiresAtMilliseconds      int64                    `json:"expiresAtMilliseconds"`
 }
 
 func (a ComputeCapabilityAuthorization) Validate() error {
 	claims := ComputeCapabilityClaims{
 		Version: a.Version, CapabilityID: a.CapabilityID, Issuer: "authorization",
 		KeyID:                base64.RawURLEncoding.EncodeToString(make([]byte, sha256.Size)),
-		SubjectParticipantID: a.SubjectParticipantID, SpaceID: a.SpaceID, PoolID: a.PoolID,
-		Operation: a.Operation, ResourceCeiling: a.ResourceCeiling,
-		PricingRevision: a.PricingRevision, DataSensitivityContract: a.DataSensitivityContract,
-		ProcessingContract: a.ProcessingContract, BindingRevision: a.BindingRevision,
-		KeyEpoch: a.KeyEpoch, IssuedAtMilliseconds: a.IssuedAtMilliseconds,
+		SubjectParticipantID: a.SubjectParticipantID, SpaceID: a.SpaceID,
+		BindingID: a.BindingID, PoolID: a.PoolID,
+		PoolAuthorityRevision:      a.PoolAuthorityRevision,
+		PoolAuthorityDigest:        a.PoolAuthorityDigest,
+		Operation:                  a.Operation,
+		AllowedProviderIdentifiers: append([]string(nil), a.AllowedProviderIdentifiers...),
+		ResourceCeiling:            a.ResourceCeiling,
+		PricingRevision:            a.PricingRevision, DataSensitivityContract: a.DataSensitivityContract,
+		ProcessingContract: a.ProcessingContract, BudgetContract: a.BudgetContract,
+		ResultPolicy: a.ResultPolicy, BindingRevision: a.BindingRevision,
+		SourceAuthorityRevision: a.SourceAuthorityRevision, KeyEpoch: a.KeyEpoch,
+		IssuedAtMilliseconds:  a.IssuedAtMilliseconds,
 		ExpiresAtMilliseconds: a.ExpiresAtMilliseconds,
 	}
 	return claims.Validate()
@@ -117,12 +143,16 @@ func (a ComputeCapabilityAuthorization) Validate() error {
 func (c ComputeCapabilityClaims) Validate() error {
 	if c.Version != SchemaVersion || c.CapabilityID == uuid.Nil ||
 		c.SubjectParticipantID == uuid.Nil || c.SpaceID == uuid.Nil ||
-		c.PoolID == uuid.Nil || c.PricingRevision == 0 ||
-		c.BindingRevision == 0 || c.KeyEpoch == 0 ||
+		c.BindingID == uuid.Nil || c.PoolID == uuid.Nil ||
+		c.PoolAuthorityRevision == 0 || !validFingerprint(c.PoolAuthorityDigest) ||
+		c.PricingRevision == 0 || c.BindingRevision == 0 ||
+		c.SourceAuthorityRevision == 0 || c.KeyEpoch == 0 ||
 		!validComputeIssuer(c.Issuer) || !validComputeKeyID(c.KeyID) ||
 		!validComputeOperation(c.Operation) ||
+		!validComputeIdentifiers(c.AllowedProviderIdentifiers, false) ||
 		!validComputeContract(c.DataSensitivityContract) ||
 		!validComputeContract(c.ProcessingContract) ||
+		!validComputeContract(c.BudgetContract) || !c.ResultPolicy.Valid() ||
 		c.IssuedAtMilliseconds < 0 || c.ExpiresAtMilliseconds <= c.IssuedAtMilliseconds ||
 		c.ExpiresAtMilliseconds-c.IssuedAtMilliseconds > MaximumComputeCapabilityLifetimeMillis {
 		return NewProtocolError(
@@ -240,14 +270,24 @@ func (s *ComputeCapabilitySigner) Issue(
 		Version: authorization.Version, CapabilityID: authorization.CapabilityID,
 		Issuer: s.issuer, KeyID: s.keyID,
 		SubjectParticipantID: authorization.SubjectParticipantID,
-		SpaceID:              authorization.SpaceID, PoolID: authorization.PoolID,
-		Operation: authorization.Operation, ResourceCeiling: authorization.ResourceCeiling,
+		SpaceID:              authorization.SpaceID, BindingID: authorization.BindingID,
+		PoolID:                authorization.PoolID,
+		PoolAuthorityRevision: authorization.PoolAuthorityRevision,
+		PoolAuthorityDigest:   authorization.PoolAuthorityDigest,
+		Operation:             authorization.Operation,
+		AllowedProviderIdentifiers: append(
+			[]string(nil), authorization.AllowedProviderIdentifiers...,
+		),
+		ResourceCeiling:         authorization.ResourceCeiling,
 		PricingRevision:         authorization.PricingRevision,
 		DataSensitivityContract: authorization.DataSensitivityContract,
 		ProcessingContract:      authorization.ProcessingContract,
-		BindingRevision:         authorization.BindingRevision, KeyEpoch: authorization.KeyEpoch,
-		IssuedAtMilliseconds:  authorization.IssuedAtMilliseconds,
-		ExpiresAtMilliseconds: authorization.ExpiresAtMilliseconds,
+		BudgetContract:          authorization.BudgetContract, ResultPolicy: authorization.ResultPolicy,
+		BindingRevision:         authorization.BindingRevision,
+		SourceAuthorityRevision: authorization.SourceAuthorityRevision,
+		KeyEpoch:                authorization.KeyEpoch,
+		IssuedAtMilliseconds:    authorization.IssuedAtMilliseconds,
+		ExpiresAtMilliseconds:   authorization.ExpiresAtMilliseconds,
 	})
 }
 
@@ -281,13 +321,18 @@ func NewComputeCapabilityVerifier(keys ...ComputeCapabilityVerificationKey) (*Co
 }
 
 type ComputeCapabilityRequirement struct {
-	Issuer               string
-	SubjectParticipantID uuid.UUID
-	SpaceID              uuid.UUID
-	PoolID               uuid.UUID
-	Operation            string
-	ResourceRequest      ComputeResourceCeiling
-	KeyEpoch             uint64
+	Issuer                  string
+	SubjectParticipantID    uuid.UUID
+	SpaceID                 uuid.UUID
+	BindingID               uuid.UUID
+	PoolID                  uuid.UUID
+	PoolAuthorityRevision   uint64
+	PoolAuthorityDigest     string
+	SourceAuthorityRevision uint64
+	ProviderIdentifier      string
+	Operation               string
+	ResourceRequest         ComputeResourceCeiling
+	KeyEpoch                uint64
 }
 
 func (v *ComputeCapabilityVerifier) Verify(
@@ -326,12 +371,23 @@ func (v *ComputeCapabilityVerifier) Verify(
 	if requirement.Issuer != "" && claims.Issuer != requirement.Issuer ||
 		requirement.SubjectParticipantID != uuid.Nil && claims.SubjectParticipantID != requirement.SubjectParticipantID ||
 		requirement.SpaceID != uuid.Nil && claims.SpaceID != requirement.SpaceID ||
+		requirement.BindingID != uuid.Nil && claims.BindingID != requirement.BindingID ||
 		requirement.PoolID != uuid.Nil && claims.PoolID != requirement.PoolID ||
+		requirement.PoolAuthorityRevision != 0 && claims.PoolAuthorityRevision != requirement.PoolAuthorityRevision ||
+		requirement.PoolAuthorityDigest != "" && claims.PoolAuthorityDigest != requirement.PoolAuthorityDigest ||
+		requirement.SourceAuthorityRevision != 0 && claims.SourceAuthorityRevision != requirement.SourceAuthorityRevision ||
 		requirement.Operation != "" && claims.Operation != requirement.Operation ||
 		requirement.KeyEpoch != 0 && claims.KeyEpoch != requirement.KeyEpoch {
 		return ComputeCapabilityClaims{}, NewProtocolError(
 			CodeComputeCapabilityUnauthorized,
 			"Shared Space compute capability scope does not authorize this request",
+		)
+	}
+	if requirement.ProviderIdentifier != "" &&
+		!sortedStringsContain(claims.AllowedProviderIdentifiers, requirement.ProviderIdentifier) {
+		return ComputeCapabilityClaims{}, NewProtocolError(
+			CodeComputeCapabilityUnauthorized,
+			"Shared Space compute capability does not authorize this provider",
 		)
 	}
 	if !computeResourceCeilingContains(claims.ResourceCeiling, requirement.ResourceRequest) {
@@ -368,7 +424,36 @@ func validComputeIssuer(value string) bool {
 }
 
 func validComputeOperation(value string) bool {
-	return validComputeOperations([]string{value})
+	return validComputeIdentifier(value)
+}
+
+func validComputeIdentifier(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return utf8.ValidString(value) && value == trimmed && value != "" && len(value) <= 256
+}
+
+func validComputeIdentifiers(values []string, optional bool) bool {
+	if len(values) > 128 || !sort.StringsAreSorted(values) || !optional && len(values) == 0 {
+		return false
+	}
+	previous := ""
+	for _, value := range values {
+		if !validComputeIdentifier(value) || value == previous {
+			return false
+		}
+		previous = value
+	}
+	return true
+}
+
+func validComputeContract(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return utf8.ValidString(value) && value == trimmed && value != "" && len(value) <= 1_024
+}
+
+func sortedStringsContain(values []string, value string) bool {
+	index := sort.SearchStrings(values, value)
+	return index < len(values) && values[index] == value
 }
 
 func computeResourceCeilingContains(ceiling, request ComputeResourceCeiling) bool {
@@ -386,44 +471,44 @@ func computeResourceCeilingContains(ceiling, request ComputeResourceCeiling) boo
 
 // AuthorizeComputeCapability evaluates the mutable Shared Space policy needed
 // to issue an immutable capability. Callers must authenticate the participant
-// credential and read pool, binding, and key epoch in one consistent snapshot
+// credential and read binding, role, and key epoch in one consistent snapshot
 // before invoking this function.
 func AuthorizeComputeCapability(
 	request ComputeCapabilityRequest,
 	participantID uuid.UUID,
+	participantRole Role,
 	currentKeyEpoch uint64,
-	pool ComputePool,
 	binding SpaceComputeBinding,
 	nowMilliseconds int64,
 ) (ComputeCapabilityAuthorization, error) {
 	if err := request.Validate(); err != nil {
 		return ComputeCapabilityAuthorization{}, err
 	}
-	if participantID == uuid.Nil || request.IssuedAtMilliseconds > nowMilliseconds ||
+	if participantID == uuid.Nil || !participantRole.Valid() ||
+		request.IssuedAtMilliseconds > nowMilliseconds ||
 		nowMilliseconds >= request.ExpiresAtMilliseconds {
 		return ComputeCapabilityAuthorization{}, NewProtocolError(
 			CodeInvalidComputeCapability,
 			"Shared Space compute capability request is not currently valid",
 		)
 	}
-	if err := pool.Validate(); err != nil {
-		return ComputeCapabilityAuthorization{}, err
-	}
 	if err := binding.Validate(); err != nil {
-		return ComputeCapabilityAuthorization{}, err
+		return ComputeCapabilityAuthorization{}, NewProtocolError(
+			CodeInvalidComputeBinding, "Shared Space compute binding is invalid",
+		)
 	}
-	if !pool.Enabled || pool.SpaceID != request.SpaceID || binding.SpaceID != request.SpaceID ||
-		pool.PoolID != request.PoolID || binding.PoolID != request.PoolID ||
+	if binding.SpaceID != request.SpaceID || binding.BindingID != request.BindingID ||
+		binding.PoolAuthority.PoolID != request.PoolID ||
 		binding.Revision != request.ExpectedBindingRevision ||
+		binding.SourceAuthorityRevision != currentKeyEpoch ||
 		currentKeyEpoch != request.ExpectedKeyEpoch {
 		return ComputeCapabilityAuthorization{}, NewProtocolError(
 			CodeComputeCapabilityUnauthorized,
 			"Shared Space compute capability policy changed or is unavailable",
 		)
 	}
-	operationIndex := sort.SearchStrings(binding.AllowedOperations, request.Operation)
-	if operationIndex >= len(binding.AllowedOperations) ||
-		binding.AllowedOperations[operationIndex] != request.Operation ||
+	if !bindingAllowsParticipant(binding, participantID, participantRole) ||
+		!sortedStringsContain(binding.AllowedOperations, request.Operation) ||
 		!computeResourceCeilingContains(binding.ResourceCeiling, request.ResourceRequest) {
 		return ComputeCapabilityAuthorization{}, NewProtocolError(
 			CodeComputeCapabilityUnauthorized,
@@ -432,13 +517,39 @@ func AuthorizeComputeCapability(
 	}
 	return ComputeCapabilityAuthorization{
 		Version: SchemaVersion, CapabilityID: request.RetryID,
-		SubjectParticipantID: participantID, SpaceID: request.SpaceID, PoolID: request.PoolID,
-		Operation: request.Operation, ResourceCeiling: request.ResourceRequest,
+		SubjectParticipantID: participantID, SpaceID: request.SpaceID,
+		BindingID: request.BindingID, PoolID: request.PoolID,
+		PoolAuthorityRevision: binding.PoolAuthority.AcceptedManifestRevision,
+		PoolAuthorityDigest:   binding.PoolAuthority.AcceptedManifestDigest,
+		Operation:             request.Operation,
+		AllowedProviderIdentifiers: append(
+			[]string(nil), binding.AllowedProviderIdentifiers...,
+		),
+		ResourceCeiling:         request.ResourceRequest,
 		PricingRevision:         binding.PricingRevision,
 		DataSensitivityContract: binding.DataSensitivityContract,
 		ProcessingContract:      binding.ProcessingContract,
-		BindingRevision:         binding.Revision, KeyEpoch: currentKeyEpoch,
-		IssuedAtMilliseconds:  request.IssuedAtMilliseconds,
-		ExpiresAtMilliseconds: request.ExpiresAtMilliseconds,
+		BudgetContract:          binding.BudgetContract, ResultPolicy: binding.ResultPolicy,
+		BindingRevision:         binding.Revision,
+		SourceAuthorityRevision: binding.SourceAuthorityRevision,
+		KeyEpoch:                currentKeyEpoch,
+		IssuedAtMilliseconds:    request.IssuedAtMilliseconds,
+		ExpiresAtMilliseconds:   request.ExpiresAtMilliseconds,
 	}, nil
+}
+
+func bindingAllowsParticipant(
+	binding SpaceComputeBinding,
+	participantID uuid.UUID,
+	participantRole Role,
+) bool {
+	participant := participantID.String()
+	principalIndex := sort.Search(len(binding.EligiblePrincipalIDs), func(index int) bool {
+		return binding.EligiblePrincipalIDs[index].String() >= participant
+	})
+	if principalIndex < len(binding.EligiblePrincipalIDs) &&
+		binding.EligiblePrincipalIDs[principalIndex] == participantID {
+		return true
+	}
+	return sortedStringsContain(binding.EligibleRoleIdentifiers, string(participantRole))
 }

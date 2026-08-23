@@ -2,10 +2,12 @@ package sharedspaces_test
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/computepool"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 )
 
@@ -33,8 +35,12 @@ func TestComputeCapabilitySignsAndVerifiesWithoutMembershipStore(t *testing.T) {
 	}
 	verified, err := verifier.Verify(capability, sharedspaces.ComputeCapabilityRequirement{
 		Issuer: claims.Issuer, SubjectParticipantID: claims.SubjectParticipantID,
-		SpaceID: claims.SpaceID, PoolID: claims.PoolID, Operation: claims.Operation,
-		KeyEpoch: claims.KeyEpoch,
+		SpaceID: claims.SpaceID, BindingID: claims.BindingID, PoolID: claims.PoolID,
+		PoolAuthorityRevision:   claims.PoolAuthorityRevision,
+		PoolAuthorityDigest:     claims.PoolAuthorityDigest,
+		SourceAuthorityRevision: claims.SourceAuthorityRevision,
+		ProviderIdentifier:      claims.AllowedProviderIdentifiers[0],
+		Operation:               claims.Operation, KeyEpoch: claims.KeyEpoch,
 		ResourceRequest: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 1_024, MaximumOutputBytes: 2_048,
 			MaximumMemoryBytes: 512 << 20, MaximumWallTimeMilliseconds: 30_000,
@@ -43,7 +49,7 @@ func TestComputeCapabilitySignsAndVerifiesWithoutMembershipStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verified != claims {
+	if !reflect.DeepEqual(verified, claims) {
 		t.Fatalf("verified claims differ: %#v", verified)
 	}
 }
@@ -113,11 +119,12 @@ func TestComputeCapabilityAuthorizationCapturesCurrentPolicyAndIssuesClaims(t *t
 	t.Parallel()
 	spaceID := uuid.New()
 	poolID := uuid.New()
+	bindingID := uuid.New()
 	participantID := uuid.New()
-	request := validComputeCapabilityRequest(spaceID, poolID)
-	pool, binding := validComputeCapabilityPolicy(spaceID, poolID)
+	request := validComputeCapabilityRequest(spaceID, bindingID, poolID)
+	binding := validComputeCapabilityPolicy(spaceID, bindingID, poolID)
 	authorization, err := sharedspaces.AuthorizeComputeCapability(
-		request, participantID, request.ExpectedKeyEpoch, pool, binding,
+		request, participantID, sharedspaces.RoleHost, request.ExpectedKeyEpoch, binding,
 		request.IssuedAtMilliseconds,
 	)
 	if err != nil {
@@ -151,14 +158,15 @@ func TestComputeCapabilityAuthorizationRejectsStaleOrExpandedPolicy(t *testing.T
 	t.Parallel()
 	spaceID := uuid.New()
 	poolID := uuid.New()
+	bindingID := uuid.New()
 	participantID := uuid.New()
-	request := validComputeCapabilityRequest(spaceID, poolID)
-	pool, binding := validComputeCapabilityPolicy(spaceID, poolID)
+	request := validComputeCapabilityRequest(spaceID, bindingID, poolID)
+	binding := validComputeCapabilityPolicy(spaceID, bindingID, poolID)
 
 	stale := request
 	stale.ExpectedBindingRevision++
 	if _, err := sharedspaces.AuthorizeComputeCapability(
-		stale, participantID, request.ExpectedKeyEpoch, pool, binding,
+		stale, participantID, sharedspaces.RoleHost, request.ExpectedKeyEpoch, binding,
 		request.IssuedAtMilliseconds,
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeCapabilityUnauthorized) {
 		t.Fatalf("stale binding error = %v", err)
@@ -166,40 +174,57 @@ func TestComputeCapabilityAuthorizationRejectsStaleOrExpandedPolicy(t *testing.T
 	expanded := request
 	expanded.ResourceRequest.MaximumInputBytes = binding.ResourceCeiling.MaximumInputBytes + 1
 	if _, err := sharedspaces.AuthorizeComputeCapability(
-		expanded, participantID, request.ExpectedKeyEpoch, pool, binding,
+		expanded, participantID, sharedspaces.RoleHost, request.ExpectedKeyEpoch, binding,
 		request.IssuedAtMilliseconds,
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeCapabilityUnauthorized) {
 		t.Fatalf("expanded resource error = %v", err)
 	}
-	disabled := pool
-	disabled.Enabled = false
+	ineligible := binding
+	ineligible.EligibleRoleIdentifiers = []string{string(sharedspaces.RoleReader)}
 	if _, err := sharedspaces.AuthorizeComputeCapability(
-		request, participantID, request.ExpectedKeyEpoch, disabled, binding,
+		request, participantID, sharedspaces.RoleHost, request.ExpectedKeyEpoch, ineligible,
 		request.IssuedAtMilliseconds,
 	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeCapabilityUnauthorized) {
-		t.Fatalf("disabled pool error = %v", err)
+		t.Fatalf("ineligible participant error = %v", err)
+	}
+	staleAuthority := binding
+	staleAuthority.SourceAuthorityRevision--
+	if _, err := sharedspaces.AuthorizeComputeCapability(
+		request, participantID, sharedspaces.RoleHost, request.ExpectedKeyEpoch,
+		staleAuthority, request.IssuedAtMilliseconds,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeComputeCapabilityUnauthorized) {
+		t.Fatalf("stale source authority error = %v", err)
 	}
 }
 
 func validComputeCapabilityClaims(key sharedspaces.ComputeCapabilityVerificationKey) sharedspaces.ComputeCapabilityClaims {
+	poolID := uuid.New()
+	authority := testComputePoolAuthority(poolID)
 	return sharedspaces.ComputeCapabilityClaims{
 		Version: sharedspaces.SchemaVersion, CapabilityID: uuid.New(),
 		Issuer: key.Issuer, KeyID: key.KeyID,
-		SubjectParticipantID: uuid.New(), SpaceID: uuid.New(), PoolID: uuid.New(),
-		Operation: "llm.batch", ResourceCeiling: sharedspaces.ComputeResourceCeiling{
+		SubjectParticipantID: uuid.New(), SpaceID: uuid.New(), BindingID: uuid.New(),
+		PoolID: poolID, PoolAuthorityRevision: authority.AcceptedManifestRevision,
+		PoolAuthorityDigest: authority.AcceptedManifestDigest,
+		Operation:           "llm.batch", ResourceCeiling: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 2 << 20,
 			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
 		},
 		PricingRevision: 3, DataSensitivityContract: "space-content-v1",
-		ProcessingContract: "participant-device-v1", BindingRevision: 4,
-		KeyEpoch: 2, IssuedAtMilliseconds: 5_000, ExpiresAtMilliseconds: 65_000,
+		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
+		ResultPolicy:               computepool.ResultPrivateToInvoker,
+		AllowedProviderIdentifiers: []string{"facets.local"}, BindingRevision: 4,
+		SourceAuthorityRevision: 2,
+		KeyEpoch:                2, IssuedAtMilliseconds: 5_000, ExpiresAtMilliseconds: 65_000,
 	}
 }
 
-func validComputeCapabilityRequest(spaceID, poolID uuid.UUID) sharedspaces.ComputeCapabilityRequest {
+func validComputeCapabilityRequest(
+	spaceID, bindingID, poolID uuid.UUID,
+) sharedspaces.ComputeCapabilityRequest {
 	return sharedspaces.ComputeCapabilityRequest{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
-		PoolID: poolID, Operation: "llm.batch",
+		BindingID: bindingID, PoolID: poolID, Operation: "llm.batch",
 		ResourceRequest: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 2 << 20,
 			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
@@ -209,25 +234,23 @@ func validComputeCapabilityRequest(spaceID, poolID uuid.UUID) sharedspaces.Compu
 	}
 }
 
-func validComputeCapabilityPolicy(spaceID, poolID uuid.UUID) (
-	sharedspaces.ComputePool,
-	sharedspaces.SpaceComputeBinding,
-) {
-	pool := sharedspaces.ComputePool{
-		Version: sharedspaces.SchemaVersion, SpaceID: spaceID, PoolID: poolID,
-		DisplayName: "Overnight devices", Enabled: true, Revision: 4,
-		CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 4_000,
-	}
-	binding := sharedspaces.SpaceComputeBinding{
-		Version: sharedspaces.SchemaVersion, SpaceID: spaceID, PoolID: poolID,
-		AllowedOperations: []string{"llm.batch", "vision.embed"},
+func validComputeCapabilityPolicy(
+	spaceID, bindingID, poolID uuid.UUID,
+) sharedspaces.SpaceComputeBinding {
+	return sharedspaces.SpaceComputeBinding{
+		Version: sharedspaces.SchemaVersion, SpaceID: spaceID, BindingID: bindingID,
+		PoolAuthority:              testComputePoolAuthority(poolID),
+		AllowedOperations:          []string{"llm.batch", "vision.embed"},
+		EligibleRoleIdentifiers:    []string{string(sharedspaces.RoleHost)},
+		AllowedProviderIdentifiers: []string{"facets.local"},
 		ResourceCeiling: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 4 << 20, MaximumOutputBytes: 8 << 20,
 			MaximumMemoryBytes: 4 << 30, MaximumWallTimeMilliseconds: 300_000,
 		},
 		PricingRevision: 3, DataSensitivityContract: "space-content-v1",
-		ProcessingContract: "participant-device-v1", Revision: 4,
+		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
+		ResultPolicy: computepool.ResultPrivateToInvoker,
+		Revision:     4, SourceAuthorityRevision: 2,
 		CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 4_000,
 	}
-	return pool, binding
 }

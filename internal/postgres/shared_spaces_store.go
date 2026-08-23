@@ -1161,7 +1161,7 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 	if err != nil {
 		return sharedspaces.SpaceStatus{}, err
 	}
-	computePools, computeBindings, err := loadSharedSpaceComputePools(ctx, tx, credential.TenantID)
+	computeBindings, err := loadSharedSpaceComputeBindings(ctx, tx, credential.TenantID)
 	if err != nil {
 		return sharedspaces.SpaceStatus{}, err
 	}
@@ -1198,165 +1198,224 @@ func (s *SharedSpacesStore) GetSpaceStatus(
 		ActiveCheckpointEpoch: activeCheckpointEpoch,
 		InitialParticipantID:  provisioning.InitialParticipantID,
 		Participants:          participants, Presentations: presentations,
-		ComputePools: computePools, ComputeBindings: computeBindings, Relay: relayStatus,
+		ComputeBindings: computeBindings, Relay: relayStatus,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}, nil
 }
 
-func (s *SharedSpacesStore) ChangeComputePool(
+func (s *SharedSpacesStore) ChangeComputeBinding(
 	ctx context.Context,
 	credential relay.AdministrationCredential,
-	change sharedspaces.ComputePoolChange,
+	change sharedspaces.SpaceComputeBindingChange,
 	nowMilliseconds int64,
-) (sharedspaces.ComputePoolChangeResult, error) {
+) (sharedspaces.SpaceComputeBindingChangeResult, error) {
 	if err := change.Validate(); err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, err
+		return sharedspaces.SpaceComputeBindingChangeResult{}, err
 	}
 	if change.ChangedAtMilliseconds > nowMilliseconds {
-		return sharedspaces.ComputePoolChangeResult{}, sharedspaces.NewProtocolError(
-			sharedspaces.CodeInvalidComputePool, "Shared Space compute pool change starts in the future",
+		return sharedspaces.SpaceComputeBindingChangeResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidComputeBinding,
+			"Shared Space compute binding change starts in the future",
 		)
 	}
 	requestPayload, err := json.Marshal(change)
 	if err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("encode Shared Space compute pool change: %w", err)
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"encode Shared Space compute binding change: %w", err,
+		)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("begin Shared Space compute pool change: %w", err)
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"begin Shared Space compute binding change: %w", err,
+		)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	domainID, _, _, err := loadSharedSpaceAuthority(ctx, tx, change.SpaceID, credential, "FOR UPDATE")
 	if err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, err
+		return sharedspaces.SpaceComputeBindingChangeResult{}, err
 	}
 	var existingRequestPayload, existingResponsePayload []byte
 	err = tx.QueryRow(ctx, `
 		SELECT request_payload,response_payload
-		FROM shared_space_compute_pool_changes
+		FROM shared_space_compute_binding_changes
 		WHERE space_id=$1 AND retry_id=$2
 		FOR UPDATE
 	`, change.SpaceID, change.RetryID).Scan(&existingRequestPayload, &existingResponsePayload)
 	if err == nil {
-		var existingRequest sharedspaces.ComputePoolChange
-		var result sharedspaces.ComputePoolChangeResult
+		var existingRequest sharedspaces.SpaceComputeBindingChange
+		var result sharedspaces.SpaceComputeBindingChangeResult
 		if decodeErr := json.Unmarshal(existingRequestPayload, &existingRequest); decodeErr != nil {
-			return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("decode Shared Space compute pool retry request: %w", decodeErr)
+			return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+				"decode Shared Space compute binding retry request: %w", decodeErr,
+			)
 		}
 		if decodeErr := json.Unmarshal(existingResponsePayload, &result); decodeErr != nil {
-			return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("decode Shared Space compute pool retry response: %w", decodeErr)
+			return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+				"decode Shared Space compute binding retry response: %w", decodeErr,
+			)
 		}
 		if !reflect.DeepEqual(existingRequest, change) {
-			return sharedspaces.ComputePoolChangeResult{}, sharedspaces.NewProtocolError(
-				sharedspaces.CodeComputePoolCollision, "compute pool retry ID was reused",
+			return sharedspaces.SpaceComputeBindingChangeResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeComputeBindingCollision,
+				"compute binding retry ID was reused",
 			)
 		}
 		result.Acceptance = relay.AcceptanceDuplicate
 		return result, nil
 	}
 	if err != pgx.ErrNoRows {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("load Shared Space compute pool retry: %w", err)
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"load Shared Space compute binding retry: %w", err,
+		)
 	}
-	var existingPoolPayload, existingBindingPayload []byte
+	currentKeyEpoch, err := loadSharedSpaceKeyEpoch(ctx, tx, change.SpaceID)
+	if err != nil {
+		return sharedspaces.SpaceComputeBindingChangeResult{}, err
+	}
+	if change.SourceAuthorityRevision != currentKeyEpoch {
+		return sharedspaces.SpaceComputeBindingChangeResult{}, sharedspaces.NewProtocolError(
+			sharedspaces.CodeComputeBindingCollision,
+			"compute binding source authority revision changed",
+		)
+	}
+	var existingBindingPayload []byte
 	var existingRevision uint64
 	var createdAt, updatedAt int64
 	err = tx.QueryRow(ctx, `
-		SELECT pool_payload,binding_payload,current_revision,
+		SELECT binding_payload,current_revision,
 		       created_at_milliseconds,updated_at_milliseconds
-		FROM shared_space_compute_pools
-		WHERE space_id=$1 AND pool_id=$2
+		FROM shared_space_compute_bindings
+		WHERE space_id=$1 AND binding_id=$2
 		FOR UPDATE
-	`, change.SpaceID, change.PoolID).Scan(
-		&existingPoolPayload, &existingBindingPayload, &existingRevision, &createdAt, &updatedAt,
+	`, change.SpaceID, change.BindingID).Scan(
+		&existingBindingPayload, &existingRevision, &createdAt, &updatedAt,
 	)
 	if err == pgx.ErrNoRows {
-		if change.PreviousPoolRevision != 0 {
-			return sharedspaces.ComputePoolChangeResult{}, sharedspaces.NewProtocolError(
-				sharedspaces.CodeComputePoolNotFound, "compute pool was not found",
+		if change.PreviousBindingRevision != 0 {
+			return sharedspaces.SpaceComputeBindingChangeResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeComputeBindingNotFound, "compute binding was not found",
 			)
 		}
 		createdAt = change.ChangedAtMilliseconds
 	} else if err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("load Shared Space compute pool: %w", err)
-	} else if existingRevision != change.PreviousPoolRevision ||
-		change.PreviousPoolRevision != change.PreviousBindingRevision {
-		return sharedspaces.ComputePoolChangeResult{}, sharedspaces.NewProtocolError(
-			sharedspaces.CodeComputePoolCollision, "compute pool revision changed",
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"load Shared Space compute binding: %w", err,
 		)
-	} else if change.ChangedAtMilliseconds < updatedAt {
-		return sharedspaces.ComputePoolChangeResult{}, sharedspaces.NewProtocolError(
-			sharedspaces.CodeInvalidComputePool, "compute pool change predates current state",
-		)
+	} else {
+		var existingBinding sharedspaces.SpaceComputeBinding
+		if err := json.Unmarshal(existingBindingPayload, &existingBinding); err != nil {
+			return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+				"decode Shared Space compute binding: %w", err,
+			)
+		}
+		if err := existingBinding.Validate(); err != nil ||
+			existingBinding.SpaceID != change.SpaceID ||
+			existingBinding.BindingID != change.BindingID ||
+			existingBinding.Revision != existingRevision {
+			return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+				"stored Shared Space compute binding is inconsistent",
+			)
+		}
+		if existingRevision != change.PreviousBindingRevision {
+			return sharedspaces.SpaceComputeBindingChangeResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeComputeBindingCollision, "compute binding revision changed",
+			)
+		}
+		if existingBinding.PoolAuthority.PoolID != change.PoolAuthority.PoolID ||
+			!reflect.DeepEqual(existingBinding.PoolAuthority.TrustAnchor, change.PoolAuthority.TrustAnchor) {
+			return sharedspaces.SpaceComputeBindingChangeResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeComputeBindingCollision,
+				"compute binding cannot silently change Pool authority",
+			)
+		}
+		if change.PoolAuthority.AcceptedManifestRevision <
+			existingBinding.PoolAuthority.AcceptedManifestRevision ||
+			(change.PoolAuthority.AcceptedManifestRevision ==
+				existingBinding.PoolAuthority.AcceptedManifestRevision &&
+				change.PoolAuthority.AcceptedManifestDigest !=
+					existingBinding.PoolAuthority.AcceptedManifestDigest) ||
+			change.SourceAuthorityRevision < existingBinding.SourceAuthorityRevision {
+			return sharedspaces.SpaceComputeBindingChangeResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeComputeBindingCollision,
+				"compute binding authority revision rolled back",
+			)
+		}
+		if change.ChangedAtMilliseconds < updatedAt {
+			return sharedspaces.SpaceComputeBindingChangeResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidComputeBinding,
+				"compute binding change predates current state",
+			)
+		}
 	}
-	nextRevision := change.PreviousPoolRevision + 1
-	pool := sharedspaces.ComputePool{
-		Version: sharedspaces.SchemaVersion, SpaceID: change.SpaceID, PoolID: change.PoolID,
-		DisplayName: change.DisplayName, Enabled: change.Enabled, Revision: nextRevision,
-		CreatedAtMilliseconds: createdAt, UpdatedAtMilliseconds: change.ChangedAtMilliseconds,
-	}
-	binding := sharedspaces.SpaceComputeBinding{
-		Version: sharedspaces.SchemaVersion, SpaceID: change.SpaceID, PoolID: change.PoolID,
-		AllowedOperations: append([]string(nil), change.AllowedOperations...),
-		ResourceCeiling:   change.ResourceCeiling, PricingRevision: change.PricingRevision,
-		DataSensitivityContract: change.DataSensitivityContract,
-		ProcessingContract:      change.ProcessingContract,
-		Revision:                nextRevision, CreatedAtMilliseconds: createdAt,
-		UpdatedAtMilliseconds: change.ChangedAtMilliseconds,
-	}
-	poolPayload, err := json.Marshal(pool)
-	if err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("encode Shared Space compute pool: %w", err)
-	}
+	nextRevision := change.PreviousBindingRevision + 1
+	binding := change.NextBinding(createdAt)
 	bindingPayload, err := json.Marshal(binding)
 	if err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("encode Shared Space compute binding: %w", err)
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"encode Shared Space compute binding: %w", err,
+		)
 	}
-	result := sharedspaces.ComputePoolChangeResult{
-		Acceptance: relay.AcceptanceAccepted, RetryID: change.RetryID, Pool: pool, Binding: binding,
+	result := sharedspaces.SpaceComputeBindingChangeResult{
+		Acceptance: relay.AcceptanceAccepted, RetryID: change.RetryID, Binding: binding,
 	}
 	responsePayload, err := json.Marshal(result)
 	if err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("encode Shared Space compute pool result: %w", err)
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"encode Shared Space compute binding result: %w", err,
+		)
 	}
 	if existingRevision == 0 {
 		_, err = tx.Exec(ctx, `
-			INSERT INTO shared_space_compute_pools (
-				space_id,pool_id,current_revision,pool_payload,binding_payload,
+			INSERT INTO shared_space_compute_bindings (
+				space_id,binding_id,pool_id,current_revision,binding_payload,
 				created_at_milliseconds,updated_at_milliseconds
 			) VALUES ($1,$2,$3,$4,$5,$6,$7)
-		`, change.SpaceID, change.PoolID, nextRevision, poolPayload, bindingPayload,
+		`, change.SpaceID, change.BindingID, change.PoolAuthority.PoolID,
+			nextRevision, bindingPayload,
 			createdAt, change.ChangedAtMilliseconds)
 	} else {
 		_, err = tx.Exec(ctx, `
-			UPDATE shared_space_compute_pools
-			SET current_revision=$3,pool_payload=$4,binding_payload=$5,
+			UPDATE shared_space_compute_bindings
+			SET pool_id=$3,current_revision=$4,binding_payload=$5,
 			    updated_at_milliseconds=$6,stored_at=now()
-			WHERE space_id=$1 AND pool_id=$2
-		`, change.SpaceID, change.PoolID, nextRevision, poolPayload, bindingPayload,
+			WHERE space_id=$1 AND binding_id=$2
+		`, change.SpaceID, change.BindingID, change.PoolAuthority.PoolID,
+			nextRevision, bindingPayload,
 			change.ChangedAtMilliseconds)
 	}
 	if err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("store Shared Space compute pool: %w", err)
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"store Shared Space compute binding: %w", err,
+		)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO shared_space_compute_pool_changes (
-			space_id,retry_id,pool_id,request_payload,response_payload,changed_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6)
-	`, change.SpaceID, change.RetryID, change.PoolID, requestPayload,
-		responsePayload, change.ChangedAtMilliseconds); err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("record Shared Space compute pool change: %w", err)
+		INSERT INTO shared_space_compute_binding_changes (
+			space_id,retry_id,binding_id,pool_id,request_payload,response_payload,
+			changed_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+	`, change.SpaceID, change.RetryID, change.BindingID,
+		change.PoolAuthority.PoolID, requestPayload, responsePayload,
+		change.ChangedAtMilliseconds); err != nil {
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"record Shared Space compute binding change: %w", err,
+		)
 	}
 	if err := insertSharedSpaceAuthorityEvent(ctx, tx, sharedspaces.AuthorityEvent{
 		EventID: change.RetryID, SpaceID: change.SpaceID, DomainID: domainID,
-		EventType:     sharedspaces.AuthorityEventSpaceComputeBindingChanged,
-		ComputePoolID: &change.PoolID, PreviousBindingRevision: &change.PreviousBindingRevision,
-		CurrentBindingRevision: &nextRevision,
-		OccurredAtMilliseconds: change.ChangedAtMilliseconds,
+		EventType:               sharedspaces.AuthorityEventSpaceComputeBindingChanged,
+		ComputeBindingID:        &change.BindingID,
+		ComputePoolID:           &change.PoolAuthority.PoolID,
+		PreviousBindingRevision: &change.PreviousBindingRevision,
+		CurrentBindingRevision:  &nextRevision,
+		OccurredAtMilliseconds:  change.ChangedAtMilliseconds,
 	}); err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, err
+		return sharedspaces.SpaceComputeBindingChangeResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return sharedspaces.ComputePoolChangeResult{}, fmt.Errorf("commit Shared Space compute pool change: %w", err)
+		return sharedspaces.SpaceComputeBindingChangeResult{}, fmt.Errorf(
+			"commit Shared Space compute binding change: %w", err,
+		)
 	}
 	return result, nil
 }
@@ -1388,7 +1447,7 @@ func (s *SharedSpacesStore) ListAuthorityEvents(
 	rows, err := tx.Query(ctx, `
 		SELECT sequence,event_id,space_id,domain_id,version,event_type,
 		       subject_participant_id,subject_device_id,invitation_id,previous_role,resulting_role,
-		       previous_key_epoch,current_key_epoch,compute_pool_id,
+		       previous_key_epoch,current_key_epoch,compute_binding_id,compute_pool_id,
 		       previous_binding_revision,current_binding_revision,
 		       secure_roster_digest,
 		       occurred_at_milliseconds
@@ -1413,7 +1472,7 @@ func (s *SharedSpacesStore) ListAuthorityEvents(
 			&event.Sequence, &event.EventID, &event.SpaceID, &event.DomainID,
 			&event.Version, &event.EventType, &event.SubjectParticipantID, &event.SubjectDeviceID,
 			&event.InvitationID, &previousRole, &currentRole,
-			&previousKeyEpoch, &currentKeyEpoch, &event.ComputePoolID,
+			&previousKeyEpoch, &currentKeyEpoch, &event.ComputeBindingID, &event.ComputePoolID,
 			&previousBindingRevision, &currentBindingRevision,
 			&secureRosterDigest,
 			&event.OccurredAtMilliseconds,
@@ -2671,34 +2730,29 @@ func (s *SharedSpacesStore) AuthorizeComputeCapability(
 		return sharedspaces.ComputeCapabilityAuthorization{}, err
 	}
 
-	var poolPayload, bindingPayload []byte
+	var bindingPayload []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT pool_payload,binding_payload
-		FROM shared_space_compute_pools
-		WHERE space_id=$1 AND pool_id=$2
-	`, request.SpaceID, request.PoolID).Scan(&poolPayload, &bindingPayload); err == pgx.ErrNoRows {
+		SELECT binding_payload
+		FROM shared_space_compute_bindings
+		WHERE space_id=$1 AND binding_id=$2
+	`, request.SpaceID, request.BindingID).Scan(&bindingPayload); err == pgx.ErrNoRows {
 		return sharedspaces.ComputeCapabilityAuthorization{}, sharedspaces.NewProtocolError(
-			sharedspaces.CodeComputePoolNotFound, "compute pool was not found",
+			sharedspaces.CodeComputeBindingNotFound, "compute binding was not found",
 		)
 	} else if err != nil {
 		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
 			"load Shared Space compute capability policy: %w", err,
 		)
 	}
-	var pool sharedspaces.ComputePool
 	var binding sharedspaces.SpaceComputeBinding
-	if err := json.Unmarshal(poolPayload, &pool); err != nil {
-		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
-			"decode Shared Space compute pool: %w", err,
-		)
-	}
 	if err := json.Unmarshal(bindingPayload, &binding); err != nil {
 		return sharedspaces.ComputeCapabilityAuthorization{}, fmt.Errorf(
 			"decode Shared Space compute binding: %w", err,
 		)
 	}
 	authorization, err := sharedspaces.AuthorizeComputeCapability(
-		request, participant.ParticipantID, currentKeyEpoch, pool, binding, nowMilliseconds,
+		request, participant.ParticipantID, participant.Role, currentKeyEpoch, binding,
+		nowMilliseconds,
 	)
 	if err != nil {
 		return sharedspaces.ComputeCapabilityAuthorization{}, err
@@ -3499,53 +3553,43 @@ func loadSharedSpaceParticipantPresentations(
 	return presentations, nil
 }
 
-func loadSharedSpaceComputePools(
+func loadSharedSpaceComputeBindings(
 	ctx context.Context,
 	querier relayQuerier,
 	spaceID uuid.UUID,
-) ([]sharedspaces.ComputePool, []sharedspaces.SpaceComputeBinding, error) {
+) ([]sharedspaces.SpaceComputeBinding, error) {
 	rows, err := querier.Query(ctx, `
-		SELECT pool_payload,binding_payload
-		FROM shared_space_compute_pools
+		SELECT binding_payload
+		FROM shared_space_compute_bindings
 		WHERE space_id=$1
-		ORDER BY pool_id
+		ORDER BY binding_id
 	`, spaceID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("query Shared Space compute pools: %w", err)
+		return nil, fmt.Errorf("query Shared Space compute bindings: %w", err)
 	}
 	defer rows.Close()
-	pools := []sharedspaces.ComputePool{}
 	bindings := []sharedspaces.SpaceComputeBinding{}
 	for rows.Next() {
-		var poolPayload, bindingPayload []byte
-		if err := rows.Scan(&poolPayload, &bindingPayload); err != nil {
-			return nil, nil, fmt.Errorf("scan Shared Space compute pool: %w", err)
-		}
-		var pool sharedspaces.ComputePool
-		if err := json.Unmarshal(poolPayload, &pool); err != nil {
-			return nil, nil, fmt.Errorf("decode Shared Space compute pool: %w", err)
+		var bindingPayload []byte
+		if err := rows.Scan(&bindingPayload); err != nil {
+			return nil, fmt.Errorf("scan Shared Space compute binding: %w", err)
 		}
 		var binding sharedspaces.SpaceComputeBinding
 		if err := json.Unmarshal(bindingPayload, &binding); err != nil {
-			return nil, nil, fmt.Errorf("decode Shared Space compute binding: %w", err)
-		}
-		if err := pool.Validate(); err != nil {
-			return nil, nil, fmt.Errorf("stored Shared Space compute pool failed validation: %v", err)
+			return nil, fmt.Errorf("decode Shared Space compute binding: %w", err)
 		}
 		if err := binding.Validate(); err != nil {
-			return nil, nil, fmt.Errorf("stored Shared Space compute binding failed validation: %v", err)
+			return nil, fmt.Errorf("stored Shared Space compute binding failed validation: %v", err)
 		}
-		if pool.SpaceID != spaceID || binding.SpaceID != spaceID ||
-			pool.PoolID != binding.PoolID || pool.Revision != binding.Revision {
-			return nil, nil, fmt.Errorf("stored Shared Space compute pool scope is inconsistent")
+		if binding.SpaceID != spaceID {
+			return nil, fmt.Errorf("stored Shared Space compute binding scope is inconsistent")
 		}
-		pools = append(pools, pool)
 		bindings = append(bindings, binding)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate Shared Space compute pools: %w", err)
+		return nil, fmt.Errorf("iterate Shared Space compute bindings: %w", err)
 	}
-	return pools, bindings, nil
+	return bindings, nil
 }
 
 func insertSharedSpaceParticipantKeyGrant(
@@ -3619,15 +3663,16 @@ func insertSharedSpaceAuthorityEvent(
 		INSERT INTO shared_space_authority_events (
 			space_id,domain_id,event_id,version,event_type,subject_participant_id,
 			subject_device_id,invitation_id,previous_role,resulting_role,previous_key_epoch,current_key_epoch,
-			compute_pool_id,previous_binding_revision,current_binding_revision,
+			compute_binding_id,compute_pool_id,previous_binding_revision,current_binding_revision,
 			secure_roster_digest,
 			occurred_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 	`, event.SpaceID, event.DomainID, event.EventID, sharedspaces.SchemaVersion,
 		string(event.EventType), event.SubjectParticipantID, event.SubjectDeviceID, event.InvitationID,
 		nullableSharedSpaceRole(event.PreviousRole), nullableSharedSpaceRole(event.CurrentRole),
 		nullableSharedSpaceKeyEpoch(event.PreviousKeyEpoch),
-		nullableSharedSpaceKeyEpoch(event.CurrentKeyEpoch), event.ComputePoolID,
+		nullableSharedSpaceKeyEpoch(event.CurrentKeyEpoch), event.ComputeBindingID,
+		event.ComputePoolID,
 		nullableSharedSpaceRevision(event.PreviousBindingRevision),
 		nullableSharedSpaceRevision(event.CurrentBindingRevision),
 		event.SecureRosterDigest, event.OccurredAtMilliseconds); err != nil {

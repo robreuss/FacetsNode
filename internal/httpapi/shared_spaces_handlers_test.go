@@ -18,8 +18,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/computepool"
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 )
 
@@ -538,33 +540,40 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		t.Fatalf("status=%+v", status)
 	}
 	poolID := uuid.New()
-	computePoolPath := spaceRoot + "/compute-pools/" + poolID.String()
-	computeChange := sharedspaces.ComputePoolChange{
+	bindingID := uuid.New()
+	computeBindingPath := spaceRoot + "/compute-bindings/" + bindingID.String()
+	computeChange := sharedspaces.SpaceComputeBindingChange{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
-		PoolID: poolID, DisplayName: "Space batch workers", Enabled: true,
-		AllowedOperations: []string{"facets.ai.classify", "facets.ai.embed"},
+		BindingID: bindingID, PoolAuthority: sharedSpaceComputePoolAuthority(poolID),
+		AllowedOperations:          []string{"facets.ai.classify", "facets.ai.embed"},
+		EligibleRoleIdentifiers:    []string{string(sharedspaces.RoleHost)},
+		AllowedProviderIdentifiers: []string{"facets.local"},
 		ResourceCeiling: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 1 << 20,
 			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
 		},
 		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
-		ProcessingContract: "participant-device-v1", ChangedAtMilliseconds: nowMilliseconds,
+		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
+		ResultPolicy:            computepool.ResultPrivateToInvoker,
+		SourceAuthorityRevision: sharedspaces.InitialKeyEpoch,
+		ChangedAtMilliseconds:   nowMilliseconds,
 	}
 	computeResponse := performRelayJSON(
-		t, handler, http.MethodPost, computePoolPath, computeChange,
+		t, handler, http.MethodPost, computeBindingPath, computeChange,
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
 	)
 	requireStatus(t, computeResponse, http.StatusCreated)
-	var computeResult sharedspaces.ComputePoolChangeResult
+	var computeResult sharedspaces.SpaceComputeBindingChangeResult
 	if err := json.NewDecoder(computeResponse.Body).Decode(&computeResult); err != nil {
 		t.Fatal(err)
 	}
 	_ = computeResponse.Body.Close()
-	if computeResult.Pool.PoolID != poolID || computeResult.Binding.Revision != 1 {
+	if computeResult.Binding.PoolAuthority.PoolID != poolID ||
+		computeResult.Binding.Revision != 1 {
 		t.Fatalf("compute result=%+v", computeResult)
 	}
 	computeRetry := performRelayJSON(
-		t, handler, http.MethodPost, computePoolPath, computeChange,
+		t, handler, http.MethodPost, computeBindingPath, computeChange,
 		domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
 	)
 	requireStatus(t, computeRetry, http.StatusOK)
@@ -579,9 +588,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		t.Fatal(err)
 	}
 	_ = computeStatusResponse.Body.Close()
-	if len(computeStatus.ComputePools) != 1 || len(computeStatus.ComputeBindings) != 1 ||
-		computeStatus.ComputePools[0].PoolID != poolID ||
-		computeStatus.ComputeBindings[0].PoolID != poolID {
+	if len(computeStatus.ComputeBindings) != 1 ||
+		computeStatus.ComputeBindings[0].PoolAuthority.PoolID != poolID ||
+		computeStatus.ComputeBindings[0].BindingID != bindingID {
 		t.Fatalf("compute status=%+v", computeStatus)
 	}
 	verificationKeyResponse := performRelayJSON(
@@ -599,7 +608,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	}
 	computeCapabilityRequest := sharedspaces.ComputeCapabilityRequest{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(), SpaceID: spaceID,
-		PoolID: poolID, Operation: "facets.ai.embed",
+		BindingID: bindingID, PoolID: poolID, Operation: "facets.ai.embed",
 		ResourceRequest: sharedspaces.ComputeResourceCeiling{
 			MaximumInputBytes: 512 << 10, MaximumOutputBytes: 512 << 10,
 			MaximumMemoryBytes: 512 << 20, MaximumWallTimeMilliseconds: 30_000,
@@ -627,7 +636,7 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	if _, err := verifier.Verify(
 		computeCapability,
 		sharedspaces.ComputeCapabilityRequirement{
-			SpaceID: spaceID, PoolID: poolID,
+			SpaceID: spaceID, BindingID: bindingID, PoolID: poolID,
 			SubjectParticipantID: provisioning.InitialParticipantID,
 			Operation:            "facets.ai.embed", ResourceRequest: computeCapabilityRequest.ResourceRequest,
 			KeyEpoch: sharedspaces.InitialKeyEpoch,
@@ -644,12 +653,12 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, wrongComputeParticipantResponse, http.StatusBadRequest)
 	_ = wrongComputeParticipantResponse.Body.Close()
-	wrongPoolPathResponse := performRelayJSON(
-		t, handler, http.MethodPost, spaceRoot+"/compute-pools/"+uuid.New().String(),
+	wrongBindingPathResponse := performRelayJSON(
+		t, handler, http.MethodPost, spaceRoot+"/compute-bindings/"+uuid.New().String(),
 		computeChange, domain.AdministrationCredential.AuthorizationToken, uuid.Nil,
 	)
-	requireStatus(t, wrongPoolPathResponse, http.StatusBadRequest)
-	_ = wrongPoolPathResponse.Body.Close()
+	requireStatus(t, wrongBindingPathResponse, http.StatusBadRequest)
+	_ = wrongBindingPathResponse.Body.Close()
 
 	revocation := sharedspaces.ParticipantRevocation{
 		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
@@ -1593,6 +1602,27 @@ func sameRelayCapabilities(left, right []relay.Capability) bool {
 		}
 	}
 	return true
+}
+
+func sharedSpaceComputePoolAuthority(poolID uuid.UUID) computepool.AuthorityReference {
+	x, y := elliptic.P256().ScalarBaseMult(bytes.Repeat([]byte{0x72}, 32))
+	publicKey := elliptic.Marshal(elliptic.P256(), x, y)
+	fingerprint := sha256.Sum256(publicKey)
+	return computepool.AuthorityReference{
+		Version: computepool.SchemaVersion,
+		PoolID:  poolID,
+		TrustAnchor: computepool.AuthorityTrustAnchor{
+			Version: computepool.SchemaVersion,
+			Scope: serviceauthority.Scope{
+				Kind: serviceauthority.ScopeComputePool, ScopeID: poolID,
+			},
+			SignerID:              uuid.MustParse("78787878-7878-4878-8878-787878787878"),
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
+			SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+		},
+		AcceptedManifestRevision: 2,
+		AcceptedManifestDigest:   hex.EncodeToString(bytes.Repeat([]byte{0x73}, 32)),
+	}
 }
 
 func TestProductAuthorityRoutesAreIsolatedByServiceConfiguration(t *testing.T) {
