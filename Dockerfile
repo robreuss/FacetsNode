@@ -19,6 +19,8 @@ RUN for value in "$FACETS_SERVER_SOURCE_REVISION" "$FACETS_SERVER_SOURCE_TREE"; 
         -o /out/facets-device-sync-server ./cmd/facets-device-sync-server && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
         -o /out/facets-shared-spaces-server ./cmd/facets-shared-spaces-server && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+        -o /out/facets-compute-pool-server ./cmd/facets-compute-pool-server && \
     mkdir -p /out/blobs && chown 65532:65532 /out/blobs
 
 FROM scratch AS device-sync
@@ -46,3 +48,16 @@ COPY --chown=65532:65532 --from=build /out/blobs /var/lib/facets-shared-spaces/b
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/facets-shared-spaces-server"]
+
+FROM scratch AS compute-pool
+ARG FACETS_SERVER_SOURCE_REVISION
+ARG FACETS_SERVER_SOURCE_TREE
+LABEL org.opencontainers.image.title="Facets Compute Pool Service" \
+      org.opencontainers.image.revision="$FACETS_SERVER_SOURCE_REVISION" \
+      org.opencontainers.image.source-tree="$FACETS_SERVER_SOURCE_TREE"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/facets-compute-pool-server /facets-compute-pool-server
+COPY --chown=65532:65532 --from=build /out/blobs /var/lib/facets-compute-pool/blobs
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/facets-compute-pool-server"]

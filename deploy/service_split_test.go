@@ -137,13 +137,15 @@ func TestSharedSpacesOperationsScriptsParse(t *testing.T) {
 	}
 }
 
-func TestDockerfilePublishesBothServiceImages(t *testing.T) {
+func TestDockerfilePublishesAllServiceImages(t *testing.T) {
 	dockerfile := readDeploymentFile(t, "../Dockerfile")
 	assertContainsAll(t, "Dockerfile", dockerfile, []string{
 		"FROM scratch AS device-sync",
 		"ENTRYPOINT [\"/facets-device-sync-server\"]",
 		"FROM scratch AS shared-spaces",
 		"ENTRYPOINT [\"/facets-shared-spaces-server\"]",
+		"FROM scratch AS compute-pool",
+		"ENTRYPOINT [\"/facets-compute-pool-server\"]",
 	})
 }
 

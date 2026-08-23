@@ -121,6 +121,8 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	t.Setenv("FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY", managedKey)
 	t.Setenv("FACETS_SHARED_SPACES_COMPUTE_CAPABILITY_SIGNING_SEED", computeSeed)
 	t.Setenv("FACETS_SHARED_SPACES_PUBLIC_URL", "https://shared-spaces.example")
+	configureComputePool(t)
+	t.Setenv("FACETS_COMPUTE_POOL_LISTEN_ADDR", ":8083")
 
 	deviceSync, err := config.Load(config.DeviceSync)
 	if err != nil {
@@ -130,11 +132,19 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	computePool, err := config.Load(config.ComputePool)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if deviceSync.Service != config.DeviceSync || deviceSync.ListenAddress != ":8081" || deviceSync.BlobRoot != "/var/lib/facets-device-sync/blobs" {
 		t.Fatalf("device sync configuration=%+v", deviceSync)
 	}
 	if sharedSpaces.Service != config.SharedSpaces || sharedSpaces.ListenAddress != ":8082" || sharedSpaces.BlobRoot != "/var/lib/facets-shared-spaces/blobs" {
 		t.Fatalf("shared spaces configuration=%+v", sharedSpaces)
+	}
+	if computePool.Service != config.ComputePool || computePool.ListenAddress != ":8083" ||
+		computePool.BlobRoot != "/var/lib/facets-compute-pool/blobs" {
+		t.Fatalf("Compute Pool configuration=%+v", computePool)
 	}
 	if !bytes.Equal(sharedSpaces.ManagedKeyEncryptionKey, bytes.Repeat([]byte{0x42}, 32)) {
 		t.Fatal("Shared Spaces managed key-encryption key was not decoded")
@@ -144,6 +154,28 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	}
 	if sharedSpaces.PublicURL != "https://shared-spaces.example" {
 		t.Fatalf("Shared Spaces public URL=%q", sharedSpaces.PublicURL)
+	}
+}
+
+func TestComputePoolRequiresIndependentOperatorAndDeploymentAuthority(t *testing.T) {
+	t.Setenv("FACETS_COMPUTE_POOL_DATABASE_URL", "postgres://example.invalid/compute_pool")
+	if _, err := config.Load(config.ComputePool); err == nil {
+		t.Fatal("Compute Pool without operator and deployment authority was accepted")
+	}
+	t.Setenv(
+		"FACETS_COMPUTE_POOL_OPERATOR_TOKEN",
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x61}, 32)),
+	)
+	if _, err := config.Load(config.ComputePool); err == nil {
+		t.Fatal("Compute Pool without deployment authority was accepted")
+	}
+	configureComputePool(t)
+	configuration, err := config.Load(config.ComputePool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.DeploymentID == uuid.Nil || configuration.OperatorToken == "" {
+		t.Fatalf("Compute Pool authority configuration=%+v", configuration)
 	}
 }
 
@@ -227,6 +259,24 @@ func TestLegacyNodeEnvironmentIsNotACompatibilityFallback(t *testing.T) {
 	if _, err := config.Load(config.DeviceSync); err == nil {
 		t.Fatal("legacy Facets Node configuration unexpectedly enabled Device Sync")
 	}
+}
+
+func configureComputePool(t *testing.T) {
+	t.Helper()
+	t.Setenv("FACETS_COMPUTE_POOL_DATABASE_URL", "postgres://example.invalid/compute_pool")
+	t.Setenv(
+		"FACETS_COMPUTE_POOL_OPERATOR_TOKEN",
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x61}, 32)),
+	)
+	t.Setenv("FACETS_COMPUTE_POOL_DEPLOYMENT_ID", "87000000-0000-0000-0000-000000000001")
+	t.Setenv(
+		"FACETS_COMPUTE_POOL_DEPLOYMENT_SIGNING_KEY_FILE",
+		"/var/lib/facets-compute-pool/deployment-signing-key",
+	)
+	t.Setenv(
+		"FACETS_COMPUTE_POOL_SERVICE_AUTHORITY_BINDINGS_FILE",
+		"/var/lib/facets-compute-pool/service-authority-bindings.json",
+	)
 }
 
 func TestDeploymentAuthenticationConfigurationIsAllOrNothing(t *testing.T) {

@@ -41,6 +41,7 @@ type Service string
 const (
 	DeviceSync   Service = "facets-device-sync-server"
 	SharedSpaces Service = "facets-shared-spaces-server"
+	ComputePool  Service = "facets-compute-pool-server"
 )
 
 func (service Service) EnvironmentPrefix() (string, error) {
@@ -49,6 +50,8 @@ func (service Service) EnvironmentPrefix() (string, error) {
 		return "FACETS_DEVICE_SYNC", nil
 	case SharedSpaces:
 		return "FACETS_SHARED_SPACES", nil
+	case ComputePool:
+		return "FACETS_COMPUTE_POOL", nil
 	default:
 		return "", fmt.Errorf("unsupported Facets server service %q", service)
 	}
@@ -60,6 +63,8 @@ func (service Service) BlobRoot() (string, error) {
 		return "/var/lib/facets-device-sync/blobs", nil
 	case SharedSpaces:
 		return "/var/lib/facets-shared-spaces/blobs", nil
+	case ComputePool:
+		return "/var/lib/facets-compute-pool/blobs", nil
 	default:
 		return "", fmt.Errorf("unsupported Facets server service %q", service)
 	}
@@ -147,6 +152,17 @@ func Load(service Service) (Config, error) {
 				"%s_OPERATOR_TOKEN must be 32-byte unpadded base64url", prefix,
 			)
 		}
+	}
+	if service == ComputePool && configuration.OperatorToken == "" {
+		return Config{}, fmt.Errorf("%s_OPERATOR_TOKEN is required", prefix)
+	}
+	if service == ComputePool && configuredDeploymentValues != 3 {
+		return Config{}, fmt.Errorf(
+			"%s, %s, and %s are required for the Compute Pool Service",
+			deploymentIDName,
+			deploymentKeyFileName,
+			bindingFileName,
+		)
 	}
 	if service == SharedSpaces {
 		managedKeyName := prefix + "_MANAGED_KEY_ENCRYPTION_KEY"

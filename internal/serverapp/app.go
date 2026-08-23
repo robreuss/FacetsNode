@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/robreuss/FacetsNode/internal/computepool"
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/httpapi"
 	"github.com/robreuss/FacetsNode/internal/keycustody"
@@ -65,6 +66,18 @@ func Main(service config.Service) {
 	if err := pool.Ping(startupContext); err != nil {
 		logger.Error("database unavailable", "error", err)
 		os.Exit(1)
+	}
+	if service == config.ComputePool {
+		if err := runComputePoolService(
+			rootContext,
+			pool,
+			configuration,
+			logger,
+		); err != nil {
+			logger.Error("Compute Pool Service failed", "error", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := postgres.Migrate(startupContext, pool); err != nil {
 		logger.Error("database migration failed", "error", err)
@@ -201,6 +214,85 @@ func Main(service config.Service) {
 		logger.Warn("cross-instance relay wake listener shutdown timed out")
 	}
 	logger.Info("shutdown complete")
+}
+
+func runComputePoolService(
+	rootContext context.Context,
+	pool *pgxpool.Pool,
+	configuration config.Config,
+	logger *slog.Logger,
+) error {
+	startupContext, startupCancel := context.WithTimeout(rootContext, 30*time.Second)
+	defer startupCancel()
+	if err := postgres.MigrateComputePool(startupContext, pool); err != nil {
+		return fmt.Errorf("Compute Pool database migration failed: %w", err)
+	}
+	deploymentSigner, err := serviceauthority.LoadDeploymentSigner(
+		configuration.DeploymentID,
+		configuration.DeploymentSigningKeyFile,
+	)
+	if err != nil {
+		return fmt.Errorf("Compute Pool deployment signing custody rejected: %w", err)
+	}
+	bindings, err := serviceauthority.LoadBindingRegistry(
+		configuration.ServiceAuthorityBindingsFile,
+		configuration.DeploymentID,
+	)
+	if err != nil {
+		return fmt.Errorf("Compute Pool service authority bindings rejected: %w", err)
+	}
+	handler, err := computepool.NewHTTPHandler(
+		postgres.NewComputePoolStore(pool),
+		deploymentSigner,
+		bindings,
+		configuration.OperatorToken,
+	)
+	if err != nil {
+		return fmt.Errorf("Compute Pool HTTP authority rejected: %w", err)
+	}
+	server := &http.Server{
+		Addr:              configuration.ListenAddress,
+		Handler:           handler.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       configuration.TransferPeriod,
+		WriteTimeout:      configuration.TransferPeriod,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1_024,
+	}
+	serverErrors := make(chan error, 1)
+	go func() {
+		logger.Info(
+			"Facets Compute Pool Service listening",
+			"address",
+			configuration.ListenAddress,
+			"go_version",
+			runtime.Version(),
+			"deployment_id",
+			configuration.DeploymentID,
+			"signing_key_fingerprint",
+			deploymentSigner.SigningKeyFingerprint(),
+		)
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case <-rootContext.Done():
+		logger.Info("Compute Pool shutdown requested")
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("Compute Pool HTTP server failed: %w", err)
+		}
+	}
+	shutdownContext, shutdownCancel := context.WithTimeout(
+		context.Background(),
+		configuration.ShutdownPeriod,
+	)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownContext); err != nil {
+		return fmt.Errorf("Compute Pool graceful shutdown failed: %w", err)
+	}
+	logger.Info("Compute Pool shutdown complete")
+	return nil
 }
 
 func blobMaintenanceLoop(ctx context.Context, logger *slog.Logger, store relay.BlobMaintenanceStore, blobs relay.BlobContentMaintenanceStore, uploads relay.BlobUploadMaintenanceContentStore, period, grace time.Duration) {
