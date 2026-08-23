@@ -17,9 +17,12 @@ The profile creates three network compartments and one socket boundary:
 
 The ordinary Caddy service is disabled and both inherited host port lists are
 reset. Tor has no SOCKS or control listener and publishes no port. Its only
-onion mapping is virtual port 443 to Caddy's Unix socket. Caddy forwards only the same
-application allowlist as direct ingress; health, readiness, metrics, operator
-provisioning, PostgreSQL, and blob files remain private.
+onion mapping is virtual port 443 to Caddy's Unix socket. Caddy forwards only
+the same application allowlist as direct ingress; health, readiness, metrics,
+operator provisioning, PostgreSQL, and blob files remain private.
+
+Tor consensus, descriptor, and runtime state use a bounded 128 MiB disposable
+tmpfs. Only the much smaller onion identity directory is persistent.
 
 The persistent onion volume contains the hostname and Tor master identity
 state and is created mode 0700 for the unprivileged `debian-tor` user. Treat

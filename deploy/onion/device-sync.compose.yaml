@@ -52,7 +52,7 @@ services:
     restart: unless-stopped
     read_only: true
     tmpfs:
-      - /tmp:size=16m,mode=1777
+      - /tmp:size=128m,mode=1777
     volumes:
       - facets-device-sync-onion:/var/lib/tor/facets-onion
       - facets-device-sync-onion-socket:/run/facets-onion

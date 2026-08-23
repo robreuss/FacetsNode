@@ -50,6 +50,7 @@ func TestOnionProfilesPublishNoHostPortAndIsolateNetworks(t *testing.T) {
 				"no-new-privileges=true",
 				"cap_drop:\n      - ALL",
 				"cap_add:\n      - NET_BIND_SERVICE\n      - DAC_READ_SEARCH",
+				"/tmp:size=128m,mode=1777",
 			})
 			if strings.Contains(contents, "127.0.0.1:") ||
 				strings.Contains(contents, "8443:8443") ||
