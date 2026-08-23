@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -28,6 +30,9 @@ type Config struct {
 	BlobOrphanGrace              time.Duration
 	CheckpointFenceTTL           time.Duration
 	TrafficLimits                traffic.Limits
+	DeploymentID                 uuid.UUID
+	DeploymentSigningKeyFile     string
+	ServiceAuthorityBindingsFile string
 }
 
 type Service string
@@ -83,6 +88,40 @@ func Load(service Service) (Config, error) {
 		BlobOrphanGrace:    24 * time.Hour,
 		CheckpointFenceTTL: 2 * time.Hour,
 		TrafficLimits:      traffic.DefaultLimits(),
+	}
+	deploymentIDName := prefix + "_DEPLOYMENT_ID"
+	deploymentKeyFileName := prefix + "_DEPLOYMENT_SIGNING_KEY_FILE"
+	bindingFileName := prefix + "_SERVICE_AUTHORITY_BINDINGS_FILE"
+	deploymentIDText := strings.TrimSpace(os.Getenv(deploymentIDName))
+	configuration.DeploymentSigningKeyFile = strings.TrimSpace(
+		os.Getenv(deploymentKeyFileName),
+	)
+	configuration.ServiceAuthorityBindingsFile = strings.TrimSpace(
+		os.Getenv(bindingFileName),
+	)
+	configuredDeploymentValues := 0
+	if deploymentIDText != "" {
+		configuredDeploymentValues++
+	}
+	if configuration.DeploymentSigningKeyFile != "" {
+		configuredDeploymentValues++
+	}
+	if configuration.ServiceAuthorityBindingsFile != "" {
+		configuredDeploymentValues++
+	}
+	if configuredDeploymentValues != 0 && configuredDeploymentValues != 3 {
+		return Config{}, fmt.Errorf(
+			"%s, %s, and %s must be configured together",
+			deploymentIDName,
+			deploymentKeyFileName,
+			bindingFileName,
+		)
+	}
+	if configuredDeploymentValues == 3 {
+		configuration.DeploymentID, err = uuid.Parse(deploymentIDText)
+		if err != nil || configuration.DeploymentID == uuid.Nil {
+			return Config{}, fmt.Errorf("%s must be a nonzero UUID", deploymentIDName)
+		}
 	}
 	if configuration.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("%s_DATABASE_URL is required", prefix)

@@ -16,6 +16,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
@@ -38,6 +39,9 @@ type Server struct {
 	logger                              *slog.Logger
 	metrics                             *Metrics
 	traffic                             *trafficController
+	deploymentSigner                    *serviceauthority.DeploymentSigner
+	serviceAuthorityBindings            *serviceauthority.BindingRegistry
+	serviceAuthorityScopeKind           serviceauthority.ScopeKind
 	now                                 func() time.Time
 }
 
@@ -61,6 +65,23 @@ func (s *Server) SetServiceIdentity(identity string) {
 	if identity = strings.TrimSpace(identity); identity != "" {
 		s.serviceIdentity = identity
 	}
+}
+
+// SetServiceAuthorityDeployment enables application-level deployment proof
+// and exact authority binding for every Facets capability route. Health and
+// metrics remain unbound so an operator can diagnose a failed authority
+// rollout without presenting a client scope.
+func (s *Server) SetServiceAuthorityDeployment(
+	signer *serviceauthority.DeploymentSigner,
+	bindings *serviceauthority.BindingRegistry,
+	scopeKind serviceauthority.ScopeKind,
+) {
+	if signer == nil || bindings == nil || !scopeKind.Valid() {
+		panic("invalid service authority deployment")
+	}
+	s.deploymentSigner = signer
+	s.serviceAuthorityBindings = bindings
+	s.serviceAuthorityScopeKind = scopeKind
 }
 
 // SetDeviceSyncStore enables the product-level Device Sync admission routes.
@@ -115,11 +136,28 @@ func NewWithRelay(
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	register := func(pattern string, surface traffic.Surface, handler http.HandlerFunc) {
+		bound := http.Handler(handler)
+		if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
+			bound = s.serviceAuthorityBindingHandler(
+				serviceAuthorityTrafficClass(surface),
+				bound,
+			)
+		}
+		mux.Handle(pattern, s.trafficHandler(surface, bound.ServeHTTP))
+	}
+	registerUnbound := func(pattern string, surface traffic.Surface, handler http.HandlerFunc) {
 		mux.Handle(pattern, s.trafficHandler(surface, handler))
 	}
-	register("GET /livez", traffic.SurfaceManagement, s.handleLive)
-	register("GET /readyz", traffic.SurfaceManagement, s.handleReady)
-	register("GET /metrics", traffic.SurfaceManagement, s.handleMetrics)
+	registerUnbound("GET /livez", traffic.SurfaceManagement, s.handleLive)
+	registerUnbound("GET /readyz", traffic.SurfaceManagement, s.handleReady)
+	registerUnbound("GET /metrics", traffic.SurfaceManagement, s.handleMetrics)
+	if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
+		registerUnbound(
+			"POST /v1/service-deployment/proof",
+			traffic.SurfaceManagement,
+			s.handleServiceDeploymentProof,
+		)
+	}
 	register("POST /v1/pairing/routes", traffic.SurfaceRendezvous, s.handleCreateRoute)
 	register(
 		"PUT /v1/pairing/routes/{routeID}/messages/{messageID}",

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
@@ -224,6 +226,32 @@ func TestLegacyNodeEnvironmentIsNotACompatibilityFallback(t *testing.T) {
 	t.Setenv("FACETS_NODE_DATABASE_URL", "postgres://example.invalid/legacy")
 	if _, err := config.Load(config.DeviceSync); err == nil {
 		t.Fatal("legacy Facets Node configuration unexpectedly enabled Device Sync")
+	}
+}
+
+func TestDeploymentAuthenticationConfigurationIsAllOrNothing(t *testing.T) {
+	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/device_sync")
+	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
+	t.Setenv("FACETS_DEVICE_SYNC_DEPLOYMENT_ID", deploymentID.String())
+	if _, err := config.Load(config.DeviceSync); err == nil {
+		t.Fatal("partial deployment authentication configuration accepted")
+	}
+	t.Setenv(
+		"FACETS_DEVICE_SYNC_DEPLOYMENT_SIGNING_KEY_FILE",
+		"/var/lib/facets-device-sync/deployment-signing-key",
+	)
+	t.Setenv(
+		"FACETS_DEVICE_SYNC_SERVICE_AUTHORITY_BINDINGS_FILE",
+		"/var/lib/facets-device-sync/service-authority-bindings.json",
+	)
+	configuration, err := config.Load(config.DeviceSync)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.DeploymentID != deploymentID ||
+		configuration.DeploymentSigningKeyFile == "" ||
+		configuration.ServiceAuthorityBindingsFile == "" {
+		t.Fatalf("deployment authentication configuration=%+v", configuration)
 	}
 }
 

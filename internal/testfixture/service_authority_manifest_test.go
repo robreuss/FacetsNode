@@ -22,9 +22,20 @@ const (
 //go:embed service-authority-manifest-portable-v1.json
 var serviceAuthorityFixture []byte
 
+//go:embed service-deployment-proof-go-v1.json
+var serviceDeploymentProofFixture []byte
+
 type portableServiceAuthorityFixture struct {
 	Manifest        []byte `json:"manifest"`
 	ReferenceDigest string `json:"referenceDigest"`
+}
+
+type portableDeploymentProofFixture struct {
+	Proof struct {
+		Payload   []byte            `json:"payload"`
+		Signature portableSignature `json:"signature"`
+	} `json:"proof"`
+	Request json.RawMessage `json:"request"`
 }
 
 type portableManifest struct {
@@ -124,6 +135,30 @@ func TestServiceAuthorityManifestPortableFixture(t *testing.T) {
 	}
 }
 
+func TestGoDeploymentProofPortableFixture(t *testing.T) {
+	var fixture portableDeploymentProofFixture
+	decodeStrict(t, serviceDeploymentProofFixture, &fixture)
+	var payload struct {
+		ExpiresAtMilliseconds int64           `json:"expiresAtMilliseconds"`
+		IssuedAtMilliseconds  int64           `json:"issuedAtMilliseconds"`
+		Request               json.RawMessage `json:"request"`
+		Version               int             `json:"version"`
+	}
+	decodeStrict(t, fixture.Proof.Payload, &payload)
+	if payload.Version != 1 || payload.IssuedAtMilliseconds != 1_000 ||
+		payload.ExpiresAtMilliseconds != 301_000 ||
+		!bytes.Equal(payload.Request, fixture.Request) {
+		t.Fatalf("unexpected portable deployment proof: %+v", payload)
+	}
+	assertCanonicalJSON(t, fixture.Proof.Payload)
+	assertRawP256Signature(
+		t,
+		fixture.Proof.Signature,
+		"Facets server deployment proof v1\x00",
+		fixture.Proof.Payload,
+	)
+}
+
 func assertIndependentOnionAuthentication(t *testing.T, routes []portableRoute) {
 	t.Helper()
 	for _, route := range routes {
@@ -146,20 +181,38 @@ func assertManifestSignature(t *testing.T, manifest portableManifest) {
 	if manifest.Signature.Algorithm != "ES256" {
 		t.Fatalf("signature algorithm=%q", manifest.Signature.Algorithm)
 	}
-	publicBytes := decodeBase64URL(t, manifest.Signature.PublicSigningKeyX963)
+	assertRawP256Signature(
+		t,
+		manifest.Signature,
+		manifestSignatureDomain,
+		manifest.Payload,
+	)
+}
+
+func assertRawP256Signature(
+	t *testing.T,
+	signature portableSignature,
+	domain string,
+	payload []byte,
+) {
+	t.Helper()
+	if signature.Algorithm != "ES256" {
+		t.Fatalf("signature algorithm=%q", signature.Algorithm)
+	}
+	publicBytes := decodeBase64URL(t, signature.PublicSigningKeyX963)
 	x, y := elliptic.Unmarshal(elliptic.P256(), publicBytes)
 	if x == nil || y == nil {
 		t.Fatal("invalid X9.63 P-256 authority public key")
 	}
 	fingerprint := sha256.Sum256(publicBytes)
-	if hex.EncodeToString(fingerprint[:]) != manifest.Signature.SigningKeyFingerprint {
+	if hex.EncodeToString(fingerprint[:]) != signature.SigningKeyFingerprint {
 		t.Fatal("authority signing-key fingerprint mismatch")
 	}
-	rawSignature := decodeBase64URL(t, manifest.Signature.Signature)
+	rawSignature := decodeBase64URL(t, signature.Signature)
 	if len(rawSignature) != 64 {
 		t.Fatalf("raw ES256 signature length=%d; want 64", len(rawSignature))
 	}
-	signed := append([]byte(manifestSignatureDomain), manifest.Payload...)
+	signed := append([]byte(domain), payload...)
 	digest := sha256.Sum256(signed)
 	key := &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
 	r := new(big.Int).SetBytes(rawSignature[:32])

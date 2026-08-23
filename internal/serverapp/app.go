@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/robreuss/FacetsNode/internal/config"
@@ -19,6 +20,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/keycustody"
 	"github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 )
 
@@ -87,6 +89,34 @@ func Main(service config.Service) {
 		os.Exit(1)
 	}
 	api.SetServiceIdentity(string(service))
+	if configuration.DeploymentID != uuid.Nil {
+		deploymentSigner, err := serviceauthority.LoadDeploymentSigner(
+			configuration.DeploymentID,
+			configuration.DeploymentSigningKeyFile,
+		)
+		if err != nil {
+			logger.Error("deployment signing custody rejected", "error", err)
+			os.Exit(1)
+		}
+		bindings, err := serviceauthority.LoadBindingRegistry(
+			configuration.ServiceAuthorityBindingsFile,
+			configuration.DeploymentID,
+		)
+		if err != nil {
+			logger.Error("service authority bindings rejected", "error", err)
+			os.Exit(1)
+		}
+		scopeKind := serviceauthority.ScopeDeviceSync
+		if service == config.SharedSpaces {
+			scopeKind = serviceauthority.ScopeSharedSpace
+		}
+		api.SetServiceAuthorityDeployment(deploymentSigner, bindings, scopeKind)
+		logger.Info(
+			"Facets deployment authentication enabled",
+			"deployment_id", configuration.DeploymentID,
+			"signing_key_fingerprint", deploymentSigner.SigningKeyFingerprint(),
+		)
+	}
 	if service == config.DeviceSync {
 		api.SetDeviceSyncStore(relayStore)
 	}

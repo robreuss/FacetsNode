@@ -183,6 +183,10 @@ legacy `FACETS_NODE_` configuration fallback. Traffic controls use the chosen
 service prefix followed by
 `TRAFFIC_<SURFACE>_{RATE_PER_MINUTE,BURST,CONNECTION_RATE_PER_MINUTE,CONNECTION_BURST,CONCURRENCY}`.
 
+Portable deployment proof, protected deployment-key custody, and exact
+service-authority request binding are documented in
+[Service authority deployment authentication](docs/service-authority-deployment.md).
+
 `FACETS_SERVER_SOURCE_REVISION` and `FACETS_SERVER_SOURCE_TREE` are OCI build
 arguments shared by both images. A revision-attested deployment supplies full
 lowercase 40-character values and verifies the resulting immutable image

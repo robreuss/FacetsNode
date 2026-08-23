@@ -36,6 +36,11 @@ capability digests without content keys.
 7. Device Sync and Shared Spaces remain independent services with independent
    databases, blob namespaces, secrets, onion state, quotas, and lifecycle even
    when hosted on one Facets Box.
+8. When deployment authentication is enabled, FacetsNode loads its P-256
+   deployment key from an owner-only key file and a non-secret, deployment-
+   scoped active-binding file. It signs only challenges that name an exact
+   current binding. All capability routes reject absent, stale, conflicting,
+   or wrong-deployment binding headers before bearer authorization.
 
 ## Compromise boundary
 
@@ -53,6 +58,12 @@ manifest monotonicity continue to protect content integrity and confidentiality.
   ingress, durable opaque storage, and operational backup/restore.
 - Shared portable fixtures freeze cross-language fields before Go APIs depend
   on them.
+
+The deployment proof endpoint is deliberately unauthenticated and accepts no
+bearer. It proves possession of the manifest-authorized deployment key for a
+fresh challenge; it does not grant a capability. Health, readiness, and
+metrics remain outside service-scope binding for diagnosis. Every product
+capability route becomes fail-closed once deployment authentication is enabled.
 
 No peer-sync compatibility or pre-release route migration is required.
 
