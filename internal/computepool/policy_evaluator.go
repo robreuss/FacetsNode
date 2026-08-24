@@ -20,10 +20,29 @@ type PolicyActivationEvaluation struct {
 	MissingParticipantIDs []uuid.UUID
 }
 
-func EvaluatePolicyActivation(current, proposed SpaceProtectionPolicy, activeParticipantIDs []uuid.UUID, acknowledgements []PolicyAcknowledgement) (PolicyActivationEvaluation, error) {
-	if current.Validate() != nil || proposed.Validate() != nil || current.PolicyID != proposed.PolicyID || current.SpaceID != proposed.SpaceID ||
+type PolicyParticipantSigningAuthority struct {
+	ParticipantID         uuid.UUID
+	SigningKeyFingerprint string
+}
+
+func EvaluatePolicyActivation(signedCurrent, signedProposed SignedSpaceProtectionPolicy, expectedPolicyAuthorityID uuid.UUID, expectedPolicySigningKeyFingerprint string, activeParticipants []PolicyParticipantSigningAuthority, acknowledgements []PolicyAcknowledgement) (PolicyActivationEvaluation, error) {
+	current, proposed := signedCurrent.Policy, signedProposed.Policy
+	participantIDs := make([]uuid.UUID, len(activeParticipants))
+	authorityByParticipant := make(map[uuid.UUID]string, len(activeParticipants))
+	for index, authority := range activeParticipants {
+		participantIDs[index] = authority.ParticipantID
+		if authority.ParticipantID == uuid.Nil || !validSHA256Hex(authority.SigningKeyFingerprint) {
+			return PolicyActivationEvaluation{}, ErrInvalid
+		}
+		authorityByParticipant[authority.ParticipantID] = authority.SigningKeyFingerprint
+	}
+	if signedCurrent.Validate() != nil || signedProposed.Validate() != nil ||
+		signedCurrent.Signature.SignerID != expectedPolicyAuthorityID || signedProposed.Signature.SignerID != expectedPolicyAuthorityID ||
+		signedCurrent.Signature.SigningKeyFingerprint != expectedPolicySigningKeyFingerprint ||
+		signedProposed.Signature.SigningKeyFingerprint != expectedPolicySigningKeyFingerprint ||
+		current.PolicyID != proposed.PolicyID || current.SpaceID != proposed.SpaceID ||
 		!equalOptionalSecurity(current.SharedSpaceSecurityProfile, proposed.SharedSpaceSecurityProfile) || proposed.Revision != current.Revision+1 ||
-		proposed.PredecessorDigest == nil || len(activeParticipantIDs) == 0 || !sortedUniqueUUIDs(activeParticipantIDs) {
+		proposed.PredecessorDigest == nil || len(participantIDs) == 0 || !sortedUniqueUUIDs(participantIDs) || len(authorityByParticipant) != len(activeParticipants) {
 		return PolicyActivationEvaluation{}, ErrInvalid
 	}
 	currentDigest, err := current.Digest()
@@ -38,12 +57,13 @@ func EvaluatePolicyActivation(current, proposed SpaceProtectionPolicy, activePar
 	for _, acknowledgement := range acknowledgements {
 		if acknowledgement.Validate() == nil && acknowledgement.SpaceID == proposed.SpaceID &&
 			acknowledgement.PolicyID == proposed.PolicyID && acknowledgement.PolicyRevision == proposed.Revision &&
-			acknowledgement.PolicyDigest == proposedDigest && contains(activeParticipantIDs, acknowledgement.ParticipantID) {
+			acknowledgement.PolicyDigest == proposedDigest &&
+			authorityByParticipant[acknowledgement.ParticipantID] == acknowledgement.Signature.SigningKeyFingerprint {
 			accepted[acknowledgement.ParticipantID] = true
 		}
 	}
 	missing := make([]uuid.UUID, 0)
-	for _, participantID := range activeParticipantIDs {
+	for _, participantID := range participantIDs {
 		if !accepted[participantID] {
 			missing = append(missing, participantID)
 		}
