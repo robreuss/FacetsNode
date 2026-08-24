@@ -21,7 +21,7 @@ func testComputePoolAuthority(poolID uuid.UUID) computepool.AuthorityReference {
 		Version: computepool.SchemaVersion,
 		PoolID:  poolID,
 		TrustAnchor: computepool.AuthorityTrustAnchor{
-			Version: computepool.SchemaVersion,
+			Version: computepool.SignatureSchemaVersion,
 			Scope: serviceauthority.Scope{
 				Kind: serviceauthority.ScopeComputePool, ScopeID: poolID,
 			},

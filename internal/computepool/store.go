@@ -19,6 +19,7 @@ type Store interface {
 	UpdatePool(context.Context, uint64, Pool) error
 	DeletePool(context.Context, uuid.UUID, uint64) error
 	PutWorkerEnrollment(context.Context, uint64, WorkerEnrollment) error
+	PutWorkerCard(context.Context, uint64, WorkerCard) error
 	PutOffering(context.Context, uint64, Offering) error
 	GetPoolStatus(context.Context, uuid.UUID) (Status, error)
 }
@@ -27,6 +28,7 @@ type Status struct {
 	Version           int                `json:"version"`
 	Pool              Pool               `json:"pool"`
 	WorkerEnrollments []WorkerEnrollment `json:"workerEnrollments"`
+	WorkerCards       []WorkerCard       `json:"workerCards"`
 	Offerings         []Offering         `json:"offerings"`
 }
 
@@ -35,6 +37,7 @@ func (status Status) Validate() error {
 		return ErrInvalid
 	}
 	enrollments := make(map[uuid.UUID]struct{}, len(status.WorkerEnrollments))
+	enrollmentOwners := make(map[uuid.UUID]uuid.UUID, len(status.WorkerEnrollments))
 	previousEnrollmentID := ""
 	for _, enrollment := range status.WorkerEnrollments {
 		if enrollment.Validate() != nil || enrollment.PoolID != status.Pool.PoolID ||
@@ -42,13 +45,29 @@ func (status Status) Validate() error {
 			return ErrInvalid
 		}
 		enrollments[enrollment.EnrollmentID] = struct{}{}
+		enrollmentOwners[enrollment.EnrollmentID] = enrollment.WorkerOwnerAuthorityID
 		previousEnrollmentID = enrollment.EnrollmentID.String()
+	}
+	cards := make(map[uuid.UUID]WorkerCard, len(status.WorkerCards))
+	previousCardID := ""
+	for _, card := range status.WorkerCards {
+		owner, enrollmentFound := enrollmentOwners[card.WorkerEnrollmentID]
+		if card.Validate() != nil || card.PoolID != status.Pool.PoolID || !enrollmentFound ||
+			card.WorkerOwnerAuthorityID != owner || card.WorkerCardID.String() <= previousCardID {
+			return ErrInvalid
+		}
+		cards[card.WorkerCardID] = card
+		previousCardID = card.WorkerCardID.String()
 	}
 	previousOfferingID := ""
 	for _, offering := range status.Offerings {
 		_, enrollmentFound := enrollments[offering.WorkerEnrollmentID]
+		card, cardFound := cards[offering.WorkerCardID]
+		cardDigest, digestError := card.Digest()
 		if offering.Validate() != nil || offering.PoolID != status.Pool.PoolID ||
-			!enrollmentFound || offering.OfferingID.String() <= previousOfferingID {
+			!enrollmentFound || !cardFound || card.WorkerEnrollmentID != offering.WorkerEnrollmentID ||
+			offering.WorkerCardRevision != card.Revision || digestError != nil ||
+			offering.WorkerCardDigest != cardDigest || offering.OfferingID.String() <= previousOfferingID {
 			return ErrInvalid
 		}
 		previousOfferingID = offering.OfferingID.String()
@@ -60,6 +79,7 @@ type MemoryStore struct {
 	mu          sync.RWMutex
 	pools       map[uuid.UUID]Pool
 	enrollments map[uuid.UUID]WorkerEnrollment
+	cards       map[uuid.UUID]WorkerCard
 	offerings   map[uuid.UUID]Offering
 }
 
@@ -67,6 +87,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		pools:       make(map[uuid.UUID]Pool),
 		enrollments: make(map[uuid.UUID]WorkerEnrollment),
+		cards:       make(map[uuid.UUID]WorkerCard),
 		offerings:   make(map[uuid.UUID]Offering),
 	}
 }
@@ -138,6 +159,42 @@ func (store *MemoryStore) DeletePool(
 			delete(store.offerings, offeringID)
 		}
 	}
+	for cardID, card := range store.cards {
+		if card.PoolID == poolID {
+			delete(store.cards, cardID)
+		}
+	}
+	return nil
+}
+
+func (store *MemoryStore) PutWorkerCard(
+	_ context.Context,
+	previousRevision uint64,
+	card WorkerCard,
+) error {
+	if card.Validate() != nil || card.Revision != previousRevision+1 {
+		return ErrInvalid
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	enrollment, found := store.enrollments[card.WorkerEnrollmentID]
+	if !found || enrollment.PoolID != card.PoolID ||
+		enrollment.WorkerOwnerAuthorityID != card.WorkerOwnerAuthorityID {
+		return ErrNotFound
+	}
+	current, found := store.cards[card.WorkerCardID]
+	if !found {
+		if previousRevision != 0 {
+			return ErrNotFound
+		}
+	} else if current.Revision != previousRevision || current.PoolID != card.PoolID ||
+		current.WorkerEnrollmentID != card.WorkerEnrollmentID ||
+		current.WorkerOwnerAuthorityID != card.WorkerOwnerAuthorityID ||
+		current.CreatedAtMilliseconds != card.CreatedAtMilliseconds ||
+		card.UpdatedAtMilliseconds < current.UpdatedAtMilliseconds {
+		return ErrConflict
+	}
+	store.cards[card.WorkerCardID] = cloneWorkerCard(card)
 	return nil
 }
 
@@ -191,6 +248,13 @@ func (store *MemoryStore) PutOffering(
 	if !found || enrollment.PoolID != offering.PoolID {
 		return ErrNotFound
 	}
+	card, found := store.cards[offering.WorkerCardID]
+	cardDigest, digestError := card.Digest()
+	if !found || card.PoolID != offering.PoolID || card.WorkerEnrollmentID != offering.WorkerEnrollmentID ||
+		offering.WorkerCardRevision != card.Revision || digestError != nil ||
+		offering.WorkerCardDigest != cardDigest {
+		return ErrNotFound
+	}
 	current, found := store.offerings[offering.OfferingID]
 	if !found {
 		if previousRevision != 0 {
@@ -229,6 +293,15 @@ func (store *MemoryStore) GetPoolStatus(
 	sort.Slice(enrollments, func(left, right int) bool {
 		return enrollments[left].EnrollmentID.String() < enrollments[right].EnrollmentID.String()
 	})
+	cards := make([]WorkerCard, 0)
+	for _, card := range store.cards {
+		if card.PoolID == poolID {
+			cards = append(cards, cloneWorkerCard(card))
+		}
+	}
+	sort.Slice(cards, func(left, right int) bool {
+		return cards[left].WorkerCardID.String() < cards[right].WorkerCardID.String()
+	})
 	offerings := make([]Offering, 0)
 	for _, offering := range store.offerings {
 		if offering.PoolID == poolID {
@@ -240,7 +313,7 @@ func (store *MemoryStore) GetPoolStatus(
 	})
 	status := Status{
 		Version: SchemaVersion, Pool: pool,
-		WorkerEnrollments: enrollments, Offerings: offerings,
+		WorkerEnrollments: enrollments, WorkerCards: cards, Offerings: offerings,
 	}
 	if err := status.Validate(); err != nil {
 		return Status{}, err
@@ -251,5 +324,11 @@ func (store *MemoryStore) GetPoolStatus(
 func cloneOffering(offering Offering) Offering {
 	offering.ModelIdentifiers = append([]string(nil), offering.ModelIdentifiers...)
 	offering.AllowedOperations = append([]string(nil), offering.AllowedOperations...)
+	offering.InteractionModes = append([]InteractionMode(nil), offering.InteractionModes...)
 	return offering
+}
+
+func cloneWorkerCard(card WorkerCard) WorkerCard {
+	card.Claims = append([]AssuranceClaim(nil), card.Claims...)
+	return card
 }

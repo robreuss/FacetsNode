@@ -11,6 +11,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/computepool"
 	postgresstore "github.com/robreuss/FacetsNode/internal/postgres"
+	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
 func TestPostgresComputePoolLifecycleIsIndependent(t *testing.T) {
@@ -31,11 +32,14 @@ func TestPostgresComputePoolLifecycleIsIndependent(t *testing.T) {
 	}
 
 	store := postgresstore.NewComputePoolStore(pool)
-	computePool, enrollment, offering := postgresComputePoolFixture()
+	computePool, enrollment, card, offering := postgresComputePoolFixture()
 	if err := store.CreatePool(ctx, computePool); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutWorkerEnrollment(ctx, 0, enrollment); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutWorkerCard(ctx, 0, card); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutOffering(ctx, 0, offering); err != nil {
@@ -43,7 +47,7 @@ func TestPostgresComputePoolLifecycleIsIndependent(t *testing.T) {
 	}
 	status, err := store.GetPoolStatus(ctx, computePool.PoolID)
 	if err != nil || status.Validate() != nil || len(status.WorkerEnrollments) != 1 ||
-		len(status.Offerings) != 1 {
+		len(status.WorkerCards) != 1 || len(status.Offerings) != 1 {
 		t.Fatalf("Compute Pool status=%+v error=%v", status, err)
 	}
 	if err := store.DeletePool(ctx, computePool.PoolID, computePool.Revision); err != nil {
@@ -52,18 +56,20 @@ func TestPostgresComputePoolLifecycleIsIndependent(t *testing.T) {
 	if _, err := store.GetPoolStatus(ctx, computePool.PoolID); !errors.Is(err, computepool.ErrNotFound) {
 		t.Fatalf("deleted Compute Pool remained available: %v", err)
 	}
-	var enrollmentCount, offeringCount int
+	var enrollmentCount, cardCount, offeringCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			(SELECT count(*) FROM compute_pool_worker_enrollments),
+			(SELECT count(*) FROM compute_pool_worker_cards),
 			(SELECT count(*) FROM compute_pool_offerings)
-	`).Scan(&enrollmentCount, &offeringCount); err != nil {
+	`).Scan(&enrollmentCount, &cardCount, &offeringCount); err != nil {
 		t.Fatal(err)
 	}
-	if enrollmentCount != 0 || offeringCount != 0 {
+	if enrollmentCount != 0 || cardCount != 0 || offeringCount != 0 {
 		t.Fatalf(
-			"Pool-owned records survived deletion: enrollments=%d offerings=%d",
+			"Pool-owned records survived deletion: enrollments=%d cards=%d offerings=%d",
 			enrollmentCount,
+			cardCount,
 			offeringCount,
 		)
 	}
@@ -72,6 +78,7 @@ func TestPostgresComputePoolLifecycleIsIndependent(t *testing.T) {
 func postgresComputePoolFixture() (
 	computepool.Pool,
 	computepool.WorkerEnrollment,
+	computepool.WorkerCard,
 	computepool.Offering,
 ) {
 	poolID := uuid.MustParse("81000000-0000-0000-0000-000000000001")
@@ -96,20 +103,40 @@ func postgresComputePoolFixture() (
 		ConsentRevision:         1, Enabled: true, Revision: 1,
 		CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
 	}
+	card := testfixture.ComputeWorkerCard(
+		uuid.MustParse("85500000-0000-0000-0000-000000000001"),
+		poolID,
+		enrollment.EnrollmentID,
+		enrollment.WorkerOwnerAuthorityID,
+		"example.provider",
+	)
+	cardDigest, err := card.Digest()
+	if err != nil {
+		panic(err)
+	}
 	offering := computepool.Offering{
 		Version:    computepool.SchemaVersion,
 		OfferingID: uuid.MustParse("86000000-0000-0000-0000-000000000001"),
 		PoolID:     poolID, WorkerEnrollmentID: enrollment.EnrollmentID,
+		WorkerCardID: card.WorkerCardID, WorkerCardRevision: card.Revision,
+		WorkerCardDigest:   cardDigest,
 		ProviderIdentifier: "example.provider", ModelIdentifiers: []string{"example.model"},
-		AllowedOperations:    []string{"classify"},
-		PlaintextBoundary:    computepool.PlaintextBoundaryExternalProvider,
-		NetworkEgress:        computepool.NetworkEgressDirectInternet,
-		RetentionDeclaration: "provider-retention-v1",
-		TrainingDeclaration:  "provider-training-v1", PricingRevision: 1,
+		AllowedOperations: []string{"classify"},
+		InteractionModes:  []computepool.InteractionMode{computepool.InteractionBatch},
+		DataHandlingProfile: computepool.DataHandlingProfile{
+			PlaintextBoundary:   computepool.PlaintextBoundaryPrivateInfrastructure,
+			NetworkEgress:       computepool.NetworkEgressNone,
+			RequestRetention:    computepool.RetentionPolicy{Mode: computepool.RetentionNone},
+			ResultRetention:     computepool.RetentionPolicy{Mode: computepool.RetentionNone},
+			DiagnosticRetention: computepool.RetentionPolicy{Mode: computepool.RetentionNone},
+			TrainingUse:         computepool.TrainingProhibited, ToolAccess: computepool.ToolAccessNone,
+			ProviderIdentifier: "example.provider",
+		},
+		PricingRevision: 1,
 		ResourceCeiling: ceiling, Enabled: true, Revision: 1,
 		CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
 	}
-	return pool, enrollment, offering
+	return pool, enrollment, card, offering
 }
 
 func stringOf(value string, count int) string {

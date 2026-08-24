@@ -9,6 +9,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/computepool"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
+	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
 func TestComputeCapabilitySignsAndVerifiesWithoutMembershipStore(t *testing.T) {
@@ -210,9 +211,9 @@ func validComputeCapabilityClaims(key sharedspaces.ComputeCapabilityVerification
 			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 2 << 20,
 			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
 		},
-		PricingRevision: 3, DataSensitivityContract: "space-content-v1",
-		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
-		ResultPolicy:               computepool.ResultPrivateToInvoker,
+		BudgetCeiling:              testfixture.ComputeBudgetCeiling(),
+		PricingRevision:            3,
+		DataUseConstraints:         testfixture.ComputeDataUseConstraints("facets.local"),
 		AllowedProviderIdentifiers: []string{"facets.local"}, BindingRevision: 4,
 		SourceAuthorityRevision: 2,
 		KeyEpoch:                2, IssuedAtMilliseconds: 5_000, ExpiresAtMilliseconds: 65_000,
@@ -238,7 +239,7 @@ func validComputeCapabilityPolicy(
 	spaceID, bindingID, poolID uuid.UUID,
 ) sharedspaces.SpaceComputeBinding {
 	return sharedspaces.SpaceComputeBinding{
-		Version: sharedspaces.SchemaVersion, SpaceID: spaceID, BindingID: bindingID,
+		Version: computepool.SchemaVersion, SpaceID: spaceID, BindingID: bindingID,
 		PoolAuthority:              testComputePoolAuthority(poolID),
 		AllowedOperations:          []string{"llm.batch", "vision.embed"},
 		EligibleRoleIdentifiers:    []string{string(sharedspaces.RoleHost)},
@@ -247,10 +248,10 @@ func validComputeCapabilityPolicy(
 			MaximumInputBytes: 4 << 20, MaximumOutputBytes: 8 << 20,
 			MaximumMemoryBytes: 4 << 30, MaximumWallTimeMilliseconds: 300_000,
 		},
-		PricingRevision: 3, DataSensitivityContract: "space-content-v1",
-		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
-		ResultPolicy: computepool.ResultPrivateToInvoker,
-		Revision:     4, SourceAuthorityRevision: 2,
+		BudgetCeiling:      testfixture.ComputeBudgetCeiling(),
+		PricingRevision:    3,
+		DataUseConstraints: testfixture.ComputeDataUseConstraints("facets.local"),
+		Revision:           4, SourceAuthorityRevision: 2,
 		CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 4_000,
 	}
 }

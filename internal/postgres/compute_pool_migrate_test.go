@@ -27,6 +27,7 @@ func TestComputePoolMigrationsContainNoSpaceOrMembershipAuthority(t *testing.T) 
 	for _, required := range []string{
 		"create table compute_pools",
 		"create table compute_pool_worker_enrollments",
+		"create table compute_pool_worker_cards",
 		"create table compute_pool_offerings",
 	} {
 		if !strings.Contains(text, required) {

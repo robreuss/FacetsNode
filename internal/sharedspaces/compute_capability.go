@@ -28,29 +28,27 @@ const (
 // only when these claims are issued; the broker never reads Shared Spaces
 // membership storage.
 type ComputeCapabilityClaims struct {
-	Version                    int                      `json:"version"`
-	CapabilityID               uuid.UUID                `json:"capabilityID"`
-	Issuer                     string                   `json:"issuer"`
-	KeyID                      string                   `json:"keyID"`
-	SubjectParticipantID       uuid.UUID                `json:"subjectParticipantID"`
-	SpaceID                    uuid.UUID                `json:"spaceID"`
-	BindingID                  uuid.UUID                `json:"bindingID"`
-	PoolID                     uuid.UUID                `json:"poolID"`
-	PoolAuthorityRevision      uint64                   `json:"poolAuthorityRevision"`
-	PoolAuthorityDigest        string                   `json:"poolAuthorityDigest"`
-	Operation                  string                   `json:"operation"`
-	AllowedProviderIdentifiers []string                 `json:"allowedProviderIdentifiers"`
-	ResourceCeiling            ComputeResourceCeiling   `json:"resourceCeiling"`
-	PricingRevision            uint64                   `json:"pricingRevision"`
-	DataSensitivityContract    string                   `json:"dataSensitivityContract"`
-	ProcessingContract         string                   `json:"processingContract"`
-	BudgetContract             string                   `json:"budgetContract"`
-	ResultPolicy               computepool.ResultPolicy `json:"resultPolicy"`
-	BindingRevision            uint64                   `json:"bindingRevision"`
-	SourceAuthorityRevision    uint64                   `json:"sourceAuthorityRevision"`
-	KeyEpoch                   uint64                   `json:"keyEpoch"`
-	IssuedAtMilliseconds       int64                    `json:"issuedAtMilliseconds"`
-	ExpiresAtMilliseconds      int64                    `json:"expiresAtMilliseconds"`
+	Version                    int                             `json:"version"`
+	CapabilityID               uuid.UUID                       `json:"capabilityID"`
+	Issuer                     string                          `json:"issuer"`
+	KeyID                      string                          `json:"keyID"`
+	SubjectParticipantID       uuid.UUID                       `json:"subjectParticipantID"`
+	SpaceID                    uuid.UUID                       `json:"spaceID"`
+	BindingID                  uuid.UUID                       `json:"bindingID"`
+	PoolID                     uuid.UUID                       `json:"poolID"`
+	PoolAuthorityRevision      uint64                          `json:"poolAuthorityRevision"`
+	PoolAuthorityDigest        string                          `json:"poolAuthorityDigest"`
+	Operation                  string                          `json:"operation"`
+	AllowedProviderIdentifiers []string                        `json:"allowedProviderIdentifiers"`
+	ResourceCeiling            ComputeResourceCeiling          `json:"resourceCeiling"`
+	BudgetCeiling              computepool.BudgetCeiling       `json:"budgetCeiling"`
+	PricingRevision            uint64                          `json:"pricingRevision"`
+	DataUseConstraints         []computepool.DataUseConstraint `json:"dataUseConstraints"`
+	BindingRevision            uint64                          `json:"bindingRevision"`
+	SourceAuthorityRevision    uint64                          `json:"sourceAuthorityRevision"`
+	KeyEpoch                   uint64                          `json:"keyEpoch"`
+	IssuedAtMilliseconds       int64                           `json:"issuedAtMilliseconds"`
+	ExpiresAtMilliseconds      int64                           `json:"expiresAtMilliseconds"`
 }
 
 // ComputeCapabilityRequest is a participant-authenticated request for one
@@ -96,27 +94,25 @@ func (r ComputeCapabilityRequest) Validate() error {
 // signed outside the authority store so compute brokers need no membership
 // database access.
 type ComputeCapabilityAuthorization struct {
-	Version                    int                      `json:"version"`
-	CapabilityID               uuid.UUID                `json:"capabilityID"`
-	SubjectParticipantID       uuid.UUID                `json:"subjectParticipantID"`
-	SpaceID                    uuid.UUID                `json:"spaceID"`
-	BindingID                  uuid.UUID                `json:"bindingID"`
-	PoolID                     uuid.UUID                `json:"poolID"`
-	PoolAuthorityRevision      uint64                   `json:"poolAuthorityRevision"`
-	PoolAuthorityDigest        string                   `json:"poolAuthorityDigest"`
-	Operation                  string                   `json:"operation"`
-	AllowedProviderIdentifiers []string                 `json:"allowedProviderIdentifiers"`
-	ResourceCeiling            ComputeResourceCeiling   `json:"resourceCeiling"`
-	PricingRevision            uint64                   `json:"pricingRevision"`
-	DataSensitivityContract    string                   `json:"dataSensitivityContract"`
-	ProcessingContract         string                   `json:"processingContract"`
-	BudgetContract             string                   `json:"budgetContract"`
-	ResultPolicy               computepool.ResultPolicy `json:"resultPolicy"`
-	BindingRevision            uint64                   `json:"bindingRevision"`
-	SourceAuthorityRevision    uint64                   `json:"sourceAuthorityRevision"`
-	KeyEpoch                   uint64                   `json:"keyEpoch"`
-	IssuedAtMilliseconds       int64                    `json:"issuedAtMilliseconds"`
-	ExpiresAtMilliseconds      int64                    `json:"expiresAtMilliseconds"`
+	Version                    int                             `json:"version"`
+	CapabilityID               uuid.UUID                       `json:"capabilityID"`
+	SubjectParticipantID       uuid.UUID                       `json:"subjectParticipantID"`
+	SpaceID                    uuid.UUID                       `json:"spaceID"`
+	BindingID                  uuid.UUID                       `json:"bindingID"`
+	PoolID                     uuid.UUID                       `json:"poolID"`
+	PoolAuthorityRevision      uint64                          `json:"poolAuthorityRevision"`
+	PoolAuthorityDigest        string                          `json:"poolAuthorityDigest"`
+	Operation                  string                          `json:"operation"`
+	AllowedProviderIdentifiers []string                        `json:"allowedProviderIdentifiers"`
+	ResourceCeiling            ComputeResourceCeiling          `json:"resourceCeiling"`
+	BudgetCeiling              computepool.BudgetCeiling       `json:"budgetCeiling"`
+	PricingRevision            uint64                          `json:"pricingRevision"`
+	DataUseConstraints         []computepool.DataUseConstraint `json:"dataUseConstraints"`
+	BindingRevision            uint64                          `json:"bindingRevision"`
+	SourceAuthorityRevision    uint64                          `json:"sourceAuthorityRevision"`
+	KeyEpoch                   uint64                          `json:"keyEpoch"`
+	IssuedAtMilliseconds       int64                           `json:"issuedAtMilliseconds"`
+	ExpiresAtMilliseconds      int64                           `json:"expiresAtMilliseconds"`
 }
 
 func (a ComputeCapabilityAuthorization) Validate() error {
@@ -130,10 +126,11 @@ func (a ComputeCapabilityAuthorization) Validate() error {
 		Operation:                  a.Operation,
 		AllowedProviderIdentifiers: append([]string(nil), a.AllowedProviderIdentifiers...),
 		ResourceCeiling:            a.ResourceCeiling,
-		PricingRevision:            a.PricingRevision, DataSensitivityContract: a.DataSensitivityContract,
-		ProcessingContract: a.ProcessingContract, BudgetContract: a.BudgetContract,
-		ResultPolicy: a.ResultPolicy, BindingRevision: a.BindingRevision,
-		SourceAuthorityRevision: a.SourceAuthorityRevision, KeyEpoch: a.KeyEpoch,
+		BudgetCeiling:              a.BudgetCeiling,
+		PricingRevision:            a.PricingRevision,
+		DataUseConstraints:         append([]computepool.DataUseConstraint(nil), a.DataUseConstraints...),
+		BindingRevision:            a.BindingRevision,
+		SourceAuthorityRevision:    a.SourceAuthorityRevision, KeyEpoch: a.KeyEpoch,
 		IssuedAtMilliseconds:  a.IssuedAtMilliseconds,
 		ExpiresAtMilliseconds: a.ExpiresAtMilliseconds,
 	}
@@ -150,9 +147,7 @@ func (c ComputeCapabilityClaims) Validate() error {
 		!validComputeIssuer(c.Issuer) || !validComputeKeyID(c.KeyID) ||
 		!validComputeOperation(c.Operation) ||
 		!validComputeIdentifiers(c.AllowedProviderIdentifiers, false) ||
-		!validComputeContract(c.DataSensitivityContract) ||
-		!validComputeContract(c.ProcessingContract) ||
-		!validComputeContract(c.BudgetContract) || !c.ResultPolicy.Valid() ||
+		c.BudgetCeiling.Validate() != nil || !validComputeDataUseConstraints(c.DataUseConstraints) ||
 		c.IssuedAtMilliseconds < 0 || c.ExpiresAtMilliseconds <= c.IssuedAtMilliseconds ||
 		c.ExpiresAtMilliseconds-c.IssuedAtMilliseconds > MaximumComputeCapabilityLifetimeMillis {
 		return NewProtocolError(
@@ -279,10 +274,9 @@ func (s *ComputeCapabilitySigner) Issue(
 			[]string(nil), authorization.AllowedProviderIdentifiers...,
 		),
 		ResourceCeiling:         authorization.ResourceCeiling,
+		BudgetCeiling:           authorization.BudgetCeiling,
 		PricingRevision:         authorization.PricingRevision,
-		DataSensitivityContract: authorization.DataSensitivityContract,
-		ProcessingContract:      authorization.ProcessingContract,
-		BudgetContract:          authorization.BudgetContract, ResultPolicy: authorization.ResultPolicy,
+		DataUseConstraints:      append([]computepool.DataUseConstraint(nil), authorization.DataUseConstraints...),
 		BindingRevision:         authorization.BindingRevision,
 		SourceAuthorityRevision: authorization.SourceAuthorityRevision,
 		KeyEpoch:                authorization.KeyEpoch,
@@ -446,6 +440,24 @@ func validComputeIdentifiers(values []string, optional bool) bool {
 	return true
 }
 
+func validComputeDataUseConstraints(values []computepool.DataUseConstraint) bool {
+	classes := []computepool.PrivacyClass{
+		computepool.PrivacyPublic,
+		computepool.PrivacyPersonal,
+		computepool.PrivacyConfidential,
+		computepool.PrivacyRestricted,
+	}
+	if len(values) != len(classes) {
+		return false
+	}
+	for index, value := range values {
+		if value.PrivacyClass != classes[index] || value.Validate() != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func validComputeContract(value string) bool {
 	trimmed := strings.TrimSpace(value)
 	return utf8.ValidString(value) && value == trimmed && value != "" && len(value) <= 1_024
@@ -526,10 +538,9 @@ func AuthorizeComputeCapability(
 			[]string(nil), binding.AllowedProviderIdentifiers...,
 		),
 		ResourceCeiling:         request.ResourceRequest,
+		BudgetCeiling:           binding.BudgetCeiling,
 		PricingRevision:         binding.PricingRevision,
-		DataSensitivityContract: binding.DataSensitivityContract,
-		ProcessingContract:      binding.ProcessingContract,
-		BudgetContract:          binding.BudgetContract, ResultPolicy: binding.ResultPolicy,
+		DataUseConstraints:      append([]computepool.DataUseConstraint(nil), binding.DataUseConstraints...),
 		BindingRevision:         binding.Revision,
 		SourceAuthorityRevision: binding.SourceAuthorityRevision,
 		KeyEpoch:                currentKeyEpoch,

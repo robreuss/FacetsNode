@@ -16,18 +16,24 @@ func TestMemoryStoreKeepsPoolWorkerAndOfferingAuthoritySeparate(t *testing.T) {
 	if err := store.CreatePool(ctx, fixture.Pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutWorkerEnrollment(ctx, 0, fixture.WorkerEnrollment); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.PutOffering(ctx, 0, fixture.Offering); err != nil {
-		t.Fatal(err)
+	for index := range fixture.WorkerEnrollments {
+		if err := store.PutWorkerEnrollment(ctx, 0, fixture.WorkerEnrollments[index]); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.PutWorkerCard(ctx, 0, fixture.WorkerCards[index]); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.PutOffering(ctx, 0, fixture.Offerings[index]); err != nil {
+			t.Fatal(err)
+		}
 	}
 	status, err := store.GetPoolStatus(ctx, fixture.Pool.PoolID)
-	if err != nil || status.Validate() != nil || len(status.WorkerEnrollments) != 1 ||
-		len(status.Offerings) != 1 {
+	if err != nil || status.Validate() != nil || len(status.WorkerEnrollments) != 3 ||
+		len(status.WorkerCards) != 3 || len(status.Offerings) != 3 {
 		t.Fatalf("Compute Pool status=%+v error=%v", status, err)
 	}
-	if status.Pool.OwnerAuthorityID == status.WorkerEnrollments[0].WorkerOwnerAuthorityID {
+	if status.Pool.OwnerAuthorityID == status.WorkerEnrollments[0].WorkerOwnerAuthorityID ||
+		status.WorkerCards[0].WorkerOwnerAuthorityID != status.WorkerEnrollments[0].WorkerOwnerAuthorityID {
 		t.Fatal("Pool ownership silently became Worker ownership")
 	}
 }
@@ -40,7 +46,10 @@ func TestMemoryStoreRejectsRollbackAndCrossPoolOffering(t *testing.T) {
 	if err := store.CreatePool(ctx, fixture.Pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutWorkerEnrollment(ctx, 0, fixture.WorkerEnrollment); err != nil {
+	if err := store.PutWorkerEnrollment(ctx, 0, fixture.WorkerEnrollments[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutWorkerCard(ctx, 0, fixture.WorkerCards[0]); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,7 +67,7 @@ func TestMemoryStoreRejectsRollbackAndCrossPoolOffering(t *testing.T) {
 		t.Fatalf("conflicting manifest at one authority revision accepted: %v", err)
 	}
 
-	crossPoolOffering := fixture.Offering
+	crossPoolOffering := fixture.Offerings[0]
 	crossPoolOffering.PoolID = fixture.Binding.SpaceID
 	if err := store.PutOffering(ctx, 0, crossPoolOffering); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-Pool offering accepted: %v", err)
@@ -73,10 +82,13 @@ func TestDeletingPoolCleansOnlyPoolOwnedRecords(t *testing.T) {
 	if err := store.CreatePool(ctx, fixture.Pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutWorkerEnrollment(ctx, 0, fixture.WorkerEnrollment); err != nil {
+	if err := store.PutWorkerEnrollment(ctx, 0, fixture.WorkerEnrollments[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutOffering(ctx, 0, fixture.Offering); err != nil {
+	if err := store.PutWorkerCard(ctx, 0, fixture.WorkerCards[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutOffering(ctx, 0, fixture.Offerings[0]); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.DeletePool(ctx, fixture.Pool.PoolID, fixture.Pool.Revision); err != nil {

@@ -14,24 +14,22 @@ type SpaceComputeBinding = computepool.SpaceBinding
 // reference and policy edge from one Shared Space to an independently owned
 // Compute Pool. It never creates, renames, enables, or deletes that Pool.
 type SpaceComputeBindingChange struct {
-	Version                    int                            `json:"version"`
-	RetryID                    uuid.UUID                      `json:"retryID"`
-	SpaceID                    uuid.UUID                      `json:"spaceID"`
-	BindingID                  uuid.UUID                      `json:"bindingID"`
-	PoolAuthority              computepool.AuthorityReference `json:"poolAuthority"`
-	PreviousBindingRevision    uint64                         `json:"previousBindingRevision"`
-	AllowedOperations          []string                       `json:"allowedOperations"`
-	EligiblePrincipalIDs       []uuid.UUID                    `json:"eligiblePrincipalIDs"`
-	EligibleRoleIdentifiers    []string                       `json:"eligibleRoleIdentifiers"`
-	AllowedProviderIdentifiers []string                       `json:"allowedProviderIdentifiers"`
-	ResourceCeiling            ComputeResourceCeiling         `json:"resourceCeiling"`
-	PricingRevision            uint64                         `json:"pricingRevision"`
-	DataSensitivityContract    string                         `json:"dataSensitivityContract"`
-	ProcessingContract         string                         `json:"processingContract"`
-	BudgetContract             string                         `json:"budgetContract"`
-	ResultPolicy               computepool.ResultPolicy       `json:"resultPolicy"`
-	SourceAuthorityRevision    uint64                         `json:"sourceAuthorityRevision"`
-	ChangedAtMilliseconds      int64                          `json:"changedAtMilliseconds"`
+	Version                    int                             `json:"version"`
+	RetryID                    uuid.UUID                       `json:"retryID"`
+	SpaceID                    uuid.UUID                       `json:"spaceID"`
+	BindingID                  uuid.UUID                       `json:"bindingID"`
+	PoolAuthority              computepool.AuthorityReference  `json:"poolAuthority"`
+	PreviousBindingRevision    uint64                          `json:"previousBindingRevision"`
+	AllowedOperations          []string                        `json:"allowedOperations"`
+	EligiblePrincipalIDs       []uuid.UUID                     `json:"eligiblePrincipalIDs"`
+	EligibleRoleIdentifiers    []string                        `json:"eligibleRoleIdentifiers"`
+	AllowedProviderIdentifiers []string                        `json:"allowedProviderIdentifiers"`
+	ResourceCeiling            ComputeResourceCeiling          `json:"resourceCeiling"`
+	BudgetCeiling              computepool.BudgetCeiling       `json:"budgetCeiling"`
+	PricingRevision            uint64                          `json:"pricingRevision"`
+	DataUseConstraints         []computepool.DataUseConstraint `json:"dataUseConstraints"`
+	SourceAuthorityRevision    uint64                          `json:"sourceAuthorityRevision"`
+	ChangedAtMilliseconds      int64                           `json:"changedAtMilliseconds"`
 }
 
 func (change SpaceComputeBindingChange) Validate() error {
@@ -72,12 +70,10 @@ func (change SpaceComputeBindingChange) binding(
 			[]string(nil),
 			change.AllowedProviderIdentifiers...,
 		),
-		ResourceCeiling: change.ResourceCeiling, PricingRevision: change.PricingRevision,
-		DataSensitivityContract: change.DataSensitivityContract,
-		ProcessingContract:      change.ProcessingContract,
-		BudgetContract:          change.BudgetContract,
-		ResultPolicy:            change.ResultPolicy,
-		Revision:                revision, SourceAuthorityRevision: change.SourceAuthorityRevision,
+		ResourceCeiling: change.ResourceCeiling, BudgetCeiling: change.BudgetCeiling,
+		PricingRevision:    change.PricingRevision,
+		DataUseConstraints: append([]computepool.DataUseConstraint(nil), change.DataUseConstraints...),
+		Revision:           revision, SourceAuthorityRevision: change.SourceAuthorityRevision,
 		CreatedAtMilliseconds: createdAtMilliseconds,
 		UpdatedAtMilliseconds: updatedAtMilliseconds,
 	}

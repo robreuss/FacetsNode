@@ -19,6 +19,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/computepool"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
+	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
 func TestMemoryStoreSharedSpaceParticipantLifecycle(t *testing.T) {
@@ -464,9 +465,9 @@ func TestMemoryStoreComputeBindingAuthorityLifecycle(t *testing.T) {
 			MaximumInputBytes: 4 << 20, MaximumOutputBytes: 1 << 20,
 			MaximumMemoryBytes: 4 << 30, MaximumWallTimeMilliseconds: 300_000,
 		},
-		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
-		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
-		ResultPolicy:            computepool.ResultPrivateToInvoker,
+		BudgetCeiling:           testfixture.ComputeBudgetCeiling(),
+		PricingRevision:         1,
+		DataUseConstraints:      testfixture.ComputeDataUseConstraints("facets.local"),
 		SourceAuthorityRevision: sharedspaces.InitialKeyEpoch,
 		ChangedAtMilliseconds:   5_100,
 	}

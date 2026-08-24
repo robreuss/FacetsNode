@@ -23,6 +23,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
+	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
 func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.T) {
@@ -552,9 +553,9 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 			MaximumInputBytes: 1 << 20, MaximumOutputBytes: 1 << 20,
 			MaximumMemoryBytes: 1 << 30, MaximumWallTimeMilliseconds: 60_000,
 		},
-		PricingRevision: 1, DataSensitivityContract: "space-members-v1",
-		ProcessingContract: "participant-device-v1", BudgetContract: "owner-funded-v1",
-		ResultPolicy:            computepool.ResultPrivateToInvoker,
+		BudgetCeiling:           testfixture.ComputeBudgetCeiling(),
+		PricingRevision:         1,
+		DataUseConstraints:      testfixture.ComputeDataUseConstraints("facets.local"),
 		SourceAuthorityRevision: sharedspaces.InitialKeyEpoch,
 		ChangedAtMilliseconds:   nowMilliseconds,
 	}
@@ -1612,7 +1613,7 @@ func sharedSpaceComputePoolAuthority(poolID uuid.UUID) computepool.AuthorityRefe
 		Version: computepool.SchemaVersion,
 		PoolID:  poolID,
 		TrustAnchor: computepool.AuthorityTrustAnchor{
-			Version: computepool.SchemaVersion,
+			Version: computepool.SignatureSchemaVersion,
 			Scope: serviceauthority.Scope{
 				Kind: serviceauthority.ScopeComputePool, ScopeID: poolID,
 			},

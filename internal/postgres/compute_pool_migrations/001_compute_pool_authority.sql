@@ -31,10 +31,29 @@ CREATE TABLE compute_pool_worker_enrollments (
     UNIQUE (pool_id, worker_id)
 );
 
+CREATE TABLE compute_pool_worker_cards (
+    worker_card_id uuid PRIMARY KEY,
+    pool_id uuid NOT NULL,
+    worker_enrollment_id uuid NOT NULL,
+    worker_owner_authority_id uuid NOT NULL,
+    current_revision bigint NOT NULL CHECK (current_revision > 0),
+    card_payload jsonb NOT NULL,
+    created_at_milliseconds bigint NOT NULL CHECK (created_at_milliseconds >= 0),
+    updated_at_milliseconds bigint NOT NULL CHECK (
+        updated_at_milliseconds >= created_at_milliseconds
+    ),
+    stored_at timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (pool_id, worker_enrollment_id)
+        REFERENCES compute_pool_worker_enrollments(pool_id, enrollment_id)
+        ON DELETE CASCADE,
+    UNIQUE (pool_id, worker_card_id)
+);
+
 CREATE TABLE compute_pool_offerings (
     offering_id uuid PRIMARY KEY,
     pool_id uuid NOT NULL,
     worker_enrollment_id uuid NOT NULL,
+    worker_card_id uuid NOT NULL,
     pricing_revision bigint NOT NULL CHECK (pricing_revision > 0),
     current_revision bigint NOT NULL CHECK (current_revision > 0),
     offering_payload jsonb NOT NULL,
@@ -46,11 +65,17 @@ CREATE TABLE compute_pool_offerings (
     FOREIGN KEY (pool_id, worker_enrollment_id)
         REFERENCES compute_pool_worker_enrollments(pool_id, enrollment_id)
         ON DELETE CASCADE,
+    FOREIGN KEY (pool_id, worker_card_id)
+        REFERENCES compute_pool_worker_cards(pool_id, worker_card_id)
+        ON DELETE CASCADE,
     UNIQUE (pool_id, offering_id)
 );
 
 CREATE INDEX compute_pool_worker_enrollments_pool_idx
     ON compute_pool_worker_enrollments (pool_id, enrollment_id);
+
+CREATE INDEX compute_pool_worker_cards_pool_idx
+    ON compute_pool_worker_cards (pool_id, worker_card_id);
 
 CREATE INDEX compute_pool_offerings_pool_idx
     ON compute_pool_offerings (pool_id, offering_id);

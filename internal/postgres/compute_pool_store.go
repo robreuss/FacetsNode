@@ -195,6 +195,73 @@ func (store *ComputePoolStore) PutWorkerEnrollment(
 	return nil
 }
 
+func (store *ComputePoolStore) PutWorkerCard(
+	ctx context.Context,
+	previousRevision uint64,
+	next computepool.WorkerCard,
+) error {
+	if next.Validate() != nil || next.Revision != previousRevision+1 {
+		return computepool.ErrInvalid
+	}
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin Compute Pool Worker Card: %w", err)
+	}
+	defer func() { _ = transaction.Rollback(ctx) }()
+	current, found, err := loadComputePoolWorkerCard(ctx, transaction, next.WorkerCardID, true)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if previousRevision != 0 {
+			return computepool.ErrNotFound
+		}
+	} else if current.Revision != previousRevision || current.PoolID != next.PoolID ||
+		current.WorkerEnrollmentID != next.WorkerEnrollmentID ||
+		current.WorkerOwnerAuthorityID != next.WorkerOwnerAuthorityID ||
+		current.CreatedAtMilliseconds != next.CreatedAtMilliseconds ||
+		next.UpdatedAtMilliseconds < current.UpdatedAtMilliseconds {
+		return computepool.ErrConflict
+	}
+	enrollment, enrollmentFound, err := loadComputePoolWorkerEnrollment(
+		ctx, transaction, next.WorkerEnrollmentID, false,
+	)
+	if err != nil {
+		return err
+	}
+	if !enrollmentFound || enrollment.PoolID != next.PoolID ||
+		enrollment.WorkerOwnerAuthorityID != next.WorkerOwnerAuthorityID {
+		return computepool.ErrNotFound
+	}
+	payload, err := json.Marshal(next)
+	if err != nil {
+		return fmt.Errorf("encode Compute Pool Worker Card: %w", err)
+	}
+	if !found {
+		_, err = transaction.Exec(ctx, `
+			INSERT INTO compute_pool_worker_cards (
+				worker_card_id,pool_id,worker_enrollment_id,worker_owner_authority_id,
+				current_revision,card_payload,created_at_milliseconds,updated_at_milliseconds
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		`, next.WorkerCardID, next.PoolID, next.WorkerEnrollmentID,
+			next.WorkerOwnerAuthorityID, next.Revision, payload,
+			next.CreatedAtMilliseconds, next.UpdatedAtMilliseconds)
+	} else {
+		_, err = transaction.Exec(ctx, `
+			UPDATE compute_pool_worker_cards
+			SET current_revision=$2,card_payload=$3,updated_at_milliseconds=$4,stored_at=now()
+			WHERE worker_card_id=$1
+		`, next.WorkerCardID, next.Revision, payload, next.UpdatedAtMilliseconds)
+	}
+	if err != nil {
+		return mapComputePoolWriteError(err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Compute Pool Worker Card: %w", err)
+	}
+	return nil
+}
+
 func (store *ComputePoolStore) PutOffering(
 	ctx context.Context,
 	previousRevision uint64,
@@ -228,6 +295,17 @@ func (store *ComputePoolStore) PutOffering(
 		next.PricingRevision < current.PricingRevision {
 		return computepool.ErrConflict
 	}
+	card, cardFound, err := loadComputePoolWorkerCard(ctx, transaction, next.WorkerCardID, false)
+	if err != nil {
+		return err
+	}
+	cardDigest, digestError := card.Digest()
+	if !cardFound || card.PoolID != next.PoolID ||
+		card.WorkerEnrollmentID != next.WorkerEnrollmentID ||
+		next.WorkerCardRevision != card.Revision || digestError != nil ||
+		next.WorkerCardDigest != cardDigest {
+		return computepool.ErrNotFound
+	}
 	payload, err := json.Marshal(next)
 	if err != nil {
 		return fmt.Errorf("encode Compute Pool offering: %w", err)
@@ -235,20 +313,20 @@ func (store *ComputePoolStore) PutOffering(
 	if !found {
 		_, err = transaction.Exec(ctx, `
 			INSERT INTO compute_pool_offerings (
-				offering_id,pool_id,worker_enrollment_id,pricing_revision,
+				offering_id,pool_id,worker_enrollment_id,worker_card_id,pricing_revision,
 				current_revision,offering_payload,created_at_milliseconds,
 				updated_at_milliseconds
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		`, next.OfferingID, next.PoolID, next.WorkerEnrollmentID,
-			next.PricingRevision, next.Revision, payload,
+			next.WorkerCardID, next.PricingRevision, next.Revision, payload,
 			next.CreatedAtMilliseconds, next.UpdatedAtMilliseconds)
 	} else {
 		_, err = transaction.Exec(ctx, `
 			UPDATE compute_pool_offerings
-			SET pricing_revision=$2,current_revision=$3,offering_payload=$4,
-			    updated_at_milliseconds=$5,stored_at=now()
+			SET worker_card_id=$2,pricing_revision=$3,current_revision=$4,offering_payload=$5,
+			    updated_at_milliseconds=$6,stored_at=now()
 			WHERE offering_id=$1
-		`, next.OfferingID, next.PricingRevision, next.Revision,
+		`, next.OfferingID, next.WorkerCardID, next.PricingRevision, next.Revision,
 			payload, next.UpdatedAtMilliseconds)
 	}
 	if err != nil {
@@ -282,13 +360,17 @@ func (store *ComputePoolStore) GetPoolStatus(
 	if err != nil {
 		return computepool.Status{}, err
 	}
+	cards, err := loadComputePoolWorkerCards(ctx, transaction, poolID)
+	if err != nil {
+		return computepool.Status{}, err
+	}
 	offerings, err := loadComputePoolOfferings(ctx, transaction, poolID)
 	if err != nil {
 		return computepool.Status{}, err
 	}
 	status := computepool.Status{
 		Version: computepool.SchemaVersion, Pool: pool,
-		WorkerEnrollments: enrollments, Offerings: offerings,
+		WorkerEnrollments: enrollments, WorkerCards: cards, Offerings: offerings,
 	}
 	if err := status.Validate(); err != nil {
 		return computepool.Status{}, fmt.Errorf("stored Compute Pool status is invalid: %w", err)
@@ -376,6 +458,30 @@ func loadComputePoolOffering(
 	return offering, true, nil
 }
 
+func loadComputePoolWorkerCard(
+	ctx context.Context,
+	transaction pgx.Tx,
+	cardID uuid.UUID,
+	forUpdate bool,
+) (computepool.WorkerCard, bool, error) {
+	query := "SELECT card_payload FROM compute_pool_worker_cards WHERE worker_card_id=$1"
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	var payload []byte
+	if err := transaction.QueryRow(ctx, query, cardID).Scan(&payload); err == pgx.ErrNoRows {
+		return computepool.WorkerCard{}, false, nil
+	} else if err != nil {
+		return computepool.WorkerCard{}, false, fmt.Errorf("load Compute Pool Worker Card: %w", err)
+	}
+	var card computepool.WorkerCard
+	if err := json.Unmarshal(payload, &card); err != nil || card.Validate() != nil ||
+		card.WorkerCardID != cardID {
+		return computepool.WorkerCard{}, false, fmt.Errorf("stored Compute Pool Worker Card is invalid")
+	}
+	return card, true, nil
+}
+
 func loadComputePoolWorkerEnrollments(
 	ctx context.Context,
 	transaction pgx.Tx,
@@ -446,6 +552,42 @@ func loadComputePoolOfferings(
 	}
 	sort.Slice(result, func(left, right int) bool {
 		return result[left].OfferingID.String() < result[right].OfferingID.String()
+	})
+	return result, nil
+}
+
+func loadComputePoolWorkerCards(
+	ctx context.Context,
+	transaction pgx.Tx,
+	poolID uuid.UUID,
+) ([]computepool.WorkerCard, error) {
+	rows, err := transaction.Query(ctx, `
+		SELECT card_payload
+		FROM compute_pool_worker_cards
+		WHERE pool_id=$1
+		ORDER BY worker_card_id
+	`, poolID)
+	if err != nil {
+		return nil, fmt.Errorf("query Compute Pool Worker Cards: %w", err)
+	}
+	defer rows.Close()
+	result := make([]computepool.WorkerCard, 0)
+	for rows.Next() {
+		var payload []byte
+		var card computepool.WorkerCard
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("scan Compute Pool Worker Card: %w", err)
+		}
+		if err := json.Unmarshal(payload, &card); err != nil || card.Validate() != nil || card.PoolID != poolID {
+			return nil, fmt.Errorf("stored Compute Pool Worker Card is invalid")
+		}
+		result = append(result, card)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate Compute Pool Worker Cards: %w", err)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		return result[left].WorkerCardID.String() < result[right].WorkerCardID.String()
 	})
 	return result, nil
 }
