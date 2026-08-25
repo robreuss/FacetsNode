@@ -23,7 +23,10 @@ It mounts independent key and route-policy directories read-only and mounts a
 writable authority-state directory at
 `/var/lib/facets-device-sync/service-authority`. Before first start, create
 `bindings.json` there as `{"bindings":[],"version":1}`, mode 0600, and make
-the state directory writable by the container runtime identity (UID 65532).
+the key, policy, and state directories and their files owned by the container
+runtime identity (UID 65532). Keep each directory mode 0700 and each file mode
+0600; the key and policy mounts remain read-only while the state mount is
+writable.
 Mounting the directory, rather than the individual file, is required because
 binding activation uses an fsynced temporary file and atomic rename.
 

@@ -15,6 +15,7 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 
 	for _, requestPath := range []string{
 		"/v1/service-deployment/proof",
+		"/v1/service-deployment/bootstrap-proof",
 		"/v1/pairing/routes",
 		"/v1/pairing/routes/11111111-1111-4111-8111-111111111111/messages",
 		"/v1/relay/tenants/11111111-1111-4111-8111-111111111111/domains/22222222-2222-4222-8222-222222222222/messages",

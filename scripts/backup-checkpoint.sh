@@ -32,6 +32,17 @@ export FACETS_DEVICE_SYNC_CHECKPOINT_REVISION
 FACETS_DEVICE_SYNC_CHECKPOINT_REVISION=$(facets_device_sync_resolve_checkpoint_revision)
 
 compose=(docker compose -f compose.yaml -f compose.backup.yaml)
+management_port=${FACETS_DEVICE_SYNC_MANAGEMENT_PORT:-}
+if [[ -z $management_port && -f .env ]]; then
+  management_port_line=$(grep -E '^FACETS_DEVICE_SYNC_MANAGEMENT_PORT=[0-9]+$' .env | tail -1 || true)
+  management_port=${management_port_line#*=}
+fi
+management_port=${management_port:-8080}
+[[ $management_port =~ ^[0-9]+$ ]] &&
+  (( management_port >= 1 && management_port <= 65535 )) || {
+  echo "FACETS_DEVICE_SYNC_MANAGEMENT_PORT is invalid" >&2
+  exit 65
+}
 source_was_running=false
 if [[ -n $("${compose[@]}" ps --status running -q server) ]]; then
   source_was_running=true
@@ -43,7 +54,7 @@ restart_source() {
     source_ready=false
     for _ in {1..30}; do
       if curl --fail --silent \
-        "http://127.0.0.1:${FACETS_DEVICE_SYNC_MANAGEMENT_PORT:-8080}/readyz" \
+        "http://127.0.0.1:${management_port}/readyz" \
         >/dev/null; then
         source_ready=true
         break
