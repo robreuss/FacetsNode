@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"reflect"
 	"strings"
 
 	"github.com/google/uuid"
@@ -21,6 +22,11 @@ import (
 
 const maximumDeviceSyncAuthorityRecordByteCount = 1024 * 1024
 const maximumDeviceSyncSnapshotPayloadByteCount = 262_144
+const maximumDeviceSyncMigrationEvidenceRecordByteCount = 8 * 1024 * 1024
+
+var ErrDeviceSyncMigrationImportConflict = errors.New(
+	"Device Sync migration import conflicts with durable state",
+)
 
 type DeviceSyncScopeEnforcementState string
 
@@ -57,6 +63,7 @@ type DeviceSyncScopeEnforcement struct {
 	LocalDeploymentID        *uuid.UUID
 	Authority                *DeviceSyncScopeAuthority
 	ActiveExportWriteFenceID *uuid.UUID
+	ActiveMigrationImportID  *uuid.UUID
 }
 
 // DeviceSyncMigrationExportRecord is the validated immutable database record
@@ -77,6 +84,105 @@ type DeviceSyncMigrationExportRecord struct {
 	StateCommitmentDigest    string
 	CapturedAtMilliseconds   int64
 	ExpiresAtMilliseconds    int64
+}
+
+// DeviceSyncInitialAuthorityEvidence preserves the exact historically
+// authenticated revision-1 authority when a principal moves to a new
+// deployment. ValidatedAtMilliseconds is the original acceptance instant, not
+// the import instant.
+type DeviceSyncInitialAuthorityEvidence struct {
+	Manifest                serviceauthority.Manifest
+	ValidatedAtMilliseconds int64
+}
+
+// DeviceSyncMigrationImportRecord is immutable evidence that one exact signed
+// snapshot and preparation populated a target-local standby scope. It does not
+// assert that artifact bytes were transferred or that the imported semantic
+// rows have been independently re-materialized into StateCommitmentDigest.
+type DeviceSyncMigrationImportRecord struct {
+	PrincipalID                             uuid.UUID
+	TenantID                                uuid.UUID
+	MigrationID                             uuid.UUID
+	SnapshotID                              uuid.UUID
+	ExportWriteFenceID                      uuid.UUID
+	AuthorityRevision                       uint64
+	AuthorityManifestDigest                 string
+	PreparationReferenceDigest              string
+	ExportingDeploymentID                   uuid.UUID
+	ImportingDeploymentID                   uuid.UUID
+	CanonicalPreparationRecord              []byte
+	PreparationRecordSHA256                 string
+	PreparationManifestRecord               []byte
+	CanonicalSnapshotRecord                 []byte
+	SnapshotRecordSHA256                    string
+	SnapshotReferenceDigest                 string
+	SnapshotPayloadSHA256                   string
+	StateCommitmentDigest                   string
+	CanonicalArtifactDescriptors            []byte
+	ArtifactDescriptorsSHA256               string
+	ArtifactCount                           int
+	ServiceStateArtifactID                  uuid.UUID
+	ServiceStateArtifactByteCount           int64
+	ServiceStateArtifactTransferDigest      string
+	CapturedAtMilliseconds                  int64
+	ExpiresAtMilliseconds                   int64
+	ImportedAtMilliseconds                  int64
+	InitialDeploymentID                     uuid.UUID
+	InitialAuthorityValidatedAtMilliseconds int64
+	InitialAuthorityManifestDigest          string
+	InitialAuthorityManifestRecord          []byte
+}
+
+// DeviceSyncStandbyImportTransaction is an internal trusted-code seam, not a
+// SQL capability sandbox. Execute, Query, and QueryRow can run arbitrary SQL.
+// A materializer must insert only the authenticated principal's semantic relay
+// and Device Sync rows; this store owns the import/enforcement evidence rows.
+type DeviceSyncStandbyImportTransaction interface {
+	Execute(context.Context, string, ...any) (int64, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// DeviceSyncStandbyImportMaterializer populates semantic service rows inside
+// the same transaction that later installs immutable import evidence and the
+// prepared-target standby enforcement row. It is never invoked for an exact
+// durable retry.
+type DeviceSyncStandbyImportMaterializer func(
+	context.Context,
+	DeviceSyncStandbyImportTransaction,
+	serviceauthority.ValidatedMigrationTransfer,
+) error
+
+type deviceSyncStandbyImportTransaction struct {
+	tx pgx.Tx
+}
+
+func (transaction deviceSyncStandbyImportTransaction) Execute(
+	ctx context.Context,
+	query string,
+	arguments ...any,
+) (int64, error) {
+	result, err := transaction.tx.Exec(ctx, query, arguments...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+func (transaction deviceSyncStandbyImportTransaction) Query(
+	ctx context.Context,
+	query string,
+	arguments ...any,
+) (pgx.Rows, error) {
+	return transaction.tx.Query(ctx, query, arguments...)
+}
+
+func (transaction deviceSyncStandbyImportTransaction) QueryRow(
+	ctx context.Context,
+	query string,
+	arguments ...any,
+) pgx.Row {
+	return transaction.tx.QueryRow(ctx, query, arguments...)
 }
 
 // DeviceSyncSnapshotReadTransaction narrows the trusted materializer to the
@@ -519,6 +625,259 @@ func (s *RelayStore) MaterializeAndFenceDeviceSyncMigrationExport(
 	return cloneDeviceSyncMigrationExportRecord(stored), nil
 }
 
+// ImportPreparedDeviceSyncMigrationStandby authenticates one complete prepared
+// transfer, invokes the trusted semantic-row materializer, and atomically
+// installs immutable import evidence plus a target-local standby enforcement
+// row. The target remains non-writable because the signed preparation continues
+// to name the source deployment as active.
+//
+// This is a headless store primitive. It does not copy artifact bytes,
+// independently re-materialize StateCommitmentDigest, sign readiness, activate
+// the target, or expose an HTTP/operator route. An exact already-committed retry
+// is returned before temporal validation and never invokes materializer.
+func (s *RelayStore) ImportPreparedDeviceSyncMigrationStandby(
+	ctx context.Context,
+	localDeploymentID uuid.UUID,
+	preparation serviceauthority.MigrationPreparation,
+	snapshot serviceauthority.MigrationSnapshot,
+	anchor serviceauthority.TrustAnchor,
+	initial DeviceSyncInitialAuthorityEvidence,
+	nowMilliseconds int64,
+	materializer DeviceSyncStandbyImportMaterializer,
+) (DeviceSyncMigrationImportRecord, error) {
+	candidate, initialAuthority, err := buildDeviceSyncMigrationImportCandidate(
+		localDeploymentID, preparation, snapshot, anchor, initial, nowMilliseconds,
+	)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, fmt.Errorf(
+			"begin Device Sync migration import: %w", err,
+		)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+	`, candidate.PrincipalID); err != nil {
+		return DeviceSyncMigrationImportRecord{}, fmt.Errorf(
+			"lock Device Sync migration import scope: %w", err,
+		)
+	}
+
+	existing, found, err := loadDeviceSyncMigrationImport(
+		ctx, tx, candidate.PrincipalID, candidate.MigrationID,
+		candidate.ImportingDeploymentID, "FOR SHARE",
+	)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, err
+	}
+	if found {
+		if !sameDeviceSyncMigrationImportIdentity(existing, candidate) {
+			return DeviceSyncMigrationImportRecord{}, ErrDeviceSyncMigrationImportConflict
+		}
+		return cloneDeviceSyncMigrationImportRecord(existing), nil
+	}
+
+	validated, err := snapshot.ValidatePreparedTransfer(
+		preparation, anchor, nowMilliseconds,
+	)
+	if err != nil || !validatedDeviceSyncMigrationTransferMatchesCandidate(
+		validated, candidate, localDeploymentID,
+	) {
+		return DeviceSyncMigrationImportRecord{}, serviceauthority.ErrInvalid
+	}
+	if materializer == nil {
+		return DeviceSyncMigrationImportRecord{}, serviceauthority.ErrInvalid
+	}
+	var collision bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM device_sync_principals WHERE principal_id=$1
+			UNION ALL
+			SELECT 1 FROM relay_tenants WHERE tenant_id=$1
+			UNION ALL
+			SELECT 1 FROM device_sync_scope_enforcement
+			WHERE principal_id=$1 OR tenant_id=$1
+			UNION ALL
+			SELECT 1 FROM device_sync_migration_imports
+			WHERE principal_id=$1 OR tenant_id=$1
+		)
+	`, candidate.PrincipalID).Scan(&collision); err != nil {
+		return DeviceSyncMigrationImportRecord{}, fmt.Errorf(
+			"check Device Sync migration import collision: %w", err,
+		)
+	}
+	if collision {
+		return DeviceSyncMigrationImportRecord{}, ErrDeviceSyncMigrationImportConflict
+	}
+	if err := materializer(
+		ctx, deviceSyncStandbyImportTransaction{tx: tx}, validated,
+	); err != nil {
+		return DeviceSyncMigrationImportRecord{}, fmt.Errorf(
+			"materialize Device Sync standby import: %w", err,
+		)
+	}
+	var semanticParentsExist bool
+	var authorityRowsExist bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM device_sync_principals AS principal
+			JOIN relay_tenants AS tenant
+			  ON tenant.tenant_id=principal.tenant_id
+			WHERE principal.principal_id=$1 AND principal.tenant_id=$1
+		), EXISTS (
+			SELECT 1 FROM device_sync_scope_enforcement
+			WHERE principal_id=$1 OR tenant_id=$1
+			UNION ALL
+			SELECT 1 FROM device_sync_migration_imports
+			WHERE principal_id=$1 OR tenant_id=$1
+		)
+	`, candidate.PrincipalID).Scan(
+		&semanticParentsExist, &authorityRowsExist,
+	); err != nil {
+		return DeviceSyncMigrationImportRecord{}, fmt.Errorf(
+			"validate Device Sync standby materialization: %w", err,
+		)
+	}
+	if !semanticParentsExist || authorityRowsExist {
+		return DeviceSyncMigrationImportRecord{}, errors.New(
+			"Device Sync standby materializer did not create exact semantic parents",
+		)
+	}
+
+	preparationAuthority, err := DeviceSyncScopeAuthorityFromManifest(
+		preparation.PreparationManifest,
+		&candidate.PreparationReferenceDigest,
+		nowMilliseconds,
+	)
+	if err != nil || preparationAuthority.Revision != candidate.AuthorityRevision ||
+		preparationAuthority.ManifestDigest != candidate.AuthorityManifestDigest ||
+		preparationAuthority.ActiveDeploymentID != candidate.ExportingDeploymentID {
+		return DeviceSyncMigrationImportRecord{}, serviceauthority.ErrInvalid
+	}
+	result, err := tx.Exec(ctx, `
+		INSERT INTO device_sync_migration_imports (
+			principal_id,tenant_id,migration_id,snapshot_id,
+			export_write_fence_id,authority_revision,
+			authority_manifest_digest,preparation_reference_digest,
+			exporting_deployment_id,importing_deployment_id,
+			canonical_preparation_record,preparation_record_sha256,
+			canonical_snapshot_record,snapshot_record_sha256,
+			snapshot_reference_digest,snapshot_payload_sha256,
+			state_commitment_digest,canonical_artifact_descriptors,
+			artifact_descriptors_sha256,artifact_count,
+			service_state_artifact_id,service_state_artifact_byte_count,
+			service_state_artifact_transfer_digest,captured_at_milliseconds,
+			expires_at_milliseconds,imported_at_milliseconds,
+			initial_deployment_id,
+			initial_authority_validated_at_milliseconds,
+			initial_authority_manifest_digest,
+			initial_authority_manifest_record
+		) VALUES (
+			$1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+			$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29
+		)
+	`, candidate.PrincipalID, candidate.MigrationID, candidate.SnapshotID,
+		candidate.ExportWriteFenceID, int64(candidate.AuthorityRevision),
+		candidate.AuthorityManifestDigest, candidate.PreparationReferenceDigest,
+		candidate.ExportingDeploymentID, candidate.ImportingDeploymentID,
+		candidate.CanonicalPreparationRecord, candidate.PreparationRecordSHA256,
+		candidate.CanonicalSnapshotRecord, candidate.SnapshotRecordSHA256,
+		candidate.SnapshotReferenceDigest, candidate.SnapshotPayloadSHA256,
+		candidate.StateCommitmentDigest, candidate.CanonicalArtifactDescriptors,
+		candidate.ArtifactDescriptorsSHA256, candidate.ArtifactCount,
+		candidate.ServiceStateArtifactID, candidate.ServiceStateArtifactByteCount,
+		candidate.ServiceStateArtifactTransferDigest,
+		candidate.CapturedAtMilliseconds, candidate.ExpiresAtMilliseconds,
+		candidate.ImportedAtMilliseconds, candidate.InitialDeploymentID,
+		candidate.InitialAuthorityValidatedAtMilliseconds,
+		candidate.InitialAuthorityManifestDigest,
+		candidate.InitialAuthorityManifestRecord)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, fmt.Errorf(
+			"insert Device Sync migration import evidence: %w", err,
+		)
+	}
+	if result.RowsAffected() != 1 {
+		return DeviceSyncMigrationImportRecord{}, errors.New(
+			"Device Sync migration import insert affected an unexpected row count",
+		)
+	}
+	result, err = tx.Exec(ctx, `
+		INSERT INTO device_sync_scope_enforcement (
+			principal_id,tenant_id,state,local_deployment_id,
+			initial_deployment_id,
+			initial_authority_validated_at_milliseconds,
+			initial_authority_manifest_digest,
+			initial_authority_manifest_record,
+			authority_validated_at_milliseconds,authority_revision,
+			authority_manifest_digest,authority_manifest_record,
+			active_deployment_id,transition_evidence_digest,
+			active_migration_import_id
+		) VALUES (
+			$1,$1,'standby',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+		)
+	`, candidate.PrincipalID, candidate.ImportingDeploymentID,
+		initialAuthority.ActiveDeploymentID,
+		initialAuthority.ValidatedAtMilliseconds,
+		initialAuthority.ManifestDigest, initialAuthority.ManifestRecord,
+		preparationAuthority.ValidatedAtMilliseconds,
+		int64(preparationAuthority.Revision), preparationAuthority.ManifestDigest,
+		preparationAuthority.ManifestRecord,
+		preparationAuthority.ActiveDeploymentID,
+		preparationAuthority.TransitionEvidenceDigest, candidate.MigrationID)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, fmt.Errorf(
+			"insert Device Sync prepared-target standby authority: %w", err,
+		)
+	}
+	if result.RowsAffected() != 1 {
+		return DeviceSyncMigrationImportRecord{}, errors.New(
+			"Device Sync prepared-target standby insert affected an unexpected row count",
+		)
+	}
+
+	stored, found, err := loadDeviceSyncMigrationImport(
+		ctx, tx, candidate.PrincipalID, candidate.MigrationID,
+		candidate.ImportingDeploymentID, "FOR SHARE",
+	)
+	if err != nil || !found ||
+		!sameDeviceSyncMigrationImportIdentity(stored, candidate) {
+		if err != nil {
+			return DeviceSyncMigrationImportRecord{}, err
+		}
+		return DeviceSyncMigrationImportRecord{}, errors.New(
+			"persisted Device Sync migration import differs from authenticated evidence",
+		)
+	}
+	standby, err := loadDeviceSyncScopeEnforcement(
+		ctx, tx, candidate.PrincipalID, "FOR SHARE",
+	)
+	if err != nil || standby.State != DeviceSyncScopeStandby ||
+		standby.LocalDeploymentID == nil ||
+		*standby.LocalDeploymentID != candidate.ImportingDeploymentID ||
+		standby.Authority == nil ||
+		standby.Authority.ActiveDeploymentID != candidate.ExportingDeploymentID ||
+		standby.ActiveMigrationImportID == nil ||
+		*standby.ActiveMigrationImportID != candidate.MigrationID {
+		if err != nil {
+			return DeviceSyncMigrationImportRecord{}, err
+		}
+		return DeviceSyncMigrationImportRecord{}, errors.New(
+			"persisted Device Sync prepared-target standby is inconsistent",
+		)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return DeviceSyncMigrationImportRecord{}, fmt.Errorf(
+			"commit Device Sync migration import: %w", err,
+		)
+	}
+	return cloneDeviceSyncMigrationImportRecord(stored), nil
+}
+
 // lockDeviceSyncScopeForMutation is the store-level seam that every durable
 // Device Sync mutator will adopt. Call it as the first row lock inside the same
 // PostgreSQL transaction as the mutation and retain that transaction through
@@ -658,6 +1017,219 @@ func validatePreparedDeviceSyncMigrationIdentity(
 	return nil
 }
 
+func buildDeviceSyncMigrationImportCandidate(
+	localDeploymentID uuid.UUID,
+	preparation serviceauthority.MigrationPreparation,
+	snapshot serviceauthority.MigrationSnapshot,
+	anchor serviceauthority.TrustAnchor,
+	initial DeviceSyncInitialAuthorityEvidence,
+	nowMilliseconds int64,
+) (DeviceSyncMigrationImportRecord, DeviceSyncScopeAuthority, error) {
+	if localDeploymentID == uuid.Nil || nowMilliseconds < 0 ||
+		initial.ValidatedAtMilliseconds < 0 {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{},
+			serviceauthority.ErrInvalid
+	}
+	snapshotPayload, err := snapshot.VerifiedPayload(nil)
+	if err != nil || snapshotPayload.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		snapshotPayload.ImportingDeploymentID != localDeploymentID {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{},
+			serviceauthority.ErrInvalid
+	}
+	historical, err := snapshot.ValidatePreparedTransfer(
+		preparation, anchor, snapshotPayload.CapturedAtMilliseconds,
+	)
+	if err != nil || historical.Snapshot.Scope != snapshotPayload.Scope ||
+		historical.Snapshot.SnapshotID != snapshotPayload.SnapshotID ||
+		historical.TargetDeploymentOffer.Deployment.DeploymentID != localDeploymentID {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{},
+			serviceauthority.ErrInvalid
+	}
+	preparedPayload := historical.PreparationManifest
+	preparationManifestDigest, preparationManifestDigestErr :=
+		preparation.PreparationManifest.ReferenceDigest()
+	preparationReferenceDigest, preparationReferenceDigestErr :=
+		preparation.ReferenceDigest()
+	snapshotReferenceDigest, snapshotReferenceDigestErr := snapshot.ReferenceDigest()
+	if preparationManifestDigestErr != nil ||
+		preparationReferenceDigestErr != nil || snapshotReferenceDigestErr != nil ||
+		preparedPayload.Revision == 0 || preparedPayload.Revision > math.MaxInt64 ||
+		snapshotPayload.AuthorityManifestDigest != preparationManifestDigest {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{},
+			serviceauthority.ErrInvalid
+	}
+	initialPayload, err := initial.Manifest.Authorize(
+		anchor, initial.ValidatedAtMilliseconds,
+	)
+	if err != nil || initialPayload.Scope != snapshotPayload.Scope ||
+		initialPayload.Revision != 1 ||
+		initialPayload.Transition != serviceauthority.TransitionInitialActivation {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{},
+			serviceauthority.ErrInvalid
+	}
+	initialAuthority, err := DeviceSyncScopeAuthorityFromManifest(
+		initial.Manifest, nil, initial.ValidatedAtMilliseconds,
+	)
+	if err != nil || initialAuthority.ActiveDeploymentID !=
+		initialPayload.ActiveDeployment.DeploymentID {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{},
+			serviceauthority.ErrInvalid
+	}
+	canonicalPreparation, preparationRecordSHA256, err :=
+		encodeCanonicalDeviceSyncEvidenceRecord(
+			preparation, maximumDeviceSyncMigrationEvidenceRecordByteCount,
+		)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{}, err
+	}
+	preparationManifestRecord, _, err := encodeCanonicalDeviceSyncEvidenceRecord(
+		preparation.PreparationManifest,
+		maximumDeviceSyncAuthorityRecordByteCount,
+	)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{}, err
+	}
+	canonicalSnapshot, snapshotRecordSHA256, err :=
+		encodeCanonicalDeviceSyncEvidenceRecord(
+			snapshot, maximumDeviceSyncMigrationEvidenceRecordByteCount,
+		)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{}, err
+	}
+	canonicalArtifacts, artifactDescriptorsSHA256, err :=
+		encodeCanonicalDeviceSyncEvidenceRecord(
+			snapshotPayload.Artifacts, maximumDeviceSyncSnapshotPayloadByteCount,
+		)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{}, err
+	}
+	var serviceStateArtifact *serviceauthority.MigrationArtifactDescriptor
+	for index := range snapshotPayload.Artifacts {
+		if snapshotPayload.Artifacts[index].Kind ==
+			serviceauthority.ArtifactServiceStateSnapshot {
+			candidate := snapshotPayload.Artifacts[index]
+			serviceStateArtifact = &candidate
+			break
+		}
+	}
+	if serviceStateArtifact == nil {
+		return DeviceSyncMigrationImportRecord{}, DeviceSyncScopeAuthority{},
+			serviceauthority.ErrInvalid
+	}
+	snapshotPayloadDigest := sha256.Sum256(snapshot.Payload)
+	candidate := DeviceSyncMigrationImportRecord{
+		PrincipalID:                             snapshotPayload.Scope.ScopeID,
+		TenantID:                                snapshotPayload.Scope.ScopeID,
+		MigrationID:                             snapshotPayload.MigrationID,
+		SnapshotID:                              snapshotPayload.SnapshotID,
+		ExportWriteFenceID:                      snapshotPayload.ExportWriteFenceID,
+		AuthorityRevision:                       preparedPayload.Revision,
+		AuthorityManifestDigest:                 preparationManifestDigest,
+		PreparationReferenceDigest:              preparationReferenceDigest,
+		ExportingDeploymentID:                   snapshotPayload.ExportingDeploymentID,
+		ImportingDeploymentID:                   snapshotPayload.ImportingDeploymentID,
+		CanonicalPreparationRecord:              canonicalPreparation,
+		PreparationRecordSHA256:                 preparationRecordSHA256,
+		PreparationManifestRecord:               preparationManifestRecord,
+		CanonicalSnapshotRecord:                 canonicalSnapshot,
+		SnapshotRecordSHA256:                    snapshotRecordSHA256,
+		SnapshotReferenceDigest:                 snapshotReferenceDigest,
+		SnapshotPayloadSHA256:                   hex.EncodeToString(snapshotPayloadDigest[:]),
+		StateCommitmentDigest:                   snapshotPayload.StateCommitmentDigest,
+		CanonicalArtifactDescriptors:            canonicalArtifacts,
+		ArtifactDescriptorsSHA256:               artifactDescriptorsSHA256,
+		ArtifactCount:                           len(snapshotPayload.Artifacts),
+		ServiceStateArtifactID:                  serviceStateArtifact.ArtifactID,
+		ServiceStateArtifactByteCount:           serviceStateArtifact.ByteCount,
+		ServiceStateArtifactTransferDigest:      serviceStateArtifact.TransferDigest,
+		CapturedAtMilliseconds:                  snapshotPayload.CapturedAtMilliseconds,
+		ExpiresAtMilliseconds:                   snapshotPayload.ExpiresAtMilliseconds,
+		ImportedAtMilliseconds:                  nowMilliseconds,
+		InitialDeploymentID:                     initialAuthority.ActiveDeploymentID,
+		InitialAuthorityValidatedAtMilliseconds: initialAuthority.ValidatedAtMilliseconds,
+		InitialAuthorityManifestDigest:          initialAuthority.ManifestDigest,
+		InitialAuthorityManifestRecord:          initialAuthority.ManifestRecord,
+	}
+	return candidate, initialAuthority, nil
+}
+
+func validatedDeviceSyncMigrationTransferMatchesCandidate(
+	validated serviceauthority.ValidatedMigrationTransfer,
+	candidate DeviceSyncMigrationImportRecord,
+	localDeploymentID uuid.UUID,
+) bool {
+	return validated.Snapshot.Scope.Kind == serviceauthority.ScopeDeviceSync &&
+		validated.Snapshot.Scope.ScopeID == candidate.PrincipalID &&
+		validated.Migration.MigrationID == candidate.MigrationID &&
+		validated.Migration.SourceDeploymentID == candidate.ExportingDeploymentID &&
+		validated.Migration.TargetDeploymentID == candidate.ImportingDeploymentID &&
+		validated.PreparationManifest.Revision == candidate.AuthorityRevision &&
+		validated.Snapshot.SnapshotID == candidate.SnapshotID &&
+		validated.Snapshot.ExportWriteFenceID == candidate.ExportWriteFenceID &&
+		validated.Snapshot.StateCommitmentDigest == candidate.StateCommitmentDigest &&
+		validated.Snapshot.ExportingDeploymentID == candidate.ExportingDeploymentID &&
+		validated.Snapshot.ImportingDeploymentID == candidate.ImportingDeploymentID &&
+		validated.TargetDeploymentOffer.Deployment.DeploymentID == localDeploymentID &&
+		candidate.ImportingDeploymentID == localDeploymentID &&
+		candidate.ImportedAtMilliseconds >= candidate.CapturedAtMilliseconds &&
+		candidate.ImportedAtMilliseconds < candidate.ExpiresAtMilliseconds
+}
+
+func encodeCanonicalDeviceSyncEvidenceRecord(
+	value any,
+	maximumByteCount int,
+) ([]byte, string, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) == 0 || maximumByteCount <= 0 ||
+		len(encoded) > maximumByteCount {
+		return nil, "", serviceauthority.ErrInvalid
+	}
+	digest := sha256.Sum256(encoded)
+	return encoded, hex.EncodeToString(digest[:]), nil
+}
+
+func sameDeviceSyncMigrationImportIdentity(
+	left DeviceSyncMigrationImportRecord,
+	right DeviceSyncMigrationImportRecord,
+) bool {
+	return left.PrincipalID == right.PrincipalID && left.TenantID == right.TenantID &&
+		left.MigrationID == right.MigrationID && left.SnapshotID == right.SnapshotID &&
+		left.ExportWriteFenceID == right.ExportWriteFenceID &&
+		left.AuthorityRevision == right.AuthorityRevision &&
+		left.AuthorityManifestDigest == right.AuthorityManifestDigest &&
+		left.PreparationReferenceDigest == right.PreparationReferenceDigest &&
+		left.ExportingDeploymentID == right.ExportingDeploymentID &&
+		left.ImportingDeploymentID == right.ImportingDeploymentID &&
+		bytes.Equal(left.CanonicalPreparationRecord, right.CanonicalPreparationRecord) &&
+		left.PreparationRecordSHA256 == right.PreparationRecordSHA256 &&
+		bytes.Equal(left.PreparationManifestRecord, right.PreparationManifestRecord) &&
+		bytes.Equal(left.CanonicalSnapshotRecord, right.CanonicalSnapshotRecord) &&
+		left.SnapshotRecordSHA256 == right.SnapshotRecordSHA256 &&
+		left.SnapshotReferenceDigest == right.SnapshotReferenceDigest &&
+		left.SnapshotPayloadSHA256 == right.SnapshotPayloadSHA256 &&
+		left.StateCommitmentDigest == right.StateCommitmentDigest &&
+		bytes.Equal(
+			left.CanonicalArtifactDescriptors,
+			right.CanonicalArtifactDescriptors,
+		) &&
+		left.ArtifactDescriptorsSHA256 == right.ArtifactDescriptorsSHA256 &&
+		left.ArtifactCount == right.ArtifactCount &&
+		left.ServiceStateArtifactID == right.ServiceStateArtifactID &&
+		left.ServiceStateArtifactByteCount == right.ServiceStateArtifactByteCount &&
+		left.ServiceStateArtifactTransferDigest ==
+			right.ServiceStateArtifactTransferDigest &&
+		left.CapturedAtMilliseconds == right.CapturedAtMilliseconds &&
+		left.ExpiresAtMilliseconds == right.ExpiresAtMilliseconds &&
+		left.InitialDeploymentID == right.InitialDeploymentID &&
+		left.InitialAuthorityValidatedAtMilliseconds ==
+			right.InitialAuthorityValidatedAtMilliseconds &&
+		left.InitialAuthorityManifestDigest == right.InitialAuthorityManifestDigest &&
+		bytes.Equal(
+			left.InitialAuthorityManifestRecord,
+			right.InitialAuthorityManifestRecord,
+		)
+}
+
 func decodeCanonicalDeviceSyncSnapshotPayload(
 	canonicalPayload []byte,
 	nowMilliseconds *int64,
@@ -692,11 +1264,15 @@ func loadDeviceSyncScopeEnforcement(
 	lockClause string,
 ) (DeviceSyncScopeEnforcement, error) {
 	query := `
-		SELECT tenant_id,state,local_deployment_id,authority_revision,
+		SELECT tenant_id,state,local_deployment_id,
+			initial_deployment_id,
+			initial_authority_validated_at_milliseconds,
+			initial_authority_manifest_digest,
+			initial_authority_manifest_record,authority_revision,
 			authority_manifest_digest,authority_manifest_record,
 			active_deployment_id,transition_evidence_digest,
 			authority_validated_at_milliseconds,
-			active_export_write_fence_id
+			active_export_write_fence_id,active_migration_import_id
 		FROM device_sync_scope_enforcement
 		WHERE principal_id=$1 AND tenant_id=$1
 	`
@@ -705,6 +1281,10 @@ func loadDeviceSyncScopeEnforcement(
 	}
 	current := DeviceSyncScopeEnforcement{PrincipalID: principalID}
 	var revision *int64
+	var initialDeploymentID *uuid.UUID
+	var initialAuthorityValidatedAtMilliseconds *int64
+	var initialAuthorityManifestDigest *string
+	var initialAuthorityManifestRecord []byte
 	var manifestDigest *string
 	var manifestRecord []byte
 	var activeDeploymentID *uuid.UUID
@@ -712,9 +1292,11 @@ func loadDeviceSyncScopeEnforcement(
 	var authorityValidatedAtMilliseconds *int64
 	err := querier.QueryRow(ctx, query, principalID).Scan(
 		&current.TenantID, &current.State, &current.LocalDeploymentID,
+		&initialDeploymentID, &initialAuthorityValidatedAtMilliseconds,
+		&initialAuthorityManifestDigest, &initialAuthorityManifestRecord,
 		&revision, &manifestDigest, &manifestRecord, &activeDeploymentID,
 		&transitionEvidenceDigest, &authorityValidatedAtMilliseconds,
-		&current.ActiveExportWriteFenceID,
+		&current.ActiveExportWriteFenceID, &current.ActiveMigrationImportID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DeviceSyncScopeEnforcement{}, errors.New(
@@ -731,10 +1313,15 @@ func loadDeviceSyncScopeEnforcement(
 			"stored Device Sync scope enforcement is invalid",
 		)
 	}
-	allAuthorityNil := current.LocalDeploymentID == nil && revision == nil &&
+	allAuthorityNil := current.LocalDeploymentID == nil &&
+		initialDeploymentID == nil &&
+		initialAuthorityValidatedAtMilliseconds == nil &&
+		initialAuthorityManifestDigest == nil &&
+		len(initialAuthorityManifestRecord) == 0 && revision == nil &&
 		manifestDigest == nil && len(manifestRecord) == 0 &&
 		activeDeploymentID == nil && transitionEvidenceDigest == nil &&
-		authorityValidatedAtMilliseconds == nil
+		authorityValidatedAtMilliseconds == nil &&
+		current.ActiveMigrationImportID == nil
 	if allAuthorityNil {
 		if current.State != DeviceSyncScopeStandby ||
 			current.ActiveExportWriteFenceID != nil {
@@ -744,7 +1331,11 @@ func loadDeviceSyncScopeEnforcement(
 		}
 		return current, nil
 	}
-	if current.LocalDeploymentID == nil || revision == nil || *revision <= 0 ||
+	if current.LocalDeploymentID == nil || initialDeploymentID == nil ||
+		initialAuthorityValidatedAtMilliseconds == nil ||
+		initialAuthorityManifestDigest == nil ||
+		len(initialAuthorityManifestRecord) == 0 ||
+		revision == nil || *revision <= 0 ||
 		manifestDigest == nil || len(manifestRecord) == 0 || activeDeploymentID == nil {
 		return DeviceSyncScopeEnforcement{}, errors.New(
 			"stored Device Sync scope authority is incomplete",
@@ -776,15 +1367,68 @@ func loadDeviceSyncScopeEnforcement(
 		)
 	}
 	current.Authority = &authority
-	if ((current.State == DeviceSyncScopeStandby ||
-		current.State == DeviceSyncScopeWritable ||
-		current.State == DeviceSyncScopeExportFenced) &&
-		*current.LocalDeploymentID != authority.ActiveDeploymentID) ||
+	initialManifest, err := decodeCanonicalDeviceSyncAuthorityManifest(
+		initialAuthorityManifestRecord,
+	)
+	if err != nil {
+		return DeviceSyncScopeEnforcement{}, err
+	}
+	initialPayload, err := initialManifest.VerifiedPayload()
+	initialDigest, digestErr := initialManifest.ReferenceDigest()
+	if err != nil || digestErr != nil ||
+		*initialAuthorityValidatedAtMilliseconds < 0 ||
+		initialPayload.Validate(initialAuthorityValidatedAtMilliseconds) != nil ||
+		initialPayload.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		initialPayload.Scope.ScopeID != principalID || initialPayload.Revision != 1 ||
+		initialPayload.Transition != serviceauthority.TransitionInitialActivation ||
+		initialPayload.ActiveDeployment.DeploymentID != *initialDeploymentID ||
+		initialDigest != *initialAuthorityManifestDigest {
+		return DeviceSyncScopeEnforcement{}, errors.New(
+			"stored Device Sync initial authority is inconsistent",
+		)
+	}
+	localMatchesActive := *current.LocalDeploymentID == authority.ActiveDeploymentID
+	preparedTargetStandby := current.State == DeviceSyncScopeStandby &&
+		!localMatchesActive && current.ActiveMigrationImportID != nil
+	if current.State == DeviceSyncScopeStandby && !localMatchesActive &&
+		!preparedTargetStandby ||
+		(current.State == DeviceSyncScopeWritable ||
+			current.State == DeviceSyncScopeExportFenced) && !localMatchesActive ||
 		((current.State == DeviceSyncScopeExportFenced) !=
-			(current.ActiveExportWriteFenceID != nil)) {
+			(current.ActiveExportWriteFenceID != nil)) ||
+		!preparedTargetStandby && current.ActiveMigrationImportID != nil {
 		return DeviceSyncScopeEnforcement{}, errors.New(
 			"stored Device Sync deployment or export fence state is inconsistent",
 		)
+	}
+	if preparedTargetStandby {
+		imported, found, err := loadDeviceSyncMigrationImport(
+			ctx, querier, principalID, *current.ActiveMigrationImportID,
+			*current.LocalDeploymentID, "",
+		)
+		if err != nil {
+			return DeviceSyncScopeEnforcement{}, err
+		}
+		if !found || imported.ExportingDeploymentID != authority.ActiveDeploymentID ||
+			imported.AuthorityRevision != authority.Revision ||
+			imported.AuthorityManifestDigest != authority.ManifestDigest ||
+			authority.TransitionEvidenceDigest == nil ||
+			imported.PreparationReferenceDigest !=
+				*authority.TransitionEvidenceDigest ||
+			imported.InitialDeploymentID != *initialDeploymentID ||
+			imported.InitialAuthorityValidatedAtMilliseconds !=
+				*initialAuthorityValidatedAtMilliseconds ||
+			imported.InitialAuthorityManifestDigest !=
+				*initialAuthorityManifestDigest ||
+			!bytes.Equal(
+				imported.InitialAuthorityManifestRecord,
+				initialAuthorityManifestRecord,
+			) ||
+			!bytes.Equal(imported.PreparationManifestRecord, manifestRecord) {
+			return DeviceSyncScopeEnforcement{}, errors.New(
+				"stored Device Sync prepared-target standby lacks exact import evidence",
+			)
+		}
 	}
 	return current, nil
 }
@@ -905,6 +1549,286 @@ func loadDeviceSyncMigrationExport(
 	return cloneDeviceSyncMigrationExportRecord(stored), true, nil
 }
 
+func loadDeviceSyncMigrationImport(
+	ctx context.Context,
+	querier relayQuerier,
+	principalID uuid.UUID,
+	migrationID uuid.UUID,
+	importingDeploymentID uuid.UUID,
+	lockClause string,
+) (DeviceSyncMigrationImportRecord, bool, error) {
+	query := `
+		SELECT snapshot_id,export_write_fence_id,authority_revision,
+			authority_manifest_digest,preparation_reference_digest,
+			exporting_deployment_id,canonical_preparation_record,
+			preparation_record_sha256,canonical_snapshot_record,
+			snapshot_record_sha256,snapshot_reference_digest,
+			snapshot_payload_sha256,state_commitment_digest,
+			canonical_artifact_descriptors,artifact_descriptors_sha256,
+			artifact_count,service_state_artifact_id,
+			service_state_artifact_byte_count,
+			service_state_artifact_transfer_digest,
+			captured_at_milliseconds,expires_at_milliseconds,
+			imported_at_milliseconds,initial_deployment_id,
+			initial_authority_validated_at_milliseconds,
+			initial_authority_manifest_digest,
+			initial_authority_manifest_record
+		FROM device_sync_migration_imports
+		WHERE principal_id=$1 AND tenant_id=$1 AND migration_id=$2
+		  AND importing_deployment_id=$3
+	`
+	if lockClause != "" {
+		query += " " + lockClause
+	}
+	stored := DeviceSyncMigrationImportRecord{
+		PrincipalID: principalID, TenantID: principalID,
+		MigrationID: migrationID, ImportingDeploymentID: importingDeploymentID,
+	}
+	var authorityRevision int64
+	err := querier.QueryRow(
+		ctx, query, principalID, migrationID, importingDeploymentID,
+	).Scan(
+		&stored.SnapshotID, &stored.ExportWriteFenceID, &authorityRevision,
+		&stored.AuthorityManifestDigest, &stored.PreparationReferenceDigest,
+		&stored.ExportingDeploymentID, &stored.CanonicalPreparationRecord,
+		&stored.PreparationRecordSHA256, &stored.CanonicalSnapshotRecord,
+		&stored.SnapshotRecordSHA256, &stored.SnapshotReferenceDigest,
+		&stored.SnapshotPayloadSHA256, &stored.StateCommitmentDigest,
+		&stored.CanonicalArtifactDescriptors, &stored.ArtifactDescriptorsSHA256,
+		&stored.ArtifactCount, &stored.ServiceStateArtifactID,
+		&stored.ServiceStateArtifactByteCount,
+		&stored.ServiceStateArtifactTransferDigest,
+		&stored.CapturedAtMilliseconds, &stored.ExpiresAtMilliseconds,
+		&stored.ImportedAtMilliseconds, &stored.InitialDeploymentID,
+		&stored.InitialAuthorityValidatedAtMilliseconds,
+		&stored.InitialAuthorityManifestDigest,
+		&stored.InitialAuthorityManifestRecord,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DeviceSyncMigrationImportRecord{}, false, nil
+	}
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, false, fmt.Errorf(
+			"load Device Sync migration import: %w", err,
+		)
+	}
+	if authorityRevision <= 0 ||
+		!validDeviceSyncDigest(stored.AuthorityManifestDigest) ||
+		!validDeviceSyncDigest(stored.PreparationReferenceDigest) ||
+		!validDeviceSyncDigest(stored.PreparationRecordSHA256) ||
+		!validDeviceSyncDigest(stored.SnapshotRecordSHA256) ||
+		!validDeviceSyncDigest(stored.SnapshotReferenceDigest) ||
+		!validDeviceSyncDigest(stored.SnapshotPayloadSHA256) ||
+		!validDeviceSyncDigest(stored.StateCommitmentDigest) ||
+		!validDeviceSyncDigest(stored.ArtifactDescriptorsSHA256) ||
+		!validDeviceSyncDigest(stored.ServiceStateArtifactTransferDigest) ||
+		stored.ExportingDeploymentID == uuid.Nil ||
+		stored.ImportingDeploymentID == uuid.Nil ||
+		stored.ExportingDeploymentID == stored.ImportingDeploymentID ||
+		stored.SnapshotID == uuid.Nil || stored.ExportWriteFenceID == uuid.Nil ||
+		stored.ArtifactCount <= 0 || stored.ServiceStateArtifactID == uuid.Nil ||
+		stored.ServiceStateArtifactByteCount < 0 ||
+		stored.CapturedAtMilliseconds < 0 ||
+		stored.ExpiresAtMilliseconds <= stored.CapturedAtMilliseconds ||
+		stored.ImportedAtMilliseconds < stored.CapturedAtMilliseconds ||
+		stored.ImportedAtMilliseconds >= stored.ExpiresAtMilliseconds {
+		return DeviceSyncMigrationImportRecord{}, false, errors.New(
+			"stored Device Sync migration import has invalid scalar evidence",
+		)
+	}
+	var preparation serviceauthority.MigrationPreparation
+	if err := decodeCanonicalDeviceSyncEvidenceRecord(
+		stored.CanonicalPreparationRecord,
+		maximumDeviceSyncMigrationEvidenceRecordByteCount,
+		&preparation,
+	); err != nil {
+		return DeviceSyncMigrationImportRecord{}, false, err
+	}
+	preparationRecordDigest := sha256.Sum256(stored.CanonicalPreparationRecord)
+	preparationReferenceDigest, referenceErr := preparation.ReferenceDigest()
+	currentPayload, currentErr := preparation.CurrentManifest.VerifiedPayload()
+	preparedPayload, preparedErr := preparation.PreparationManifest.VerifiedPayload()
+	_, successorErr := preparation.PreparationManifest.ValidateSuccessor(
+		preparation.CurrentManifest,
+	)
+	targetOffer, targetErr := preparation.TargetOffer.VerifiedPayload(nil)
+	targetDeployment, deploymentErr := targetOffer.DeploymentOffer.VerifiedPayload(nil)
+	currentDigest, currentDigestErr := preparation.CurrentManifest.ReferenceDigest()
+	targetOfferDigest, targetOfferDigestErr := preparation.TargetOffer.ReferenceDigest()
+	preparationManifestDigest, preparationManifestDigestErr :=
+		preparation.PreparationManifest.ReferenceDigest()
+	preparationManifestRecord, _, preparationManifestRecordErr :=
+		encodeCanonicalDeviceSyncEvidenceRecord(
+			preparation.PreparationManifest,
+			maximumDeviceSyncAuthorityRecordByteCount,
+		)
+	if referenceErr != nil || currentErr != nil || preparedErr != nil ||
+		successorErr != nil || targetErr != nil || deploymentErr != nil ||
+		currentDigestErr != nil || targetOfferDigestErr != nil ||
+		preparationManifestDigestErr != nil || preparationManifestRecordErr != nil ||
+		hex.EncodeToString(preparationRecordDigest[:]) !=
+			stored.PreparationRecordSHA256 ||
+		preparationReferenceDigest != stored.PreparationReferenceDigest ||
+		preparedPayload.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		preparedPayload.Scope.ScopeID != principalID ||
+		preparedPayload.Revision != uint64(authorityRevision) ||
+		preparedPayload.Transition != serviceauthority.TransitionMigrationPreparation ||
+		preparedPayload.Migration == nil || len(preparedPayload.PreparedDeployments) != 1 ||
+		currentPayload.Scope != preparedPayload.Scope ||
+		targetOffer.Scope != preparedPayload.Scope ||
+		targetOffer.SourceManifestDigest != currentDigest ||
+		targetOffer.MigrationID != migrationID ||
+		targetOfferDigest != preparedPayload.Migration.TargetMigrationOfferDigest ||
+		preparedPayload.Migration.MigrationID != migrationID ||
+		preparedPayload.Migration.SourceDeploymentID !=
+			stored.ExportingDeploymentID ||
+		preparedPayload.Migration.TargetDeploymentID != importingDeploymentID ||
+		preparedPayload.ActiveDeployment.DeploymentID !=
+			stored.ExportingDeploymentID ||
+		targetDeployment.Deployment.DeploymentID != importingDeploymentID ||
+		!reflect.DeepEqual(
+			preparedPayload.PreparedDeployments[0], targetDeployment.Deployment,
+		) ||
+		preparationManifestDigest != stored.AuthorityManifestDigest {
+		return DeviceSyncMigrationImportRecord{}, false, errors.New(
+			"stored Device Sync migration preparation evidence is inconsistent",
+		)
+	}
+	stored.PreparationManifestRecord = preparationManifestRecord
+
+	var snapshot serviceauthority.MigrationSnapshot
+	if err := decodeCanonicalDeviceSyncEvidenceRecord(
+		stored.CanonicalSnapshotRecord,
+		maximumDeviceSyncMigrationEvidenceRecordByteCount,
+		&snapshot,
+	); err != nil {
+		return DeviceSyncMigrationImportRecord{}, false, err
+	}
+	snapshotRecordDigest := sha256.Sum256(stored.CanonicalSnapshotRecord)
+	snapshotPayloadDigest := sha256.Sum256(snapshot.Payload)
+	snapshotReferenceDigest, snapshotReferenceErr := snapshot.ReferenceDigest()
+	snapshotPayload, snapshotErr := snapshot.VerifiedPayload(nil)
+	if snapshotReferenceErr != nil || snapshotErr != nil ||
+		hex.EncodeToString(snapshotRecordDigest[:]) != stored.SnapshotRecordSHA256 ||
+		hex.EncodeToString(snapshotPayloadDigest[:]) != stored.SnapshotPayloadSHA256 ||
+		snapshotReferenceDigest != stored.SnapshotReferenceDigest ||
+		snapshotPayload.Scope != preparedPayload.Scope ||
+		snapshotPayload.MigrationID != migrationID ||
+		snapshotPayload.SnapshotID != stored.SnapshotID ||
+		snapshotPayload.ExportWriteFenceID != stored.ExportWriteFenceID ||
+		snapshotPayload.AuthorityManifestDigest != stored.AuthorityManifestDigest ||
+		snapshotPayload.ExportingDeploymentID != stored.ExportingDeploymentID ||
+		snapshotPayload.ImportingDeploymentID != importingDeploymentID ||
+		snapshotPayload.StateCommitmentDigest != stored.StateCommitmentDigest ||
+		snapshotPayload.CapturedAtMilliseconds != stored.CapturedAtMilliseconds ||
+		snapshotPayload.ExpiresAtMilliseconds != stored.ExpiresAtMilliseconds ||
+		snapshot.Signature.SignerID != preparedPayload.ActiveDeployment.DeploymentID ||
+		snapshot.Signature.PublicSigningKeyX963 !=
+			preparedPayload.ActiveDeployment.PublicSigningKeyX963 ||
+		snapshot.Signature.SigningKeyFingerprint !=
+			preparedPayload.ActiveDeployment.SigningKeyFingerprint {
+		return DeviceSyncMigrationImportRecord{}, false, errors.New(
+			"stored Device Sync signed migration snapshot is inconsistent",
+		)
+	}
+	var artifacts []serviceauthority.MigrationArtifactDescriptor
+	if err := decodeCanonicalDeviceSyncEvidenceRecord(
+		stored.CanonicalArtifactDescriptors,
+		maximumDeviceSyncSnapshotPayloadByteCount,
+		&artifacts,
+	); err != nil {
+		return DeviceSyncMigrationImportRecord{}, false, err
+	}
+	artifactDigest := sha256.Sum256(stored.CanonicalArtifactDescriptors)
+	var serviceStateArtifact *serviceauthority.MigrationArtifactDescriptor
+	for index := range artifacts {
+		if artifacts[index].Kind == serviceauthority.ArtifactServiceStateSnapshot {
+			candidate := artifacts[index]
+			serviceStateArtifact = &candidate
+			break
+		}
+	}
+	if len(artifacts) != stored.ArtifactCount ||
+		!reflect.DeepEqual(artifacts, snapshotPayload.Artifacts) ||
+		hex.EncodeToString(artifactDigest[:]) != stored.ArtifactDescriptorsSHA256 ||
+		serviceStateArtifact == nil ||
+		serviceStateArtifact.ArtifactID != stored.ServiceStateArtifactID ||
+		serviceStateArtifact.ByteCount != stored.ServiceStateArtifactByteCount ||
+		serviceStateArtifact.TransferDigest !=
+			stored.ServiceStateArtifactTransferDigest {
+		return DeviceSyncMigrationImportRecord{}, false, errors.New(
+			"stored Device Sync migration artifact evidence is inconsistent",
+		)
+	}
+	initialManifest, err := decodeCanonicalDeviceSyncAuthorityManifest(
+		stored.InitialAuthorityManifestRecord,
+	)
+	if err != nil {
+		return DeviceSyncMigrationImportRecord{}, false, err
+	}
+	initialPayload, initialErr := initialManifest.VerifiedPayload()
+	initialDigest, initialDigestErr := initialManifest.ReferenceDigest()
+	if initialErr != nil || initialDigestErr != nil ||
+		initialPayload.Validate(
+			&stored.InitialAuthorityValidatedAtMilliseconds,
+		) != nil || initialPayload.Scope != preparedPayload.Scope ||
+		initialPayload.Revision != 1 ||
+		initialPayload.Transition != serviceauthority.TransitionInitialActivation ||
+		initialPayload.ActiveDeployment.DeploymentID != stored.InitialDeploymentID ||
+		initialDigest != stored.InitialAuthorityManifestDigest {
+		return DeviceSyncMigrationImportRecord{}, false, errors.New(
+			"stored Device Sync migration initial authority is inconsistent",
+		)
+	}
+	stored.AuthorityRevision = uint64(authorityRevision)
+	return cloneDeviceSyncMigrationImportRecord(stored), true, nil
+}
+
+func decodeCanonicalDeviceSyncEvidenceRecord(
+	record []byte,
+	maximumByteCount int,
+	value any,
+) error {
+	if len(record) == 0 || maximumByteCount <= 0 || len(record) > maximumByteCount {
+		return serviceauthority.ErrInvalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(record))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return serviceauthority.ErrInvalid
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return serviceauthority.ErrInvalid
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil || !bytes.Equal(canonical, record) {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
+func cloneDeviceSyncMigrationImportRecord(
+	record DeviceSyncMigrationImportRecord,
+) DeviceSyncMigrationImportRecord {
+	cloned := record
+	cloned.CanonicalPreparationRecord = append(
+		[]byte(nil), record.CanonicalPreparationRecord...,
+	)
+	cloned.PreparationManifestRecord = append(
+		[]byte(nil), record.PreparationManifestRecord...,
+	)
+	cloned.CanonicalSnapshotRecord = append(
+		[]byte(nil), record.CanonicalSnapshotRecord...,
+	)
+	cloned.CanonicalArtifactDescriptors = append(
+		[]byte(nil), record.CanonicalArtifactDescriptors...,
+	)
+	cloned.InitialAuthorityManifestRecord = append(
+		[]byte(nil), record.InitialAuthorityManifestRecord...,
+	)
+	return cloned
+}
+
 func cloneDeviceSyncMigrationExportRecord(
 	record DeviceSyncMigrationExportRecord,
 ) DeviceSyncMigrationExportRecord {
@@ -938,6 +1862,7 @@ func cloneDeviceSyncScopeEnforcement(
 	cloned := value
 	cloned.LocalDeploymentID = cloneUUIDPointer(value.LocalDeploymentID)
 	cloned.ActiveExportWriteFenceID = cloneUUIDPointer(value.ActiveExportWriteFenceID)
+	cloned.ActiveMigrationImportID = cloneUUIDPointer(value.ActiveMigrationImportID)
 	if value.Authority != nil {
 		authority := *value.Authority
 		authority.ManifestRecord = append([]byte(nil), value.Authority.ManifestRecord...)

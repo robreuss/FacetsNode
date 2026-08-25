@@ -22,11 +22,8 @@ type deviceSyncEnforcementMigrationFixture struct {
 	RollbackEvidenceDigest    string                       `json:"rollbackEvidenceDigest"`
 	RollbackEvidence          struct {
 		ActivationEvidence struct {
-			Preparation struct {
-				CurrentManifest     serviceauthority.Manifest `json:"currentManifest"`
-				PreparationManifest serviceauthority.Manifest `json:"preparationManifest"`
-			} `json:"preparation"`
-			Snapshot serviceauthority.MigrationSnapshot `json:"snapshot"`
+			Preparation serviceauthority.MigrationPreparation `json:"preparation"`
+			Snapshot    serviceauthority.MigrationSnapshot    `json:"snapshot"`
 		} `json:"activationEvidence"`
 		RollbackManifest serviceauthority.Manifest `json:"rollbackManifest"`
 	} `json:"rollbackEvidence"`
@@ -237,6 +234,48 @@ func TestDeviceSyncScopeWriteFenceErrorHasStableSentinel(t *testing.T) {
 	}
 }
 
+func TestDeviceSyncMigrationImportCandidateAuthenticatesHistoricalEvidence(
+	t *testing.T,
+) {
+	fixture := loadDeviceSyncEnforcementMigrationFixture(t)
+	preparation := fixture.RollbackEvidence.ActivationEvidence.Preparation
+	snapshot := fixture.RollbackEvidence.ActivationEvidence.Snapshot
+	prepared, err := preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || len(prepared.PreparedDeployments) != 1 {
+		t.Fatalf("prepared payload=%+v err=%v", prepared, err)
+	}
+	initial := DeviceSyncInitialAuthorityEvidence{
+		Manifest:                preparation.CurrentManifest,
+		ValidatedAtMilliseconds: 1_100,
+	}
+	candidate, _, err := buildDeviceSyncMigrationImportCandidate(
+		prepared.PreparedDeployments[0].DeploymentID,
+		preparation, snapshot, fixture.AuthorityAnchor, initial, 20_001,
+	)
+	if err != nil || candidate.MigrationID == uuid.Nil ||
+		candidate.ImportedAtMilliseconds != 20_001 ||
+		candidate.ServiceStateArtifactID == uuid.Nil ||
+		candidate.PreparationManifestRecord == nil {
+		t.Fatalf("candidate=%+v err=%v", candidate, err)
+	}
+	wrongAnchor := fixture.AuthorityAnchor
+	wrongAnchor.SigningKeyFingerprint = strings.Repeat("0", 64)
+	if _, _, err := buildDeviceSyncMigrationImportCandidate(
+		prepared.PreparedDeployments[0].DeploymentID,
+		preparation, snapshot, wrongAnchor, initial, 20_001,
+	); !errors.Is(err, serviceauthority.ErrInvalid) {
+		t.Fatalf("wrong authority anchor error=%v", err)
+	}
+	tampered := snapshot
+	tampered.Payload = append(append([]byte(nil), snapshot.Payload...), '\n')
+	if _, _, err := buildDeviceSyncMigrationImportCandidate(
+		prepared.PreparedDeployments[0].DeploymentID,
+		preparation, tampered, fixture.AuthorityAnchor, initial, 20_001,
+	); !errors.Is(err, serviceauthority.ErrInvalid) {
+		t.Fatalf("tampered signed snapshot error=%v", err)
+	}
+}
+
 func TestDeviceSyncScopeEnforcementMigrationContainsHardConstraints(t *testing.T) {
 	contents, err := migrationFiles.ReadFile(
 		"migrations/041_device_sync_scope_enforcement.sql",
@@ -248,6 +287,7 @@ func TestDeviceSyncScopeEnforcementMigrationContainsHardConstraints(t *testing.T
 	required := []string{
 		"state IN ('standby', 'writable', 'export_fenced', 'retired')",
 		"local_deployment_id uuid",
+		"active_migration_import_id uuid",
 		"initial_claim_transaction_id xid8 NOT NULL",
 		"device_sync_initial_claim_transaction_is_bound",
 		"initial_authority_validated_at_milliseconds bigint",
@@ -257,6 +297,14 @@ func TestDeviceSyncScopeEnforcementMigrationContainsHardConstraints(t *testing.T
 		"octet_length(canonical_snapshot_payload) <= 262144",
 		"UNIQUE (principal_id, migration_id, exporting_deployment_id)",
 		"device_sync_scope_enforcement_active_fence_fk",
+		"CREATE TABLE device_sync_migration_imports",
+		"canonical_preparation_record bytea NOT NULL",
+		"canonical_snapshot_record bytea NOT NULL",
+		"canonical_artifact_descriptors bytea NOT NULL",
+		"preparation_reference_digest",
+		"device_sync_scope_enforcement_active_import_fk",
+		"device_sync_migration_import_is_immutable",
+		"'device_sync_migration_imports'",
 		"device_sync_principal_requires_enforcement",
 		"device_sync_principal_enforcement_is_permanent",
 		"scope enforcement row cannot be deleted",

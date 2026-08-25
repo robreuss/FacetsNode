@@ -25,11 +25,8 @@ type postgresDeviceSyncEnforcementFixture struct {
 	PreparationEvidenceDigest string                       `json:"preparationEvidenceDigest"`
 	RollbackEvidence          struct {
 		ActivationEvidence struct {
-			Preparation struct {
-				CurrentManifest     serviceauthority.Manifest `json:"currentManifest"`
-				PreparationManifest serviceauthority.Manifest `json:"preparationManifest"`
-			} `json:"preparation"`
-			Snapshot serviceauthority.MigrationSnapshot `json:"snapshot"`
+			Preparation serviceauthority.MigrationPreparation `json:"preparation"`
+			Snapshot    serviceauthority.MigrationSnapshot    `json:"snapshot"`
 		} `json:"activationEvidence"`
 	} `json:"rollbackEvidence"`
 }

@@ -38,6 +38,7 @@ CREATE TABLE device_sync_scope_enforcement (
         transition_evidence_digest ~ '^[0-9a-f]{64}$'
     ),
     active_export_write_fence_id uuid,
+    active_migration_import_id uuid,
     stored_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (principal_id, tenant_id),
@@ -69,16 +70,23 @@ CREATE TABLE device_sync_scope_enforcement (
     ),
     CHECK (
         (state = 'standby' AND active_export_write_fence_id IS NULL AND (
-            (local_deployment_id IS NULL AND authority_revision IS NULL) OR
+            (local_deployment_id IS NULL AND authority_revision IS NULL AND
+                active_migration_import_id IS NULL) OR
             (local_deployment_id = active_deployment_id AND
-                authority_revision IS NOT NULL)
+                authority_revision IS NOT NULL AND
+                active_migration_import_id IS NULL) OR
+            (local_deployment_id <> active_deployment_id AND
+                authority_revision IS NOT NULL AND
+                active_migration_import_id IS NOT NULL)
         )) OR
         (state = 'writable' AND local_deployment_id = active_deployment_id AND
-            authority_revision IS NOT NULL AND active_export_write_fence_id IS NULL) OR
+            authority_revision IS NOT NULL AND active_export_write_fence_id IS NULL AND
+            active_migration_import_id IS NULL) OR
         (state = 'export_fenced' AND local_deployment_id = active_deployment_id AND
-            authority_revision IS NOT NULL AND active_export_write_fence_id IS NOT NULL) OR
+            authority_revision IS NOT NULL AND active_export_write_fence_id IS NOT NULL AND
+            active_migration_import_id IS NULL) OR
         (state = 'retired' AND authority_revision IS NOT NULL AND
-            active_export_write_fence_id IS NULL)
+            active_export_write_fence_id IS NULL AND active_migration_import_id IS NULL)
     )
 );
 
@@ -142,11 +150,129 @@ CREATE TABLE device_sync_migration_exports (
         ON DELETE CASCADE
 );
 
+-- A target import is immutable evidence that one exact authenticated source
+-- snapshot populated one exact target-local standby scope. The service rows
+-- themselves are materialized in the same transaction. This table deliberately
+-- stores only signed/canonical evidence and artifact descriptors; artifact bytes
+-- and production migration orchestration remain separate checkpoints.
+CREATE TABLE device_sync_migration_imports (
+    principal_id uuid NOT NULL,
+    tenant_id uuid NOT NULL,
+    migration_id uuid NOT NULL,
+    snapshot_id uuid NOT NULL,
+    export_write_fence_id uuid NOT NULL,
+    authority_revision bigint NOT NULL CHECK (authority_revision > 0),
+    authority_manifest_digest text NOT NULL CHECK (
+        authority_manifest_digest ~ '^[0-9a-f]{64}$'
+    ),
+    preparation_reference_digest text NOT NULL CHECK (
+        preparation_reference_digest ~ '^[0-9a-f]{64}$'
+    ),
+    exporting_deployment_id uuid NOT NULL,
+    importing_deployment_id uuid NOT NULL,
+    canonical_preparation_record bytea NOT NULL CHECK (
+        octet_length(canonical_preparation_record) > 0 AND
+        octet_length(canonical_preparation_record) <= 8388608
+    ),
+    preparation_record_sha256 text NOT NULL CHECK (
+        preparation_record_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    canonical_snapshot_record bytea NOT NULL CHECK (
+        octet_length(canonical_snapshot_record) > 0 AND
+        octet_length(canonical_snapshot_record) <= 8388608
+    ),
+    snapshot_record_sha256 text NOT NULL CHECK (
+        snapshot_record_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    snapshot_reference_digest text NOT NULL CHECK (
+        snapshot_reference_digest ~ '^[0-9a-f]{64}$'
+    ),
+    snapshot_payload_sha256 text NOT NULL CHECK (
+        snapshot_payload_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    state_commitment_digest text NOT NULL CHECK (
+        state_commitment_digest ~ '^[0-9a-f]{64}$'
+    ),
+    canonical_artifact_descriptors bytea NOT NULL CHECK (
+        octet_length(canonical_artifact_descriptors) > 0 AND
+        octet_length(canonical_artifact_descriptors) <= 262144
+    ),
+    artifact_descriptors_sha256 text NOT NULL CHECK (
+        artifact_descriptors_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    artifact_count integer NOT NULL CHECK (artifact_count > 0),
+    service_state_artifact_id uuid NOT NULL,
+    service_state_artifact_byte_count bigint NOT NULL CHECK (
+        service_state_artifact_byte_count >= 0
+    ),
+    service_state_artifact_transfer_digest text NOT NULL CHECK (
+        service_state_artifact_transfer_digest ~ '^[0-9a-f]{64}$'
+    ),
+    captured_at_milliseconds bigint NOT NULL CHECK (
+        captured_at_milliseconds >= 0
+    ),
+    expires_at_milliseconds bigint NOT NULL CHECK (
+        expires_at_milliseconds > captured_at_milliseconds
+    ),
+    imported_at_milliseconds bigint NOT NULL CHECK (
+        imported_at_milliseconds >= captured_at_milliseconds AND
+        imported_at_milliseconds < expires_at_milliseconds
+    ),
+    initial_deployment_id uuid NOT NULL,
+    initial_authority_validated_at_milliseconds bigint NOT NULL CHECK (
+        initial_authority_validated_at_milliseconds >= 0
+    ),
+    initial_authority_manifest_digest text NOT NULL CHECK (
+        initial_authority_manifest_digest ~ '^[0-9a-f]{64}$'
+    ),
+    initial_authority_manifest_record bytea NOT NULL CHECK (
+        octet_length(initial_authority_manifest_record) > 0 AND
+        octet_length(initial_authority_manifest_record) <= 1048576
+    ),
+    stored_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (principal_id, migration_id, importing_deployment_id),
+    UNIQUE (principal_id, snapshot_id, importing_deployment_id),
+    UNIQUE (
+        principal_id, tenant_id, migration_id, importing_deployment_id,
+        exporting_deployment_id, authority_revision, authority_manifest_digest,
+        preparation_reference_digest, initial_deployment_id,
+        initial_authority_validated_at_milliseconds,
+        initial_authority_manifest_digest
+    ),
+    CHECK (principal_id = tenant_id),
+    CHECK (exporting_deployment_id <> importing_deployment_id),
+    FOREIGN KEY (principal_id, tenant_id)
+        REFERENCES device_sync_scope_enforcement(principal_id, tenant_id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+
 ALTER TABLE device_sync_scope_enforcement
     ADD CONSTRAINT device_sync_scope_enforcement_active_fence_fk
     FOREIGN KEY (principal_id, tenant_id, active_export_write_fence_id)
     REFERENCES device_sync_migration_exports(
         principal_id, tenant_id, export_write_fence_id
+    ) DEFERRABLE INITIALLY DEFERRED;
+
+-- The composite reference makes the exceptional target standby shape exact at
+-- the database boundary: its local deployment is the authenticated importer,
+-- its still-active deployment is the exporter, and its authority revision and
+-- digest are the exact preparation committed by the immutable import record.
+ALTER TABLE device_sync_scope_enforcement
+    ADD CONSTRAINT device_sync_scope_enforcement_active_import_fk
+    FOREIGN KEY (
+        principal_id, tenant_id, active_migration_import_id,
+        local_deployment_id, active_deployment_id,
+        authority_revision, authority_manifest_digest,
+        transition_evidence_digest, initial_deployment_id,
+        initial_authority_validated_at_milliseconds,
+        initial_authority_manifest_digest
+    ) REFERENCES device_sync_migration_imports (
+        principal_id, tenant_id, migration_id,
+        importing_deployment_id, exporting_deployment_id,
+        authority_revision, authority_manifest_digest,
+        preparation_reference_digest, initial_deployment_id,
+        initial_authority_validated_at_milliseconds,
+        initial_authority_manifest_digest
     ) DEFERRABLE INITIALLY DEFERRED;
 
 -- Exactly one enforcement row must exist for every principal created after
@@ -251,6 +377,23 @@ AFTER UPDATE OR DELETE ON device_sync_migration_exports
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION preserve_device_sync_migration_export();
+
+CREATE FUNCTION preserve_device_sync_migration_import()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION
+        'Device Sync migration import % is immutable',
+        OLD.migration_id
+        USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER device_sync_migration_import_is_immutable
+BEFORE UPDATE OR DELETE ON device_sync_migration_imports
+FOR EACH ROW
+EXECUTE FUNCTION preserve_device_sync_migration_import();
 
 -- A Device Sync principal is permanent in this unreleased authority model.
 -- Rejecting the principal row deletion also rejects a relay-tenant deletion
@@ -384,7 +527,8 @@ BEGIN
           AND column_name IN ('principal_id', 'tenant_id')
           AND table_name NOT IN (
               'device_sync_scope_enforcement',
-              'device_sync_migration_exports'
+              'device_sync_migration_exports',
+              'device_sync_migration_imports'
           )
         GROUP BY table_name
         ORDER BY table_name
