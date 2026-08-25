@@ -19,6 +19,25 @@ type memoryBlobUploadFinalization struct {
 	result  BlobUploadFinalizationResponse
 }
 
+func (s *MemoryStore) AuthorizeBlobUpload(
+	_ context.Context,
+	credential Credential,
+	nowMilliseconds int64,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedMember(
+		credential,
+		CapabilityPublishBlob,
+		nowMilliseconds,
+	)
+	if err != nil {
+		return err
+	}
+	_, err = activeMemberSubscription(domain, credential.MemberID)
+	return err
+}
+
 func (s *MemoryStore) CreateBlobUpload(
 	_ context.Context,
 	credential Credential,

@@ -269,12 +269,9 @@ func singleHeaderValue(header http.Header, name string) (string, error) {
 }
 
 type CurrentBinding struct {
-	Revision                       uint64
-	Digest                         string
-	DeploymentID                   uuid.UUID
-	AuthoritySignerID              uuid.UUID
-	AuthorityPublicSigningKeyX963  string
-	AuthoritySigningKeyFingerprint string
+	Revision     uint64
+	Digest       string
+	DeploymentID uuid.UUID
 }
 
 type BindingRegistry struct {
@@ -288,13 +285,10 @@ type BindingFile struct {
 }
 
 type BindingFileEntry struct {
-	AuthorityPublicSigningKeyX963  string    `json:"authorityPublicSigningKeyX963"`
-	AuthoritySignerID              uuid.UUID `json:"authoritySignerID"`
-	AuthoritySigningKeyFingerprint string    `json:"authoritySigningKeyFingerprint"`
-	DeploymentID                   uuid.UUID `json:"deploymentID"`
-	Digest                         string    `json:"digest"`
-	Revision                       uint64    `json:"revision"`
-	Scope                          Scope     `json:"scope"`
+	DeploymentID uuid.UUID `json:"deploymentID"`
+	Digest       string    `json:"digest"`
+	Revision     uint64    `json:"revision"`
+	Scope        Scope     `json:"scope"`
 }
 
 func NewBindingRegistry() *BindingRegistry {
@@ -340,12 +334,9 @@ func LoadBindingRegistry(
 		}
 		seen[entry.Scope] = struct{}{}
 		if err := registry.Activate(entry.Scope, CurrentBinding{
-			Revision:                       entry.Revision,
-			Digest:                         entry.Digest,
-			DeploymentID:                   entry.DeploymentID,
-			AuthoritySignerID:              entry.AuthoritySignerID,
-			AuthorityPublicSigningKeyX963:  entry.AuthorityPublicSigningKeyX963,
-			AuthoritySigningKeyFingerprint: entry.AuthoritySigningKeyFingerprint,
+			Revision:     entry.Revision,
+			Digest:       entry.Digest,
+			DeploymentID: entry.DeploymentID,
 		}); err != nil {
 			return nil, err
 		}
@@ -357,22 +348,14 @@ func LoadBindingRegistry(
 // authenticate the Facets authority chain before installing this non-secret
 // active binding in the deployment runtime.
 func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) error {
-	_, _, fingerprint, keyErr := decodeP256PublicKey(
-		binding.AuthorityPublicSigningKeyX963,
-	)
 	if registry == nil || scope.Validate() != nil || binding.Revision == 0 ||
-		!validDigest(binding.Digest) || binding.DeploymentID == uuid.Nil ||
-		binding.AuthoritySignerID == uuid.Nil || keyErr != nil ||
-		fingerprint != binding.AuthoritySigningKeyFingerprint {
+		!validDigest(binding.Digest) || binding.DeploymentID == uuid.Nil {
 		return ErrInvalid
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	if current, exists := registry.bindings[scope]; exists {
-		if binding.AuthoritySignerID != current.AuthoritySignerID ||
-			binding.AuthorityPublicSigningKeyX963 != current.AuthorityPublicSigningKeyX963 ||
-			binding.AuthoritySigningKeyFingerprint != current.AuthoritySigningKeyFingerprint ||
-			binding.Revision < current.Revision ||
+		if binding.Revision < current.Revision ||
 			(binding.Revision == current.Revision &&
 				(subtle.ConstantTimeCompare([]byte(binding.Digest), []byte(current.Digest)) != 1 ||
 					binding.DeploymentID != current.DeploymentID)) {

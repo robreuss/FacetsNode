@@ -1294,6 +1294,93 @@ func (s *Server) handleAcknowledgeRelayMessage(writer http.ResponseWriter, reque
 	writeJSON(writer, http.StatusOK, result)
 }
 
+func (s *Server) handleCreateRelayBulkTransferGrant(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	var input serviceauthority.BulkGrantRequest
+	if err := readRelayJSON(writer, request, &input, 8_192); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.Validate() != nil || input.RequiredByteCount > relay.MaximumBlobByteCount {
+		writeServiceAuthorityError(writer, http.StatusBadRequest)
+		return
+	}
+	now := s.now().UnixMilli()
+	maximumByteCount := input.RequiredByteCount
+	switch input.Direction {
+	case serviceauthority.BulkUpload:
+		uploadID, parseErr := uuid.Parse(input.ResourceID)
+		if parseErr != nil || uploadID == uuid.Nil ||
+			s.relayStore.AuthorizeBlobUpload(request.Context(), credential, now) != nil {
+			writeServiceAuthorityError(writer, http.StatusConflict)
+			return
+		}
+		status, statusErr := s.relayStore.GetBlobUpload(
+			request.Context(), credential, uploadID, now,
+		)
+		if statusErr == nil {
+			maximumByteCount = status.ByteCount
+		} else if !relay.ErrorHasCode(statusErr, relay.CodeBlobUploadNotFound) {
+			s.writeError(writer, statusErr)
+			return
+		}
+	case serviceauthority.BulkDownload:
+		if err := relay.ValidateBlobID(input.ResourceID); err != nil {
+			s.writeError(writer, err)
+			return
+		}
+		metadata, metadataErr := s.relayStore.GetBlobMetadata(
+			request.Context(), credential, input.ResourceID, now,
+		)
+		if metadataErr != nil {
+			s.writeError(writer, metadataErr)
+			return
+		}
+		maximumByteCount = metadata.ByteCount
+	}
+	if input.RequiredByteCount > maximumByteCount {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return
+	}
+	binding, err := requiredServiceAuthorityBinding(request)
+	if err != nil || binding.TrafficClass != serviceauthority.TrafficControl ||
+		binding.Scope.ScopeID != tenantID {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return
+	}
+	payload := serviceauthority.BulkGrantPayload{
+		AuthorityManifestDigest: binding.AuthorityDigest,
+		DeploymentID:            binding.DeploymentID,
+		Direction:               input.Direction,
+		ExpiresAtMilliseconds:   now + serviceauthority.MaximumBulkGrantLifetime.Milliseconds(),
+		GrantID:                 uuid.New(),
+		MaximumByteCount:        maximumByteCount,
+		NotBeforeMilliseconds:   now,
+		ResourceID:              input.ResourceID,
+		RouteID:                 input.RouteID,
+		Scope:                   binding.Scope,
+		Version:                 serviceauthority.SchemaVersion,
+	}
+	grant, err := s.deploymentSigner.SignBulkTransferGrant(payload)
+	if err != nil {
+		writeServiceAuthorityError(writer, http.StatusBadRequest)
+		return
+	}
+	writeJSON(writer, http.StatusOK, grant)
+}
+
 func (s *Server) handleCreateRelayBlobUpload(writer http.ResponseWriter, request *http.Request) {
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {

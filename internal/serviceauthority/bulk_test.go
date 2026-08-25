@@ -1,14 +1,8 @@
 package serviceauthority
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"testing"
 	"time"
@@ -27,6 +21,12 @@ func TestBulkTransferGrantRequiresExactCurrentAuthorityAndRoute(t *testing.T) {
 	current := testCurrentBinding(t, 1, digest, deploymentID)
 	registry := NewBindingRegistry()
 	if err := registry.Activate(scope, current); err != nil {
+		t.Fatal(err)
+	}
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
 		t.Fatal(err)
 	}
 	binding := RequestBinding{
@@ -53,9 +53,9 @@ func TestBulkTransferGrantRequiresExactCurrentAuthorityAndRoute(t *testing.T) {
 	header := make(http.Header)
 	header.Set(HeaderBulkResourceID, payload.ResourceID)
 	header.Set(HeaderBulkDirection, string(payload.Direction))
-	header.Set(HeaderBulkTransferGrant, testSignedBulkGrantHeader(t, payload))
+	header.Set(HeaderBulkTransferGrant, testSignedBulkGrantHeader(t, payload, signer))
 
-	if accepted, err := registry.AuthorizeBulkTransfer(binding, header, time.UnixMilli(1_500)); err != nil || accepted != payload {
+	if accepted, err := registry.AuthorizeBulkTransfer(binding, header, time.UnixMilli(1_500), signer); err != nil || accepted != payload {
 		t.Fatalf("current exact grant rejected: payload=%+v err=%v", accepted, err)
 	}
 
@@ -65,6 +65,15 @@ func TestBulkTransferGrantRequiresExactCurrentAuthorityAndRoute(t *testing.T) {
 		header  http.Header
 		now     time.Time
 	}{
+		{
+			name: "stale authority digest",
+			binding: func() RequestBinding {
+				changed := binding
+				changed.AuthorityDigest = repeatHex("2")
+				return changed
+			}(),
+			header: header.Clone(), now: time.UnixMilli(1_500),
+		},
 		{
 			name: "wrong resource", binding: binding,
 			header: clonedHeaderWith(header, HeaderBulkResourceID, "different-resource"),
@@ -113,50 +122,72 @@ func TestBulkTransferGrantRequiresExactCurrentAuthorityAndRoute(t *testing.T) {
 	}
 	for _, test := range rejections {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := registry.AuthorizeBulkTransfer(test.binding, test.header, test.now); err == nil {
+			if _, err := registry.AuthorizeBulkTransfer(test.binding, test.header, test.now, signer); err == nil {
 				t.Fatal("invalid bulk transfer grant accepted")
 			}
 		})
 	}
 }
 
-func testSignedBulkGrantHeader(t *testing.T, payload BulkGrantPayload) string {
-	t.Helper()
-	privateScalar := make([]byte, 32)
-	privateScalar[31] = 1
-	curve := elliptic.P256()
-	d := new(big.Int).SetBytes(privateScalar)
-	x, y := curve.ScalarBaseMult(privateScalar)
-	privateKey := &ecdsa.PrivateKey{
-		PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y},
-		D:         d,
-	}
-	encodedPayload, err := json.Marshal(payload)
+func TestBulkTransferGrantRejectsWrongDeploymentSignerAndExcessLifetime(t *testing.T) {
+	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := NewDeploymentSigner(deploymentID, seed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := sha256.Sum256(append([]byte(bulkGrantSignatureDomain), encodedPayload...))
-	r, s, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Cmp(new(big.Int).Rsh(new(big.Int).Set(curve.Params().N), 1)) > 0 {
-		s.Sub(curve.Params().N, s)
-	}
-	rawSignature := make([]byte, 64)
-	r.FillBytes(rawSignature[:32])
-	s.FillBytes(rawSignature[32:])
-	publicKey := elliptic.Marshal(curve, x, y)
-	fingerprint := sha256.Sum256(publicKey)
-	grant := BulkTransferGrant{
-		Payload: encodedPayload,
-		Signature: Signature{
-			Algorithm:             "ES256",
-			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(publicKey),
-			Signature:             base64.RawURLEncoding.EncodeToString(rawSignature),
-			SignerID:              uuid.MustParse("64000000-0000-0000-0000-000000000001"),
-			SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+	payload := BulkGrantPayload{
+		AuthorityManifestDigest: repeatHex("1"),
+		DeploymentID:            deploymentID,
+		Direction:               BulkDownload,
+		ExpiresAtMilliseconds:   301_000,
+		GrantID:                 uuid.MustParse("65000000-0000-0000-0000-000000000001"),
+		MaximumByteCount:        0,
+		NotBeforeMilliseconds:   1_000,
+		ResourceID:              repeatHex("2"),
+		RouteID:                 uuid.MustParse("62000000-0000-0000-0000-000000000001"),
+		Scope: Scope{
+			Kind:    ScopeDeviceSync,
+			ScopeID: uuid.MustParse("61000000-0000-0000-0000-000000000001"),
 		},
+		Version: SchemaVersion,
+	}
+	grant, err := signer.SignBulkTransferGrant(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attackerSeed := make([]byte, 32)
+	attackerSeed[31] = 3
+	attacker, err := NewDeploymentSigner(deploymentID, attackerSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifyBulkTransferGrant(grant, payload, attacker) == nil {
+		t.Fatal("grant accepted against another deployment key")
+	}
+
+	payload.ExpiresAtMilliseconds++
+	if payload.Validate() == nil {
+		t.Fatal("grant lifetime above five minutes accepted")
+	}
+	payload.ExpiresAtMilliseconds = 301_000
+	payload.DeploymentID = uuid.New()
+	if _, err := signer.SignBulkTransferGrant(payload); err == nil {
+		t.Fatal("deployment signer signed a grant for another deployment")
+	}
+}
+
+func testSignedBulkGrantHeader(
+	t *testing.T,
+	payload BulkGrantPayload,
+	signer *DeploymentSigner,
+) string {
+	t.Helper()
+	grant, err := signer.SignBulkTransferGrant(payload)
+	if err != nil {
+		t.Fatal(err)
 	}
 	encodedGrant, err := json.Marshal(grant)
 	if err != nil {

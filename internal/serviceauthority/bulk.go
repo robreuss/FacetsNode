@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -26,6 +27,7 @@ const (
 	BulkUpload                      BulkDirection = "upload"
 	BulkDownload                    BulkDirection = "download"
 	maximumBulkGrantHeaderByteCount               = 16 * 1024
+	MaximumBulkGrantLifetime                      = 5 * time.Minute
 )
 
 type BulkDirection string
@@ -55,8 +57,27 @@ func (payload BulkGrantPayload) Validate() error {
 		payload.Scope.Validate() != nil || !validDigest(payload.AuthorityManifestDigest) ||
 		payload.DeploymentID == uuid.Nil || payload.RouteID == uuid.Nil ||
 		!validBulkResourceID(payload.ResourceID) || !payload.Direction.Valid() ||
-		payload.MaximumByteCount <= 0 || payload.NotBeforeMilliseconds < 0 ||
-		payload.ExpiresAtMilliseconds <= payload.NotBeforeMilliseconds {
+		payload.MaximumByteCount < 0 || payload.NotBeforeMilliseconds < 0 ||
+		payload.ExpiresAtMilliseconds <= payload.NotBeforeMilliseconds ||
+		payload.ExpiresAtMilliseconds-payload.NotBeforeMilliseconds >
+			MaximumBulkGrantLifetime.Milliseconds() {
+		return ErrInvalid
+	}
+	return nil
+}
+
+type BulkGrantRequest struct {
+	Direction         BulkDirection `json:"direction"`
+	RequiredByteCount int64         `json:"requiredByteCount"`
+	ResourceID        string        `json:"resourceID"`
+	RouteID           uuid.UUID     `json:"routeID"`
+	Version           int           `json:"version"`
+}
+
+func (request BulkGrantRequest) Validate() error {
+	if request.Version != SchemaVersion || !request.Direction.Valid() ||
+		request.RequiredByteCount < 0 ||
+		!validBulkResourceID(request.ResourceID) || request.RouteID == uuid.Nil {
 		return ErrInvalid
 	}
 	return nil
@@ -65,6 +86,40 @@ func (payload BulkGrantPayload) Validate() error {
 type BulkTransferGrant struct {
 	Payload   []byte    `json:"payload"`
 	Signature Signature `json:"signature"`
+}
+
+func (signer *DeploymentSigner) SignBulkTransferGrant(
+	payload BulkGrantPayload,
+) (BulkTransferGrant, error) {
+	if signer == nil || payload.Validate() != nil ||
+		payload.DeploymentID != signer.DeploymentID() {
+		return BulkTransferGrant{}, ErrInvalid
+	}
+	encodedPayload, err := json.Marshal(payload)
+	if err != nil {
+		return BulkTransferGrant{}, err
+	}
+	digest := sha256.Sum256(append([]byte(bulkGrantSignatureDomain), encodedPayload...))
+	r, s, err := ecdsa.Sign(rand.Reader, signer.privateKey, digest[:])
+	if err != nil {
+		return BulkTransferGrant{}, err
+	}
+	if s.Cmp(new(big.Int).Rsh(new(big.Int).Set(elliptic.P256().Params().N), 1)) > 0 {
+		s.Sub(elliptic.P256().Params().N, s)
+	}
+	rawSignature := make([]byte, 64)
+	r.FillBytes(rawSignature[:32])
+	s.FillBytes(rawSignature[32:])
+	return BulkTransferGrant{
+		Payload: encodedPayload,
+		Signature: Signature{
+			Algorithm:             "ES256",
+			PublicSigningKeyX963:  signer.PublicSigningKeyX963(),
+			Signature:             base64.RawURLEncoding.EncodeToString(rawSignature),
+			SignerID:              signer.DeploymentID(),
+			SigningKeyFingerprint: signer.SigningKeyFingerprint(),
+		},
+	}, nil
 }
 
 func ParseBulkTransferGrantHeader(value string) (BulkTransferGrant, BulkGrantPayload, error) {
@@ -108,12 +163,12 @@ func ParseBulkTransferGrantHeader(value string) (BulkTransferGrant, BulkGrantPay
 func verifyBulkTransferGrant(
 	grant BulkTransferGrant,
 	payload BulkGrantPayload,
-	authority CurrentBinding,
+	signer *DeploymentSigner,
 ) error {
-	if grant.Signature.Algorithm != "ES256" ||
-		grant.Signature.SignerID != authority.AuthoritySignerID ||
-		grant.Signature.PublicSigningKeyX963 != authority.AuthorityPublicSigningKeyX963 ||
-		grant.Signature.SigningKeyFingerprint != authority.AuthoritySigningKeyFingerprint {
+	if signer == nil || grant.Signature.Algorithm != "ES256" ||
+		grant.Signature.SignerID != signer.DeploymentID() ||
+		grant.Signature.PublicSigningKeyX963 != signer.PublicSigningKeyX963() ||
+		grant.Signature.SigningKeyFingerprint != signer.SigningKeyFingerprint() {
 		return ErrInvalid
 	}
 	_, publicKey, fingerprint, err := decodeP256PublicKey(
@@ -146,8 +201,9 @@ func (registry *BindingRegistry) AuthorizeBulkTransfer(
 	binding RequestBinding,
 	header http.Header,
 	now time.Time,
+	signer *DeploymentSigner,
 ) (BulkGrantPayload, error) {
-	if registry == nil || binding.TrafficClass != TrafficBulk ||
+	if registry == nil || signer == nil || binding.TrafficClass != TrafficBulk ||
 		registry.Authorize(binding) != nil {
 		return BulkGrantPayload{}, ErrInvalid
 	}
@@ -166,7 +222,8 @@ func (registry *BindingRegistry) AuthorizeBulkTransfer(
 	registry.mu.RLock()
 	current, exists := registry.bindings[binding.Scope]
 	registry.mu.RUnlock()
-	if !exists || verifyBulkTransferGrant(grant, payload, current) != nil ||
+	if !exists || current.DeploymentID != signer.DeploymentID() ||
+		verifyBulkTransferGrant(grant, payload, signer) != nil ||
 		payload.Scope != binding.Scope || payload.AuthorityManifestDigest != binding.AuthorityDigest ||
 		payload.DeploymentID != binding.DeploymentID || payload.RouteID != binding.RouteID ||
 		payload.ResourceID != resourceID || payload.Direction != direction ||

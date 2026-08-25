@@ -336,6 +336,13 @@ func (s *Server) Handler() http.Handler {
 			s.handleAcknowledgeRelayMessage,
 		)
 		if s.blobContentStore != nil {
+			if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
+				register(
+					"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/bulk-transfer-grants",
+					traffic.SurfaceCheckpointAdmin,
+					s.handleCreateRelayBulkTransferGrant,
+				)
+			}
 			register(
 				"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
 				traffic.SurfaceStorage,

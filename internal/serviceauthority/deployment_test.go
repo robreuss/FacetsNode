@@ -157,12 +157,6 @@ func TestBindingRegistryRejectsRollbackEquivocationAndStaleHeaders(t *testing.T)
 	)); err == nil {
 		t.Fatal("accepted authority revision gap")
 	}
-	replacementAuthority := testCurrentBinding(t, 3, repeatHex("3"), deploymentID)
-	replacementAuthority.AuthoritySignerID = uuid.New()
-	if err := registry.Activate(scope, replacementAuthority); err == nil {
-		t.Fatal("accepted an authority identity replacement")
-	}
-
 	header := make(http.Header)
 	header.Set(HeaderScopeKind, string(scope.Kind))
 	header.Set(HeaderScopeID, scope.ScopeID.String())
@@ -194,15 +188,11 @@ func TestBindingRegistryLoadsStrictDeploymentScopedState(t *testing.T) {
 	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
 	scopeID := uuid.MustParse("61000000-0000-0000-0000-000000000001")
 	path := filepath.Join(t.TempDir(), "bindings.json")
-	binding := testCurrentBinding(t, 1, repeatHex("1"), deploymentID)
 	data, err := json.Marshal(BindingFile{
 		Bindings: []BindingFileEntry{{
-			AuthorityPublicSigningKeyX963:  binding.AuthorityPublicSigningKeyX963,
-			AuthoritySignerID:              binding.AuthoritySignerID,
-			AuthoritySigningKeyFingerprint: binding.AuthoritySigningKeyFingerprint,
-			DeploymentID:                   deploymentID,
-			Digest:                         repeatHex("1"),
-			Revision:                       1,
+			DeploymentID: deploymentID,
+			Digest:       repeatHex("1"),
+			Revision:     1,
 			Scope: Scope{
 				Kind: ScopeDeviceSync, ScopeID: scopeID,
 			},
@@ -273,20 +263,8 @@ func testCurrentBinding(
 	deploymentID uuid.UUID,
 ) CurrentBinding {
 	t.Helper()
-	seed := make([]byte, 32)
-	seed[31] = 1
-	authority, err := NewDeploymentSigner(
-		uuid.MustParse("64000000-0000-0000-0000-000000000001"),
-		seed,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	return CurrentBinding{
 		Revision: revision, Digest: digest, DeploymentID: deploymentID,
-		AuthoritySignerID:              authority.DeploymentID(),
-		AuthorityPublicSigningKeyX963:  authority.PublicSigningKeyX963(),
-		AuthoritySigningKeyFingerprint: authority.SigningKeyFingerprint(),
 	}
 }
 

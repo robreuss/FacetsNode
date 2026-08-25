@@ -26,9 +26,6 @@ deployment input with no group/world write permission and this schema:
 {
   "bindings": [
     {
-      "authorityPublicSigningKeyX963": "<canonical unpadded base64url P-256 X9.63 public key>",
-      "authoritySignerID": "64000000-0000-0000-0000-000000000001",
-      "authoritySigningKeyFingerprint": "<SHA-256 of the public key as 64 lowercase hexadecimal characters>",
       "deploymentID": "63000000-0000-0000-0000-000000000001",
       "digest": "<64 lowercase hexadecimal characters>",
       "revision": 1,
@@ -47,19 +44,18 @@ unknown fields, and trailing JSON are rejected at startup. The source that
 produces this file must first authenticate the corresponding Facets-signed
 manifest chain; FacetsNode does not create or repair authority successors.
 The server permits only an identical retry or the next consecutive revision
-when updating its live registry. The authority signer identity, public key, and
-fingerprint are immutable across those revisions. A planned authority-key
-rotation therefore requires a separate, explicit protocol rather than silently
-replacing this local trust anchor.
+when updating its live registry. The Facets authority public key remains in the
+client-verified manifest and is not copied into this server-side binding file.
 
 Once enabled:
 
 - `POST /v1/service-deployment/proof` issues a five-minute deployment-key
   proof only for an exact current scope/revision/digest/deployment binding;
 - all Facets capability routes require the matching protected binding headers;
-- every bulk relay operation additionally requires a short-lived,
-  authority-signed transfer grant bound to the exact current manifest digest,
-  deployment, route, resource, direction, and maximum byte count;
+- after ordinary member-bearer authorization over an authenticated control
+  route, the active deployment may issue a transfer grant with a maximum
+  five-minute lifetime, bound to the exact current manifest digest,
+  deployment, client-selected route, resource, direction, and byte ceiling;
 - the configured server process rejects every other service's scope kind, and
   resource-bearing paths require their principal, Space, or relay tenant ID to
   equal the bound logical scope;
@@ -81,3 +77,11 @@ binding also remain production-enablement gates. Keep deployment authentication
 disabled in a deployed Device Sync or Shared Spaces service until those client
 and server paths are wired. Compute Pool is a development skeleton and fails
 startup without deployment authentication.
+
+The transfer grant is signed by the active deployment key, not the longer-lived
+Facets authority key. FacetsNode issues it only after the existing bearer has
+authorized the exact relay domain and resource. The client independently checks
+the signature against the active deployment in its accepted manifest and
+refuses a different route. The route identifier is a client policy binding, not
+server-side proof of the physical ingress path; a five-minute replay still needs
+the original bearer and is limited to the same opaque resource and byte ceiling.

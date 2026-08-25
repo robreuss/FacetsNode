@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
@@ -265,6 +267,148 @@ func TestBulkAuthorityMiddlewareRequiresExactOperationGrant(t *testing.T) {
 	}
 }
 
+func TestDeploymentIssuesBearerAuthorizedGrantBeforeBulkUpload(t *testing.T) {
+	blobRoot := t.TempDir()
+	blobStore, err := relay.NewFileBlobContentStore(blobRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadStore, err := relay.NewFileBlobUploadContentStore(blobRoot, blobStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorToken := relayTestToken(201)
+	server, err := NewWithRelay(
+		rendezvous.NewMemoryStore(),
+		relay.NewMemoryStore(),
+		blobStore,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		operatorToken,
+		uploadStore,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return time.UnixMilli(1_500) }
+	authority := provisionRelayTestAuthority(
+		t, server.Handler(), operatorToken, 1_500, 202, 203,
+	)
+	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
+	routeID := uuid.MustParse("62000000-0000-0000-0000-000000000001")
+	digest := repeatAuthorityHex("1")
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := serviceauthority.Scope{
+		Kind:    serviceauthority.ScopeDeviceSync,
+		ScopeID: authority.Domain.TenantID,
+	}
+	bindings := serviceauthority.NewBindingRegistry()
+	if err := bindings.Activate(scope, serviceauthority.CurrentBinding{
+		Revision: 1, Digest: digest, DeploymentID: deploymentID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server.SetServiceAuthorityDeployment(
+		signer, bindings, serviceauthority.ScopeDeviceSync,
+	)
+	handler := server.Handler()
+	uploadID := uuid.New()
+	grantRequest := serviceauthority.BulkGrantRequest{
+		Direction:         serviceauthority.BulkUpload,
+		RequiredByteCount: 12,
+		ResourceID:        uploadID.String(),
+		RouteID:           routeID,
+		Version:           serviceauthority.SchemaVersion,
+	}
+	body, err := json.Marshal(grantRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/relay/tenants/"+authority.Domain.TenantID.String()+
+			"/domains/"+authority.Domain.DomainID.String()+
+			"/bulk-transfer-grants",
+		bytes.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+authority.MemberCredential.AuthorizationToken)
+	request.Header.Set("X-Facets-Member-ID", authority.Member.MemberID.String())
+	setAuthorityHeaders(
+		request.Header, scope, 1, digest, deploymentID, routeID,
+		serviceauthority.TrafficControl,
+	)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("grant status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var grant serviceauthority.BulkTransferGrant
+	if err := json.NewDecoder(recorder.Body).Decode(&grant); err != nil {
+		t.Fatal(err)
+	}
+	grantHeaderData, err := json.Marshal(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantHeader := base64.RawURLEncoding.EncodeToString(grantHeaderData)
+	_, grantPayload, err := serviceauthority.ParseBulkTransferGrantHeader(grantHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.Signature.SignerID != deploymentID ||
+		grantPayload.ResourceID != uploadID.String() ||
+		grantPayload.MaximumByteCount != 12 ||
+		grantPayload.ExpiresAtMilliseconds != 301_500 {
+		t.Fatalf("unexpected deployment grant: grant=%+v payload=%+v", grant, grantPayload)
+	}
+
+	blobBytes := []byte("cipher-bytes")
+	upload := relay.BlobUploadRequest{
+		RetryID: uuid.New(), UploadID: uploadID, RelayBlobID: relay.BlobID(blobBytes),
+		ByteCount: int64(len(blobBytes)), CreatedAtMilliseconds: 1_500,
+	}
+	uploadBody, err := json.Marshal(upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/relay/tenants/"+authority.Domain.TenantID.String()+
+			"/domains/"+authority.Domain.DomainID.String()+"/blob-uploads",
+		bytes.NewReader(uploadBody),
+	)
+	uploadRequest.Header.Set("Content-Type", "application/json")
+	uploadRequest.Header.Set("Authorization", "Bearer "+authority.MemberCredential.AuthorizationToken)
+	uploadRequest.Header.Set("X-Facets-Member-ID", authority.Member.MemberID.String())
+	uploadRequest.Header.Set(serviceauthority.HeaderBulkTransferGrant, grantHeader)
+	uploadRequest.Header.Set(serviceauthority.HeaderBulkResourceID, uploadID.String())
+	uploadRequest.Header.Set(serviceauthority.HeaderBulkDirection, string(serviceauthority.BulkUpload))
+	setAuthorityHeaders(
+		uploadRequest.Header, scope, 1, digest, deploymentID, routeID,
+		serviceauthority.TrafficBulk,
+	)
+	uploadRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(uploadRecorder, uploadRequest)
+	if uploadRecorder.Code != http.StatusCreated {
+		t.Fatalf("authorized upload status=%d body=%s", uploadRecorder.Code, uploadRecorder.Body.String())
+	}
+
+	missingGrant := uploadRequest.Clone(uploadRequest.Context())
+	missingGrant.Body = io.NopCloser(bytes.NewReader(uploadBody))
+	missingGrant.Header = uploadRequest.Header.Clone()
+	missingGrant.Header.Del(serviceauthority.HeaderBulkTransferGrant)
+	missingRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(missingRecorder, missingGrant)
+	if missingRecorder.Code != http.StatusConflict {
+		t.Fatalf("grantless upload status=%d; want 409", missingRecorder.Code)
+	}
+}
+
 func setAuthorityHeaders(
 	header http.Header,
 	scope serviceauthority.Scope,
@@ -290,20 +434,8 @@ func testServiceAuthorityCurrentBinding(
 	deploymentID uuid.UUID,
 ) serviceauthority.CurrentBinding {
 	t.Helper()
-	seed := make([]byte, 32)
-	seed[31] = 1
-	authority, err := serviceauthority.NewDeploymentSigner(
-		uuid.MustParse("64000000-0000-0000-0000-000000000001"),
-		seed,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	return serviceauthority.CurrentBinding{
 		Revision: revision, Digest: digest, DeploymentID: deploymentID,
-		AuthoritySignerID:              authority.DeploymentID(),
-		AuthorityPublicSigningKeyX963:  authority.PublicSigningKeyX963(),
-		AuthoritySigningKeyFingerprint: authority.SigningKeyFingerprint(),
 	}
 }
 

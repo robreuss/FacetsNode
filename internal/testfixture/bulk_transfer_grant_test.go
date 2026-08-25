@@ -22,17 +22,10 @@ func TestBulkTransferGrantPortableFixture(t *testing.T) {
 		t.Fatalf("portable payload=%+v expected=%+v err=%v", payload, fixture.Expected, err)
 	}
 	registry := serviceauthority.NewBindingRegistry()
-	grant, _, err := serviceauthority.ParseBulkTransferGrantHeader(fixture.GrantHeader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	current := serviceauthority.CurrentBinding{
-		Revision:                       fixture.AuthorityRevision,
-		Digest:                         fixture.Expected.AuthorityManifestDigest,
-		DeploymentID:                   fixture.Expected.DeploymentID,
-		AuthoritySignerID:              grant.Signature.SignerID,
-		AuthorityPublicSigningKeyX963:  grant.Signature.PublicSigningKeyX963,
-		AuthoritySigningKeyFingerprint: grant.Signature.SigningKeyFingerprint,
+		Revision:     fixture.AuthorityRevision,
+		Digest:       fixture.Expected.AuthorityManifestDigest,
+		DeploymentID: fixture.Expected.DeploymentID,
 	}
 	if err := registry.Activate(fixture.Expected.Scope, current); err != nil {
 		t.Fatal(err)
@@ -49,7 +42,13 @@ func TestBulkTransferGrantPortableFixture(t *testing.T) {
 	header.Set(serviceauthority.HeaderBulkTransferGrant, fixture.GrantHeader)
 	header.Set(serviceauthority.HeaderBulkResourceID, fixture.Expected.ResourceID)
 	header.Set(serviceauthority.HeaderBulkDirection, string(fixture.Expected.Direction))
-	if _, err := registry.AuthorizeBulkTransfer(binding, header, time.UnixMilli(1_500)); err != nil {
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := serviceauthority.NewDeploymentSigner(fixture.Expected.DeploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.AuthorizeBulkTransfer(binding, header, time.UnixMilli(1_500), signer); err != nil {
 		t.Fatalf("portable grant signature rejected: %v", err)
 	}
 }

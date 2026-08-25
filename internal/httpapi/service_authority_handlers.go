@@ -13,6 +13,7 @@ import (
 const maximumDeploymentProofRequestByteCount = 4 * 1024
 
 type bulkGrantContextKey struct{}
+type serviceAuthorityBindingContextKey struct{}
 
 func (s *Server) handleServiceDeploymentProof(
 	writer http.ResponseWriter,
@@ -81,6 +82,7 @@ func (s *Server) serviceAuthorityBindingHandler(
 				binding,
 				request.Header,
 				s.now(),
+				s.deploymentSigner,
 			)
 			if err != nil {
 				writeServiceAuthorityError(writer, http.StatusConflict)
@@ -92,8 +94,23 @@ func (s *Server) serviceAuthorityBindingHandler(
 				grant,
 			))
 		}
+		request = request.WithContext(context.WithValue(
+			request.Context(),
+			serviceAuthorityBindingContextKey{},
+			binding,
+		))
 		next.ServeHTTP(writer, request)
 	})
+}
+
+func requiredServiceAuthorityBinding(
+	request *http.Request,
+) (serviceauthority.RequestBinding, error) {
+	binding, ok := request.Context().Value(serviceAuthorityBindingContextKey{}).(serviceauthority.RequestBinding)
+	if !ok {
+		return serviceauthority.RequestBinding{}, serviceauthority.ErrInvalid
+	}
+	return binding, nil
 }
 
 func hasBulkTransferHeaders(header http.Header) bool {

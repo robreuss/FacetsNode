@@ -150,6 +150,7 @@ type Store interface {
 		stage AcknowledgmentStage,
 		nowMilliseconds int64,
 	) (AcknowledgmentResult, error)
+	AuthorizeBlobUpload(context.Context, Credential, int64) error
 	CreateBlobUpload(context.Context, Credential, BlobUploadRequest, int64) (BlobUploadCreateResponse, error)
 	GetBlobUpload(context.Context, Credential, uuid.UUID, int64) (BlobUploadStatus, error)
 	AppendBlobUploadChunk(context.Context, Credential, BlobUploadChunkRequest, int64, func(BlobUploadStatus) error) (BlobUploadStatus, error)

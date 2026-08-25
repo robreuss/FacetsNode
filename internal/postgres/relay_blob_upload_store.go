@@ -11,6 +11,15 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
 
+func (s *RelayStore) AuthorizeBlobUpload(
+	ctx context.Context,
+	credential relay.Credential,
+	nowMilliseconds int64,
+) error {
+	_, err := authorizeBlobUploadMember(ctx, s.pool, credential, nowMilliseconds)
+	return err
+}
+
 type storedBlobUpload struct {
 	status            relay.BlobUploadStatus
 	createRetryID     uuid.UUID

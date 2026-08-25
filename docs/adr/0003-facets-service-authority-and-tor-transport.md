@@ -41,6 +41,11 @@ capability digests without content keys.
    scoped active-binding file. It signs only challenges that name an exact
    current binding. All capability routes reject absent, stale, conflicting,
    or wrong-deployment binding headers before bearer authorization.
+9. Bulk transfer grants are short-lived capabilities issued by the active
+   deployment after ordinary bearer authorization over the control route. They
+   do not require the Facets authority private key to remain online or to be
+   shared with participants. Clients choose the route first and validate the
+   returned grant against the active deployment key and accepted manifest.
 
 ## Compromise boundary
 
