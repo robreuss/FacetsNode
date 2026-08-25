@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,9 @@ const (
 	ScopeSharedSpace               ScopeKind    = "shared_space"
 	ScopeComputePool               ScopeKind    = "compute_pool"
 )
+
+var ErrBindingConflict = errors.New("service authority binding conflicts with current authority")
+var ErrBindingUnavailable = errors.New("service authority binding custody is unavailable")
 
 var ErrInvalid = errors.New("invalid Facets service authority value")
 
@@ -437,17 +441,15 @@ func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) e
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	if registry.poisoned {
-		return ErrInvalid
+		return ErrBindingUnavailable
 	}
 	if current, exists := registry.bindings[scope]; exists {
-		if binding.Revision < current.Revision ||
-			(binding.Revision == current.Revision &&
-				(subtle.ConstantTimeCompare([]byte(binding.Digest), []byte(current.Digest)) != 1 ||
-					binding.DeploymentID != current.DeploymentID)) {
-			return ErrInvalid
+		if reflect.DeepEqual(current, binding) {
+			return nil
 		}
-		if binding.Revision > current.Revision && binding.Revision != current.Revision+1 {
-			return ErrInvalid
+		if binding.Revision <= current.Revision ||
+			binding.Revision != current.Revision+1 {
+			return fmt.Errorf("%w: %w", ErrBindingConflict, ErrInvalid)
 		}
 	}
 	next := make(map[Scope]CurrentBinding, len(registry.bindings)+1)
@@ -456,7 +458,7 @@ func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) e
 	}
 	next[scope] = binding
 	if err := registry.persistBindingsLocked(next); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrBindingUnavailable, err)
 	}
 	registry.bindings = next
 	return nil

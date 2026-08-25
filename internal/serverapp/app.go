@@ -85,7 +85,26 @@ func Main(service config.Service) {
 	}
 
 	store := postgres.NewStore(pool)
-	relayStore := postgres.NewRelayStore(pool, configuration.BlobUploadTTL, configuration.CheckpointFenceTTL)
+	var relayStore *postgres.RelayStore
+	if service == config.DeviceSync {
+		relayStore, err = postgres.NewDeviceSyncAuthorityBoundRelayStore(
+			pool,
+			configuration.DeploymentID,
+			configuration.BlobUploadTTL,
+			configuration.CheckpointFenceTTL,
+		)
+		if err != nil {
+			logger.Error("Device Sync authority-bound store rejected", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		relayStore = postgres.NewRelayStore(
+			pool,
+			configuration.BlobUploadTTL,
+			configuration.CheckpointFenceTTL,
+		)
+	}
+	blobMaintenanceStore := relay.BlobMaintenanceStore(relayStore)
 	blobContentStore, err := relay.NewFileBlobContentStore(configuration.BlobRoot)
 	if err != nil {
 		logger.Error("blob store configuration rejected", "error", err)
@@ -108,6 +127,13 @@ func Main(service config.Service) {
 			os.Exit(1)
 		}
 		logger.Info("privacy-safe onion ingress traffic policy enabled")
+	}
+	// Device Sync production startup is never allowed to fall through to a
+	// non-authority mode. Config.Load enforces the same requirement; this guard
+	// keeps the execution path fail-closed if configuration validation changes.
+	if service == config.DeviceSync && configuration.DeploymentID == uuid.Nil {
+		logger.Error("Device Sync service authority deployment is required")
+		os.Exit(1)
 	}
 	if configuration.DeploymentID != uuid.Nil {
 		deploymentSigner, err := serviceauthority.LoadDeploymentSigner(
@@ -141,6 +167,32 @@ func Main(service config.Service) {
 		scopeKind := serviceauthority.ScopeDeviceSync
 		if service == config.SharedSpaces {
 			scopeKind = serviceauthority.ScopeSharedSpace
+		}
+		if service == config.DeviceSync {
+			if err := reconcileDeviceSyncServiceAuthority(
+				startupContext,
+				relayStore,
+				bindings,
+				time.Now().UnixMilli(),
+			); err != nil {
+				logger.Error(
+					"Device Sync service authority readiness rejected",
+					"error", err,
+				)
+				os.Exit(1)
+			}
+			blobMaintenanceStore, err = newDeviceSyncBlobMaintenanceStore(
+				relayStore,
+				bindings,
+				relayStore,
+			)
+			if err != nil {
+				logger.Error(
+					"Device Sync blob maintenance authority rejected",
+					"error", err,
+				)
+				os.Exit(1)
+			}
 		}
 		api.SetServiceAuthorityDeployment(deploymentSigner, bindings, scopeKind)
 		logger.Info(
@@ -197,7 +249,7 @@ func Main(service config.Service) {
 		MaxHeaderBytes:    16 * 1_024,
 	}
 	go cleanupLoop(rootContext, logger, store, configuration.CleanupPeriod)
-	go blobMaintenanceLoop(rootContext, logger, relayStore, blobContentStore, blobUploadContentStore, configuration.CleanupPeriod, configuration.BlobOrphanGrace)
+	go blobMaintenanceLoop(rootContext, logger, blobMaintenanceStore, blobContentStore, blobUploadContentStore, configuration.CleanupPeriod, configuration.BlobOrphanGrace)
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info("Facets server listening", "address", configuration.ListenAddress, "go_version", runtime.Version())
@@ -337,34 +389,48 @@ func blobMaintenanceLoop(ctx context.Context, logger *slog.Logger, store relay.B
 }
 
 func reconcileBlobFiles(ctx context.Context, store relay.BlobMaintenanceStore, blobs relay.BlobContentMaintenanceStore, uploads relay.BlobUploadMaintenanceContentStore, nowMilliseconds, graceMilliseconds int64) error {
-	if _, err := store.ExpireBlobUploads(ctx, nowMilliseconds, graceMilliseconds); err != nil {
-		return err
+	var maintenanceErr error
+	_, expiryErr := store.ExpireBlobUploads(
+		ctx, nowMilliseconds, graceMilliseconds,
+	)
+	maintenanceErr = errors.Join(maintenanceErr, expiryErr)
+	if errors.Is(expiryErr, context.Canceled) ||
+		errors.Is(expiryErr, context.DeadlineExceeded) {
+		return maintenanceErr
 	}
 	finalCandidates, err := blobs.BlobCandidates(ctx)
 	if err != nil {
-		return err
+		return errors.Join(maintenanceErr, err)
 	}
 	for _, candidate := range finalCandidates {
 		_, err := store.DeleteBlobIfUnauthorized(ctx, candidate, nowMilliseconds, graceMilliseconds, func() error {
 			return blobs.DeleteBlob(ctx, candidate.Scope, candidate.BlobID)
 		})
 		if err != nil {
-			return err
+			maintenanceErr = errors.Join(maintenanceErr, err)
+			if errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return maintenanceErr
+			}
 		}
 	}
 	uploadCandidates, err := uploads.UploadCandidates(ctx)
 	if err != nil {
-		return err
+		return errors.Join(maintenanceErr, err)
 	}
 	for _, candidate := range uploadCandidates {
 		_, err := store.DeleteBlobUploadIfUnauthorized(ctx, candidate, nowMilliseconds, graceMilliseconds, func() error {
 			return uploads.DeleteUpload(ctx, candidate.Scope, candidate.UploadID)
 		})
 		if err != nil {
-			return err
+			maintenanceErr = errors.Join(maintenanceErr, err)
+			if errors.Is(err, context.Canceled) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return maintenanceErr
+			}
 		}
 	}
-	return nil
+	return maintenanceErr
 }
 
 type expiryStore interface {

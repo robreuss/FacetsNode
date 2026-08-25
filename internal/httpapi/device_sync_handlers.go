@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -357,6 +358,8 @@ func (s *Server) handleClaimDeviceSyncAccountAdmission(writer http.ResponseWrite
 	}
 	now := s.nowMilliseconds()
 	var authorityBinding *serviceauthority.CurrentBinding
+	var initialAuthority *devicesync.InitialServiceAuthorityBinding
+	var authorityStore devicesync.AuthorityBoundAccountStore
 	if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
 		if input.ServiceAuthorityEnrollment == nil {
 			s.writeError(writer, devicesync.NewProtocolError(
@@ -368,32 +371,41 @@ func (s *Server) handleClaimDeviceSyncAccountAdmission(writer http.ResponseWrite
 		scope := serviceauthority.Scope{
 			Kind: serviceauthority.ScopeDeviceSync, ScopeID: input.PrincipalID,
 		}
-		manifest, enrollmentErr := input.ServiceAuthorityEnrollment.ValidateForAdmissionClaim(scope, now)
-		digest, digestErr := input.ServiceAuthorityEnrollment.Manifest.ReferenceDigest()
-		if enrollmentErr != nil || digestErr != nil ||
-			manifest.ActiveDeployment.DeploymentID != s.deploymentSigner.DeploymentID() ||
-			manifest.ActiveDeployment.PublicSigningKeyX963 !=
-				s.deploymentSigner.PublicSigningKeyX963() ||
-			manifest.ActiveDeployment.SigningKeyFingerprint !=
-				s.deploymentSigner.SigningKeyFingerprint() {
+		var bindingErr error
+		initialAuthority, bindingErr = devicesync.NewInitialServiceAuthorityBinding(
+			*input.ServiceAuthorityEnrollment, s.deploymentSigner, scope, now,
+		)
+		var storeSupportsAuthority bool
+		authorityStore, storeSupportsAuthority =
+			s.deviceSyncStore.(devicesync.AuthorityBoundAccountStore)
+		if bindingErr != nil || !storeSupportsAuthority {
 			s.writeError(writer, devicesync.NewProtocolError(
 				devicesync.CodeInvalidPrincipal,
 				"initial service authority enrollment is invalid",
 			))
 			return
 		}
+		manifest := initialAuthority.Manifest()
 		authorityBinding = &serviceauthority.CurrentBinding{
-			Revision: manifest.Revision, Digest: digest,
-			DeploymentID: manifest.ActiveDeployment.DeploymentID,
-			Manifest:     &input.ServiceAuthorityEnrollment.Manifest,
+			Revision:     initialAuthority.Revision(),
+			Digest:       initialAuthority.ManifestDigest(),
+			DeploymentID: initialAuthority.LocalDeploymentID(),
+			Manifest:     &manifest,
 		}
 	}
-	result, err := s.deviceSyncStore.ClaimAccountAdmission(
-		request.Context(),
-		devicesync.AdmissionCredential{AdmissionID: admissionID, Token: token},
-		provisioning,
-		now,
-	)
+	credential := devicesync.AdmissionCredential{
+		AdmissionID: admissionID, Token: token,
+	}
+	var result devicesync.PrincipalProvisioningResult
+	if initialAuthority == nil {
+		result, err = s.deviceSyncStore.ClaimAccountAdmission(
+			request.Context(), credential, provisioning, now,
+		)
+	} else {
+		result, err = authorityStore.ClaimAccountAdmissionWithAuthority(
+			request.Context(), credential, provisioning, initialAuthority, now,
+		)
+	}
 	if err != nil {
 		s.writeError(writer, err)
 		return
@@ -405,12 +417,48 @@ func (s *Server) handleClaimDeviceSyncAccountAdmission(writer http.ResponseWrite
 			},
 			*authorityBinding,
 		); err != nil {
-			writeServiceAuthorityError(writer, http.StatusConflict)
+			writeDeviceSyncBindingActivationError(writer, err)
+			return
+		}
+		if err := authorityStore.ActivateBoundDeviceSyncScope(
+			request.Context(), input.PrincipalID,
+			initialAuthority.LocalDeploymentID(), initialAuthority.Revision(),
+			initialAuthority.ManifestDigest(), now,
+		); err != nil {
+			if errors.Is(err, devicesync.ErrInitialServiceAuthorityConflict) {
+				writeServiceAuthorityError(writer, http.StatusConflict)
+			} else {
+				writeDeviceSyncAuthorityUnavailable(writer)
+			}
 			return
 		}
 	}
 	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func writeDeviceSyncBindingActivationError(
+	writer http.ResponseWriter,
+	err error,
+) {
+	// Persistence/custody failures can retain ErrInvalid as their underlying
+	// cause. Availability must therefore take precedence over identity
+	// classification when an error carries both sentinels.
+	if errors.Is(err, serviceauthority.ErrBindingUnavailable) {
+		writeDeviceSyncAuthorityUnavailable(writer)
+	} else if errors.Is(err, serviceauthority.ErrBindingConflict) ||
+		errors.Is(err, serviceauthority.ErrInvalid) {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+	} else {
+		writeDeviceSyncAuthorityUnavailable(writer)
+	}
+}
+
+func writeDeviceSyncAuthorityUnavailable(writer http.ResponseWriter) {
+	writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+		"code":    "device_sync_authority_unavailable",
+		"message": "Device Sync authority custody is temporarily unavailable.",
+	})
 }
 
 func (s *Server) handleCreateDeviceSyncDeviceAdmission(writer http.ResponseWriter, request *http.Request) {

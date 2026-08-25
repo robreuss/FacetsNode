@@ -32,12 +32,35 @@ func TestPostgresDeviceSyncSpaceAndRelayDomainCommitAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := postgresstore.NewRelayStore(pool)
-	const now = int64(10_000)
-	principalID := uuid.New()
+	const now = int64(1_100)
+	fixture := loadPostgresDeviceSyncEnforcementFixture(t)
+	manifest := fixture.RollbackEvidence.ActivationEvidence.
+		Preparation.CurrentManifest
+	payload, err := manifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSigner := postgresFixtureDeploymentSigner(
+		t, payload.ActiveDeployment,
+	)
+	initialAuthority := postgresInitialServiceAuthorityBinding(
+		t, fixture, manifest, localSigner, now,
+	)
+	principalID := payload.Scope.ScopeID
 	initialDeviceID := uuid.New()
 	authority := postgresBootstrapDeviceSyncPrincipal(
-		t, ctx, store, principalID, initialDeviceID, now,
+		t, ctx, store, principalID, initialDeviceID, now, initialAuthority,
 	)
+	if err := store.ActivateBoundDeviceSyncScope(
+		ctx,
+		principalID,
+		localSigner.DeploymentID(),
+		initialAuthority.Revision(),
+		initialAuthority.ManifestDigest(),
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	spaceID := uuid.New()
 	space := devicesync.SpaceProvisioning{
@@ -317,6 +340,8 @@ type postgresDeviceSyncAuthority struct {
 	TenantCredential                relay.TenantCredential
 	ControlDomain                   relay.DomainProvisioning
 	ControlAdministrationCredential relay.AdministrationCredential
+	AdmissionCredential             devicesync.AdmissionCredential
+	PrincipalProvisioning           devicesync.PrincipalProvisioning
 }
 
 func postgresBootstrapDeviceSyncPrincipal(
@@ -326,6 +351,7 @@ func postgresBootstrapDeviceSyncPrincipal(
 	principalID uuid.UUID,
 	initialDeviceID uuid.UUID,
 	now int64,
+	initialAuthorities ...*devicesync.InitialServiceAuthorityBinding,
 ) postgresDeviceSyncAuthority {
 	t.Helper()
 	admissionCredential := devicesync.AdmissionCredential{
@@ -375,14 +401,25 @@ func postgresBootstrapDeviceSyncPrincipal(
 		},
 		ControlDomain: controlDomain, CreatedAtMilliseconds: now,
 	}
-	if result, err := store.ClaimAccountAdmission(
-		ctx, admissionCredential, claim, now,
-	); err != nil || result.Acceptance != relay.AcceptanceAccepted {
+	var result devicesync.PrincipalProvisioningResult
+	if len(initialAuthorities) == 0 {
+		result, err = store.ClaimAccountAdmission(
+			ctx, admissionCredential, claim, now,
+		)
+	} else if len(initialAuthorities) == 1 {
+		result, err = store.ClaimAccountAdmissionWithAuthority(
+			ctx, admissionCredential, claim, initialAuthorities[0], now,
+		)
+	} else {
+		t.Fatal("at most one initial service authority binding is supported")
+	}
+	if err != nil || result.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("claim account admission=%+v err=%v", result, err)
 	}
 	return postgresDeviceSyncAuthority{
 		TenantCredential: tenantCredential, ControlDomain: controlDomain,
 		ControlAdministrationCredential: controlAdministrationCredential,
+		AdmissionCredential:             admissionCredential, PrincipalProvisioning: claim,
 	}
 }
 

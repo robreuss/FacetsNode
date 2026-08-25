@@ -9,12 +9,15 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 type memoryPrincipal struct {
-	admissionID  uuid.UUID
-	provisioning PrincipalProvisioning
-	result       relay.TenantProvisioningResult
+	admissionID      uuid.UUID
+	provisioning     PrincipalProvisioning
+	result           relay.TenantProvisioningResult
+	initialAuthority *InitialServiceAuthorityBinding
+	authorityActive  bool
 }
 
 type memoryDeviceAdmission struct {
@@ -266,6 +269,36 @@ func (s *MemoryStore) CreateAccountAdmission(_ context.Context, admission Accoun
 }
 
 func (s *MemoryStore) ClaimAccountAdmission(ctx context.Context, credential AdmissionCredential, provisioning PrincipalProvisioning, nowMilliseconds int64) (PrincipalProvisioningResult, error) {
+	return s.claimAccountAdmission(
+		ctx, credential, provisioning, nil, nowMilliseconds,
+	)
+}
+
+func (s *MemoryStore) ClaimAccountAdmissionWithAuthority(
+	ctx context.Context,
+	credential AdmissionCredential,
+	provisioning PrincipalProvisioning,
+	initialAuthority *InitialServiceAuthorityBinding,
+	nowMilliseconds int64,
+) (PrincipalProvisioningResult, error) {
+	if initialAuthority == nil || initialAuthority.Validate() != nil ||
+		initialAuthority.Scope() != (serviceauthority.Scope{
+			Kind: serviceauthority.ScopeDeviceSync, ScopeID: provisioning.PrincipalID,
+		}) {
+		return PrincipalProvisioningResult{}, serviceauthority.ErrInvalid
+	}
+	return s.claimAccountAdmission(
+		ctx, credential, provisioning, initialAuthority, nowMilliseconds,
+	)
+}
+
+func (s *MemoryStore) claimAccountAdmission(
+	ctx context.Context,
+	credential AdmissionCredential,
+	provisioning PrincipalProvisioning,
+	initialAuthority *InitialServiceAuthorityBinding,
+	nowMilliseconds int64,
+) (PrincipalProvisioningResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	admission, found := s.admissions[credential.AdmissionID]
@@ -279,18 +312,30 @@ func (s *MemoryStore) ClaimAccountAdmission(ctx context.Context, credential Admi
 	if err := provisioning.Validate(); err != nil {
 		return PrincipalProvisioningResult{}, err
 	}
-	if provisioning.CreatedAtMilliseconds > nowMilliseconds {
-		return PrincipalProvisioningResult{}, NewProtocolError(CodeInvalidPrincipal, "principal starts in the future")
-	}
 	if admission.ClaimedAtMilliseconds != nil {
 		existing, found := s.principals[*admission.ClaimedPrincipalID]
-		if found && existing.admissionID == admission.AdmissionID && reflect.DeepEqual(existing.provisioning, provisioning) {
+		if found && existing.admissionID == admission.AdmissionID &&
+			reflect.DeepEqual(existing.provisioning, provisioning) &&
+			InitialServiceAuthorityBindingsEqual(
+				existing.initialAuthority, initialAuthority,
+			) {
 			return resultFor(provisioning, existing.result, relay.AcceptanceDuplicate), nil
 		}
 		return PrincipalProvisioningResult{}, NewProtocolError(CodeAdmissionClaimed, "account admission was already claimed")
 	}
+	if provisioning.CreatedAtMilliseconds > nowMilliseconds {
+		return PrincipalProvisioningResult{}, NewProtocolError(CodeInvalidPrincipal, "principal starts in the future")
+	}
 	if err := admission.RequireActive(nowMilliseconds); err != nil {
 		return PrincipalProvisioningResult{}, err
+	}
+	if initialAuthority != nil {
+		if err := initialAuthority.RequireFreshClaimAt(nowMilliseconds); err != nil {
+			return PrincipalProvisioningResult{}, NewProtocolError(
+				CodeInvalidPrincipal,
+				"initial service authority enrollment is not current",
+			)
+		}
 	}
 	if existing, found := s.principals[provisioning.PrincipalID]; found {
 		if existing.admissionID != admission.AdmissionID || !reflect.DeepEqual(existing.provisioning, provisioning) {
@@ -307,9 +352,41 @@ func (s *MemoryStore) ClaimAccountAdmission(ctx context.Context, credential Admi
 	admission.ClaimedPrincipalID = &principalID
 	s.admissions[admission.AdmissionID] = admission
 	s.principals[principalID] = memoryPrincipal{
-		admissionID: admission.AdmissionID, provisioning: provisioning, result: relayResult,
+		admissionID: admission.AdmissionID, provisioning: provisioning,
+		result: relayResult, initialAuthority: initialAuthority,
 	}
 	return resultFor(provisioning, relayResult, relay.AcceptanceAccepted), nil
+}
+
+func (s *MemoryStore) ActivateBoundDeviceSyncScope(
+	_ context.Context,
+	principalID uuid.UUID,
+	localDeploymentID uuid.UUID,
+	expectedAuthorityRevision uint64,
+	expectedAuthorityManifestDigest string,
+	nowMilliseconds int64,
+) error {
+	if principalID == uuid.Nil || localDeploymentID == uuid.Nil ||
+		expectedAuthorityRevision != 1 ||
+		!validDigest(expectedAuthorityManifestDigest) || nowMilliseconds < 0 {
+		return serviceauthority.ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	principal, found := s.principals[principalID]
+	if !found || principal.initialAuthority == nil ||
+		principal.initialAuthority.LocalDeploymentID() != localDeploymentID ||
+		principal.initialAuthority.Revision() != expectedAuthorityRevision ||
+		principal.initialAuthority.ManifestDigest() !=
+			expectedAuthorityManifestDigest {
+		return ErrInitialServiceAuthorityConflict
+	}
+	if principal.authorityActive {
+		return nil
+	}
+	principal.authorityActive = true
+	s.principals[principalID] = principal
+	return nil
 }
 
 func (s *MemoryStore) CreateDeviceAdmission(

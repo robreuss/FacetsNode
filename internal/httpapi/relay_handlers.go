@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -969,15 +970,23 @@ func (s *Server) handleWaitForRelayMessages(
 	// Subscribe before checking the durable store so publication cannot fall
 	// into a gap between the check and the wait.
 	wake := s.relayWakeBroker.subscribe(tenantID, domainID)
-	hasChanges := func() (bool, error) {
-		result, fetchErr := s.relayStore.Fetch(
-			request.Context(), credential, after, 1, s.nowMilliseconds(),
+	hasChanges := func() (bool, bool) {
+		var changed bool
+		completed := s.executeShortBoundMutation(
+			writer,
+			request,
+			func(ctx context.Context) error {
+				result, fetchErr := s.relayStore.Fetch(
+					ctx, credential, after, 1, s.nowMilliseconds(),
+				)
+				changed = len(result.Messages) > 0
+				return fetchErr
+			},
 		)
-		return len(result.Messages) > 0, fetchErr
+		return changed, completed
 	}
-	changed, err := hasChanges()
-	if err != nil {
-		s.writeError(writer, err)
+	changed, completed := hasChanges()
+	if !completed {
 		return
 	}
 	if changed {
@@ -996,9 +1005,8 @@ func (s *Server) handleWaitForRelayMessages(
 	case <-wake:
 	}
 
-	changed, err = hasChanges()
-	if err != nil {
-		s.writeError(writer, err)
+	changed, completed = hasChanges()
+	if !completed {
 		return
 	}
 	if !changed {

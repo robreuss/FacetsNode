@@ -559,6 +559,7 @@ func TestMutatingGETHEADAndGrantRoutesWaitForScopeDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	server.SetServiceAuthorityDeployment(signer, bindings, serviceauthority.ScopeDeviceSync)
+	setUnboundDeviceSyncMutationFenceForTesting(server)
 	drain, err := bindings.AcquireMigrationDrain(context.Background(), scope)
 	if err != nil {
 		t.Fatal(err)
@@ -583,14 +584,6 @@ func TestMutatingGETHEADAndGrantRoutesWaitForScopeDrain(t *testing.T) {
 			method: http.MethodGet,
 			path: fmt.Sprintf(
 				"/v1/relay/tenants/%s/domains/%s/messages",
-				tenantID, domainID,
-			),
-			trafficClass: serviceauthority.TrafficMessage,
-		},
-		{
-			method: http.MethodGet,
-			path: fmt.Sprintf(
-				"/v1/relay/tenants/%s/domains/%s/messages/wake",
 				tenantID, domainID,
 			),
 			trafficClass: serviceauthority.TrafficMessage,
@@ -792,6 +785,7 @@ func TestDeploymentIssuesBearerAuthorizedGrantBeforeBulkUpload(t *testing.T) {
 	server.SetServiceAuthorityDeployment(
 		signer, bindings, serviceauthority.ScopeDeviceSync,
 	)
+	setUnboundDeviceSyncMutationFenceForTesting(server)
 	handler := server.Handler()
 	uploadID := uuid.New()
 	grantRequest := serviceauthority.BulkGrantRequest{

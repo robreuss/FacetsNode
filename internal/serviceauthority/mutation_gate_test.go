@@ -201,6 +201,183 @@ func TestBindingRegistryDrainRejectsUnboundScope(t *testing.T) {
 	}
 }
 
+func TestMutationAuthorizationIsSealedRegistryEvidence(t *testing.T) {
+	registry := NewBindingRegistry()
+	scope := mutationTestScope(ScopeDeviceSync)
+	deploymentID := uuid.New()
+	digest := mutationTestDigest("3")
+	if err := registry.Activate(scope, CurrentBinding{
+		Revision: 1, Digest: digest, DeploymentID: deploymentID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	binding := RequestBinding{
+		Scope: scope, AuthorityRevision: 1, AuthorityDigest: digest,
+		DeploymentID: deploymentID, RouteID: uuid.New(),
+		TrafficClass: TrafficControl,
+	}
+	now := time.UnixMilli(4_000)
+	authorization, err := registry.AuthorizeMutationAt(binding, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authorization.ValidateFor(ScopeDeviceSync, deploymentID); err != nil {
+		t.Fatal(err)
+	}
+	if authorization.Scope() != scope || authorization.AuthorityRevision() != 1 ||
+		authorization.AuthorityManifestDigest() != digest ||
+		authorization.DeploymentID() != deploymentID ||
+		authorization.AuthorizedAtMilliseconds() != 4_000 {
+		t.Fatalf("unexpected sealed authorization: %+v", authorization)
+	}
+	if (MutationAuthorization{}).ValidateFor(ScopeDeviceSync, deploymentID) == nil ||
+		authorization.ValidateFor(ScopeSharedSpace, deploymentID) == nil ||
+		authorization.ValidateFor(ScopeDeviceSync, uuid.New()) == nil {
+		t.Fatal("sealed mutation authorization accepted the wrong boundary")
+	}
+
+	registry.mu.Lock()
+	current := registry.bindings[scope]
+	current.WriteFence = &MigrationWriteFence{}
+	registry.bindings[scope] = current
+	registry.mu.Unlock()
+	if _, err := registry.AuthorizeMutationAt(binding, now); err == nil {
+		t.Fatal("registry issued mutation authorization after a write fence")
+	}
+}
+
+func TestInternalDeviceSyncMutationAuthorizationRequiresCurrentLocalAuthority(t *testing.T) {
+	fixture := newBootstrapFixture(t)
+	validUntil := int64(2_000)
+	manifest := fixture.signedManifestUntil(t, fixture.policy, &validUntil)
+	digest, err := manifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewBindingRegistry()
+	registry.expectedDeploymentID = fixture.descriptor.DeploymentID
+	if err := registry.Activate(fixture.scope, CurrentBinding{
+		Revision:     1,
+		Digest:       digest,
+		DeploymentID: fixture.descriptor.DeploymentID,
+		Manifest:     &manifest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	authorization, err := registry.AuthorizeInternalDeviceSyncMutationAt(
+		fixture.scope,
+		time.UnixMilli(1_100),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authorization.ValidateFor(
+		ScopeDeviceSync,
+		fixture.descriptor.DeploymentID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if authorization.Scope() != fixture.scope ||
+		authorization.AuthorityRevision() != 1 ||
+		authorization.AuthorityManifestDigest() != digest ||
+		authorization.DeploymentID() != fixture.descriptor.DeploymentID ||
+		authorization.AuthorizedAtMilliseconds() != 1_100 {
+		t.Fatalf("unexpected internal authorization: %+v", authorization)
+	}
+
+	tests := []struct {
+		name string
+		now  int64
+		edit func(*BindingRegistry)
+	}{
+		{
+			name: "future manifest",
+			now:  999,
+		},
+		{
+			name: "expired manifest",
+			now:  2_000,
+		},
+		{
+			name: "negative time",
+			now:  -1,
+		},
+		{
+			name: "missing signed manifest",
+			now:  1_100,
+			edit: func(candidate *BindingRegistry) {
+				current := candidate.bindings[fixture.scope]
+				current.Manifest = nil
+				candidate.bindings[fixture.scope] = current
+			},
+		},
+		{
+			name: "nonlocal deployment",
+			now:  1_100,
+			edit: func(candidate *BindingRegistry) {
+				candidate.expectedDeploymentID = uuid.New()
+			},
+		},
+		{
+			name: "write fence",
+			now:  1_100,
+			edit: func(candidate *BindingRegistry) {
+				current := candidate.bindings[fixture.scope]
+				current.WriteFence = &MigrationWriteFence{}
+				candidate.bindings[fixture.scope] = current
+			},
+		},
+		{
+			name: "poisoned custody",
+			now:  1_100,
+			edit: func(candidate *BindingRegistry) {
+				candidate.poisoned = true
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := NewBindingRegistry()
+			candidate.expectedDeploymentID = fixture.descriptor.DeploymentID
+			candidate.bindings[fixture.scope] = registry.bindings[fixture.scope]
+			if test.edit != nil {
+				test.edit(candidate)
+			}
+			_, err := candidate.AuthorizeInternalDeviceSyncMutationAt(
+				fixture.scope,
+				time.UnixMilli(test.now),
+			)
+			if err == nil {
+				t.Fatal("internal mutation authority was issued")
+			}
+			if test.name == "poisoned custody" &&
+				!errors.Is(err, ErrBindingUnavailable) {
+				t.Fatalf("poisoned error=%v; want ErrBindingUnavailable", err)
+			}
+		})
+	}
+
+	if _, err := NewBindingRegistry().AuthorizeInternalDeviceSyncMutationAt(
+		fixture.scope,
+		time.UnixMilli(1_100),
+	); err == nil {
+		t.Fatal("unscoped registry issued internal mutation authority")
+	}
+	if _, err := registry.AuthorizeInternalDeviceSyncMutationAt(
+		Scope{Kind: ScopeDeviceSync, ScopeID: uuid.New()},
+		time.UnixMilli(1_100),
+	); err == nil {
+		t.Fatal("missing scope issued internal mutation authority")
+	}
+	if _, err := registry.AuthorizeInternalDeviceSyncMutationAt(
+		Scope{Kind: ScopeSharedSpace, ScopeID: fixture.scope.ScopeID},
+		time.UnixMilli(1_100),
+	); err == nil {
+		t.Fatal("wrong service issued internal mutation authority")
+	}
+}
+
 func mutationTestScope(kind ScopeKind) Scope {
 	return Scope{Kind: kind, ScopeID: uuid.New()}
 }

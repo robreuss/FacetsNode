@@ -1631,7 +1631,9 @@ func TestProductAuthorityRoutesAreIsolatedByServiceConfiguration(t *testing.T) {
 
 	deviceRelay := relay.NewMemoryStore()
 	deviceServer := newRelayTestServer(t, deviceRelay, operatorToken)
-	deviceServer.SetDeviceSyncStore(devicesync.NewMemoryStore(deviceRelay))
+	setUnboundDeviceSyncStoreForTesting(
+		deviceServer, devicesync.NewMemoryStore(deviceRelay),
+	)
 	sharedOnDevice := performRelayJSON(
 		t, deviceServer.Handler(), http.MethodPost, "/v1/shared-spaces",
 		map[string]any{}, operatorToken, uuid.Nil,

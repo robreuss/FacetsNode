@@ -13,6 +13,7 @@ import (
 )
 
 func TestBlobMaintenanceDefaultsAndOverrides(t *testing.T) {
+	configureDeviceSyncDeployment(t)
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/facets")
 	configuration, err := config.Load(config.DeviceSync)
 	if err != nil {
@@ -39,7 +40,25 @@ func TestBlobMaintenanceDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestDeviceSyncRequiresAtLeastTwoDatabaseConnections(t *testing.T) {
+	configureDeviceSyncDeployment(t)
+	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/facets")
+	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_CONNS", "1")
+	if _, err := config.Load(config.DeviceSync); err == nil {
+		t.Fatal("Device Sync accepted a self-deadlocking one-connection pool")
+	}
+	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_CONNS", "2")
+	configuration, err := config.Load(config.DeviceSync)
+	if err != nil {
+		t.Fatalf("two-connection Device Sync pool rejected: %v", err)
+	}
+	if configuration.DatabaseConns != 2 {
+		t.Fatalf("Device Sync database connections=%d", configuration.DatabaseConns)
+	}
+}
+
 func TestTrafficLimitDefaultsOverridesAndHardCaps(t *testing.T) {
+	configureDeviceSyncDeployment(t)
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/facets")
 	configuration, err := config.Load(config.DeviceSync)
 	if err != nil {
@@ -76,6 +95,7 @@ func TestTrafficLimitDefaultsOverridesAndHardCaps(t *testing.T) {
 }
 
 func TestCheckpointFenceTTLRejectsOutOfRangeDurations(t *testing.T) {
+	configureDeviceSyncDeployment(t)
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/facets")
 	for _, value := range []string{"0s", "4m59s", "25h", "invalid"} {
 		t.Run(value, func(t *testing.T) {
@@ -88,6 +108,7 @@ func TestCheckpointFenceTTLRejectsOutOfRangeDurations(t *testing.T) {
 }
 
 func TestCheckpointFenceTTLAcceptsInclusiveBounds(t *testing.T) {
+	configureDeviceSyncDeployment(t)
 	for _, value := range []string{"5m", "24h"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/facets")
@@ -100,6 +121,7 @@ func TestCheckpointFenceTTLAcceptsInclusiveBounds(t *testing.T) {
 }
 
 func TestBlobMaintenanceRejectsNonPositiveDurations(t *testing.T) {
+	configureDeviceSyncDeployment(t)
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/facets")
 	for _, variable := range []string{"FACETS_DEVICE_SYNC_BLOB_UPLOAD_TTL", "FACETS_DEVICE_SYNC_BLOB_ORPHAN_GRACE"} {
 		t.Run(variable, func(t *testing.T) {
@@ -112,6 +134,7 @@ func TestBlobMaintenanceRejectsNonPositiveDurations(t *testing.T) {
 }
 
 func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
+	configureDeviceSyncDeployment(t)
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/device_sync")
 	t.Setenv("FACETS_DEVICE_SYNC_LISTEN_ADDR", ":8081")
 	t.Setenv("FACETS_SHARED_SPACES_DATABASE_URL", "postgres://example.invalid/shared_spaces")
@@ -239,6 +262,7 @@ func TestSharedSpacesRequiresPublicURL(t *testing.T) {
 }
 
 func TestDeviceSyncDoesNotConsumeSharedSpacesManagedKey(t *testing.T) {
+	configureDeviceSyncDeployment(t)
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/device_sync")
 	t.Setenv("FACETS_SHARED_SPACES_MANAGED_KEY_ENCRYPTION_KEY", "invalid")
 	t.Setenv("FACETS_SHARED_SPACES_COMPUTE_CAPABILITY_SIGNING_SEED", "invalid")
@@ -283,6 +307,23 @@ func configureComputePool(t *testing.T) {
 	)
 }
 
+func configureDeviceSyncDeployment(t *testing.T) {
+	t.Helper()
+	t.Setenv("FACETS_DEVICE_SYNC_DEPLOYMENT_ID", "63000000-0000-0000-0000-000000000001")
+	t.Setenv(
+		"FACETS_DEVICE_SYNC_DEPLOYMENT_SIGNING_KEY_FILE",
+		"/var/lib/facets-device-sync/deployment-signing-key",
+	)
+	t.Setenv(
+		"FACETS_DEVICE_SYNC_DEPLOYMENT_ROUTE_POLICY_FILE",
+		"/var/lib/facets-device-sync/deployment-route-policy.json",
+	)
+	t.Setenv(
+		"FACETS_DEVICE_SYNC_SERVICE_AUTHORITY_BINDINGS_FILE",
+		"/var/lib/facets-device-sync/service-authority-bindings.json",
+	)
+}
+
 func TestDeploymentAuthenticationConfigurationIsAllOrNothing(t *testing.T) {
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/device_sync")
 	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
@@ -314,7 +355,18 @@ func TestDeploymentAuthenticationConfigurationIsAllOrNothing(t *testing.T) {
 	}
 }
 
+func TestDeviceSyncRequiresDeploymentAuthority(t *testing.T) {
+	t.Setenv(
+		"FACETS_DEVICE_SYNC_DATABASE_URL",
+		"postgres://example.invalid/device_sync",
+	)
+	if _, err := config.Load(config.DeviceSync); err == nil {
+		t.Fatal("Device Sync without deployment authority was accepted")
+	}
+}
+
 func TestOnionIngressTokenIsOptionalStrictAndServiceScoped(t *testing.T) {
+	configureDeviceSyncDeployment(t)
 	t.Setenv("FACETS_DEVICE_SYNC_DATABASE_URL", "postgres://example.invalid/device_sync")
 	token := bytes.Repeat([]byte{0x51}, 32)
 	t.Setenv(

@@ -29,6 +29,7 @@ type Server struct {
 	store                               rendezvous.Store
 	relayStore                          relay.Store
 	deviceSyncStore                     devicesync.Store
+	deviceSyncMutationFenceStore        devicesync.MutationFenceStore
 	sharedSpacesStore                   sharedspaces.Store
 	sharedSpacesComputeCapabilitySigner *sharedspaces.ComputeCapabilitySigner
 	blobContentStore                    relay.BlobContentStore
@@ -103,7 +104,20 @@ func (s *Server) SetServiceAuthorityDeployment(
 // Shared Spaces intentionally leaves this unset even though it reuses the
 // underlying opaque relay implementation.
 func (s *Server) SetDeviceSyncStore(store devicesync.Store) {
+	if store == nil || s.deploymentSigner == nil ||
+		s.serviceAuthorityBindings == nil ||
+		s.serviceAuthorityScopeKind != serviceauthority.ScopeDeviceSync {
+		panic("Device Sync requires its service-authority deployment")
+	}
+	if _, ok := store.(devicesync.AuthorityBoundAccountStore); !ok {
+		panic("Device Sync store lacks durable service-authority binding")
+	}
+	mutationFenceStore, ok := store.(devicesync.MutationFenceStore)
+	if !ok {
+		panic("Device Sync store lacks durable mutation fencing")
+	}
 	s.deviceSyncStore = store
+	s.deviceSyncMutationFenceStore = mutationFenceStore
 }
 
 // SetSharedSpacesStore enables the product-level Shared Spaces authority
@@ -149,6 +163,12 @@ func NewWithRelay(
 }
 
 func (s *Server) Handler() http.Handler {
+	if s.deploymentSigner != nil &&
+		s.serviceAuthorityScopeKind == serviceauthority.ScopeDeviceSync &&
+		(s.store != nil || s.relayStore != nil || s.deviceSyncStore != nil) &&
+		s.deviceSyncMutationFenceStore == nil {
+		panic("Device Sync capability routes require durable mutation fencing")
+	}
 	mux := http.NewServeMux()
 	read := serviceauthority.RequestRead
 	mutation := serviceauthority.RequestMutation
@@ -370,7 +390,7 @@ func (s *Server) Handler() http.Handler {
 		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/wake",
 			traffic.SurfaceRelayMessage,
-			mutation,
+			read,
 			s.handleWaitForRelayMessages,
 		)
 		register(

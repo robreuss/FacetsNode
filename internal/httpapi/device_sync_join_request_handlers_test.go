@@ -23,7 +23,7 @@ func TestDeviceSyncJoinRequestDeliversOnlyCandidateEncryptedBootstrap(t *testing
 	controlDomain := newRelayDomainProvisioningRequest(now, 111, 112)
 	bootstrapDeviceSyncPrincipal(t, deviceStore, controlDomain, 113)
 	server := newRelayTestServer(t, relayStore, relayTestToken(114))
-	server.SetDeviceSyncStore(deviceStore)
+	setUnboundDeviceSyncStoreForTesting(server, deviceStore)
 	server.now = func() time.Time { return time.UnixMilli(now) }
 	handler := server.Handler()
 

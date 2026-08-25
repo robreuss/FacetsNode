@@ -1,15 +1,19 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 func (s *RelayStore) RevokeDevice(
@@ -379,6 +383,36 @@ func (s *RelayStore) ClaimAccountAdmission(
 	provisioning devicesync.PrincipalProvisioning,
 	nowMilliseconds int64,
 ) (devicesync.PrincipalProvisioningResult, error) {
+	return s.claimAccountAdmission(
+		ctx, credential, provisioning, nil, nowMilliseconds,
+	)
+}
+
+func (s *RelayStore) ClaimAccountAdmissionWithAuthority(
+	ctx context.Context,
+	credential devicesync.AdmissionCredential,
+	provisioning devicesync.PrincipalProvisioning,
+	initialAuthority *devicesync.InitialServiceAuthorityBinding,
+	nowMilliseconds int64,
+) (devicesync.PrincipalProvisioningResult, error) {
+	if initialAuthority == nil || initialAuthority.Validate() != nil ||
+		initialAuthority.Scope() != (serviceauthority.Scope{
+			Kind: serviceauthority.ScopeDeviceSync, ScopeID: provisioning.PrincipalID,
+		}) {
+		return devicesync.PrincipalProvisioningResult{}, serviceauthority.ErrInvalid
+	}
+	return s.claimAccountAdmission(
+		ctx, credential, provisioning, initialAuthority, nowMilliseconds,
+	)
+}
+
+func (s *RelayStore) claimAccountAdmission(
+	ctx context.Context,
+	credential devicesync.AdmissionCredential,
+	provisioning devicesync.PrincipalProvisioning,
+	initialAuthority *devicesync.InitialServiceAuthorityBinding,
+	nowMilliseconds int64,
+) (devicesync.PrincipalProvisioningResult, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return devicesync.PrincipalProvisioningResult{}, fmt.Errorf("begin Device Sync principal provisioning: %w", err)
@@ -395,13 +429,10 @@ func (s *RelayStore) ClaimAccountAdmission(
 	if err := provisioning.Validate(); err != nil {
 		return devicesync.PrincipalProvisioningResult{}, err
 	}
-	if provisioning.CreatedAtMilliseconds > nowMilliseconds {
-		return devicesync.PrincipalProvisioningResult{}, devicesync.NewProtocolError(
-			devicesync.CodeInvalidPrincipal, "principal starts in the future",
-		)
-	}
 	if admission.ClaimedAtMilliseconds != nil {
-		exact, err := deviceSyncPrincipalProvisioningEqual(ctx, tx, admission.AdmissionID, provisioning)
+		exact, err := deviceSyncPrincipalProvisioningEqual(
+			ctx, tx, admission.AdmissionID, provisioning, initialAuthority,
+		)
 		if err != nil {
 			return devicesync.PrincipalProvisioningResult{}, err
 		}
@@ -416,8 +447,21 @@ func (s *RelayStore) ClaimAccountAdmission(
 		}
 		return deviceSyncPrincipalResult(provisioning, relayResult, relay.AcceptanceDuplicate), nil
 	}
+	if provisioning.CreatedAtMilliseconds > nowMilliseconds {
+		return devicesync.PrincipalProvisioningResult{}, devicesync.NewProtocolError(
+			devicesync.CodeInvalidPrincipal, "principal starts in the future",
+		)
+	}
 	if err := admission.RequireActive(nowMilliseconds); err != nil {
 		return devicesync.PrincipalProvisioningResult{}, err
+	}
+	if initialAuthority != nil {
+		if err := initialAuthority.RequireFreshClaimAt(nowMilliseconds); err != nil {
+			return devicesync.PrincipalProvisioningResult{}, devicesync.NewProtocolError(
+				devicesync.CodeInvalidPrincipal,
+				"initial service authority enrollment is not current",
+			)
+		}
 	}
 	var principalExists bool
 	if err := tx.QueryRow(ctx, `
@@ -452,6 +496,40 @@ func (s *RelayStore) ClaimAccountAdmission(
 		provisioning.Tenant.TenantID, controlDomainID, provisioning.InitialDeviceID,
 		provisioning.CreatedAtMilliseconds); err != nil {
 		return devicesync.PrincipalProvisioningResult{}, fmt.Errorf("insert Device Sync principal: %w", err)
+	}
+	var enforcementResult pgconn.CommandTag
+	if initialAuthority == nil {
+		enforcementResult, err = tx.Exec(ctx, `
+			INSERT INTO device_sync_scope_enforcement (
+				principal_id, tenant_id, state
+			) VALUES ($1,$2,'standby')
+		`, provisioning.PrincipalID, provisioning.Tenant.TenantID)
+	} else {
+		enforcementResult, err = tx.Exec(ctx, `
+			INSERT INTO device_sync_scope_enforcement (
+				principal_id,tenant_id,state,local_deployment_id,
+				initial_deployment_id,
+				initial_authority_validated_at_milliseconds,
+				initial_authority_manifest_digest,
+				initial_authority_manifest_record,
+				authority_validated_at_milliseconds,
+				authority_revision,authority_manifest_digest,
+				authority_manifest_record,active_deployment_id
+			) VALUES ($1,$2,'standby',$3,$3,$4,$5,$6,$4,$7,$5,$6,$3)
+		`, provisioning.PrincipalID, provisioning.Tenant.TenantID,
+			initialAuthority.LocalDeploymentID(), nowMilliseconds,
+			initialAuthority.ManifestDigest(), initialAuthority.ManifestRecord(),
+			int64(initialAuthority.Revision()))
+	}
+	if err != nil {
+		return devicesync.PrincipalProvisioningResult{}, fmt.Errorf(
+			"initialize Device Sync scope enforcement: %w", err,
+		)
+	}
+	if enforcementResult.RowsAffected() != 1 {
+		return devicesync.PrincipalProvisioningResult{}, errors.New(
+			"Device Sync scope enforcement insert affected an unexpected row count",
+		)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO device_sync_devices (
@@ -1431,6 +1509,7 @@ func deviceSyncPrincipalProvisioningEqual(
 	tx pgx.Tx,
 	admissionID uuid.UUID,
 	provisioning devicesync.PrincipalProvisioning,
+	initialAuthority *devicesync.InitialServiceAuthorityBinding,
 ) (bool, error) {
 	var principalID, retryID, tenantID, domainID, deviceID uuid.UUID
 	var createdAt int64
@@ -1446,11 +1525,45 @@ func deviceSyncPrincipalProvisioningEqual(
 	if err != nil {
 		return false, fmt.Errorf("load Device Sync principal: %w", err)
 	}
-	return principalID == provisioning.PrincipalID && retryID == provisioning.RetryID &&
+	provisioningEqual := principalID == provisioning.PrincipalID &&
+		retryID == provisioning.RetryID &&
 		tenantID == provisioning.Tenant.TenantID &&
 		domainID == provisioning.ControlDomain.Registration.DomainID &&
 		deviceID == provisioning.InitialDeviceID &&
-		createdAt == provisioning.CreatedAtMilliseconds, nil
+		createdAt == provisioning.CreatedAtMilliseconds
+	if !provisioningEqual {
+		return false, nil
+	}
+	var initialDeploymentID *uuid.UUID
+	var initialManifestDigest *string
+	var initialManifestRecord []byte
+	err = tx.QueryRow(ctx, `
+		SELECT initial_deployment_id,initial_authority_manifest_digest,
+			initial_authority_manifest_record
+		FROM device_sync_scope_enforcement
+		WHERE principal_id=$1 AND tenant_id=$1
+	`, principalID).Scan(
+		&initialDeploymentID, &initialManifestDigest, &initialManifestRecord,
+	)
+	if err == pgx.ErrNoRows {
+		return false, errors.New(
+			"claimed Device Sync principal lacks its permanent enforcement row",
+		)
+	}
+	if err != nil {
+		return false, fmt.Errorf(
+			"load claimed Device Sync initial authority: %w", err,
+		)
+	}
+	if initialAuthority == nil {
+		return initialDeploymentID == nil && initialManifestDigest == nil &&
+			len(initialManifestRecord) == 0, nil
+	}
+	return initialDeploymentID != nil &&
+		*initialDeploymentID == initialAuthority.LocalDeploymentID() &&
+		initialManifestDigest != nil &&
+		*initialManifestDigest == initialAuthority.ManifestDigest() &&
+		bytes.Equal(initialManifestRecord, initialAuthority.ManifestRecord()), nil
 }
 
 func deviceSyncPrincipalResult(

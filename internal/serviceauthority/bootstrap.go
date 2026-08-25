@@ -394,30 +394,24 @@ func (enrollment InitialEnrollment) Validate(
 	expectedScope Scope,
 	nowMilliseconds int64,
 ) (ManifestPayload, error) {
-	return enrollment.validate(expectedScope, nowMilliseconds, true)
+	return enrollment.validate(expectedScope, &nowMilliseconds)
 }
 
-// ValidateForAdmissionClaim authenticates the enrollment while allowing the
-// short-lived deployment offer to have expired after revision 1 was created.
-// The Device Sync admission store remains responsible for rejecting an
-// expired first claim and permits only an exact retry after it has committed.
+// ValidateForAdmissionClaim authenticates the immutable enrollment structure
+// without applying the offer or Manifest validity windows. The Device Sync
+// admission store must apply both temporal checks before an unclaimed first
+// claim and may omit them only after matching an exact committed authority.
 func (enrollment InitialEnrollment) ValidateForAdmissionClaim(
 	expectedScope Scope,
-	nowMilliseconds int64,
 ) (ManifestPayload, error) {
-	return enrollment.validate(expectedScope, nowMilliseconds, false)
+	return enrollment.validate(expectedScope, nil)
 }
 
 func (enrollment InitialEnrollment) validate(
 	expectedScope Scope,
-	nowMilliseconds int64,
-	requireCurrentOffer bool,
+	nowMilliseconds *int64,
 ) (ManifestPayload, error) {
-	var offerTime *int64
-	if requireCurrentOffer {
-		offerTime = &nowMilliseconds
-	}
-	offer, err := enrollment.DeploymentOffer.VerifiedPayload(offerTime)
+	offer, err := enrollment.DeploymentOffer.VerifiedPayload(nowMilliseconds)
 	if err != nil || enrollment.Version != SchemaVersion || expectedScope.Validate() != nil ||
 		enrollment.Anchor.Version != SchemaVersion || enrollment.Anchor.Scope != expectedScope ||
 		enrollment.Anchor.SignerID == uuid.Nil {
@@ -431,14 +425,12 @@ func (enrollment InitialEnrollment) validate(
 	var manifest ManifestPayload
 	if verifyCanonicalRecord(enrollment.Manifest.Payload, enrollment.Manifest.Signature,
 		"Facets service authority manifest v1\x00", &manifest) != nil ||
-		manifest.Validate(nil) != nil || manifest.Scope != expectedScope ||
+		manifest.Validate(nowMilliseconds) != nil || manifest.Scope != expectedScope ||
 		manifest.Revision != 1 || manifest.Transition != "initial_activation" ||
 		manifest.PredecessorManifestDigest != nil ||
 		manifest.IssuedAtMilliseconds < offer.IssuedAtMilliseconds ||
 		manifest.IssuedAtMilliseconds >= offer.ExpiresAtMilliseconds ||
 		manifest.ValidFromMilliseconds < manifest.IssuedAtMilliseconds ||
-		(nowMilliseconds < manifest.ValidFromMilliseconds ||
-			(manifest.ValidUntilMilliseconds != nil && nowMilliseconds >= *manifest.ValidUntilMilliseconds)) ||
 		enrollment.Manifest.Signature.SignerID != enrollment.Anchor.SignerID ||
 		enrollment.Manifest.Signature.PublicSigningKeyX963 != enrollment.Anchor.PublicSigningKeyX963 ||
 		enrollment.Manifest.Signature.SigningKeyFingerprint != enrollment.Anchor.SigningKeyFingerprint ||

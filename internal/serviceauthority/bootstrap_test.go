@@ -46,8 +46,32 @@ func TestDeploymentOfferAndInitialEnrollmentKeepAuthorityKeysSeparate(t *testing
 	if _, err := enrollment.Validate(fixture.scope, 2_000); err == nil {
 		t.Fatal("expired deployment offer accepted")
 	}
-	if _, err := enrollment.ValidateForAdmissionClaim(fixture.scope, 2_000); err != nil {
+	if _, err := enrollment.ValidateForAdmissionClaim(fixture.scope); err != nil {
 		t.Fatalf("structurally valid committed admission retry rejected: %v", err)
+	}
+}
+
+func TestInitialEnrollmentAdmissionRetryAuthenticatesExpiredFiniteManifest(t *testing.T) {
+	fixture := newBootstrapFixture(t)
+	offer, err := fixture.deploymentSigner.SignDeploymentOffer(fixture.offerPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validUntil := int64(1_500)
+	enrollment := InitialEnrollment{
+		Anchor:          fixture.anchor,
+		DeploymentOffer: offer,
+		Manifest:        fixture.signedManifestUntil(t, fixture.policy, &validUntil),
+		Version:         SchemaVersion,
+	}
+	if _, err := enrollment.Validate(fixture.scope, 1_100); err != nil {
+		t.Fatalf("current finite Manifest rejected: %v", err)
+	}
+	if _, err := enrollment.Validate(fixture.scope, 2_100); err == nil {
+		t.Fatal("expired offer and finite Manifest accepted as a fresh enrollment")
+	}
+	if _, err := enrollment.ValidateForAdmissionClaim(fixture.scope); err != nil {
+		t.Fatalf("expired finite Manifest lost structural authenticity: %v", err)
 	}
 }
 
@@ -67,6 +91,9 @@ func TestInitialEnrollmentRejectsPolicyNotAuthenticatedByOffer(t *testing.T) {
 	}
 	if _, err := enrollment.Validate(fixture.scope, 1_100); err == nil {
 		t.Fatal("manifest policy not present in the signed deployment offer was accepted")
+	}
+	if _, err := enrollment.ValidateForAdmissionClaim(fixture.scope); err == nil {
+		t.Fatal("structural retry accepted policy not authenticated by the offer")
 	}
 }
 
@@ -338,17 +365,26 @@ func (fixture bootstrapFixture) signedManifest(
 	t *testing.T,
 	policy TransportPolicy,
 ) Manifest {
+	return fixture.signedManifestUntil(t, policy, nil)
+}
+
+func (fixture bootstrapFixture) signedManifestUntil(
+	t *testing.T,
+	policy TransportPolicy,
+	validUntil *int64,
+) Manifest {
 	t.Helper()
 	payload := ManifestPayload{
-		ActiveDeployment:      fixture.descriptor,
-		IssuedAtMilliseconds:  1_000,
-		PreparedDeployments:   []DeploymentDescriptor{},
-		Revision:              1,
-		Scope:                 fixture.scope,
-		Transition:            "initial_activation",
-		TransportPolicy:       policy,
-		ValidFromMilliseconds: 1_000,
-		Version:               SchemaVersion,
+		ActiveDeployment:       fixture.descriptor,
+		IssuedAtMilliseconds:   1_000,
+		PreparedDeployments:    []DeploymentDescriptor{},
+		Revision:               1,
+		Scope:                  fixture.scope,
+		Transition:             "initial_activation",
+		TransportPolicy:        policy,
+		ValidFromMilliseconds:  1_000,
+		ValidUntilMilliseconds: validUntil,
+		Version:                SchemaVersion,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

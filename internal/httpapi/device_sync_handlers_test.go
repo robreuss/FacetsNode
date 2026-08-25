@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,6 +22,30 @@ import (
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
+
+func TestDeviceSyncBindingAvailabilityTakesPrecedenceOverInvalidCause(
+	t *testing.T,
+) {
+	recorder := httptest.NewRecorder()
+	writeDeviceSyncBindingActivationError(
+		recorder,
+		fmt.Errorf(
+			"persist binding: %w: %w",
+			serviceauthority.ErrBindingUnavailable,
+			serviceauthority.ErrInvalid,
+		),
+	)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want=%d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	var response map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["code"] != "device_sync_authority_unavailable" {
+		t.Fatalf("response=%+v", response)
+	}
+}
 
 func TestDeviceSyncAccountAdmissionClaimsPrincipalExactlyOnce(t *testing.T) {
 	operatorToken := relayTestToken(201)
@@ -243,7 +269,14 @@ func TestDeviceSyncAccountClaimActivatesClientSignedInitialAuthorityBinding(t *t
 		credential.AuthorizationToken,
 		uuid.Nil,
 	)
-	requireStatus(t, response, http.StatusConflict)
+	requireStatus(t, response, http.StatusServiceUnavailable)
+	var unavailable map[string]string
+	if err := json.NewDecoder(response.Body).Decode(&unavailable); err != nil {
+		t.Fatal(err)
+	}
+	if unavailable["code"] != "device_sync_authority_unavailable" {
+		t.Fatalf("authority unavailable response=%+v", unavailable)
+	}
 	_ = response.Body.Close()
 	if err := os.Remove(bindingPath); err != nil {
 		t.Fatal(err)
@@ -277,8 +310,41 @@ func TestDeviceSyncAccountClaimActivatesClientSignedInitialAuthorityBinding(t *t
 		t.Fatalf("claimed initial authority binding was not activated: %v", err)
 	}
 
+	// A separately signed, valid revision-1 enrollment is not an exact retry,
+	// even when it names the same principal and deployment.
+	substitutedEnrollment := testInitialServiceAuthorityEnrollment(
+		t, signer, scope, routeID,
+	)
+	substitutedDigest, err := substitutedEnrollment.Manifest.ReferenceDigest()
+	if err != nil || substitutedDigest == manifestDigest {
+		t.Fatalf("substituted enrollment digest=%q err=%v", substitutedDigest, err)
+	}
+	substitutedClaim := claim
+	substitutedClaim.ServiceAuthorityEnrollment = &substitutedEnrollment
+	response = performRelayJSON(
+		t, handler, http.MethodPost, claimPath, substitutedClaim,
+		credential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusConflict)
+	_ = response.Body.Close()
+	if err := bindings.Authorize(serviceauthority.RequestBinding{
+		Scope: scope, AuthorityRevision: 1, AuthorityDigest: substitutedDigest,
+		DeploymentID: deploymentID, RouteID: routeID,
+		TrafficClass: serviceauthority.TrafficControl,
+	}); err == nil {
+		t.Fatal("substituted initial enrollment changed committed registry authority")
+	}
+	if err := os.Remove(bindingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(bindingPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
 	// The setup offer expires at 2,000. Once the store has committed this exact
 	// claim, expiry must not turn a lost-response retry into a false failure.
+	// The deliberately unusable persistence path also proves an exact installed
+	// registry retry performs no write.
 	now = 2_100
 	server.now = func() time.Time { return time.UnixMilli(now) }
 	response = performRelayJSON(
@@ -416,7 +482,7 @@ func TestDeviceSyncPrincipalAdmitsAdditionalDeviceTransportExactlyOnce(t *testin
 	principalID := domainInput.AdministrationCredential.TenantID
 	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, domainInput, 233)
 	server := newRelayTestServer(t, relayStore, relayTestToken(234))
-	server.SetDeviceSyncStore(deviceSyncStore)
+	setUnboundDeviceSyncStoreForTesting(server, deviceSyncStore)
 	server.now = func() time.Time { return time.UnixMilli(now) }
 	handler := server.Handler()
 
@@ -536,7 +602,7 @@ func TestDeviceSyncPrincipalProvisionsOpaqueSpaceDomainExactlyOnce(t *testing.T)
 	initialDeviceID := controlDomain.MemberCredential.MemberID
 	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, controlDomain, tenantSeed)
 	server := newRelayTestServer(t, relayStore, relayTestToken(244))
-	server.SetDeviceSyncStore(deviceSyncStore)
+	setUnboundDeviceSyncStoreForTesting(server, deviceSyncStore)
 	server.now = func() time.Time { return time.UnixMilli(now) }
 	handler := server.Handler()
 
@@ -610,7 +676,7 @@ func TestDeviceSyncPrincipalStatusIsAuthenticatedAndContentBlind(t *testing.T) {
 	principalID := controlDomain.AdministrationCredential.TenantID
 	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, controlDomain, tenantSeed)
 	server := newRelayTestServer(t, relayStore, relayTestToken(10))
-	server.SetDeviceSyncStore(deviceSyncStore)
+	setUnboundDeviceSyncStoreForTesting(server, deviceSyncStore)
 	handler := server.Handler()
 	path := "/v1/device-sync/principals/" + principalID.String() + "/status"
 
@@ -649,7 +715,7 @@ func TestDeviceSyncSpaceProvisioningRejectsUnenrolledInitialDevice(t *testing.T)
 	principalID := controlDomain.AdministrationCredential.TenantID
 	bootstrapDeviceSyncPrincipal(t, deviceSyncStore, controlDomain, tenantSeed)
 	server := newRelayTestServer(t, relayStore, relayTestToken(254))
-	server.SetDeviceSyncStore(deviceSyncStore)
+	setUnboundDeviceSyncStoreForTesting(server, deviceSyncStore)
 	server.now = func() time.Time { return time.UnixMilli(now) }
 
 	unknownDeviceID := uuid.New()
@@ -705,7 +771,7 @@ func TestDeviceSyncSpaceAdmitsEnrolledDeviceTransportExactlyOnce(t *testing.T) {
 	}
 
 	server := newRelayTestServer(t, relayStore, relayTestToken(49))
-	server.SetDeviceSyncStore(deviceSyncStore)
+	setUnboundDeviceSyncStoreForTesting(server, deviceSyncStore)
 	server.now = func() time.Time { return time.UnixMilli(now) }
 	handler := server.Handler()
 	admissionCredential := deviceSyncAdmissionCredential{
@@ -983,7 +1049,9 @@ func newDeviceSyncTestServer(
 ) *Server {
 	t.Helper()
 	server := newRelayTestServer(t, relayStore, operatorToken)
-	server.SetDeviceSyncStore(devicesync.NewMemoryStore(relayStore))
+	setUnboundDeviceSyncStoreForTesting(
+		server, devicesync.NewMemoryStore(relayStore),
+	)
 	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
 	return server
 }

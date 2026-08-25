@@ -63,7 +63,7 @@ func TestDeviceSyncSpaceDataPlaneCarriesOpaqueCheckpointTailAndBlob(t *testing.T
 	}
 
 	server := newRelayTestServer(t, relayStore, relayTestToken(69))
-	server.SetDeviceSyncStore(deviceSyncStore)
+	setUnboundDeviceSyncStoreForTesting(server, deviceSyncStore)
 	server.now = func() time.Time { return time.UnixMilli(now) }
 	handler := server.Handler()
 

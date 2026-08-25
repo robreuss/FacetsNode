@@ -6,6 +6,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const MaximumBlobUploadExpiryBatchSize = 256
+
 type Store interface {
 	ProvisionTenant(
 		ctx context.Context,

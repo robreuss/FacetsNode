@@ -3,6 +3,7 @@ package serverapp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,9 +15,12 @@ import (
 )
 
 type maintenanceAuthority struct {
-	blobs   map[string]bool
-	uploads map[uuid.UUID]bool
-	expired bool
+	blobs        map[string]bool
+	uploads      map[uuid.UUID]bool
+	expired      bool
+	expiryErr    error
+	blobErrors   map[string]error
+	uploadErrors map[uuid.UUID]error
 }
 
 // memoryBlobMaintenanceStore intentionally has no filesystem representation.
@@ -53,10 +57,13 @@ func (s *memoryBlobUploadMaintenanceStore) DeleteUpload(_ context.Context, _ rel
 
 func (s *maintenanceAuthority) ExpireBlobUploads(context.Context, int64, int64) ([]relay.BlobUploadExpiry, error) {
 	s.expired = true
-	return nil, nil
+	return nil, s.expiryErr
 }
 
 func (s *maintenanceAuthority) DeleteBlobIfUnauthorized(_ context.Context, candidate relay.BlobContentCandidate, _, _ int64, remove func() error) (bool, error) {
+	if err := s.blobErrors[candidate.BlobID]; err != nil {
+		return false, err
+	}
 	if s.blobs[candidate.BlobID] {
 		return false, nil
 	}
@@ -64,10 +71,55 @@ func (s *maintenanceAuthority) DeleteBlobIfUnauthorized(_ context.Context, candi
 }
 
 func (s *maintenanceAuthority) DeleteBlobUploadIfUnauthorized(_ context.Context, candidate relay.BlobUploadContentCandidate, _, _ int64, remove func() error) (bool, error) {
+	if err := s.uploadErrors[candidate.UploadID]; err != nil {
+		return false, err
+	}
 	if s.uploads[candidate.UploadID] {
 		return false, nil
 	}
 	return true, remove()
+}
+
+func TestReconcileBlobFilesContinuesAfterScopeFailure(t *testing.T) {
+	ctx := context.Background()
+	scope := relay.BlobScope{TenantID: uuid.New(), DomainID: uuid.New()}
+	blockedBlob := relay.BlobID([]byte("blocked"))
+	writableBlob := relay.BlobID([]byte("writable"))
+	blockedUpload := uuid.New()
+	writableUpload := uuid.New()
+	blobs := &memoryBlobMaintenanceStore{candidates: []relay.BlobContentCandidate{
+		{Scope: scope, BlobID: blockedBlob, ModifiedMilliseconds: 1},
+		{Scope: scope, BlobID: writableBlob, ModifiedMilliseconds: 1},
+	}}
+	uploads := &memoryBlobUploadMaintenanceStore{
+		candidates: []relay.BlobUploadContentCandidate{
+			{Scope: scope, UploadID: blockedUpload, ModifiedMilliseconds: 1},
+			{Scope: scope, UploadID: writableUpload, ModifiedMilliseconds: 1},
+		},
+	}
+	expiryFailure := errors.New("expiry scope is fenced")
+	blobFailure := errors.New("blob scope is fenced")
+	uploadFailure := errors.New("upload scope is fenced")
+	authority := &maintenanceAuthority{
+		blobs:      map[string]bool{},
+		uploads:    map[uuid.UUID]bool{},
+		expiryErr:  expiryFailure,
+		blobErrors: map[string]error{blockedBlob: blobFailure},
+		uploadErrors: map[uuid.UUID]error{
+			blockedUpload: uploadFailure,
+		},
+	}
+	err := reconcileBlobFiles(ctx, authority, blobs, uploads, 9_999, 100)
+	if !errors.Is(err, expiryFailure) || !errors.Is(err, blobFailure) ||
+		!errors.Is(err, uploadFailure) {
+		t.Fatalf("maintenance error=%v", err)
+	}
+	if len(blobs.deleted) != 1 || blobs.deleted[0] != writableBlob {
+		t.Fatalf("later writable blob was starved: %v", blobs.deleted)
+	}
+	if len(uploads.deleted) != 1 || uploads.deleted[0] != writableUpload {
+		t.Fatalf("later writable upload was starved: %v", uploads.deleted)
+	}
 }
 
 func TestReconcileBlobFilesRechecksAuthorityBeforeDeletion(t *testing.T) {

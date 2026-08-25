@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
@@ -124,6 +126,7 @@ func (s *Server) serviceAuthorityBindingHandler(
 			return
 		}
 		var mutationLease *serviceauthority.ScopeLease
+		var durableMutationFence devicesync.MutationFenceLease
 		if access == serviceauthority.RequestMutation {
 			mutationLease, err = s.serviceAuthorityBindings.AcquireMutationLease(
 				request.Context(),
@@ -138,9 +141,37 @@ func (s *Server) serviceAuthorityBindingHandler(
 			// Revalidate only after admission, then retain the lease through the
 			// complete handler, including any filesystem callback it invokes.
 			now = s.now()
-			if s.serviceAuthorityBindings.AuthorizeRequestAt(binding, access, now) != nil {
+			authorization, authorizeErr :=
+				s.serviceAuthorityBindings.AuthorizeMutationAt(binding, now)
+			if authorizeErr != nil {
 				writeServiceAuthorityError(writer, http.StatusConflict)
 				return
+			}
+			if binding.Scope.Kind == serviceauthority.ScopeDeviceSync &&
+				s.deviceSyncMutationFenceStore != nil {
+				durableMutationFence, err =
+					s.deviceSyncMutationFenceStore.AcquireDeviceSyncMutationFence(
+						request.Context(), authorization,
+					)
+				if err != nil {
+					if errors.Is(err, serviceauthority.ErrInvalid) ||
+						errors.Is(err, devicesync.ErrScopeWriteFenced) {
+						writeServiceAuthorityError(writer, http.StatusConflict)
+					} else {
+						writeDeviceSyncAuthorityUnavailable(writer)
+					}
+					return
+				}
+				defer func() {
+					if releaseErr := durableMutationFence.Release(
+						context.WithoutCancel(request.Context()),
+					); releaseErr != nil && s.logger != nil {
+						s.logger.Error(
+							"Device Sync durable mutation fence release failed",
+							"error", releaseErr,
+						)
+					}
+				}()
 			}
 		}
 		if trafficClass == serviceauthority.TrafficBulk {
@@ -169,6 +200,94 @@ func (s *Server) serviceAuthorityBindingHandler(
 		))
 		next.ServeHTTP(writer, request)
 	})
+}
+
+// executeShortBoundMutation applies the normal mutation boundary around one
+// short operation and releases it before returning. Long-poll handlers use it
+// for each actual store access so their idle wait never retains a PostgreSQL
+// fence connection or blocks unrelated writes.
+func (s *Server) executeShortBoundMutation(
+	writer http.ResponseWriter,
+	request *http.Request,
+	operation func(context.Context) error,
+) bool {
+	if writer == nil || request == nil || operation == nil {
+		return false
+	}
+	if s.deploymentSigner == nil && s.serviceAuthorityBindings == nil {
+		if err := operation(request.Context()); err != nil {
+			s.writeError(writer, err)
+			return false
+		}
+		return true
+	}
+	if s.deploymentSigner == nil || s.serviceAuthorityBindings == nil {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return false
+	}
+	binding, err := requiredServiceAuthorityBinding(request)
+	if err != nil || binding.Scope.Kind != s.serviceAuthorityScopeKind ||
+		requestScopeMatchesBinding(request, binding.Scope) != nil {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return false
+	}
+	processLease, err := s.serviceAuthorityBindings.AcquireMutationLease(
+		request.Context(), binding.Scope,
+	)
+	if err != nil {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return false
+	}
+	defer processLease.Release()
+
+	authorization, err := s.serviceAuthorityBindings.AuthorizeMutationAt(
+		binding, s.now(),
+	)
+	if err != nil {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return false
+	}
+	var durableLease devicesync.MutationFenceLease
+	if binding.Scope.Kind == serviceauthority.ScopeDeviceSync {
+		if s.deviceSyncMutationFenceStore == nil {
+			writeDeviceSyncAuthorityUnavailable(writer)
+			return false
+		}
+		durableLease, err =
+			s.deviceSyncMutationFenceStore.AcquireDeviceSyncMutationFence(
+				request.Context(), authorization,
+			)
+		if err != nil {
+			if errors.Is(err, serviceauthority.ErrInvalid) ||
+				errors.Is(err, devicesync.ErrScopeWriteFenced) {
+				writeServiceAuthorityError(writer, http.StatusConflict)
+			} else {
+				writeDeviceSyncAuthorityUnavailable(writer)
+			}
+			return false
+		}
+	}
+
+	operationErr := operation(request.Context())
+	if durableLease != nil {
+		if releaseErr := durableLease.Release(
+			context.WithoutCancel(request.Context()),
+		); releaseErr != nil {
+			if s.logger != nil {
+				s.logger.Error(
+					"Device Sync short mutation fence release failed",
+					"error", releaseErr,
+				)
+			}
+			writeDeviceSyncAuthorityUnavailable(writer)
+			return false
+		}
+	}
+	if operationErr != nil {
+		s.writeError(writer, operationErr)
+		return false
+	}
+	return true
 }
 
 func requiredServiceAuthorityBinding(

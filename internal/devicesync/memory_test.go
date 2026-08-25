@@ -32,6 +32,12 @@ func TestMemoryStoreClaimsAdmissionExactlyOnceAndRetriesExactly(t *testing.T) {
 	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("claim retry=%+v err=%v", retry, err)
 	}
+	clockRollbackRetry, err := store.ClaimAccountAdmission(
+		ctx, credential, provisioning, 1_000,
+	)
+	if err != nil || clockRollbackRetry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("clock-rollback claim retry=%+v err=%v", clockRollbackRetry, err)
+	}
 	changed := provisioning
 	changed.RetryID = uuid.New()
 	if _, err := store.ClaimAccountAdmission(ctx, credential, changed, 1_200); !devicesync.ErrorHasCode(err, devicesync.CodeAdmissionClaimed) {

@@ -11,12 +11,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 type RelayStore struct {
-	pool               *pgxpool.Pool
-	blobUploadTTL      time.Duration
-	checkpointFenceTTL time.Duration
+	pool                        *pgxpool.Pool
+	blobUploadTTL               time.Duration
+	checkpointFenceTTL          time.Duration
+	deviceSyncLocalDeploymentID uuid.UUID
+	deviceSyncFencePermits      chan struct{}
 }
 
 func NewRelayStore(pool *pgxpool.Pool, durations ...time.Duration) *RelayStore {
@@ -29,6 +32,32 @@ func NewRelayStore(pool *pgxpool.Pool, durations ...time.Duration) *RelayStore {
 		fenceTTL = durations[1]
 	}
 	return &RelayStore{pool: pool, blobUploadTTL: uploadTTL, checkpointFenceTTL: fenceTTL}
+}
+
+// NewDeviceSyncAuthorityBoundRelayStore returns a RelayStore whose immutable
+// local deployment identity can be used to validate sealed Device Sync
+// mutation authorizations. Existing unbound stores remain suitable for relay
+// and non-authority test paths, but cannot acquire a Device Sync mutation
+// fence.
+func NewDeviceSyncAuthorityBoundRelayStore(
+	pool *pgxpool.Pool,
+	localDeploymentID uuid.UUID,
+	durations ...time.Duration,
+) (*RelayStore, error) {
+	if pool == nil || localDeploymentID == uuid.Nil ||
+		pool.Config().MaxConns < 2 {
+		return nil, serviceauthority.ErrInvalid
+	}
+	store := NewRelayStore(pool, durations...)
+	store.deviceSyncLocalDeploymentID = localDeploymentID
+	// A fence lease holds one connection while its handler performs the
+	// guarded mutation on another. Limit fences to half the pool so admitted
+	// handlers can always make forward progress and ordinary relay work retains
+	// balanced capacity.
+	store.deviceSyncFencePermits = make(
+		chan struct{}, int(pool.Config().MaxConns/2),
+	)
+	return store, nil
 }
 
 func (s *RelayStore) CreateDomain(

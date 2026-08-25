@@ -5,6 +5,13 @@ import (
 	"fmt"
 )
 
+// ErrScopeWriteFenced is returned by durable stores when the Device Sync
+// service scope is not in its writable authority state. Callers may use
+// errors.Is to distinguish this fail-closed condition from an ordinary store
+// failure. The concrete store error retains the non-writable state for
+// diagnostics without making PostgreSQL an API dependency.
+var ErrScopeWriteFenced = errors.New("Device Sync scope rejects writes")
+
 type ErrorCode string
 
 const (

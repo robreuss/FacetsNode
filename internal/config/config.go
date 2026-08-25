@@ -174,6 +174,15 @@ func Load(service Service) (Config, error) {
 			bindingFileName,
 		)
 	}
+	if service == DeviceSync && configuredDeploymentValues != 4 {
+		return Config{}, fmt.Errorf(
+			"%s, %s, %s, and %s are required for the Device Sync Service",
+			deploymentIDName,
+			deploymentKeyFileName,
+			deploymentRoutePolicyFileName,
+			bindingFileName,
+		)
+	}
 	if service == SharedSpaces {
 		managedKeyName := prefix + "_MANAGED_KEY_ENCRYPTION_KEY"
 		configuration.ManagedKeyEncryptionKey, err = decodeSecret32(
@@ -240,8 +249,14 @@ func Load(service Service) (Config, error) {
 	}
 	if value := os.Getenv(prefix + "_DATABASE_CONNS"); value != "" {
 		count, err := strconv.ParseInt(value, 10, 32)
-		if err != nil || count <= 0 || count > 100 {
-			return Config{}, fmt.Errorf("%s_DATABASE_CONNS must be between 1 and 100", prefix)
+		minimum := int64(1)
+		if service == DeviceSync {
+			minimum = 2
+		}
+		if err != nil || count < minimum || count > 100 {
+			return Config{}, fmt.Errorf(
+				"%s_DATABASE_CONNS must be between %d and 100", prefix, minimum,
+			)
 		}
 		configuration.DatabaseConns = int32(count)
 	}

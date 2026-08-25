@@ -3,21 +3,118 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"math"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 func (s *RelayStore) ExpireBlobUploads(ctx context.Context, nowMilliseconds, graceMilliseconds int64) ([]relay.BlobUploadExpiry, error) {
-	rows, err := s.pool.Query(ctx, `SELECT tenant_id,domain_id,upload_id FROM relay_blob_uploads WHERE state='active' AND expires_at_milliseconds <= $1 ORDER BY expires_at_milliseconds LIMIT 256`, nowMilliseconds)
+	if ctx == nil || s == nil || s.pool == nil ||
+		!validBlobMaintenanceTime(nowMilliseconds, graceMilliseconds) {
+		return nil, serviceauthority.ErrInvalid
+	}
+	tenants, err := s.ExpiredBlobUploadTenantCandidates(ctx, nowMilliseconds)
+	if err != nil {
+		return nil, err
+	}
+	var expired []relay.BlobUploadExpiry
+	for _, tenantID := range tenants {
+		remaining := relay.MaximumBlobUploadExpiryBatchSize - len(expired)
+		if remaining == 0 {
+			break
+		}
+		items, err := s.ExpireBlobUploadsForTenant(
+			ctx,
+			tenantID,
+			nowMilliseconds,
+			graceMilliseconds,
+			remaining,
+		)
+		expired = append(expired, items...)
+		if err != nil {
+			return expired, err
+		}
+	}
+	return expired, nil
+}
+
+// ExpiredBlobUploadTenantCandidates discovers mutation scopes without changing
+// state. Device Sync uses this boundary to obtain scope authority before any
+// upload-expiry mutation is attempted.
+func (s *RelayStore) ExpiredBlobUploadTenantCandidates(
+	ctx context.Context,
+	nowMilliseconds int64,
+) ([]uuid.UUID, error) {
+	if ctx == nil || s == nil || s.pool == nil || nowMilliseconds < 0 {
+		return nil, serviceauthority.ErrInvalid
+	}
+	// Return one row for every candidate tenant. The caller bounds successful
+	// expiries, while an ordered fixed prefix here would let fenced tenants hide
+	// every writable tenant that follows them indefinitely.
+	rows, err := s.pool.Query(ctx, `
+		SELECT tenant_id
+		FROM relay_blob_uploads
+		WHERE state='active' AND expires_at_milliseconds <= $1
+		GROUP BY tenant_id
+		ORDER BY MIN(expires_at_milliseconds), tenant_id
+	`, nowMilliseconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []uuid.UUID
+	for rows.Next() {
+		var tenantID uuid.UUID
+		if err := rows.Scan(&tenantID); err != nil {
+			return nil, err
+		}
+		if tenantID == uuid.Nil {
+			return nil, serviceauthority.ErrInvalid
+		}
+		candidates = append(candidates, tenantID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+// ExpireBlobUploadsForTenant mutates only one tenant. Device Sync callers must
+// hold that principal's in-process lease and durable scope fence for the full
+// call; Shared Spaces may continue to use the aggregate maintenance method.
+func (s *RelayStore) ExpireBlobUploadsForTenant(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	nowMilliseconds, graceMilliseconds int64,
+	limit int,
+) ([]relay.BlobUploadExpiry, error) {
+	if ctx == nil || s == nil || s.pool == nil || tenantID == uuid.Nil ||
+		!validBlobMaintenanceTime(nowMilliseconds, graceMilliseconds) ||
+		limit <= 0 || limit > relay.MaximumBlobUploadExpiryBatchSize {
+		return nil, serviceauthority.ErrInvalid
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT tenant_id,domain_id,upload_id
+		FROM relay_blob_uploads
+		WHERE tenant_id=$1 AND state='active' AND expires_at_milliseconds <= $2
+		ORDER BY expires_at_milliseconds, domain_id, upload_id
+		LIMIT $3
+	`, tenantID, nowMilliseconds, limit)
 	if err != nil {
 		return nil, err
 	}
 	var candidates []relay.BlobUploadExpiry
 	for rows.Next() {
 		var item relay.BlobUploadExpiry
-		if err := rows.Scan(&item.Scope.TenantID, &item.Scope.DomainID, &item.UploadID); err != nil {
+		if err := rows.Scan(
+			&item.Scope.TenantID,
+			&item.Scope.DomainID,
+			&item.UploadID,
+		); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -31,7 +128,7 @@ func (s *RelayStore) ExpireBlobUploads(ctx context.Context, nowMilliseconds, gra
 	for _, item := range candidates {
 		tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 		if err != nil {
-			return nil, err
+			return expired, err
 		}
 		if _, err = loadRelayTenant(ctx, tx, item.Scope.TenantID, "FOR UPDATE"); err == nil {
 			_, _, _, _, _, _, err = loadRelayDomain(ctx, tx, item.Scope.TenantID, item.Scope.DomainID, "FOR UPDATE")
@@ -63,11 +160,16 @@ func (s *RelayStore) ExpireBlobUploads(ctx context.Context, nowMilliseconds, gra
 			_ = tx.Rollback(ctx)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("expire blob upload: %w", err)
+			return expired, fmt.Errorf("expire blob upload: %w", err)
 		}
 		expired = append(expired, item)
 	}
 	return expired, nil
+}
+
+func validBlobMaintenanceTime(nowMilliseconds, graceMilliseconds int64) bool {
+	return nowMilliseconds >= 0 && graceMilliseconds >= 0 &&
+		graceMilliseconds <= math.MaxInt64-nowMilliseconds
 }
 
 func (s *RelayStore) DeleteBlobIfUnauthorized(ctx context.Context, candidate relay.BlobContentCandidate, nowMilliseconds, graceMilliseconds int64, remove func() error) (bool, error) {
