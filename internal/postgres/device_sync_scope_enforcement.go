@@ -97,9 +97,9 @@ type DeviceSyncInitialAuthorityEvidence struct {
 }
 
 // DeviceSyncMigrationImportRecord is immutable evidence that one exact signed
-// snapshot and preparation populated a target-local standby scope. It does not
-// assert that artifact bytes were transferred or that the imported semantic
-// rows have been independently re-materialized into StateCommitmentDigest.
+// snapshot and preparation populated a target-local standby scope and that the
+// imported semantic rows independently reproduced StateCommitmentDigest. It
+// does not assert custody of the opaque blob bytes named by the inventory.
 type DeviceSyncMigrationImportRecord struct {
 	PrincipalID                             uuid.UUID
 	TenantID                                uuid.UUID

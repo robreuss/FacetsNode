@@ -475,7 +475,8 @@ func exportDeviceSyncMigrationBlobInventory(
 }
 
 func validateDeviceSyncMigrationBlobEntry(entry DeviceSyncMigrationBlobInventoryEntry) error {
-	if entry.DomainID == uuid.Nil || entry.ByteCount < 0 {
+	if entry.DomainID == uuid.Nil || entry.ByteCount < 0 ||
+		entry.ByteCount > relay.MaximumBlobByteCount {
 		return errors.New("Device Sync migration blob inventory entry is invalid")
 	}
 	if err := relay.ValidateBlobID(entry.BlobID); err != nil {
@@ -511,8 +512,7 @@ func ValidateDeviceSyncMigrationStateArtifact(
 }
 
 // ValidateDeviceSyncMigrationBlobInventory validates a blob inventory without
-// retaining it in memory. A future coordinator can reopen the staged file to
-// walk entries after this gate.
+// retaining it in memory.
 func ValidateDeviceSyncMigrationBlobInventory(
 	ctx context.Context,
 	source io.ReadSeeker,
@@ -522,6 +522,45 @@ func ValidateDeviceSyncMigrationBlobInventory(
 	if err := verifyDeviceSyncMigrationTransferDigest(ctx, source, expectedSHA256); err != nil {
 		return err
 	}
+	return decodeDeviceSyncMigrationBlobInventory(
+		ctx, source, expectedPrincipalID, expectedSHA256, nil,
+	)
+}
+
+// WalkDeviceSyncMigrationBlobInventory fully validates the transfer digest,
+// body checksum, structure, scope, and ordering before it rewinds and invokes
+// visit for each entry. The two-pass gate is deliberate: a caller may perform
+// durable copy side effects without acting on a merely prefix-valid inventory.
+func WalkDeviceSyncMigrationBlobInventory(
+	ctx context.Context,
+	source io.ReadSeeker,
+	expectedPrincipalID uuid.UUID,
+	expectedSHA256 DeviceSyncMigrationDigest,
+	visit func(DeviceSyncMigrationBlobInventoryEntry) error,
+) error {
+	if err := verifyDeviceSyncMigrationTransferDigest(ctx, source, expectedSHA256); err != nil {
+		return err
+	}
+	if err := decodeDeviceSyncMigrationBlobInventory(
+		ctx, source, expectedPrincipalID, expectedSHA256, nil,
+	); err != nil {
+		return err
+	}
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind validated Device Sync migration blob inventory: %w", err)
+	}
+	return decodeDeviceSyncMigrationBlobInventory(
+		ctx, source, expectedPrincipalID, expectedSHA256, visit,
+	)
+}
+
+func decodeDeviceSyncMigrationBlobInventory(
+	ctx context.Context,
+	source io.Reader,
+	expectedPrincipalID uuid.UUID,
+	expectedSHA256 DeviceSyncMigrationDigest,
+	visit func(DeviceSyncMigrationBlobInventoryEntry) error,
+) error {
 	reader := newDeviceSyncMigrationArtifactReader(source)
 	if err := expectMigrationBytes(reader.bodyReader, deviceSyncMigrationBlobMagic, "blob inventory magic"); err != nil {
 		return err
@@ -568,6 +607,11 @@ func ValidateDeviceSyncMigrationBlobInventory(
 		}
 		if previous != nil && compareDeviceSyncMigrationBlobEntries(*previous, entry) >= 0 {
 			return errors.New("Device Sync migration blob inventory is duplicate or unordered")
+		}
+		if visit != nil {
+			if err := visit(entry); err != nil {
+				return fmt.Errorf("visit Device Sync migration blob %s: %w", entry.BlobID, err)
+			}
 		}
 		entryCopy := entry
 		previous = &entryCopy
