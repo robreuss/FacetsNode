@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -10,6 +11,8 @@ import (
 )
 
 const maximumDeploymentProofRequestByteCount = 4 * 1024
+
+type bulkGrantContextKey struct{}
 
 func (s *Server) handleServiceDeploymentProof(
 	writer http.ResponseWriter,
@@ -69,8 +72,61 @@ func (s *Server) serviceAuthorityBindingHandler(
 			writeServiceAuthorityError(writer, http.StatusConflict)
 			return
 		}
+		if trafficClass != serviceauthority.TrafficBulk && hasBulkTransferHeaders(request.Header) {
+			writeServiceAuthorityError(writer, http.StatusConflict)
+			return
+		}
+		if trafficClass == serviceauthority.TrafficBulk {
+			grant, err := s.serviceAuthorityBindings.AuthorizeBulkTransfer(
+				binding,
+				request.Header,
+				s.now(),
+			)
+			if err != nil {
+				writeServiceAuthorityError(writer, http.StatusConflict)
+				return
+			}
+			request = request.WithContext(context.WithValue(
+				request.Context(),
+				bulkGrantContextKey{},
+				grant,
+			))
+		}
 		next.ServeHTTP(writer, request)
 	})
+}
+
+func hasBulkTransferHeaders(header http.Header) bool {
+	return len(header.Values(serviceauthority.HeaderBulkTransferGrant)) > 0 ||
+		len(header.Values(serviceauthority.HeaderBulkResourceID)) > 0 ||
+		len(header.Values(serviceauthority.HeaderBulkDirection)) > 0
+}
+
+func requiredBulkGrant(request *http.Request) (serviceauthority.BulkGrantPayload, error) {
+	grant, ok := request.Context().Value(bulkGrantContextKey{}).(serviceauthority.BulkGrantPayload)
+	if !ok {
+		return serviceauthority.BulkGrantPayload{}, serviceauthority.ErrInvalid
+	}
+	return grant, nil
+}
+
+func (s *Server) requireBulkOperation(
+	writer http.ResponseWriter,
+	request *http.Request,
+	resourceID string,
+	direction serviceauthority.BulkDirection,
+	maximumObservedByteCount int64,
+) bool {
+	if s.deploymentSigner == nil || s.serviceAuthorityBindings == nil {
+		return true
+	}
+	grant, err := requiredBulkGrant(request)
+	if err != nil || grant.ResourceID != resourceID || grant.Direction != direction ||
+		maximumObservedByteCount < 0 || maximumObservedByteCount > grant.MaximumByteCount {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return false
+	}
+	return true
 }
 
 // Resource-bearing routes use the existing invariant that a Device Sync

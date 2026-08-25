@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -1309,6 +1310,15 @@ func (s *Server) handleCreateRelayBlobUpload(writer http.ResponseWriter, request
 		s.writeError(writer, err)
 		return
 	}
+	if !s.requireBulkOperation(
+		writer,
+		request,
+		input.UploadID.String(),
+		serviceauthority.BulkUpload,
+		input.ByteCount,
+	) {
+		return
+	}
 	result, err := s.relayStore.CreateBlobUpload(request.Context(), credential, input, s.nowMilliseconds())
 	if err != nil {
 		s.writeError(writer, err)
@@ -1340,6 +1350,15 @@ func (s *Server) handleGetRelayBlobUpload(writer http.ResponseWriter, request *h
 		s.writeError(writer, err)
 		return
 	}
+	if !s.requireBulkOperation(
+		writer,
+		request,
+		uploadID.String(),
+		serviceauthority.BulkUpload,
+		0,
+	) {
+		return
+	}
 	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
 	if err != nil {
 		s.writeError(writer, err)
@@ -1364,6 +1383,15 @@ func (s *Server) handleAppendRelayBlobUpload(writer http.ResponseWriter, request
 		s.writeError(writer, err)
 		return
 	}
+	if !s.requireBulkOperation(
+		writer,
+		request,
+		uploadID.String(),
+		serviceauthority.BulkUpload,
+		0,
+	) {
+		return
+	}
 	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
 	if err != nil {
 		s.writeError(writer, err)
@@ -1374,6 +1402,15 @@ func (s *Server) handleAppendRelayBlobUpload(writer http.ResponseWriter, request
 	if mediaErr != nil || mediaType != "application/octet-stream" || offsetErr != nil ||
 		request.ContentLength <= 0 || request.ContentLength > relay.MaximumBlobByteCount {
 		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidBlobUpload, "chunk headers are invalid"))
+		return
+	}
+	if offset > relay.MaximumBlobByteCount-request.ContentLength || !s.requireBulkOperation(
+		writer,
+		request,
+		uploadID.String(),
+		serviceauthority.BulkUpload,
+		offset+request.ContentLength,
+	) {
 		return
 	}
 	chunk := relay.BlobUploadChunkRequest{
@@ -1409,6 +1446,15 @@ func (s *Server) handleFinalizeRelayBlobUpload(writer http.ResponseWriter, reque
 		s.writeError(writer, err)
 		return
 	}
+	if !s.requireBulkOperation(
+		writer,
+		request,
+		uploadID.String(),
+		serviceauthority.BulkUpload,
+		0,
+	) {
+		return
+	}
 	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
 	if err != nil {
 		s.writeError(writer, err)
@@ -1421,6 +1467,15 @@ func (s *Server) handleFinalizeRelayBlobUpload(writer http.ResponseWriter, reque
 	}
 	if input.UploadID != uploadID {
 		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidBlobUpload, "finalization upload ID does not match path"))
+		return
+	}
+	if !s.requireBulkOperation(
+		writer,
+		request,
+		uploadID.String(),
+		serviceauthority.BulkUpload,
+		input.ByteCount,
+	) {
 		return
 	}
 	scope := relay.BlobScope{TenantID: tenantID, DomainID: domainID}
@@ -1455,6 +1510,15 @@ func (s *Server) handleFetchRelayBlob(writer http.ResponseWriter, request *http.
 		s.writeError(writer, err)
 		return
 	}
+	if !s.requireBulkOperation(
+		writer,
+		request,
+		blobID,
+		serviceauthority.BulkDownload,
+		0,
+	) {
+		return
+	}
 	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
 	if err != nil {
 		s.writeError(writer, err)
@@ -1468,6 +1532,15 @@ func (s *Server) handleFetchRelayBlob(writer http.ResponseWriter, request *http.
 	)
 	if err != nil {
 		s.writeError(writer, err)
+		return
+	}
+	if !s.requireBulkOperation(
+		writer,
+		request,
+		blobID,
+		serviceauthority.BulkDownload,
+		metadata.ByteCount,
+	) {
 		return
 	}
 	content, err := s.blobContentStore.Open(

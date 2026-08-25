@@ -132,30 +132,35 @@ func TestBindingRegistryRejectsRollbackEquivocationAndStaleHeaders(t *testing.T)
 	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
 	digestOne := string(make([]byte, 0)) + repeatHex("1")
 	digestTwo := repeatHex("2")
-	if err := registry.Activate(scope, CurrentBinding{
-		Revision: 1, Digest: digestOne, DeploymentID: deploymentID,
-	}); err != nil {
+	if err := registry.Activate(scope, testCurrentBinding(
+		t, 1, digestOne, deploymentID,
+	)); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.Activate(scope, CurrentBinding{
-		Revision: 1, Digest: digestTwo, DeploymentID: deploymentID,
-	}); err == nil {
+	if err := registry.Activate(scope, testCurrentBinding(
+		t, 1, digestTwo, deploymentID,
+	)); err == nil {
 		t.Fatal("accepted equivocation")
 	}
-	if err := registry.Activate(scope, CurrentBinding{
-		Revision: 2, Digest: digestTwo, DeploymentID: deploymentID,
-	}); err != nil {
+	if err := registry.Activate(scope, testCurrentBinding(
+		t, 2, digestTwo, deploymentID,
+	)); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.Activate(scope, CurrentBinding{
-		Revision: 1, Digest: digestOne, DeploymentID: deploymentID,
-	}); err == nil {
+	if err := registry.Activate(scope, testCurrentBinding(
+		t, 1, digestOne, deploymentID,
+	)); err == nil {
 		t.Fatal("accepted rollback")
 	}
-	if err := registry.Activate(scope, CurrentBinding{
-		Revision: 4, Digest: repeatHex("4"), DeploymentID: deploymentID,
-	}); err == nil {
+	if err := registry.Activate(scope, testCurrentBinding(
+		t, 4, repeatHex("4"), deploymentID,
+	)); err == nil {
 		t.Fatal("accepted authority revision gap")
+	}
+	replacementAuthority := testCurrentBinding(t, 3, repeatHex("3"), deploymentID)
+	replacementAuthority.AuthoritySignerID = uuid.New()
+	if err := registry.Activate(scope, replacementAuthority); err == nil {
+		t.Fatal("accepted an authority identity replacement")
 	}
 
 	header := make(http.Header)
@@ -178,13 +183,35 @@ func TestBindingRegistryRejectsRollbackEquivocationAndStaleHeaders(t *testing.T)
 	if registry.Authorize(binding) == nil {
 		t.Fatal("stale binding accepted")
 	}
+	header.Set(HeaderAuthorityRevision, "2")
+	header.Add(HeaderAuthorityRevision, "2")
+	if _, err := ParseRequestBinding(header, deploymentID, TrafficMessage); err == nil {
+		t.Fatal("duplicate authority header accepted")
+	}
 }
 
 func TestBindingRegistryLoadsStrictDeploymentScopedState(t *testing.T) {
 	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
 	scopeID := uuid.MustParse("61000000-0000-0000-0000-000000000001")
 	path := filepath.Join(t.TempDir(), "bindings.json")
-	data := []byte(`{"bindings":[{"deploymentID":"63000000-0000-0000-0000-000000000001","digest":"` + repeatHex("1") + `","revision":1,"scope":{"kind":"device_sync","scopeID":"61000000-0000-0000-0000-000000000001"}}],"version":1}`)
+	binding := testCurrentBinding(t, 1, repeatHex("1"), deploymentID)
+	data, err := json.Marshal(BindingFile{
+		Bindings: []BindingFileEntry{{
+			AuthorityPublicSigningKeyX963:  binding.AuthorityPublicSigningKeyX963,
+			AuthoritySignerID:              binding.AuthoritySignerID,
+			AuthoritySigningKeyFingerprint: binding.AuthoritySigningKeyFingerprint,
+			DeploymentID:                   deploymentID,
+			Digest:                         repeatHex("1"),
+			Revision:                       1,
+			Scope: Scope{
+				Kind: ScopeDeviceSync, ScopeID: scopeID,
+			},
+		}},
+		Version: SchemaVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -236,6 +263,30 @@ func testProofRequest(deploymentID uuid.UUID) ProofRequest {
 		},
 		TrafficClass: TrafficMessage,
 		Version:      SchemaVersion,
+	}
+}
+
+func testCurrentBinding(
+	t *testing.T,
+	revision uint64,
+	digest string,
+	deploymentID uuid.UUID,
+) CurrentBinding {
+	t.Helper()
+	seed := make([]byte, 32)
+	seed[31] = 1
+	authority, err := NewDeploymentSigner(
+		uuid.MustParse("64000000-0000-0000-0000-000000000001"),
+		seed,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return CurrentBinding{
+		Revision: revision, Digest: digest, DeploymentID: deploymentID,
+		AuthoritySignerID:              authority.DeploymentID(),
+		AuthorityPublicSigningKeyX963:  authority.PublicSigningKeyX963(),
+		AuthoritySigningKeyFingerprint: authority.SigningKeyFingerprint(),
 	}
 }
 

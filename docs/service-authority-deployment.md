@@ -26,6 +26,9 @@ deployment input with no group/world write permission and this schema:
 {
   "bindings": [
     {
+      "authorityPublicSigningKeyX963": "<canonical unpadded base64url P-256 X9.63 public key>",
+      "authoritySignerID": "64000000-0000-0000-0000-000000000001",
+      "authoritySigningKeyFingerprint": "<SHA-256 of the public key as 64 lowercase hexadecimal characters>",
       "deploymentID": "63000000-0000-0000-0000-000000000001",
       "digest": "<64 lowercase hexadecimal characters>",
       "revision": 1,
@@ -44,17 +47,27 @@ unknown fields, and trailing JSON are rejected at startup. The source that
 produces this file must first authenticate the corresponding Facets-signed
 manifest chain; FacetsNode does not create or repair authority successors.
 The server permits only an identical retry or the next consecutive revision
-when updating its live registry.
+when updating its live registry. The authority signer identity, public key, and
+fingerprint are immutable across those revisions. A planned authority-key
+rotation therefore requires a separate, explicit protocol rather than silently
+replacing this local trust anchor.
 
 Once enabled:
 
 - `POST /v1/service-deployment/proof` issues a five-minute deployment-key
   proof only for an exact current scope/revision/digest/deployment binding;
 - all Facets capability routes require the matching protected binding headers;
+- every bulk relay operation additionally requires a short-lived,
+  authority-signed transfer grant bound to the exact current manifest digest,
+  deployment, route, resource, direction, and maximum byte count;
 - the configured server process rejects every other service's scope kind, and
   resource-bearing paths require their principal, Space, or relay tenant ID to
   equal the bound logical scope;
-- stale or missing authority fails with HTTP 409 before bearer evaluation; and
+- stale or missing authority fails with HTTP 409 before bearer evaluation;
+- missing, expired, forged, stale, route-mismatched, cross-resource, wrong-direction,
+  or undersized bulk grants fail with HTTP 409 without a direct-route fallback;
+- message operations preserve the existing Facets message traffic class and
+  do not require a bulk grant; and
 - `/livez`, `/readyz`, and `/metrics` remain available to the private
   management plane without a client service scope.
 

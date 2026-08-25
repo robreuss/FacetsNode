@@ -139,9 +139,21 @@ func testHTTPHandler(
 		TrafficClass: serviceauthority.TrafficControl,
 	}
 	bindings := serviceauthority.NewBindingRegistry()
+	authoritySeed := make([]byte, 32)
+	authoritySeed[31] = 1
+	authority, err := serviceauthority.NewDeploymentSigner(
+		uuid.MustParse("8a000000-0000-0000-0000-000000000001"),
+		authoritySeed,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := bindings.Activate(binding.Scope, serviceauthority.CurrentBinding{
 		Revision: binding.AuthorityRevision, Digest: binding.AuthorityDigest,
-		DeploymentID: deploymentID,
+		DeploymentID:                   deploymentID,
+		AuthoritySignerID:              authority.DeploymentID(),
+		AuthorityPublicSigningKeyX963:  authority.PublicSigningKeyX963(),
+		AuthoritySigningKeyFingerprint: authority.SigningKeyFingerprint(),
 	}); err != nil {
 		t.Fatal(err)
 	}

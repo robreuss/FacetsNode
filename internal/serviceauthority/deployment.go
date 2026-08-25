@@ -225,22 +225,32 @@ func ParseRequestBinding(
 	expectedDeploymentID uuid.UUID,
 	expectedTrafficClass TrafficClass,
 ) (RequestBinding, error) {
-	revision, err := strconv.ParseUint(header.Get(HeaderAuthorityRevision), 10, 64)
-	scopeID, scopeErr := uuid.Parse(header.Get(HeaderScopeID))
-	deploymentID, deploymentErr := uuid.Parse(header.Get(HeaderDeploymentID))
-	routeID, routeErr := uuid.Parse(header.Get(HeaderRouteID))
+	scopeKindValue, scopeKindErr := singleHeaderValue(header, HeaderScopeKind)
+	scopeIDValue, scopeIDHeaderErr := singleHeaderValue(header, HeaderScopeID)
+	revisionValue, revisionHeaderErr := singleHeaderValue(header, HeaderAuthorityRevision)
+	digestValue, digestHeaderErr := singleHeaderValue(header, HeaderAuthorityDigest)
+	deploymentValue, deploymentHeaderErr := singleHeaderValue(header, HeaderDeploymentID)
+	routeValue, routeHeaderErr := singleHeaderValue(header, HeaderRouteID)
+	trafficClassValue, trafficClassErr := singleHeaderValue(header, HeaderTrafficClass)
+	revision, err := strconv.ParseUint(revisionValue, 10, 64)
+	scopeID, scopeErr := uuid.Parse(scopeIDValue)
+	deploymentID, deploymentErr := uuid.Parse(deploymentValue)
+	routeID, routeErr := uuid.Parse(routeValue)
 	binding := RequestBinding{
 		Scope: Scope{
-			Kind:    ScopeKind(header.Get(HeaderScopeKind)),
+			Kind:    ScopeKind(scopeKindValue),
 			ScopeID: scopeID,
 		},
 		AuthorityRevision: revision,
-		AuthorityDigest:   header.Get(HeaderAuthorityDigest),
+		AuthorityDigest:   digestValue,
 		DeploymentID:      deploymentID,
 		RouteID:           routeID,
-		TrafficClass:      TrafficClass(header.Get(HeaderTrafficClass)),
+		TrafficClass:      TrafficClass(trafficClassValue),
 	}
-	if err != nil || scopeErr != nil || deploymentErr != nil || routeErr != nil ||
+	if scopeKindErr != nil || scopeIDHeaderErr != nil || revisionHeaderErr != nil ||
+		digestHeaderErr != nil || deploymentHeaderErr != nil || routeHeaderErr != nil ||
+		trafficClassErr != nil || err != nil || scopeErr != nil || deploymentErr != nil ||
+		routeErr != nil ||
 		binding.Scope.Validate() != nil || revision == 0 ||
 		!validDigest(binding.AuthorityDigest) || deploymentID != expectedDeploymentID ||
 		routeID == uuid.Nil || binding.TrafficClass != expectedTrafficClass ||
@@ -250,10 +260,21 @@ func ParseRequestBinding(
 	return binding, nil
 }
 
+func singleHeaderValue(header http.Header, name string) (string, error) {
+	values := header.Values(name)
+	if len(values) != 1 || values[0] == "" {
+		return "", ErrInvalid
+	}
+	return values[0], nil
+}
+
 type CurrentBinding struct {
-	Revision     uint64
-	Digest       string
-	DeploymentID uuid.UUID
+	Revision                       uint64
+	Digest                         string
+	DeploymentID                   uuid.UUID
+	AuthoritySignerID              uuid.UUID
+	AuthorityPublicSigningKeyX963  string
+	AuthoritySigningKeyFingerprint string
 }
 
 type BindingRegistry struct {
@@ -267,10 +288,13 @@ type BindingFile struct {
 }
 
 type BindingFileEntry struct {
-	DeploymentID uuid.UUID `json:"deploymentID"`
-	Digest       string    `json:"digest"`
-	Revision     uint64    `json:"revision"`
-	Scope        Scope     `json:"scope"`
+	AuthorityPublicSigningKeyX963  string    `json:"authorityPublicSigningKeyX963"`
+	AuthoritySignerID              uuid.UUID `json:"authoritySignerID"`
+	AuthoritySigningKeyFingerprint string    `json:"authoritySigningKeyFingerprint"`
+	DeploymentID                   uuid.UUID `json:"deploymentID"`
+	Digest                         string    `json:"digest"`
+	Revision                       uint64    `json:"revision"`
+	Scope                          Scope     `json:"scope"`
 }
 
 func NewBindingRegistry() *BindingRegistry {
@@ -316,9 +340,12 @@ func LoadBindingRegistry(
 		}
 		seen[entry.Scope] = struct{}{}
 		if err := registry.Activate(entry.Scope, CurrentBinding{
-			Revision:     entry.Revision,
-			Digest:       entry.Digest,
-			DeploymentID: entry.DeploymentID,
+			Revision:                       entry.Revision,
+			Digest:                         entry.Digest,
+			DeploymentID:                   entry.DeploymentID,
+			AuthoritySignerID:              entry.AuthoritySignerID,
+			AuthorityPublicSigningKeyX963:  entry.AuthorityPublicSigningKeyX963,
+			AuthoritySigningKeyFingerprint: entry.AuthoritySigningKeyFingerprint,
 		}); err != nil {
 			return nil, err
 		}
@@ -330,14 +357,22 @@ func LoadBindingRegistry(
 // authenticate the Facets authority chain before installing this non-secret
 // active binding in the deployment runtime.
 func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) error {
+	_, _, fingerprint, keyErr := decodeP256PublicKey(
+		binding.AuthorityPublicSigningKeyX963,
+	)
 	if registry == nil || scope.Validate() != nil || binding.Revision == 0 ||
-		!validDigest(binding.Digest) || binding.DeploymentID == uuid.Nil {
+		!validDigest(binding.Digest) || binding.DeploymentID == uuid.Nil ||
+		binding.AuthoritySignerID == uuid.Nil || keyErr != nil ||
+		fingerprint != binding.AuthoritySigningKeyFingerprint {
 		return ErrInvalid
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	if current, exists := registry.bindings[scope]; exists {
-		if binding.Revision < current.Revision ||
+		if binding.AuthoritySignerID != current.AuthoritySignerID ||
+			binding.AuthorityPublicSigningKeyX963 != current.AuthorityPublicSigningKeyX963 ||
+			binding.AuthoritySigningKeyFingerprint != current.AuthoritySigningKeyFingerprint ||
+			binding.Revision < current.Revision ||
 			(binding.Revision == current.Revision &&
 				(subtle.ConstantTimeCompare([]byte(binding.Digest), []byte(current.Digest)) != 1 ||
 					binding.DeploymentID != current.DeploymentID)) {

@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
 func TestDeploymentProofAndCapabilityRoutesRequireCurrentAuthorityBinding(t *testing.T) {
@@ -32,9 +33,9 @@ func TestDeploymentProofAndCapabilityRoutesRequireCurrentAuthorityBinding(t *tes
 		t.Fatal(err)
 	}
 	bindings := serviceauthority.NewBindingRegistry()
-	if err := bindings.Activate(scope, serviceauthority.CurrentBinding{
-		Revision: 1, Digest: digest, DeploymentID: deploymentID,
-	}); err != nil {
+	if err := bindings.Activate(scope, testServiceAuthorityCurrentBinding(
+		t, 1, digest, deploymentID,
+	)); err != nil {
 		t.Fatal(err)
 	}
 	server := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -118,6 +119,23 @@ func TestDeploymentProofAndCapabilityRoutesRequireCurrentAuthorityBinding(t *tes
 	if recorder.Code == http.StatusConflict {
 		t.Fatalf("current authority binding was rejected: %s", recorder.Body.String())
 	}
+
+	capability = httptest.NewRequest(http.MethodPost, "/v1/pairing/routes", nil)
+	setAuthorityHeaders(
+		capability.Header,
+		scope,
+		1,
+		digest,
+		deploymentID,
+		routeID,
+		serviceauthority.TrafficControl,
+	)
+	capability.Header.Set(serviceauthority.HeaderBulkResourceID, "smuggled-resource")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, capability)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("bulk metadata on control request status=%d; want 409", recorder.Code)
+	}
 }
 
 func TestAuthorityBindingRejectsWrongServiceKindAndResourceScope(t *testing.T) {
@@ -133,9 +151,9 @@ func TestAuthorityBindingRejectsWrongServiceKindAndResourceScope(t *testing.T) {
 	}
 	bindings := serviceauthority.NewBindingRegistry()
 	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeDeviceSync, ScopeID: principalID}
-	if err := bindings.Activate(scope, serviceauthority.CurrentBinding{
-		Revision: 1, Digest: digest, DeploymentID: deploymentID,
-	}); err != nil {
+	if err := bindings.Activate(scope, testServiceAuthorityCurrentBinding(
+		t, 1, digest, deploymentID,
+	)); err != nil {
 		t.Fatal(err)
 	}
 	server := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -155,9 +173,9 @@ func TestAuthorityBindingRejectsWrongServiceKindAndResourceScope(t *testing.T) {
 	}
 
 	wrongKind := serviceauthority.Scope{Kind: serviceauthority.ScopeSharedSpace, ScopeID: principalID}
-	if err := bindings.Activate(wrongKind, serviceauthority.CurrentBinding{
-		Revision: 1, Digest: digest, DeploymentID: deploymentID,
-	}); err != nil {
+	if err := bindings.Activate(wrongKind, testServiceAuthorityCurrentBinding(
+		t, 1, digest, deploymentID,
+	)); err != nil {
 		t.Fatal(err)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/", nil)
@@ -167,6 +185,83 @@ func TestAuthorityBindingRejectsWrongServiceKindAndResourceScope(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("cross-service binding status=%d; want 409", recorder.Code)
+	}
+}
+
+func TestBulkAuthorityMiddlewareRequiresExactOperationGrant(t *testing.T) {
+	fixture, err := testfixture.LoadBulkTransferGrantFixture()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := fixture.Expected
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := serviceauthority.NewDeploymentSigner(payload.DeploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := serviceauthority.NewBindingRegistry()
+	if err := bindings.Activate(payload.Scope, testServiceAuthorityCurrentBinding(
+		t,
+		fixture.AuthorityRevision,
+		payload.AuthorityManifestDigest,
+		payload.DeploymentID,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	server := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.now = func() time.Time { return time.UnixMilli(1_500) }
+	server.SetServiceAuthorityDeployment(signer, bindings, serviceauthority.ScopeDeviceSync)
+
+	perform := func(
+		includeGrant bool,
+		resourceID string,
+		observedByteCount int64,
+	) *httptest.ResponseRecorder {
+		t.Helper()
+		next := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if server.requireBulkOperation(
+				writer,
+				request,
+				resourceID,
+				serviceauthority.BulkUpload,
+				observedByteCount,
+			) {
+				writer.WriteHeader(http.StatusNoContent)
+			}
+		})
+		handler := server.serviceAuthorityBindingHandler(serviceauthority.TrafficBulk, next)
+		request := httptest.NewRequest(http.MethodPost, "/", nil)
+		setAuthorityHeaders(
+			request.Header,
+			payload.Scope,
+			fixture.AuthorityRevision,
+			payload.AuthorityManifestDigest,
+			payload.DeploymentID,
+			payload.RouteID,
+			serviceauthority.TrafficBulk,
+		)
+		if includeGrant {
+			request.Header.Set(serviceauthority.HeaderBulkTransferGrant, fixture.GrantHeader)
+			request.Header.Set(serviceauthority.HeaderBulkResourceID, payload.ResourceID)
+			request.Header.Set(serviceauthority.HeaderBulkDirection, string(payload.Direction))
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	if recorder := perform(false, payload.ResourceID, payload.MaximumByteCount); recorder.Code != http.StatusConflict {
+		t.Fatalf("grantless bulk request status=%d; want 409", recorder.Code)
+	}
+	if recorder := perform(true, payload.ResourceID, payload.MaximumByteCount); recorder.Code != http.StatusNoContent {
+		t.Fatalf("exact bulk request status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := perform(true, "different-resource", payload.MaximumByteCount); recorder.Code != http.StatusConflict {
+		t.Fatalf("resource substitution status=%d; want 409", recorder.Code)
+	}
+	if recorder := perform(true, payload.ResourceID, payload.MaximumByteCount+1); recorder.Code != http.StatusConflict {
+		t.Fatalf("oversized transfer status=%d; want 409", recorder.Code)
 	}
 }
 
@@ -186,6 +281,30 @@ func setAuthorityHeaders(
 	header.Set(serviceauthority.HeaderDeploymentID, deploymentID.String())
 	header.Set(serviceauthority.HeaderRouteID, routeID.String())
 	header.Set(serviceauthority.HeaderTrafficClass, string(trafficClass))
+}
+
+func testServiceAuthorityCurrentBinding(
+	t *testing.T,
+	revision uint64,
+	digest string,
+	deploymentID uuid.UUID,
+) serviceauthority.CurrentBinding {
+	t.Helper()
+	seed := make([]byte, 32)
+	seed[31] = 1
+	authority, err := serviceauthority.NewDeploymentSigner(
+		uuid.MustParse("64000000-0000-0000-0000-000000000001"),
+		seed,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serviceauthority.CurrentBinding{
+		Revision: revision, Digest: digest, DeploymentID: deploymentID,
+		AuthoritySignerID:              authority.DeploymentID(),
+		AuthorityPublicSigningKeyX963:  authority.PublicSigningKeyX963(),
+		AuthoritySigningKeyFingerprint: authority.SigningKeyFingerprint(),
+	}
 }
 
 func repeatAuthorityHex(value string) string {
