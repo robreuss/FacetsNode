@@ -55,6 +55,23 @@ idempotent after short-lived evidence expires while changed evidence cannot
 borrow an already accepted manifest. Conflicting retries fail.
 Reload independently revalidates manifest signatures, canonical payloads,
 snapshot signatures, digests, deployment relationships, and fence facts.
+On supported Unix systems, a normalized binding path also has one exclusive
+process owner for the registry lifetime. A second process fails closed until
+the owner calls `Close`; the lock must be a private regular file in an
+owner-controlled directory and path/open-file identity is verified. This
+prevents divergent in-memory successors from competing to replace the same
+file. Persistent authority fails unsupported on Windows until a native
+interprocess lock exists.
+
+An accepted preparation remains usable if only its superseded predecessor
+manifest later expires. Transfer reconstructs that predecessor at the
+historical overlap where the preparation was valid, but still requires the
+preparation manifest, target offer, snapshot, readiness, and activation to be
+live at cutover.
+
+An exact already-confirmed snapshot retry remains idempotent after its
+short-lived evidence expires. A first confirmation at or after expiry still
+fails, and any changed payload, signature, or digest conflicts.
 
 ## Custody and content boundary
 
@@ -75,3 +92,9 @@ on deployed hosts. Those remain required before any runtime migration claim.
 
 No legacy transition or binding migration layer is provided; Facets is
 unreleased.
+
+The cross-repository adversarial review is recorded by Facets at
+`docs/security/attended-service-migration-adversarial-review.md`. Remaining
+claim limits include the service-store transaction race described above,
+client monotonic-history recovery, physical-ingress route attestation, and
+native Windows interprocess locking.

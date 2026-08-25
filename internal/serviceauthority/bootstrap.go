@@ -560,20 +560,38 @@ func verifyCanonicalRecord(payload []byte, signature Signature, domain string, t
 		signature.SigningKeyFingerprint {
 		return ErrInvalid
 	}
-	raw, err := base64.RawURLEncoding.Strict().DecodeString(signature.Signature)
-	if err != nil || len(raw) != 64 ||
-		base64.RawURLEncoding.EncodeToString(raw) != signature.Signature {
+	r, s, err := decodeCanonicalP256Signature(signature.Signature)
+	if err != nil {
 		return ErrInvalid
 	}
 	x, y := elliptic.Unmarshal(elliptic.P256(), publicBytes)
 	digest := sha256.Sum256(append([]byte(domain), payload...))
 	if x == nil || y == nil || !ecdsa.Verify(
 		&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y},
-		digest[:], new(big.Int).SetBytes(raw[:32]), new(big.Int).SetBytes(raw[32:]),
+		digest[:], r, s,
 	) {
 		return ErrInvalid
 	}
 	return nil
+}
+
+// decodeCanonicalP256Signature admits exactly one raw ES256 representation.
+// ECDSA verification alone also accepts (r, N-s), which is mathematically
+// equivalent but would produce a different Facets reference digest.
+func decodeCanonicalP256Signature(value string) (*big.Int, *big.Int, error) {
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(value)
+	if err != nil || len(raw) != 64 ||
+		base64.RawURLEncoding.EncodeToString(raw) != value {
+		return nil, nil, ErrInvalid
+	}
+	r := new(big.Int).SetBytes(raw[:32])
+	s := new(big.Int).SetBytes(raw[32:])
+	order := elliptic.P256().Params().N
+	halfOrder := new(big.Int).Rsh(new(big.Int).Set(order), 1)
+	if r.Sign() <= 0 || r.Cmp(order) >= 0 || s.Sign() <= 0 || s.Cmp(halfOrder) > 0 {
+		return nil, nil, ErrInvalid
+	}
+	return r, s, nil
 }
 
 func canonicalP256PublicKey(value string) ([]byte, error) {

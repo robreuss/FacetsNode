@@ -186,6 +186,11 @@ func TestBindingRegistryRejectsRollbackEquivocationAndStaleHeaders(t *testing.T)
 
 func TestBindingRegistryLoadsStrictDeploymentScopedState(t *testing.T) {
 	fixture := newBootstrapFixture(t)
+	messageRoute := fixture.route
+	messageRoute.Endpoint = "https://facets-box.local:9443"
+	messageRoute.RouteID = uuid.MustParse("62000000-0000-0000-0000-000000000002")
+	fixture.descriptor.Routes = []TransportRoute{fixture.route, messageRoute}
+	fixture.policy.MessageRouteIDs = []uuid.UUID{messageRoute.RouteID}
 	deploymentID := fixture.descriptor.DeploymentID
 	scopeID := fixture.scope.ScopeID
 	manifest := fixture.signedManifest(t, fixture.policy)
@@ -216,14 +221,38 @@ func TestBindingRegistryLoadsStrictDeploymentScopedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.Authorize(RequestBinding{
+	t.Cleanup(func() { _ = registry.Close() })
+	controlBinding := RequestBinding{
 		Scope:             Scope{Kind: ScopeDeviceSync, ScopeID: scopeID},
 		AuthorityRevision: 1,
 		AuthorityDigest:   digest,
 		DeploymentID:      deploymentID,
-		RouteID:           uuid.New(),
+		RouteID:           fixture.route.RouteID,
 		TrafficClass:      TrafficControl,
-	}); err != nil {
+	}
+	if err := registry.Authorize(controlBinding); err != nil {
+		t.Fatal(err)
+	}
+	messageBinding := controlBinding
+	messageBinding.RouteID = messageRoute.RouteID
+	messageBinding.TrafficClass = TrafficMessage
+	if err := registry.Authorize(messageBinding); err != nil {
+		t.Fatalf("listed message route rejected: %v", err)
+	}
+	unlisted := controlBinding
+	unlisted.RouteID = uuid.New()
+	if err := registry.Authorize(unlisted); err == nil {
+		t.Fatal("unlisted route authorized")
+	}
+	wrongTrafficClass := controlBinding
+	wrongTrafficClass.TrafficClass = TrafficMessage
+	if err := registry.Authorize(wrongTrafficClass); err == nil {
+		t.Fatal("control-only route authorized for message traffic")
+	}
+	if _, err := LoadBindingRegistry(path, deploymentID); err == nil {
+		t.Fatal("binding file admitted a second live process owner")
+	}
+	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadBindingRegistry(path, uuid.New()); err == nil {
@@ -263,6 +292,7 @@ func TestBindingRegistryPersistsFirstActivationAndReloadsIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("empty initial registry rejected: %v", err)
 	}
+	t.Cleanup(func() { _ = registry.Close() })
 	manifest := fixture.signedManifest(t, fixture.policy)
 	digest, err := manifest.ReferenceDigest()
 	if err != nil {
@@ -274,16 +304,20 @@ func TestBindingRegistryPersistsFirstActivationAndReloadsIt(t *testing.T) {
 	if err := registry.Activate(scope, binding); err != nil {
 		t.Fatalf("first activation failed: %v", err)
 	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reloaded, err := LoadBindingRegistry(path, deploymentID)
 	if err != nil {
 		t.Fatalf("persisted registry rejected: %v", err)
 	}
+	t.Cleanup(func() { _ = reloaded.Close() })
 	if err := reloaded.Authorize(RequestBinding{
 		Scope:             scope,
 		AuthorityRevision: binding.Revision,
 		AuthorityDigest:   binding.Digest,
 		DeploymentID:      binding.DeploymentID,
-		RouteID:           uuid.New(),
+		RouteID:           fixture.route.RouteID,
 		TrafficClass:      TrafficControl,
 	}); err != nil {
 		t.Fatalf("reloaded activation not authoritative: %v", err)

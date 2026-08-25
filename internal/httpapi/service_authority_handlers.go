@@ -84,11 +84,12 @@ func (s *Server) handleServiceDeploymentProof(
 		RouteID:           proofRequest.RouteID,
 		TrafficClass:      proofRequest.TrafficClass,
 	}
-	if s.serviceAuthorityBindings.Authorize(binding) != nil {
+	now := s.now()
+	if s.serviceAuthorityBindings.AuthorizeAt(binding, now) != nil {
 		writeServiceAuthorityError(writer, http.StatusConflict)
 		return
 	}
-	proof, err := s.deploymentSigner.SignProof(proofRequest, s.now())
+	proof, err := s.deploymentSigner.SignProof(proofRequest, now)
 	if err != nil {
 		writeServiceAuthorityError(writer, http.StatusBadRequest)
 		return
@@ -101,13 +102,14 @@ func (s *Server) serviceAuthorityBindingHandler(
 	next http.Handler,
 ) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		now := s.now()
 		binding, err := serviceauthority.ParseRequestBinding(
 			request.Header,
 			s.deploymentSigner.DeploymentID(),
 			trafficClass,
 		)
 		if err != nil ||
-			s.serviceAuthorityBindings.AuthorizeRequest(binding, request.Method) != nil {
+			s.serviceAuthorityBindings.AuthorizeRequestAt(binding, request.Method, now) != nil {
 			writeServiceAuthorityError(writer, http.StatusConflict)
 			return
 		}
@@ -123,8 +125,9 @@ func (s *Server) serviceAuthorityBindingHandler(
 		if trafficClass == serviceauthority.TrafficBulk {
 			grant, err := s.serviceAuthorityBindings.AuthorizeBulkTransfer(
 				binding,
+				request.Method,
 				request.Header,
-				s.now(),
+				now,
 				s.deploymentSigner,
 			)
 			if err != nil {
@@ -195,22 +198,28 @@ func (s *Server) requireBulkOperation(
 // are still constrained to the configured service kind and an exact current
 // scope binding; their capability handlers enforce the route/admission ID.
 func requestScopeMatchesBinding(request *http.Request, scope serviceauthority.Scope) error {
-	var resourceID uuid.UUID
-	found := false
-	for _, name := range []string{"principalID", "spaceID", "tenantID"} {
+	var names []string
+	switch scope.Kind {
+	case serviceauthority.ScopeDeviceSync:
+		// A Device Sync Space is nested beneath its personal principal. Its
+		// spaceID is content-selection state, not the service-authority scope.
+		names = []string{"principalID", "tenantID"}
+	case serviceauthority.ScopeSharedSpace:
+		// Shared Space control routes name spaceID; their reused opaque relay
+		// data plane names the same logical Space as tenantID.
+		names = []string{"spaceID", "tenantID"}
+	default:
+		return serviceauthority.ErrInvalid
+	}
+	for _, name := range names {
 		value := request.PathValue(name)
 		if value == "" {
 			continue
 		}
 		parsed, err := uuid.Parse(value)
-		if err != nil || parsed == uuid.Nil || (found && parsed != resourceID) {
+		if err != nil || parsed == uuid.Nil || parsed != scope.ScopeID {
 			return serviceauthority.ErrInvalid
 		}
-		resourceID = parsed
-		found = true
-	}
-	if found && resourceID != scope.ScopeID {
-		return serviceauthority.ErrInvalid
 	}
 	return nil
 }

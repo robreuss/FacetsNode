@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -18,16 +19,22 @@ import (
 var serviceMigrationPortableFixture []byte
 
 type migrationPortableFixture struct {
-	ActivationManifestDigest                 string                    `json:"activationManifestDigest"`
-	AuthorityAnchor                          TrustAnchor               `json:"authorityAnchor"`
-	CustodyEnvelope                          MigrationCustodyEnvelope  `json:"custodyEnvelope"`
-	CustodyPlaintext                         string                    `json:"custodyPlaintext"`
-	PreparationManifestDigest                string                    `json:"preparationManifestDigest"`
-	RollbackEvidence                         MigrationRollbackEvidence `json:"rollbackEvidence"`
-	RollbackManifestDigest                   string                    `json:"rollbackManifestDigest"`
-	TargetCustodyPrivateKeyRawRepresentation string                    `json:"targetCustodyPrivateKeyRawRepresentation"`
-	TargetOfferDigest                        string                    `json:"targetOfferDigest"`
-	Version                                  int                       `json:"version"`
+	ActivationManifestDigest                 string                        `json:"activationManifestDigest"`
+	ActivationEvidenceDigest                 string                        `json:"activationEvidenceDigest"`
+	AuthorityAnchor                          TrustAnchor                   `json:"authorityAnchor"`
+	CancellationEvidence                     MigrationCancellationEvidence `json:"cancellationEvidence"`
+	CancellationEvidenceDigest               string                        `json:"cancellationEvidenceDigest"`
+	CancellationManifestDigest               string                        `json:"cancellationManifestDigest"`
+	CustodyEnvelope                          MigrationCustodyEnvelope      `json:"custodyEnvelope"`
+	CustodyPlaintext                         string                        `json:"custodyPlaintext"`
+	PreparationEvidenceDigest                string                        `json:"preparationEvidenceDigest"`
+	PreparationManifestDigest                string                        `json:"preparationManifestDigest"`
+	RollbackEvidence                         MigrationRollbackEvidence     `json:"rollbackEvidence"`
+	RollbackEvidenceDigest                   string                        `json:"rollbackEvidenceDigest"`
+	RollbackManifestDigest                   string                        `json:"rollbackManifestDigest"`
+	TargetCustodyPrivateKeyRawRepresentation string                        `json:"targetCustodyPrivateKeyRawRepresentation"`
+	TargetOfferDigest                        string                        `json:"targetOfferDigest"`
+	Version                                  int                           `json:"version"`
 }
 
 func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
@@ -58,6 +65,20 @@ func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
 	if err != nil || targetDigest != fixture.TargetOfferDigest {
 		t.Fatalf("target offer digest=%s err=%v", targetDigest, err)
 	}
+	preparationEvidenceDigest, err := migrationEvidenceDigest(
+		migrationPreparationEvidenceReferenceDomain,
+		fixture.RollbackEvidence.ActivationEvidence.Preparation,
+	)
+	if err != nil || preparationEvidenceDigest != fixture.PreparationEvidenceDigest {
+		t.Fatalf("preparation evidence digest=%s err=%v", preparationEvidenceDigest, err)
+	}
+	activationEvidenceDigest, err := migrationEvidenceDigest(
+		migrationActivationEvidenceReferenceDomain,
+		fixture.RollbackEvidence.ActivationEvidence,
+	)
+	if err != nil || activationEvidenceDigest != fixture.ActivationEvidenceDigest {
+		t.Fatalf("activation evidence digest=%s err=%v", activationEvidenceDigest, err)
+	}
 
 	rolledBack, err := fixture.RollbackEvidence.Validate(fixture.AuthorityAnchor, 4_000)
 	if err != nil || rolledBack.Transition != TransitionMigrationRollback {
@@ -67,12 +88,34 @@ func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
 	if err != nil || rollbackDigest != fixture.RollbackManifestDigest {
 		t.Fatalf("rollback digest=%s err=%v", rollbackDigest, err)
 	}
-
-	preparation, _, err := fixture.RollbackEvidence.ActivationEvidence.
-		Preparation.Validate(fixture.AuthorityAnchor, 3_200)
-	if err != nil {
-		t.Fatal(err)
+	rollbackEvidenceDigest, err := migrationEvidenceDigest(
+		migrationRollbackEvidenceReferenceDomain,
+		fixture.RollbackEvidence,
+	)
+	if err != nil || rollbackEvidenceDigest != fixture.RollbackEvidenceDigest {
+		t.Fatalf("rollback evidence digest=%s err=%v", rollbackEvidenceDigest, err)
 	}
+
+	cancelled, err := fixture.CancellationEvidence.Validate(
+		fixture.AuthorityAnchor,
+		20_001,
+	)
+	if err != nil || cancelled.Transition != TransitionMigrationCancellation {
+		t.Fatalf("Swift cancellation evidence rejected: payload=%+v err=%v", cancelled, err)
+	}
+	cancellationManifestDigest, err := fixture.CancellationEvidence.
+		CancellationManifest.ReferenceDigest()
+	if err != nil || cancellationManifestDigest != fixture.CancellationManifestDigest {
+		t.Fatalf("cancellation manifest digest=%s err=%v", cancellationManifestDigest, err)
+	}
+	cancellationEvidenceDigest, err := migrationEvidenceDigest(
+		migrationCancellationEvidenceReferenceDomain,
+		fixture.CancellationEvidence,
+	)
+	if err != nil || cancellationEvidenceDigest != fixture.CancellationEvidenceDigest {
+		t.Fatalf("cancellation evidence digest=%s err=%v", cancellationEvidenceDigest, err)
+	}
+
 	privateKey, err := canonicalBase64URL(fixture.TargetCustodyPrivateKeyRawRepresentation)
 	if err != nil {
 		t.Fatal(err)
@@ -83,8 +126,10 @@ func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
 	}
 	plaintext, err := fixture.CustodyEnvelope.Open(
 		privateKey,
-		preparation,
-		fixture.RollbackEvidence.ActivationEvidence.Preparation.TargetOffer,
+		fixture.RollbackEvidence.ActivationEvidence.Preparation,
+		fixture.RollbackEvidence.ActivationEvidence.Snapshot,
+		fixture.AuthorityAnchor,
+		3_200,
 	)
 	if err != nil || !bytes.Equal(plaintext, expectedPlaintext) {
 		t.Fatalf("Swift custody envelope rejected or changed: plaintext=%q err=%v", plaintext, err)
@@ -108,18 +153,16 @@ func TestMigrationFixtureRejectsTamperingExpiryAndBareSuccessors(t *testing.T) {
 	}
 	sealed[len(sealed)-1] ^= 0x01
 	tampered.SealedPayload = encodeBase64URL(sealed)
-	preparation, _, err := activation.Preparation.Validate(fixture.AuthorityAnchor, 3_200)
-	if err != nil {
-		t.Fatal(err)
-	}
 	privateKey, err := canonicalBase64URL(fixture.TargetCustodyPrivateKeyRawRepresentation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tampered.Open(
 		privateKey,
-		preparation,
-		activation.Preparation.TargetOffer,
+		activation.Preparation,
+		activation.Snapshot,
+		fixture.AuthorityAnchor,
+		3_200,
 	); err == nil {
 		t.Fatal("tampered custody ciphertext accepted")
 	}
@@ -248,6 +291,7 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	}
 	sourceRequest := requestForAuthority(
 		preparedPayload.Scope, preparedPayload.Revision, preparedDigest, sourceID,
+		activation.Preparation.PreparationManifest,
 	)
 	if err := source.AuthorizeRequest(sourceRequest, http.MethodPost); err != nil {
 		t.Fatalf("source write rejected before fence: %v", err)
@@ -278,10 +322,14 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	if err := source.AuthorizeRequest(sourceRequest, http.MethodPost); err == nil {
 		t.Fatal("source write accepted after durable fence")
 	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reloadedPendingSource, err := LoadBindingRegistry(sourcePath, sourceID)
 	if err != nil {
 		t.Fatalf("staged unsigned fence did not survive restart: %v", err)
 	}
+	t.Cleanup(func() { _ = reloadedPendingSource.Close() })
 	if err := reloadedPendingSource.AuthorizeRequest(sourceRequest, http.MethodPost); err == nil {
 		t.Fatal("reloaded staged fence accepted a write")
 	}
@@ -294,11 +342,26 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	); err != nil {
 		t.Fatalf("exact staged fence retry failed after snapshot expiry: %v", err)
 	}
-	if err := source.ConfirmMigrationWriteFenceSnapshot(
+	if err := source.ConfirmMigrationWriteFenceSnapshotAt(
 		preparedPayload.Scope,
 		activation.Snapshot,
+		10_000,
+	); err == nil {
+		t.Fatal("expired source snapshot confirmation succeeded")
+	}
+	if err := source.ConfirmMigrationWriteFenceSnapshotAt(
+		preparedPayload.Scope,
+		activation.Snapshot,
+		3_000,
 	); err != nil {
 		t.Fatalf("source signed snapshot confirmation failed: %v", err)
+	}
+	if err := source.ConfirmMigrationWriteFenceSnapshotAt(
+		preparedPayload.Scope,
+		activation.Snapshot,
+		10_000,
+	); err != nil {
+		t.Fatalf("exact confirmed snapshot retry failed after expiry: %v", err)
 	}
 	if err := target.ApplyMigrationActivation(
 		activation, fixture.AuthorityAnchor, 3_200,
@@ -353,6 +416,7 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	}
 	targetRequest := requestForAuthority(
 		activatedPayload.Scope, activatedPayload.Revision, activatedDigest, targetID,
+		activation.ActivationManifest,
 	)
 	if err := target.AuthorizeRequest(targetRequest, http.MethodPost); err != nil {
 		t.Fatalf("target write rejected after activation: %v", err)
@@ -369,9 +433,10 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	); err != nil {
 		t.Fatalf("target reverse fence staging failed: %v", err)
 	}
-	if err := target.ConfirmMigrationWriteFenceSnapshot(
+	if err := target.ConfirmMigrationWriteFenceSnapshotAt(
 		activatedPayload.Scope,
 		fixture.RollbackEvidence.TargetSnapshot,
+		4_000,
 	); err != nil {
 		t.Fatalf("target reverse snapshot confirmation failed: %v", err)
 	}
@@ -404,22 +469,42 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	}
 	rolledBackRequest := requestForAuthority(
 		rolledBackPayload.Scope, rolledBackPayload.Revision, rolledBackDigest, sourceID,
+		fixture.RollbackEvidence.RollbackManifest,
 	)
-	if err := source.AuthorizeRequest(rolledBackRequest, http.MethodPost); err != nil {
+	if err := source.AuthorizeRequestAt(
+		rolledBackRequest,
+		http.MethodPost,
+		time.UnixMilli(4_000),
+	); err != nil {
 		t.Fatalf("source did not clear its forward fence at validated rollback: %v", err)
 	}
 	if err := target.AuthorizeRequest(targetRequest, http.MethodGet); err == nil {
 		t.Fatal("retired target authorized stale active binding after rollback")
 	}
 
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reloadedSource, err := LoadBindingRegistry(sourcePath, sourceID)
-	if err != nil || reloadedSource.AuthorizeRequest(rolledBackRequest, http.MethodPost) != nil {
-		t.Fatalf("reloaded source lost rollback activation: registry=%v err=%v", reloadedSource, err)
+	if err != nil {
+		t.Fatalf("reloaded source lost rollback activation: %v", err)
+	}
+	t.Cleanup(func() { _ = reloadedSource.Close() })
+	if err := reloadedSource.AuthorizeRequestAt(
+		rolledBackRequest,
+		http.MethodPost,
+		time.UnixMilli(4_000),
+	); err != nil {
+		t.Fatalf("reloaded source lost rollback activation: %v", err)
 	}
 	reloadedTarget, err := LoadBindingRegistry(targetPath, targetID)
 	if err != nil {
 		t.Fatalf("reloaded target fence rejected: %v", err)
 	}
+	t.Cleanup(func() { _ = reloadedTarget.Close() })
 	if reloadedTarget.bindings[rolledBackPayload.Scope].WriteFence == nil {
 		t.Fatal("reloaded target lost its durable reverse fence")
 	}
@@ -448,7 +533,7 @@ func TestNodeSignsOnlyPreviouslyStagedMigrationSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	signer := fixtureDeploymentSigner(t, current.ActiveDeployment)
-	if _, err := registry.SignStagedMigrationSnapshot(current.Scope, signer); err == nil {
+	if _, err := registry.SignStagedMigrationSnapshotAt(current.Scope, signer, 3_000); err == nil {
 		t.Fatal("deployment signed a snapshot before a durable fence was staged")
 	}
 	payload, err := fixture.RollbackEvidence.ActivationEvidence.Snapshot.VerifiedPayload(nil)
@@ -463,7 +548,7 @@ func TestNodeSignsOnlyPreviouslyStagedMigrationSnapshots(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := registry.SignStagedMigrationSnapshot(current.Scope, signer)
+	snapshot, err := registry.SignStagedMigrationSnapshotAt(current.Scope, signer, 3_000)
 	if err != nil {
 		t.Fatalf("staged snapshot signing failed: %v", err)
 	}
@@ -471,7 +556,7 @@ func TestNodeSignsOnlyPreviouslyStagedMigrationSnapshots(t *testing.T) {
 	if err != nil || !canonicalEqual(verified, payload) {
 		t.Fatalf("Node signed a different snapshot payload: verified=%+v err=%v", verified, err)
 	}
-	if _, err := registry.SignStagedMigrationSnapshot(current.Scope, signer); err == nil {
+	if _, err := registry.SignStagedMigrationSnapshotAt(current.Scope, signer, 3_000); err == nil {
 		t.Fatal("already signed fence produced a second conflicting snapshot")
 	}
 }
@@ -500,6 +585,7 @@ func newMigrationRegistry(t *testing.T, deploymentID uuid.UUID) (*BindingRegistr
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = registry.Close() })
 	return registry, path
 }
 
@@ -508,10 +594,16 @@ func requestForAuthority(
 	revision uint64,
 	digest string,
 	deploymentID uuid.UUID,
+	manifest Manifest,
 ) RequestBinding {
+	payload, err := manifest.VerifiedPayload()
+	if err != nil || len(payload.TransportPolicy.ControlRouteIDs) == 0 {
+		panic("requestForAuthority requires a verified control route")
+	}
 	return RequestBinding{
 		Scope: scope, AuthorityRevision: revision, AuthorityDigest: digest,
-		DeploymentID: deploymentID, RouteID: uuid.New(), TrafficClass: TrafficControl,
+		DeploymentID: deploymentID, RouteID: payload.TransportPolicy.ControlRouteIDs[0],
+		TrafficClass: TrafficControl,
 	}
 }
 

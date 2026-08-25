@@ -89,11 +89,12 @@ func (handler *HTTPHandler) handleDeploymentProof(
 		DeploymentID:    proofRequest.DeploymentID, RouteID: proofRequest.RouteID,
 		TrafficClass: proofRequest.TrafficClass,
 	}
-	if handler.authorityBindings.Authorize(binding) != nil {
+	now := handler.now()
+	if handler.authorityBindings.AuthorizeAt(binding, now) != nil {
 		writeComputePoolError(writer, http.StatusConflict, "stale_or_invalid_service_authority")
 		return
 	}
-	proof, err := handler.deploymentSigner.SignProof(proofRequest, handler.now())
+	proof, err := handler.deploymentSigner.SignProof(proofRequest, now)
 	if err != nil {
 		writeComputePoolError(writer, http.StatusBadRequest, "invalid_deployment_proof")
 		return
@@ -117,7 +118,11 @@ func (handler *HTTPHandler) handlePoolStatus(
 	)
 	if err != nil || binding.Scope.Kind != serviceauthority.ScopeComputePool ||
 		binding.Scope.ScopeID != poolID ||
-		handler.authorityBindings.AuthorizeRequest(binding, request.Method) != nil {
+		handler.authorityBindings.AuthorizeRequestAt(
+			binding,
+			request.Method,
+			handler.now(),
+		) != nil {
 		writeComputePoolError(writer, http.StatusConflict, "stale_or_invalid_service_authority")
 		return
 	}

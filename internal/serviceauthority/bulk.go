@@ -177,17 +177,8 @@ func verifyBulkTransferGrant(
 	if err != nil || fingerprint != grant.Signature.SigningKeyFingerprint {
 		return ErrInvalid
 	}
-	rawSignature, err := base64.RawURLEncoding.Strict().DecodeString(
-		grant.Signature.Signature,
-	)
-	if err != nil || len(rawSignature) != 64 ||
-		base64.RawURLEncoding.EncodeToString(rawSignature) != grant.Signature.Signature {
-		return ErrInvalid
-	}
-	r := new(big.Int).SetBytes(rawSignature[:32])
-	s := new(big.Int).SetBytes(rawSignature[32:])
-	if r.Sign() <= 0 || s.Sign() <= 0 || r.Cmp(elliptic.P256().Params().N) >= 0 ||
-		s.Cmp(elliptic.P256().Params().N) >= 0 {
+	r, s, err := decodeCanonicalP256Signature(grant.Signature.Signature)
+	if err != nil {
 		return ErrInvalid
 	}
 	digest := sha256.Sum256(append([]byte(bulkGrantSignatureDomain), grant.Payload...))
@@ -199,12 +190,13 @@ func verifyBulkTransferGrant(
 
 func (registry *BindingRegistry) AuthorizeBulkTransfer(
 	binding RequestBinding,
+	method string,
 	header http.Header,
 	now time.Time,
 	signer *DeploymentSigner,
 ) (BulkGrantPayload, error) {
 	if registry == nil || signer == nil || binding.TrafficClass != TrafficBulk ||
-		registry.Authorize(binding) != nil {
+		method == "" || registry.AuthorizeRequestAt(binding, method, now) != nil {
 		return BulkGrantPayload{}, ErrInvalid
 	}
 	resourceID, resourceErr := singleHeaderValue(header, HeaderBulkResourceID)
@@ -231,6 +223,15 @@ func (registry *BindingRegistry) AuthorizeBulkTransfer(
 		payload.ResourceID != resourceID || payload.Direction != direction ||
 		now.UnixMilli() < payload.NotBeforeMilliseconds ||
 		now.UnixMilli() >= payload.ExpiresAtMilliseconds {
+		return BulkGrantPayload{}, ErrInvalid
+	}
+	finalMethod := method
+	if payload.Direction == BulkUpload {
+		// Upload authorization is mutating even if a malformed route attempts to
+		// carry it through a nominally read-only HTTP method.
+		finalMethod = http.MethodPost
+	}
+	if registry.AuthorizeRequestAt(binding, finalMethod, now) != nil {
 		return BulkGrantPayload{}, ErrInvalid
 	}
 	return payload, nil

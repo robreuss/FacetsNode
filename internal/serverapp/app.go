@@ -133,6 +133,11 @@ func Main(service config.Service) {
 			logger.Error("service authority bindings rejected", "error", err)
 			os.Exit(1)
 		}
+		defer func() {
+			if err := bindings.Close(); err != nil {
+				logger.Error("service authority binding lock release failed", "error", err)
+			}
+		}()
 		scopeKind := serviceauthority.ScopeDeviceSync
 		if service == config.SharedSpaces {
 			scopeKind = serviceauthority.ScopeSharedSpace
@@ -254,6 +259,11 @@ func runComputePoolService(
 	if err != nil {
 		return fmt.Errorf("Compute Pool service authority bindings rejected: %w", err)
 	}
+	defer func() {
+		if err := bindings.Close(); err != nil {
+			logger.Error("Compute Pool service authority binding lock release failed", "error", err)
+		}
+	}()
 	handler, err := computepool.NewHTTPHandler(
 		postgres.NewComputePoolStore(pool),
 		deploymentSigner,

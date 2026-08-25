@@ -18,19 +18,21 @@ import (
 )
 
 const (
-	TransitionInitialActivation    = "initial_activation"
-	TransitionRouteRotation        = "route_rotation"
-	TransitionPolicyUpdate         = "policy_update"
-	TransitionMigrationPreparation = "migration_preparation"
-	TransitionMigrationActivation  = "migration_activation"
-	TransitionMigrationRetirement  = "migration_retirement"
-	TransitionMigrationRollback    = "migration_rollback"
-	TransitionRecovery             = "recovery"
+	TransitionInitialActivation     = "initial_activation"
+	TransitionRouteRotation         = "route_rotation"
+	TransitionPolicyUpdate          = "policy_update"
+	TransitionMigrationPreparation  = "migration_preparation"
+	TransitionMigrationCancellation = "migration_cancellation"
+	TransitionMigrationActivation   = "migration_activation"
+	TransitionMigrationRetirement   = "migration_retirement"
+	TransitionMigrationRollback     = "migration_rollback"
+	TransitionRecovery              = "recovery"
 
 	MaximumMigrationTargetOfferLifetime = 7 * 24 * time.Hour
 	MaximumMigrationSnapshotLifetime    = 24 * time.Hour
 	MaximumMigrationReadinessLifetime   = time.Hour
 	MaximumMigrationCustodyPlaintext    = 64 * 1024
+	maximumMigrationEvidenceByteCount   = 8 * 1024 * 1024
 
 	migrationTargetOfferSignatureDomain     = "Facets service migration target offer v1\x00"
 	migrationTargetOfferReferenceDomain     = "Facets service migration target offer reference v1\x00"
@@ -73,6 +75,7 @@ func (anchor TrustAnchor) Validate() error {
 
 func (payload ManifestPayload) Validate(nowMilliseconds *int64) error {
 	if payload.Version != SchemaVersion || payload.Scope.Validate() != nil || payload.Revision == 0 ||
+		payload.PreparedDeployments == nil ||
 		payload.IssuedAtMilliseconds < 0 ||
 		payload.ValidFromMilliseconds < payload.IssuedAtMilliseconds ||
 		(payload.ValidUntilMilliseconds != nil && *payload.ValidUntilMilliseconds <= payload.ValidFromMilliseconds) ||
@@ -82,7 +85,7 @@ func (payload ManifestPayload) Validate(nowMilliseconds *int64) error {
 	}
 	switch payload.Transition {
 	case TransitionInitialActivation, TransitionRouteRotation, TransitionPolicyUpdate,
-		TransitionMigrationPreparation, TransitionMigrationActivation,
+		TransitionMigrationPreparation, TransitionMigrationCancellation, TransitionMigrationActivation,
 		TransitionMigrationRetirement, TransitionMigrationRollback, TransitionRecovery:
 	default:
 		return ErrInvalid
@@ -109,6 +112,7 @@ func (payload ManifestPayload) Validate(nowMilliseconds *int64) error {
 		}
 	}
 	migrationTransition := payload.Transition == TransitionMigrationPreparation ||
+		payload.Transition == TransitionMigrationCancellation ||
 		payload.Transition == TransitionMigrationActivation ||
 		payload.Transition == TransitionMigrationRetirement ||
 		payload.Transition == TransitionMigrationRollback
@@ -132,9 +136,21 @@ func (payload ManifestPayload) Validate(nowMilliseconds *int64) error {
 				return ErrInvalid
 			}
 		}
-		if payload.Transition != TransitionMigrationRetirement &&
+		if payload.Transition != TransitionMigrationCancellation &&
+			payload.Transition != TransitionMigrationRetirement &&
 			migration.RollbackUntilMilliseconds != nil &&
 			*migration.RollbackUntilMilliseconds <= payload.ValidFromMilliseconds {
+			return ErrInvalid
+		}
+		if payload.Transition == TransitionMigrationActivation &&
+			migration.RollbackUntilMilliseconds != nil &&
+			payload.ValidUntilMilliseconds != nil &&
+			*payload.ValidUntilMilliseconds < *migration.RollbackUntilMilliseconds {
+			return ErrInvalid
+		}
+		if payload.Transition == TransitionMigrationRetirement &&
+			migration.RollbackUntilMilliseconds != nil &&
+			payload.ValidFromMilliseconds < *migration.RollbackUntilMilliseconds {
 			return ErrInvalid
 		}
 		if payload.Transition == TransitionMigrationRollback &&
@@ -201,7 +217,8 @@ func validateManifestTransition(current, next ManifestPayload) error {
 	case TransitionPolicyUpdate:
 		if next.Migration != nil || len(next.PreparedDeployments) != 0 ||
 			len(current.PreparedDeployments) != 0 ||
-			(current.Migration != nil && current.Transition != TransitionMigrationRetirement &&
+			(current.Migration != nil && current.Transition != TransitionMigrationCancellation &&
+				current.Transition != TransitionMigrationRetirement &&
 				current.Transition != TransitionMigrationRollback) ||
 			!deploymentEqual(next.ActiveDeployment, current.ActiveDeployment) {
 			return ErrInvalid
@@ -209,7 +226,8 @@ func validateManifestTransition(current, next ManifestPayload) error {
 	case TransitionRouteRotation:
 		if next.Migration != nil || len(next.PreparedDeployments) != 0 ||
 			len(current.PreparedDeployments) != 0 ||
-			(current.Migration != nil && current.Transition != TransitionMigrationRetirement &&
+			(current.Migration != nil && current.Transition != TransitionMigrationCancellation &&
+				current.Transition != TransitionMigrationRetirement &&
 				current.Transition != TransitionMigrationRollback) ||
 			next.ActiveDeployment.DeploymentID != current.ActiveDeployment.DeploymentID ||
 			next.ActiveDeployment.PublicSigningKeyX963 != current.ActiveDeployment.PublicSigningKeyX963 ||
@@ -221,9 +239,18 @@ func validateManifestTransition(current, next ManifestPayload) error {
 		if current.Transition == TransitionMigrationPreparation || current.Transition == TransitionMigrationActivation ||
 			len(current.PreparedDeployments) != 0 || next.Migration == nil ||
 			!deploymentEqual(next.ActiveDeployment, current.ActiveDeployment) ||
+			!transportPolicyEqual(next.TransportPolicy, current.TransportPolicy) ||
 			next.Migration.SourceDeploymentID != current.ActiveDeployment.DeploymentID ||
 			len(next.PreparedDeployments) != 1 ||
 			next.PreparedDeployments[0].DeploymentID != next.Migration.TargetDeploymentID {
+			return ErrInvalid
+		}
+	case TransitionMigrationCancellation:
+		if current.Transition != TransitionMigrationPreparation || current.Migration == nil ||
+			next.Migration == nil || !migrationEqual(next.Migration, current.Migration) ||
+			!deploymentEqual(next.ActiveDeployment, current.ActiveDeployment) ||
+			!transportPolicyEqual(next.TransportPolicy, current.TransportPolicy) ||
+			len(next.PreparedDeployments) != 0 {
 			return ErrInvalid
 		}
 	case TransitionMigrationActivation:
@@ -241,12 +268,22 @@ func validateManifestTransition(current, next ManifestPayload) error {
 			!deploymentEqual(next.PreparedDeployments[0], current.ActiveDeployment) {
 			return ErrInvalid
 		}
+		if next.Migration.RollbackUntilMilliseconds != nil &&
+			next.ValidUntilMilliseconds != nil &&
+			*next.ValidUntilMilliseconds < *next.Migration.RollbackUntilMilliseconds {
+			return ErrInvalid
+		}
 	case TransitionMigrationRetirement:
 		if current.Transition != TransitionMigrationActivation || next.Migration == nil ||
 			!migrationEqual(next.Migration, current.Migration) ||
 			!deploymentEqual(next.ActiveDeployment, current.ActiveDeployment) ||
+			!transportPolicyEqual(next.TransportPolicy, current.TransportPolicy) ||
 			next.ActiveDeployment.DeploymentID != next.Migration.TargetDeploymentID ||
 			len(next.PreparedDeployments) != 0 {
+			return ErrInvalid
+		}
+		if next.Migration.RollbackUntilMilliseconds != nil &&
+			next.ValidFromMilliseconds < *next.Migration.RollbackUntilMilliseconds {
 			return ErrInvalid
 		}
 	case TransitionMigrationRollback:
@@ -398,6 +435,90 @@ func (preparation MigrationPreparation) Validate(
 	return *prepared.Migration, target, nil
 }
 
+func (preparation MigrationPreparation) validateHistorically(
+	anchor TrustAnchor,
+) (MigrationAuthority, MigrationTargetOfferPayload, error) {
+	current, currentErr := preparation.CurrentManifest.VerifiedPayload()
+	prepared, preparedErr := preparation.PreparationManifest.VerifiedPayload()
+	target, targetErr := preparation.TargetOffer.VerifiedPayload(nil)
+	deployment, deploymentErr := target.DeploymentOffer.VerifiedPayload(nil)
+	if currentErr != nil || preparedErr != nil || targetErr != nil || deploymentErr != nil {
+		return MigrationAuthority{}, MigrationTargetOfferPayload{}, ErrInvalid
+	}
+	validationTime := current.ValidFromMilliseconds
+	for _, candidate := range []int64{
+		prepared.ValidFromMilliseconds,
+		target.IssuedAtMilliseconds,
+		deployment.IssuedAtMilliseconds,
+	} {
+		if candidate > validationTime {
+			validationTime = candidate
+		}
+	}
+	return preparation.Validate(anchor, validationTime)
+}
+
+// validateForTransfer reconstructs the predecessor link at the interval where
+// the complete preparation was valid, but requires the authority-bearing
+// preparation manifest and target offer to remain live at transfer time. This
+// permits an attended migration to finish after only the superseded
+// predecessor manifest expires.
+func (preparation MigrationPreparation) validateForTransfer(
+	anchor TrustAnchor,
+	nowMilliseconds int64,
+) (MigrationAuthority, MigrationTargetOfferPayload, error) {
+	migration, target, err := preparation.validateHistorically(anchor)
+	if err != nil {
+		return MigrationAuthority{}, MigrationTargetOfferPayload{}, ErrInvalid
+	}
+	if _, err := preparation.PreparationManifest.Authorize(anchor, nowMilliseconds); err != nil {
+		return MigrationAuthority{}, MigrationTargetOfferPayload{}, ErrInvalid
+	}
+	if _, err := preparation.TargetOffer.VerifiedPayload(&nowMilliseconds); err != nil {
+		return MigrationAuthority{}, MigrationTargetOfferPayload{}, ErrInvalid
+	}
+	return migration, target, nil
+}
+
+// MigrationCancellationEvidence proves that an exact, previously valid
+// preparation was cancelled by its immediate authority successor. The target
+// offer and preparation need not remain live forever, so the full preparation
+// is reconstructed at its historical validity overlap. The cancellation itself
+// must be authority-valid at acceptance time, while the registry independently
+// requires this exact preparation to be its installed predecessor.
+type MigrationCancellationEvidence struct {
+	CancellationManifest Manifest             `json:"cancellationManifest"`
+	Preparation          MigrationPreparation `json:"preparation"`
+}
+
+func (evidence MigrationCancellationEvidence) Validate(
+	anchor TrustAnchor,
+	nowMilliseconds int64,
+) (ManifestPayload, error) {
+	preparedHistorical, err := evidence.Preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || preparedHistorical.Transition != TransitionMigrationPreparation ||
+		preparedHistorical.Migration == nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	if _, _, err := evidence.Preparation.validateHistorically(anchor); err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	cancelled, err := evidence.CancellationManifest.Authorize(anchor, nowMilliseconds)
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	if _, err := evidence.CancellationManifest.ValidateSuccessor(
+		evidence.Preparation.PreparationManifest,
+	); err != nil || cancelled.Transition != TransitionMigrationCancellation ||
+		!migrationEqual(cancelled.Migration, preparedHistorical.Migration) ||
+		!deploymentEqual(cancelled.ActiveDeployment, preparedHistorical.ActiveDeployment) ||
+		!transportPolicyEqual(cancelled.TransportPolicy, preparedHistorical.TransportPolicy) ||
+		len(cancelled.PreparedDeployments) != 0 {
+		return ManifestPayload{}, ErrInvalid
+	}
+	return cancelled, nil
+}
+
 type MigrationArtifactKind string
 
 const (
@@ -474,20 +595,47 @@ func (envelope MigrationCustodyEnvelope) Validate() error {
 
 func (envelope MigrationCustodyEnvelope) Open(
 	targetPrivateKeyRaw []byte,
-	migration MigrationAuthority,
-	targetOffer MigrationTargetOffer,
+	preparation MigrationPreparation,
+	snapshot MigrationSnapshot,
+	anchor TrustAnchor,
+	nowMilliseconds int64,
 ) ([]byte, error) {
-	if envelope.Validate() != nil || migration.Validate() != nil {
+	if envelope.Validate() != nil {
 		return nil, ErrInvalid
 	}
-	target, err := targetOffer.VerifiedPayload(nil)
+	migration, target, err := preparation.validateForTransfer(anchor, nowMilliseconds)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	prepared, err := preparation.PreparationManifest.Authorize(anchor, nowMilliseconds)
 	if err != nil {
 		return nil, ErrInvalid
 	}
 	offered, err := target.DeploymentOffer.VerifiedPayload(nil)
-	offerDigest, digestErr := targetOffer.ReferenceDigest()
+	offerDigest, digestErr := preparation.TargetOffer.ReferenceDigest()
+	snapshotPayload, snapshotErr := snapshot.validateTransfer(
+		preparation.PreparationManifest,
+		prepared,
+		migration,
+		prepared.ActiveDeployment,
+		offered.Deployment,
+		nowMilliseconds,
+	)
+	envelopeDigest, envelopeDigestErr := envelope.ReferenceDigest()
+	canonicalEnvelope, canonicalEnvelopeErr := canonicalJSON(envelope)
+	var matchingArtifact *MigrationArtifactDescriptor
+	for index := range snapshotPayload.Artifacts {
+		artifact := &snapshotPayload.Artifacts[index]
+		if artifact.ArtifactID == envelope.Metadata.ArtifactID && artifact.Kind == envelope.Metadata.Kind {
+			matchingArtifact = artifact
+			break
+		}
+	}
 	privateKey, keyErr := ecdh.P256().NewPrivateKey(targetPrivateKeyRaw)
-	if err != nil || digestErr != nil || keyErr != nil ||
+	if err != nil || digestErr != nil || snapshotErr != nil || envelopeDigestErr != nil ||
+		canonicalEnvelopeErr != nil || matchingArtifact == nil || keyErr != nil ||
+		matchingArtifact.ByteCount != int64(len(canonicalEnvelope)) ||
+		matchingArtifact.TransferDigest != envelopeDigest ||
 		migration.MigrationID != envelope.Metadata.MigrationID ||
 		migration.TargetDeploymentID != envelope.Metadata.TargetDeploymentID ||
 		migration.TargetDeploymentID != offered.Deployment.DeploymentID ||
@@ -567,6 +715,8 @@ func (payload MigrationSnapshotPayload) Validate(nowMilliseconds *int64) error {
 		return ErrInvalid
 	}
 	seen := make(map[uuid.UUID]struct{}, len(payload.Artifacts))
+	seenKinds := make(map[MigrationArtifactKind]struct{}, len(payload.Artifacts))
+	serviceStateSnapshots := 0
 	for index, artifact := range payload.Artifacts {
 		if artifact.Validate() != nil {
 			return ErrInvalid
@@ -575,9 +725,19 @@ func (payload MigrationSnapshotPayload) Validate(nowMilliseconds *int64) error {
 			return ErrInvalid
 		}
 		seen[artifact.ArtifactID] = struct{}{}
+		if _, exists := seenKinds[artifact.Kind]; exists {
+			return ErrInvalid
+		}
+		seenKinds[artifact.Kind] = struct{}{}
+		if artifact.Kind == ArtifactServiceStateSnapshot {
+			serviceStateSnapshots++
+		}
 		if index > 0 && !uuidLess(payload.Artifacts[index-1].ArtifactID, artifact.ArtifactID) {
 			return ErrInvalid
 		}
+	}
+	if serviceStateSnapshots != 1 {
+		return ErrInvalid
 	}
 	if nowMilliseconds != nil && (*nowMilliseconds < payload.CapturedAtMilliseconds ||
 		*nowMilliseconds >= payload.ExpiresAtMilliseconds) {
@@ -619,6 +779,7 @@ func (snapshot MigrationSnapshot) validateTransfer(
 	manifestDigest, digestErr := authorityManifest.ReferenceDigest()
 	if err != nil || digestErr != nil || payload.MigrationID != migration.MigrationID ||
 		payload.Scope != authorityPayload.Scope || payload.AuthorityManifestDigest != manifestDigest ||
+		payload.CapturedAtMilliseconds < authorityPayload.ValidFromMilliseconds ||
 		payload.ExportingDeploymentID != exporting.DeploymentID ||
 		payload.ImportingDeploymentID != importing.DeploymentID ||
 		snapshot.Signature.SignerID != exporting.DeploymentID ||
@@ -728,7 +889,7 @@ func (evidence MigrationActivationEvidence) Validate(
 	anchor TrustAnchor,
 	nowMilliseconds int64,
 ) (ManifestPayload, error) {
-	migration, target, err := evidence.Preparation.Validate(anchor, nowMilliseconds)
+	migration, target, err := evidence.Preparation.validateForTransfer(anchor, nowMilliseconds)
 	if err != nil {
 		return ManifestPayload{}, ErrInvalid
 	}
@@ -844,8 +1005,12 @@ func canonicalBase64URL(value string) ([]byte, error) {
 }
 
 func canonicalJSON(value any) ([]byte, error) {
+	return canonicalJSONWithLimit(value, 262_144)
+}
+
+func canonicalJSONWithLimit(value any, maximumByteCount int) ([]byte, error) {
 	encoded, err := json.Marshal(value)
-	if err != nil || len(encoded) > 262_144 {
+	if err != nil || maximumByteCount <= 0 || len(encoded) > maximumByteCount {
 		return nil, ErrInvalid
 	}
 	return encoded, nil
@@ -864,7 +1029,7 @@ func signedReferenceDigest(domain string, payload []byte, signature Signature) (
 }
 
 func migrationEvidenceDigest(domain string, evidence any) (string, error) {
-	encoded, err := canonicalJSON(evidence)
+	encoded, err := canonicalJSONWithLimit(evidence, maximumMigrationEvidenceByteCount)
 	if err != nil {
 		return "", ErrInvalid
 	}

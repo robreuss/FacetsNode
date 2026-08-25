@@ -29,6 +29,9 @@ runtime identity (UID 65532). Keep each directory mode 0700 and each file mode
 writable.
 Mounting the directory, rather than the individual file, is required because
 binding activation uses an fsynced temporary file and atomic rename.
+The persistent authority registry currently requires Unix `flock` semantics;
+native Windows hosting fails closed until a `LockFileEx` adapter is implemented.
+Run the service in its Linux container on Windows hosts.
 
 The route-policy file is non-secret, operator-owned, and protected from group
 or world writes. It contains the exact public deployment descriptor and
@@ -114,6 +117,14 @@ success; a changed retry fails closed. It then permits only an identical
 binding or the next consecutive revision. The Facets authority public key
 remains in the client-verified manifest and is not copied into this server-side
 binding file.
+
+The persistent registry normalizes the configured path and obtains an
+exclusive process-lifetime lock before reading it. Only one FacetsNode process
+may own a binding file; another loader fails closed until the owner invokes
+`Close`. Unix builds use an operating-system file lock. The future Windows
+adapter still requires a native interprocess lock; loading a persistent
+registry currently fails unsupported there. The lock file must remain a
+private regular file in the owner-controlled binding directory.
 
 An attended migration enriches the same entry with the exact signed manifest.
 The active `deploymentID` may then name the other deployment only while that

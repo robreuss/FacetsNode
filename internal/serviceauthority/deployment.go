@@ -29,6 +29,7 @@ import (
 const (
 	SchemaVersion                               = 1
 	MaximumProofLifetime                        = 5 * time.Minute
+	maximumBindingFileByteCount                 = 1024 * 1024
 	deploymentProofSignatureDomain              = "Facets server deployment proof v1\x00"
 	HeaderScopeKind                             = "X-Facets-Service-Scope-Kind"
 	HeaderScopeID                               = "X-Facets-Service-Scope-ID"
@@ -46,6 +47,10 @@ const (
 )
 
 var ErrInvalid = errors.New("invalid Facets service authority value")
+
+var errBindingPersistenceAmbiguous = errors.New(
+	"Facets service authority binding persistence is ambiguous",
+)
 
 type ScopeKind string
 
@@ -285,11 +290,13 @@ type CurrentBinding struct {
 // state commitment atomically before the deployment signs the snapshot; this
 // registry then makes the fence fail-closed at the HTTP authority boundary.
 type MigrationWriteFence struct {
-	AuthorityManifestDigest string             `json:"authorityManifestDigest"`
-	AuthorityRevision       uint64             `json:"authorityRevision"`
-	Snapshot                *MigrationSnapshot `json:"snapshot,omitempty"`
-	SnapshotPayload         []byte             `json:"snapshotPayload"`
-	SnapshotReferenceDigest *string            `json:"snapshotReferenceDigest,omitempty"`
+	AuthorityManifestDigest        string             `json:"authorityManifestDigest"`
+	AuthorityRevision              uint64             `json:"authorityRevision"`
+	ExportingPublicSigningKeyX963  string             `json:"exportingPublicSigningKeyX963"`
+	ExportingSigningKeyFingerprint string             `json:"exportingSigningKeyFingerprint"`
+	Snapshot                       *MigrationSnapshot `json:"snapshot,omitempty"`
+	SnapshotPayload                []byte             `json:"snapshotPayload"`
+	SnapshotReferenceDigest        *string            `json:"snapshotReferenceDigest,omitempty"`
 }
 
 type BindingRegistry struct {
@@ -297,6 +304,9 @@ type BindingRegistry struct {
 	bindings             map[Scope]CurrentBinding
 	persistencePath      string
 	expectedDeploymentID uuid.UUID
+	persist              func(string, uuid.UUID, map[Scope]CurrentBinding) error
+	poisoned             bool
+	processLock          *bindingProcessLock
 }
 
 type BindingFile struct {
@@ -325,8 +335,23 @@ func LoadBindingRegistry(
 	if strings.TrimSpace(path) == "" || expectedDeploymentID == uuid.Nil {
 		return nil, ErrInvalid
 	}
+	resolvedPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	path = filepath.Clean(resolvedPath)
+	processLock, err := acquireBindingProcessLock(path)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	loaded := false
+	defer func() {
+		if !loaded {
+			_ = processLock.release()
+		}
+	}()
 	// Bindings are not secret, but only the service owner may modify them.
-	data, err := readProtectedRegularFile(path, 1024*1024, 0o022)
+	data, err := readProtectedRegularFile(path, maximumBindingFileByteCount, 0o022)
 	if err != nil {
 		return nil, fmt.Errorf("read service authority bindings: %w", err)
 	}
@@ -349,6 +374,8 @@ func LoadBindingRegistry(
 		bindings:             make(map[Scope]CurrentBinding),
 		persistencePath:      path,
 		expectedDeploymentID: expectedDeploymentID,
+		persist:              persistBindingFile,
+		processLock:          processLock,
 	}
 	seen := make(map[Scope]struct{}, len(file.Bindings))
 	for _, entry := range file.Bindings {
@@ -370,7 +397,22 @@ func LoadBindingRegistry(
 		}
 		registry.bindings[entry.Scope] = binding
 	}
+	loaded = true
 	return registry, nil
+}
+
+// Close releases this process's exclusive custody of the persistent binding
+// file. A closed registry remains poisoned and cannot authorize or mutate.
+func (registry *BindingRegistry) Close() error {
+	if registry == nil {
+		return nil
+	}
+	registry.mu.Lock()
+	registry.poisoned = true
+	lock := registry.processLock
+	registry.processLock = nil
+	registry.mu.Unlock()
+	return lock.release()
 }
 
 // Activate is intentionally limited to initial activation and is not exposed
@@ -389,6 +431,9 @@ func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) e
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.poisoned {
+		return ErrInvalid
+	}
 	if current, exists := registry.bindings[scope]; exists {
 		if binding.Revision < current.Revision ||
 			(binding.Revision == current.Revision &&
@@ -405,14 +450,8 @@ func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) e
 		next[existingScope] = existingBinding
 	}
 	next[scope] = binding
-	if registry.persistencePath != "" {
-		if err := persistBindingFile(
-			registry.persistencePath,
-			registry.expectedDeploymentID,
-			next,
-		); err != nil {
-			return err
-		}
+	if err := registry.persistBindingsLocked(next); err != nil {
+		return err
 	}
 	registry.bindings = next
 	return nil
@@ -459,6 +498,9 @@ func persistBindingFile(
 		return fmt.Errorf("encode service authority bindings: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	if len(encoded) > maximumBindingFileByteCount {
+		return ErrInvalid
+	}
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, ".facets-service-authority-bindings-*")
 	if err != nil {
@@ -490,11 +532,42 @@ func persistBindingFile(
 	committed = true
 	directoryFile, err := os.Open(directory)
 	if err != nil {
-		return fmt.Errorf("open service authority binding directory: %w", err)
+		return fmt.Errorf(
+			"%w: open service authority binding directory: %v",
+			errBindingPersistenceAmbiguous,
+			err,
+		)
 	}
 	defer directoryFile.Close()
 	if err := directoryFile.Sync(); err != nil {
-		return fmt.Errorf("sync service authority binding directory: %w", err)
+		return fmt.Errorf(
+			"%w: sync service authority binding directory: %v",
+			errBindingPersistenceAmbiguous,
+			err,
+		)
+	}
+	return nil
+}
+
+func (registry *BindingRegistry) persistBindingsLocked(
+	bindings map[Scope]CurrentBinding,
+) error {
+	if registry.persistencePath == "" {
+		return nil
+	}
+	persist := registry.persist
+	if persist == nil {
+		persist = persistBindingFile
+	}
+	if err := persist(
+		registry.persistencePath,
+		registry.expectedDeploymentID,
+		bindings,
+	); err != nil {
+		if errors.Is(err, errBindingPersistenceAmbiguous) {
+			registry.poisoned = true
+		}
+		return err
 	}
 	return nil
 }
@@ -524,6 +597,7 @@ func validateCurrentBinding(
 		return ErrInvalid
 	}
 	requiresEvidence := payload.Transition == TransitionMigrationPreparation ||
+		payload.Transition == TransitionMigrationCancellation ||
 		payload.Transition == TransitionMigrationActivation ||
 		payload.Transition == TransitionMigrationRollback
 	if requiresEvidence != (binding.TransitionEvidenceDigest != nil) ||
@@ -557,8 +631,13 @@ func (fence MigrationWriteFence) validate(
 	expectedDeploymentID uuid.UUID,
 ) error {
 	var payload MigrationSnapshotPayload
+	exportingKey, exportingKeyErr := canonicalP256PublicKey(
+		fence.ExportingPublicSigningKeyX963,
+	)
 	if decodeCanonical(fence.SnapshotPayload, &payload) != nil || payload.Validate(nil) != nil ||
 		!validDigest(fence.AuthorityManifestDigest) ||
+		exportingKeyErr != nil ||
+		hex.EncodeToString(sha256Bytes(exportingKey)) != fence.ExportingSigningKeyFingerprint ||
 		fence.AuthorityRevision == 0 || fence.AuthorityRevision > binding.Revision ||
 		payload.Scope != scope || payload.AuthorityManifestDigest != fence.AuthorityManifestDigest ||
 		(expectedDeploymentID != uuid.Nil && payload.ExportingDeploymentID != expectedDeploymentID) {
@@ -573,6 +652,8 @@ func (fence MigrationWriteFence) validate(
 		digest, digestErr := fence.Snapshot.ReferenceDigest()
 		if err != nil || digestErr != nil || !canonicalEqual(verified, payload) ||
 			!bytes.Equal(fence.Snapshot.Payload, fence.SnapshotPayload) ||
+			fence.Snapshot.Signature.PublicSigningKeyX963 != fence.ExportingPublicSigningKeyX963 ||
+			fence.Snapshot.Signature.SigningKeyFingerprint != fence.ExportingSigningKeyFingerprint ||
 			fence.SnapshotReferenceDigest == nil || digest != *fence.SnapshotReferenceDigest {
 			return ErrInvalid
 		}
@@ -583,20 +664,70 @@ func (fence MigrationWriteFence) validate(
 			manifest.Migration.MigrationID != payload.MigrationID {
 			return ErrInvalid
 		}
+		exporter, found := deploymentNamedByManifest(
+			manifest,
+			payload.ExportingDeploymentID,
+		)
+		if found {
+			if exporter.PublicSigningKeyX963 != fence.ExportingPublicSigningKeyX963 ||
+				exporter.SigningKeyFingerprint != fence.ExportingSigningKeyFingerprint {
+				return ErrInvalid
+			}
+		} else {
+			terminalForwardFence := manifest.Transition == TransitionMigrationRetirement &&
+				payload.ExportingDeploymentID == manifest.Migration.SourceDeploymentID
+			terminalReverseFence := manifest.Transition == TransitionMigrationRollback &&
+				payload.ExportingDeploymentID == manifest.Migration.TargetDeploymentID
+			if !terminalForwardFence && !terminalReverseFence {
+				// Retirement and rollback intentionally omit the now-inactive
+				// exporter descriptor while preserving its already-validated fence.
+				// Every non-terminal binding must still carry the signed descriptor
+				// that pins the exporter's exact signing key.
+				return ErrInvalid
+			}
+		}
 	}
 	return nil
 }
 
+func deploymentNamedByManifest(
+	manifest ManifestPayload,
+	deploymentID uuid.UUID,
+) (DeploymentDescriptor, bool) {
+	if manifest.ActiveDeployment.DeploymentID == deploymentID {
+		return manifest.ActiveDeployment, true
+	}
+	for _, deployment := range manifest.PreparedDeployments {
+		if deployment.DeploymentID == deploymentID {
+			return deployment, true
+		}
+	}
+	return DeploymentDescriptor{}, false
+}
+
 func (registry *BindingRegistry) Authorize(binding RequestBinding) error {
-	if registry == nil {
+	return registry.AuthorizeAt(binding, time.Now())
+}
+
+func (registry *BindingRegistry) AuthorizeAt(binding RequestBinding, now time.Time) error {
+	if registry == nil || binding.Scope.Validate() != nil ||
+		binding.AuthorityRevision == 0 || !validDigest(binding.AuthorityDigest) ||
+		binding.DeploymentID == uuid.Nil || binding.RouteID == uuid.Nil ||
+		!binding.TrafficClass.Valid() {
 		return ErrInvalid
 	}
 	registry.mu.RLock()
+	defer registry.mu.RUnlock()
 	current, exists := registry.bindings[binding.Scope]
-	registry.mu.RUnlock()
-	if !exists || current.Revision != binding.AuthorityRevision ||
+	if registry.poisoned || !exists || current.Revision != binding.AuthorityRevision ||
 		current.DeploymentID != binding.DeploymentID ||
-		subtle.ConstantTimeCompare([]byte(current.Digest), []byte(binding.AuthorityDigest)) != 1 {
+		subtle.ConstantTimeCompare([]byte(current.Digest), []byte(binding.AuthorityDigest)) != 1 ||
+		!bindingManifestAuthorizes(
+			current,
+			now.UnixMilli(),
+			binding.RouteID,
+			binding.TrafficClass,
+		) {
 		return ErrInvalid
 	}
 	return nil
@@ -607,15 +738,32 @@ func (registry *BindingRegistry) Authorize(binding RequestBinding) error {
 // can mutate service state fails closed until evidence-specific activation or
 // rollback clears the local fence.
 func (registry *BindingRegistry) AuthorizeRequest(binding RequestBinding, method string) error {
-	if registry == nil {
+	return registry.AuthorizeRequestAt(binding, method, time.Now())
+}
+
+func (registry *BindingRegistry) AuthorizeRequestAt(
+	binding RequestBinding,
+	method string,
+	now time.Time,
+) error {
+	if registry == nil || binding.Scope.Validate() != nil ||
+		binding.AuthorityRevision == 0 || !validDigest(binding.AuthorityDigest) ||
+		binding.DeploymentID == uuid.Nil || binding.RouteID == uuid.Nil ||
+		!binding.TrafficClass.Valid() {
 		return ErrInvalid
 	}
 	registry.mu.RLock()
 	defer registry.mu.RUnlock()
 	current, exists := registry.bindings[binding.Scope]
-	if !exists || current.Revision != binding.AuthorityRevision ||
+	if registry.poisoned || !exists || current.Revision != binding.AuthorityRevision ||
 		current.DeploymentID != binding.DeploymentID ||
-		subtle.ConstantTimeCompare([]byte(current.Digest), []byte(binding.AuthorityDigest)) != 1 {
+		subtle.ConstantTimeCompare([]byte(current.Digest), []byte(binding.AuthorityDigest)) != 1 ||
+		!bindingManifestAuthorizes(
+			current,
+			now.UnixMilli(),
+			binding.RouteID,
+			binding.TrafficClass,
+		) {
 		return ErrInvalid
 	}
 	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
@@ -625,6 +773,28 @@ func (registry *BindingRegistry) AuthorizeRequest(binding RequestBinding, method
 		return ErrInvalid
 	}
 	return nil
+}
+
+func bindingManifestAuthorizes(
+	binding CurrentBinding,
+	nowMilliseconds int64,
+	routeID uuid.UUID,
+	trafficClass TrafficClass,
+) bool {
+	if binding.Manifest == nil {
+		return true
+	}
+	payload, err := binding.Manifest.VerifiedPayload()
+	if err != nil || payload.Validate(&nowMilliseconds) != nil ||
+		payload.ActiveDeployment.DeploymentID != binding.DeploymentID {
+		return false
+	}
+	for _, authorizedRouteID := range payload.TransportPolicy.routeIDs(trafficClass) {
+		if authorizedRouteID == routeID {
+			return true
+		}
+	}
+	return false
 }
 
 func validDigest(value string) bool {

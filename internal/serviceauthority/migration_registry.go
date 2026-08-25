@@ -2,14 +2,16 @@ package serviceauthority
 
 import (
 	"bytes"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 const (
-	migrationPreparationEvidenceReferenceDomain = "Facets Node migration preparation evidence reference v1\x00"
-	migrationActivationEvidenceReferenceDomain  = "Facets Node migration activation evidence reference v1\x00"
-	migrationRollbackEvidenceReferenceDomain    = "Facets Node migration rollback evidence reference v1\x00"
+	migrationPreparationEvidenceReferenceDomain  = "Facets service migration preparation evidence reference v1\x00"
+	migrationCancellationEvidenceReferenceDomain = "Facets service migration cancellation evidence reference v1\x00"
+	migrationActivationEvidenceReferenceDomain   = "Facets service migration activation evidence reference v1\x00"
+	migrationRollbackEvidenceReferenceDomain     = "Facets service migration rollback evidence reference v1\x00"
 )
 
 // ApplyMigrationPreparation installs an authority-signed preparation only
@@ -80,6 +82,65 @@ func (registry *BindingRegistry) ApplyMigrationPreparation(
 	return registry.installBindingLocked(next.Scope, binding)
 }
 
+// ApplyMigrationCancellation installs the authority-signed terminal successor
+// for one exact preparation. The source atomically clears only its local
+// forward fence; the target records the same cancellation manifest while its
+// binding continues to name the remote source as active and therefore cannot
+// authorize local capability requests.
+func (registry *BindingRegistry) ApplyMigrationCancellation(
+	evidence MigrationCancellationEvidence,
+	anchor TrustAnchor,
+	nowMilliseconds int64,
+) error {
+	if registry == nil || registry.expectedDeploymentID == uuid.Nil {
+		return ErrInvalid
+	}
+	evidenceDigest, err := migrationEvidenceDigest(
+		migrationCancellationEvidenceReferenceDomain,
+		evidence,
+	)
+	if err != nil {
+		return ErrInvalid
+	}
+	if registry.acceptsExactManifestRetry(
+		evidence.CancellationManifest,
+		&evidenceDigest,
+	) {
+		return nil
+	}
+	next, err := evidence.Validate(anchor, nowMilliseconds)
+	if err != nil {
+		return ErrInvalid
+	}
+	current, err := evidence.Preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || current.Migration == nil {
+		return ErrInvalid
+	}
+	return registry.installVerifiedSuccessor(
+		evidence.Preparation.PreparationManifest,
+		current,
+		evidence.CancellationManifest,
+		next,
+		&evidenceDigest,
+		func(binding CurrentBinding) (*MigrationWriteFence, error) {
+			switch registry.expectedDeploymentID {
+			case current.Migration.SourceDeploymentID:
+				// A nil fence means cancellation happened before export. A
+				// non-nil fence is already validated against this exact
+				// preparation binding and can now be atomically cleared.
+				return nil, nil
+			case current.Migration.TargetDeploymentID:
+				if binding.WriteFence != nil {
+					return nil, ErrInvalid
+				}
+				return nil, nil
+			default:
+				return nil, ErrInvalid
+			}
+		},
+	)
+}
+
 // StageMigrationWriteFence persists the exact canonical snapshot payload after
 // the service state store has atomically committed the named write fence and
 // state commitment. It runs before deployment signing and immediately makes
@@ -101,7 +162,7 @@ func (registry *BindingRegistry) StageMigrationWriteFence(
 	}
 	registry.mu.RLock()
 	current, exists := registry.bindings[authority.Scope]
-	exactFence := exists && bindingMatchesManifest(
+	exactFence := !registry.poisoned && exists && bindingMatchesManifest(
 		current, authorityManifest, authority, manifestDigest,
 	) && current.WriteFence != nil &&
 		bytes.Equal(current.WriteFence.SnapshotPayload, encodedPayload)
@@ -125,9 +186,11 @@ func (registry *BindingRegistry) StageMigrationWriteFence(
 		return ErrInvalid
 	}
 	fence := &MigrationWriteFence{
-		AuthorityManifestDigest: manifestDigest,
-		AuthorityRevision:       authority.Revision,
-		SnapshotPayload:         encodedPayload,
+		AuthorityManifestDigest:        manifestDigest,
+		AuthorityRevision:              authority.Revision,
+		ExportingPublicSigningKeyX963:  authority.ActiveDeployment.PublicSigningKeyX963,
+		ExportingSigningKeyFingerprint: authority.ActiveDeployment.SigningKeyFingerprint,
+		SnapshotPayload:                encodedPayload,
 	}
 
 	registry.mu.Lock()
@@ -158,9 +221,25 @@ func (registry *BindingRegistry) ConfirmMigrationWriteFenceSnapshot(
 	scope Scope,
 	snapshot MigrationSnapshot,
 ) error {
+	return registry.ConfirmMigrationWriteFenceSnapshotAt(
+		scope,
+		snapshot,
+		time.Now().UnixMilli(),
+	)
+}
+
+func (registry *BindingRegistry) ConfirmMigrationWriteFenceSnapshotAt(
+	scope Scope,
+	snapshot MigrationSnapshot,
+	nowMilliseconds int64,
+) error {
 	if registry == nil || registry.expectedDeploymentID == uuid.Nil || scope.Validate() != nil {
 		return ErrInvalid
 	}
+	// Verify the canonical signature before consulting persisted state, but defer
+	// the temporal check until after the exact-retry branch. Once this exact
+	// snapshot is durably confirmed, its expiry must not turn a lost-response
+	// retry into a false failure.
 	payload, err := snapshot.VerifiedPayload(nil)
 	digest, digestErr := snapshot.ReferenceDigest()
 	if err != nil || digestErr != nil || payload.Scope != scope ||
@@ -170,14 +249,21 @@ func (registry *BindingRegistry) ConfirmMigrationWriteFenceSnapshot(
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	current, exists := registry.bindings[scope]
-	if !exists || current.WriteFence == nil ||
-		!bytes.Equal(current.WriteFence.SnapshotPayload, snapshot.Payload) {
+	if registry.poisoned || !exists || current.WriteFence == nil ||
+		!bytes.Equal(current.WriteFence.SnapshotPayload, snapshot.Payload) ||
+		snapshot.Signature.PublicSigningKeyX963 !=
+			current.WriteFence.ExportingPublicSigningKeyX963 ||
+		snapshot.Signature.SigningKeyFingerprint !=
+			current.WriteFence.ExportingSigningKeyFingerprint {
 		return ErrInvalid
 	}
 	if current.WriteFence.Snapshot != nil {
 		if current.WriteFence.matchesSnapshot(snapshot) {
 			return nil
 		}
+		return ErrInvalid
+	}
+	if payload.Validate(&nowMilliseconds) != nil {
 		return ErrInvalid
 	}
 	nextFence := *current.WriteFence
@@ -198,13 +284,32 @@ func (registry *BindingRegistry) SignStagedMigrationSnapshot(
 	scope Scope,
 	signer *DeploymentSigner,
 ) (MigrationSnapshot, error) {
+	return registry.SignStagedMigrationSnapshotAt(
+		scope,
+		signer,
+		time.Now().UnixMilli(),
+	)
+}
+
+func (registry *BindingRegistry) SignStagedMigrationSnapshotAt(
+	scope Scope,
+	signer *DeploymentSigner,
+	nowMilliseconds int64,
+) (MigrationSnapshot, error) {
 	if registry == nil || signer == nil || registry.expectedDeploymentID == uuid.Nil ||
 		signer.DeploymentID() != registry.expectedDeploymentID || scope.Validate() != nil {
 		return MigrationSnapshot{}, ErrInvalid
 	}
 	registry.mu.RLock()
 	binding, exists := registry.bindings[scope]
-	if !exists || binding.WriteFence == nil || binding.WriteFence.Snapshot != nil {
+	if registry.poisoned || !exists || binding.WriteFence == nil ||
+		binding.WriteFence.Snapshot != nil {
+		registry.mu.RUnlock()
+		return MigrationSnapshot{}, ErrInvalid
+	}
+	if signer.PublicSigningKeyX963() != binding.WriteFence.ExportingPublicSigningKeyX963 ||
+		signer.SigningKeyFingerprint() !=
+			binding.WriteFence.ExportingSigningKeyFingerprint {
 		registry.mu.RUnlock()
 		return MigrationSnapshot{}, ErrInvalid
 	}
@@ -212,7 +317,7 @@ func (registry *BindingRegistry) SignStagedMigrationSnapshot(
 	registry.mu.RUnlock()
 
 	var decoded MigrationSnapshotPayload
-	if decodeCanonical(payload, &decoded) != nil || decoded.Validate(nil) != nil ||
+	if decodeCanonical(payload, &decoded) != nil || decoded.Validate(&nowMilliseconds) != nil ||
 		decoded.ExportingDeploymentID != signer.DeploymentID() {
 		return MigrationSnapshot{}, ErrInvalid
 	}
@@ -221,7 +326,11 @@ func (registry *BindingRegistry) SignStagedMigrationSnapshot(
 		return MigrationSnapshot{}, ErrInvalid
 	}
 	snapshot := MigrationSnapshot{Payload: payload, Signature: signature}
-	if err := registry.ConfirmMigrationWriteFenceSnapshot(scope, snapshot); err != nil {
+	if err := registry.ConfirmMigrationWriteFenceSnapshotAt(
+		scope,
+		snapshot,
+		nowMilliseconds,
+	); err != nil {
 		return MigrationSnapshot{}, ErrInvalid
 	}
 	return snapshot, nil
@@ -379,15 +488,30 @@ func (registry *BindingRegistry) ApplyServiceAuthoritySuccessor(
 	if _, err := successor.ValidateSuccessor(currentManifest); err != nil {
 		return ErrInvalid
 	}
+	fenceForNext := func(binding CurrentBinding) (*MigrationWriteFence, error) {
+		if next.Transition != TransitionMigrationRetirement || current.Migration == nil {
+			return binding.WriteFence, nil
+		}
+		switch registry.expectedDeploymentID {
+		case current.Migration.SourceDeploymentID:
+			// The retired source remains durably fenced even after the target is
+			// final. It cannot install a later manifest that no longer names it.
+			return binding.WriteFence, nil
+		case current.Migration.TargetDeploymentID:
+			// Once the rollback deadline has passed, retirement is the terminal
+			// evidence that makes an abandoned reverse fence safe to clear.
+			return nil, nil
+		default:
+			return nil, ErrInvalid
+		}
+	}
 	return registry.installVerifiedSuccessor(
 		currentManifest,
 		current,
 		successor,
 		next,
 		nil,
-		func(binding CurrentBinding) (*MigrationWriteFence, error) {
-			return binding.WriteFence, nil
-		},
+		fenceForNext,
 	)
 }
 
@@ -409,6 +533,9 @@ func (registry *BindingRegistry) installVerifiedSuccessor(
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.poisoned {
+		return ErrInvalid
+	}
 	current, exists := registry.bindings[currentPayload.Scope]
 	if exists && bindingMatchesManifest(current, nextManifest, nextPayload, nextDigest) {
 		expectedFence, fenceErr := fenceForNext(current)
@@ -464,25 +591,23 @@ func (registry *BindingRegistry) acceptsExactManifestRetry(
 	}
 	registry.mu.RLock()
 	binding, exists := registry.bindings[payload.Scope]
+	poisoned := registry.poisoned
 	registry.mu.RUnlock()
-	return exists && bindingMatchesManifest(binding, manifest, payload, digest) &&
+	return !poisoned && exists && bindingMatchesManifest(binding, manifest, payload, digest) &&
 		canonicalEqual(binding.TransitionEvidenceDigest, evidenceDigest)
 }
 
 func (registry *BindingRegistry) installBindingLocked(scope Scope, binding CurrentBinding) error {
+	if registry.poisoned {
+		return ErrInvalid
+	}
 	nextBindings := make(map[Scope]CurrentBinding, len(registry.bindings)+1)
 	for existingScope, existing := range registry.bindings {
 		nextBindings[existingScope] = existing
 	}
 	nextBindings[scope] = binding
-	if registry.persistencePath != "" {
-		if err := persistBindingFile(
-			registry.persistencePath,
-			registry.expectedDeploymentID,
-			nextBindings,
-		); err != nil {
-			return err
-		}
+	if err := registry.persistBindingsLocked(nextBindings); err != nil {
+		return err
 	}
 	registry.bindings = nextBindings
 	return nil

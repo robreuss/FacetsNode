@@ -55,7 +55,7 @@ func TestBulkTransferGrantRequiresExactCurrentAuthorityAndRoute(t *testing.T) {
 	header.Set(HeaderBulkDirection, string(payload.Direction))
 	header.Set(HeaderBulkTransferGrant, testSignedBulkGrantHeader(t, payload, signer))
 
-	if accepted, err := registry.AuthorizeBulkTransfer(binding, header, time.UnixMilli(1_500), signer); err != nil || accepted != payload {
+	if accepted, err := registry.AuthorizeBulkTransfer(binding, http.MethodPost, header, time.UnixMilli(1_500), signer); err != nil || accepted != payload {
 		t.Fatalf("current exact grant rejected: payload=%+v err=%v", accepted, err)
 	}
 
@@ -122,7 +122,7 @@ func TestBulkTransferGrantRequiresExactCurrentAuthorityAndRoute(t *testing.T) {
 	}
 	for _, test := range rejections {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := registry.AuthorizeBulkTransfer(test.binding, test.header, test.now, signer); err == nil {
+			if _, err := registry.AuthorizeBulkTransfer(test.binding, http.MethodPost, test.header, test.now, signer); err == nil {
 				t.Fatal("invalid bulk transfer grant accepted")
 			}
 		})

@@ -179,6 +179,7 @@ func TestDeviceSyncAccountClaimActivatesClientSignedInitialAuthorityBinding(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = bindings.Close() })
 	server.SetServiceAuthorityDeployment(
 		signer,
 		bindings,
