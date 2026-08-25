@@ -34,13 +34,16 @@ const (
 	MaximumMigrationCustodyPlaintext    = 64 * 1024
 	maximumMigrationEvidenceByteCount   = 8 * 1024 * 1024
 
-	migrationTargetOfferSignatureDomain     = "Facets service migration target offer v1\x00"
-	migrationTargetOfferReferenceDomain     = "Facets service migration target offer reference v1\x00"
-	migrationCustodyEnvelopeReferenceDomain = "Facets service migration custody envelope reference v1\x00"
-	migrationCustodyKeyDomain               = "Facets service migration custody key v1\x00"
-	migrationSnapshotSignatureDomain        = "Facets service migration snapshot v1\x00"
-	migrationSnapshotReferenceDomain        = "Facets service migration snapshot reference v1\x00"
-	migrationReadinessSignatureDomain       = "Facets service migration readiness v1\x00"
+	migrationTargetOfferSignatureDomain             = "Facets service migration target offer v1\x00"
+	migrationTargetOfferReferenceDomain             = "Facets service migration target offer reference v1\x00"
+	migrationCustodyEnvelopeReferenceDomain         = "Facets service migration custody envelope reference v1\x00"
+	migrationCustodyKeyDomain                       = "Facets service migration custody key v1\x00"
+	migrationSnapshotSignatureDomain                = "Facets service migration snapshot v1\x00"
+	migrationSnapshotReferenceDomain                = "Facets service migration snapshot reference v1\x00"
+	migrationReadinessSignatureDomain               = "Facets service migration readiness v1\x00"
+	migrationActivationPrerequisitesReferenceDomain = "Facets service migration activation prerequisites reference v1\x00"
+	migrationRollbackPrerequisitesReferenceDomain   = "Facets service migration rollback prerequisites reference v1\x00"
+	migrationRetirementEvidenceReferenceDomain      = "Facets service migration retirement evidence reference v1\x00"
 )
 
 type MigrationAuthority struct {
@@ -117,6 +120,16 @@ func (payload ManifestPayload) Validate(nowMilliseconds *int64) error {
 		payload.Transition == TransitionMigrationRetirement ||
 		payload.Transition == TransitionMigrationRollback
 	if migrationTransition != (payload.Migration != nil) {
+		return ErrInvalid
+	}
+	prerequisiteTransition := payload.Transition == TransitionMigrationActivation ||
+		payload.Transition == TransitionMigrationRollback
+	if prerequisiteTransition {
+		if payload.MigrationPrerequisiteEvidenceDigest == nil ||
+			!validDigest(*payload.MigrationPrerequisiteEvidenceDigest) {
+			return ErrInvalid
+		}
+	} else if payload.MigrationPrerequisiteEvidenceDigest != nil {
 		return ErrInvalid
 	}
 	if payload.Migration == nil {
@@ -519,6 +532,23 @@ func (evidence MigrationCancellationEvidence) Validate(
 	return cancelled, nil
 }
 
+// ValidateHistoricalCatchUp reconstructs cancellation at its signed effective
+// time while independently requiring the terminal manifest to remain current
+// when it is received.
+func (evidence MigrationCancellationEvidence) ValidateHistoricalCatchUp(
+	anchor TrustAnchor,
+	receivedAtMilliseconds int64,
+) (ManifestPayload, error) {
+	terminal, err := evidence.CancellationManifest.VerifiedPayload()
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	if _, err := evidence.Validate(anchor, terminal.ValidFromMilliseconds); err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	return evidence.CancellationManifest.Authorize(anchor, receivedAtMilliseconds)
+}
+
 type MigrationArtifactKind string
 
 const (
@@ -878,11 +908,49 @@ func (readiness MigrationReadiness) validateTransfer(
 	return payload, nil
 }
 
+// MigrationActivationPrerequisites is the exact deployment-signed operational
+// evidence committed by an authority-signed activation manifest. The terminal
+// manifest is deliberately excluded to avoid a digest cycle.
+type MigrationActivationPrerequisites struct {
+	Preparation MigrationPreparation `json:"preparation"`
+	Readiness   MigrationReadiness   `json:"readiness"`
+	Snapshot    MigrationSnapshot    `json:"snapshot"`
+}
+
+func (prerequisites *MigrationActivationPrerequisites) UnmarshalJSON(input []byte) error {
+	type wire MigrationActivationPrerequisites
+	var decoded wire
+	if unmarshalStrictMigrationRecord(
+		input,
+		&decoded,
+		[]string{"preparation", "readiness", "snapshot"},
+	) != nil {
+		return ErrInvalid
+	}
+	*prerequisites = MigrationActivationPrerequisites(decoded)
+	return nil
+}
+
+func (prerequisites MigrationActivationPrerequisites) ReferenceDigest() (string, error) {
+	return migrationEvidenceDigest(
+		migrationActivationPrerequisitesReferenceDomain,
+		prerequisites,
+	)
+}
+
 type MigrationActivationEvidence struct {
 	ActivationManifest Manifest             `json:"activationManifest"`
 	Preparation        MigrationPreparation `json:"preparation"`
 	Readiness          MigrationReadiness   `json:"readiness"`
 	Snapshot           MigrationSnapshot    `json:"snapshot"`
+}
+
+func (evidence MigrationActivationEvidence) PrerequisitesReferenceDigest() (string, error) {
+	return MigrationActivationPrerequisites{
+		Preparation: evidence.Preparation,
+		Readiness:   evidence.Readiness,
+		Snapshot:    evidence.Snapshot,
+	}.ReferenceDigest()
 }
 
 func (evidence MigrationActivationEvidence) Validate(
@@ -918,15 +986,68 @@ func (evidence MigrationActivationEvidence) Validate(
 	if err != nil {
 		return ManifestPayload{}, ErrInvalid
 	}
+	prerequisiteDigest, err := evidence.PrerequisitesReferenceDigest()
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
 	if _, err := evidence.ActivationManifest.ValidateSuccessor(evidence.Preparation.PreparationManifest); err != nil ||
 		activated.Transition != TransitionMigrationActivation ||
 		!migrationEqual(activated.Migration, &migration) ||
 		!deploymentEqual(activated.ActiveDeployment, targetOffer.Deployment) ||
 		!transportPolicyEqual(activated.TransportPolicy, targetOffer.TransportPolicy) ||
+		activated.MigrationPrerequisiteEvidenceDigest == nil ||
+		*activated.MigrationPrerequisiteEvidenceDigest != prerequisiteDigest ||
 		activated.IssuedAtMilliseconds < ready.ReadyAtMilliseconds {
 		return ManifestPayload{}, ErrInvalid
 	}
 	return activated, nil
+}
+
+// ValidateHistoricalCatchUp validates all operational evidence at the signed
+// activation effective time, then separately requires the activation manifest
+// to remain live when received.
+func (evidence MigrationActivationEvidence) ValidateHistoricalCatchUp(
+	anchor TrustAnchor,
+	receivedAtMilliseconds int64,
+) (ManifestPayload, error) {
+	terminal, err := evidence.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	if _, err := evidence.Validate(anchor, terminal.ValidFromMilliseconds); err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	return evidence.ActivationManifest.Authorize(anchor, receivedAtMilliseconds)
+}
+
+// MigrationRollbackPrerequisites is the exact reverse-transfer evidence
+// committed by an authority-signed rollback manifest. The rollback manifest is
+// deliberately excluded to avoid a digest cycle.
+type MigrationRollbackPrerequisites struct {
+	ActivationEvidence MigrationActivationEvidence `json:"activationEvidence"`
+	SourceReadiness    MigrationReadiness          `json:"sourceReadiness"`
+	TargetSnapshot     MigrationSnapshot           `json:"targetSnapshot"`
+}
+
+func (prerequisites *MigrationRollbackPrerequisites) UnmarshalJSON(input []byte) error {
+	type wire MigrationRollbackPrerequisites
+	var decoded wire
+	if unmarshalStrictMigrationRecord(
+		input,
+		&decoded,
+		[]string{"activationEvidence", "sourceReadiness", "targetSnapshot"},
+	) != nil {
+		return ErrInvalid
+	}
+	*prerequisites = MigrationRollbackPrerequisites(decoded)
+	return nil
+}
+
+func (prerequisites MigrationRollbackPrerequisites) ReferenceDigest() (string, error) {
+	return migrationEvidenceDigest(
+		migrationRollbackPrerequisitesReferenceDomain,
+		prerequisites,
+	)
 }
 
 type MigrationRollbackEvidence struct {
@@ -934,6 +1055,14 @@ type MigrationRollbackEvidence struct {
 	RollbackManifest   Manifest                    `json:"rollbackManifest"`
 	SourceReadiness    MigrationReadiness          `json:"sourceReadiness"`
 	TargetSnapshot     MigrationSnapshot           `json:"targetSnapshot"`
+}
+
+func (evidence MigrationRollbackEvidence) PrerequisitesReferenceDigest() (string, error) {
+	return MigrationRollbackPrerequisites{
+		ActivationEvidence: evidence.ActivationEvidence,
+		SourceReadiness:    evidence.SourceReadiness,
+		TargetSnapshot:     evidence.TargetSnapshot,
+	}.ReferenceDigest()
 }
 
 func (evidence MigrationRollbackEvidence) Validate(
@@ -971,6 +1100,10 @@ func (evidence MigrationRollbackEvidence) Validate(
 	if err != nil {
 		return ManifestPayload{}, ErrInvalid
 	}
+	prerequisiteDigest, err := evidence.PrerequisitesReferenceDigest()
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
 	if _, err := evidence.RollbackManifest.ValidateSuccessor(evidence.ActivationEvidence.ActivationManifest); err != nil {
 		return ManifestPayload{}, ErrInvalid
 	}
@@ -979,10 +1112,76 @@ func (evidence MigrationRollbackEvidence) Validate(
 		!migrationEqual(rolledBack.Migration, current.Migration) ||
 		!deploymentEqual(rolledBack.ActiveDeployment, source) ||
 		!transportPolicyEqual(rolledBack.TransportPolicy, preparationPayload.TransportPolicy) ||
+		rolledBack.MigrationPrerequisiteEvidenceDigest == nil ||
+		*rolledBack.MigrationPrerequisiteEvidenceDigest != prerequisiteDigest ||
 		rolledBack.IssuedAtMilliseconds < ready.ReadyAtMilliseconds {
 		return ManifestPayload{}, ErrInvalid
 	}
 	return rolledBack, nil
+}
+
+// ValidateHistoricalCatchUp validates reverse-transfer evidence at the signed
+// rollback effective time and still enforces terminal freshness at receipt.
+// The rollback manifest's strict valid-until boundary is never extended.
+func (evidence MigrationRollbackEvidence) ValidateHistoricalCatchUp(
+	anchor TrustAnchor,
+	receivedAtMilliseconds int64,
+) (ManifestPayload, error) {
+	terminal, err := evidence.RollbackManifest.VerifiedPayload()
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	if _, err := evidence.Validate(anchor, terminal.ValidFromMilliseconds); err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	return evidence.RollbackManifest.Authorize(anchor, receivedAtMilliseconds)
+}
+
+// MigrationRetirementEvidence binds the complete activation evidence to its
+// exact immediate retirement successor for an offline follower.
+type MigrationRetirementEvidence struct {
+	ActivationEvidence MigrationActivationEvidence `json:"activationEvidence"`
+	RetirementManifest Manifest                    `json:"retirementManifest"`
+}
+
+func (evidence MigrationRetirementEvidence) ValidateHistoricalCatchUp(
+	anchor TrustAnchor,
+	receivedAtMilliseconds int64,
+) (ManifestPayload, error) {
+	activation, err := evidence.ActivationEvidence.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	retirement, err := evidence.RetirementManifest.VerifiedPayload()
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	if _, err := evidence.ActivationEvidence.Validate(
+		anchor,
+		activation.ValidFromMilliseconds,
+	); err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	retiredAtEffectiveTime, err := evidence.RetirementManifest.Authorize(
+		anchor,
+		retirement.ValidFromMilliseconds,
+	)
+	if err != nil {
+		return ManifestPayload{}, ErrInvalid
+	}
+	if _, err := evidence.RetirementManifest.ValidateSuccessor(
+		evidence.ActivationEvidence.ActivationManifest,
+	); err != nil || retiredAtEffectiveTime.Transition != TransitionMigrationRetirement {
+		return ManifestPayload{}, ErrInvalid
+	}
+	return evidence.RetirementManifest.Authorize(anchor, receivedAtMilliseconds)
+}
+
+func (evidence MigrationRetirementEvidence) ReferenceDigest() (string, error) {
+	return migrationEvidenceDigest(
+		migrationRetirementEvidenceReferenceDomain,
+		evidence,
+	)
 }
 
 func canonicalP256AgreementPublicKey(value string) ([]byte, error) {
@@ -1051,6 +1250,57 @@ func canonicalEqual(left, right any) bool {
 	leftJSON, leftErr := canonicalJSON(left)
 	rightJSON, rightErr := canonicalJSON(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
+func unmarshalStrictMigrationRecord(input []byte, target any, requiredKeys []string) error {
+	if len(input) == 0 || len(input) > maximumMigrationEvidenceByteCount {
+		return ErrInvalid
+	}
+	fieldsDecoder := json.NewDecoder(bytes.NewReader(input))
+	opening, err := fieldsDecoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return ErrInvalid
+	}
+	required := make(map[string]struct{}, len(requiredKeys))
+	for _, key := range requiredKeys {
+		required[key] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(requiredKeys))
+	for fieldsDecoder.More() {
+		keyToken, err := fieldsDecoder.Token()
+		key, isString := keyToken.(string)
+		if err != nil || !isString {
+			return ErrInvalid
+		}
+		if _, allowed := required[key]; !allowed {
+			return ErrInvalid
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return ErrInvalid
+		}
+		var value json.RawMessage
+		if err := fieldsDecoder.Decode(&value); err != nil ||
+			bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return ErrInvalid
+		}
+		seen[key] = struct{}{}
+	}
+	closing, err := fieldsDecoder.Token()
+	if err != nil || closing != json.Delim('}') || len(seen) != len(required) {
+		return ErrInvalid
+	}
+	if err := fieldsDecoder.Decode(&struct{}{}); err != io.EOF {
+		return ErrInvalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(input))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return ErrInvalid
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func decodeCanonical(input []byte, target any) error {

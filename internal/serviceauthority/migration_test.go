@@ -14,12 +14,13 @@ import (
 	"github.com/google/uuid"
 )
 
-//go:embed testdata/service-migration-portable-v1.json
+//go:embed testdata/service-migration-portable-v2.json
 var serviceMigrationPortableFixture []byte
 
 type migrationPortableFixture struct {
-	ActivationManifestDigest                 string                        `json:"activationManifestDigest"`
 	ActivationEvidenceDigest                 string                        `json:"activationEvidenceDigest"`
+	ActivationManifestDigest                 string                        `json:"activationManifestDigest"`
+	ActivationPrerequisitesDigest            string                        `json:"activationPrerequisitesDigest"`
 	AuthorityAnchor                          TrustAnchor                   `json:"authorityAnchor"`
 	CancellationEvidence                     MigrationCancellationEvidence `json:"cancellationEvidence"`
 	CancellationEvidenceDigest               string                        `json:"cancellationEvidenceDigest"`
@@ -28,9 +29,13 @@ type migrationPortableFixture struct {
 	CustodyPlaintext                         string                        `json:"custodyPlaintext"`
 	PreparationEvidenceDigest                string                        `json:"preparationEvidenceDigest"`
 	PreparationManifestDigest                string                        `json:"preparationManifestDigest"`
+	RetirementEvidence                       MigrationRetirementEvidence   `json:"retirementEvidence"`
+	RetirementEvidenceDigest                 string                        `json:"retirementEvidenceDigest"`
+	RetirementManifestDigest                 string                        `json:"retirementManifestDigest"`
 	RollbackEvidence                         MigrationRollbackEvidence     `json:"rollbackEvidence"`
 	RollbackEvidenceDigest                   string                        `json:"rollbackEvidenceDigest"`
 	RollbackManifestDigest                   string                        `json:"rollbackManifestDigest"`
+	RollbackPrerequisitesDigest              string                        `json:"rollbackPrerequisitesDigest"`
 	TargetCustodyPrivateKeyRawRepresentation string                        `json:"targetCustodyPrivateKeyRawRepresentation"`
 	TargetOfferDigest                        string                        `json:"targetOfferDigest"`
 	Version                                  int                           `json:"version"`
@@ -38,7 +43,7 @@ type migrationPortableFixture struct {
 
 func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
 	fixture := decodeMigrationPortableFixture(t)
-	if fixture.Version != SchemaVersion || fixture.AuthorityAnchor.Validate() != nil {
+	if fixture.Version != 2 || fixture.AuthorityAnchor.Validate() != nil {
 		t.Fatal("invalid portable fixture header or authority anchor")
 	}
 
@@ -78,6 +83,11 @@ func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
 	if err != nil || activationEvidenceDigest != fixture.ActivationEvidenceDigest {
 		t.Fatalf("activation evidence digest=%s err=%v", activationEvidenceDigest, err)
 	}
+	activationPrerequisitesDigest, err := fixture.RollbackEvidence.ActivationEvidence.
+		PrerequisitesReferenceDigest()
+	if err != nil || activationPrerequisitesDigest != fixture.ActivationPrerequisitesDigest {
+		t.Fatalf("activation prerequisites digest=%s err=%v", activationPrerequisitesDigest, err)
+	}
 
 	rolledBack, err := fixture.RollbackEvidence.Validate(fixture.AuthorityAnchor, 4_000)
 	if err != nil || rolledBack.Transition != TransitionMigrationRollback {
@@ -93,6 +103,27 @@ func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
 	)
 	if err != nil || rollbackEvidenceDigest != fixture.RollbackEvidenceDigest {
 		t.Fatalf("rollback evidence digest=%s err=%v", rollbackEvidenceDigest, err)
+	}
+	rollbackPrerequisitesDigest, err := fixture.RollbackEvidence.PrerequisitesReferenceDigest()
+	if err != nil || rollbackPrerequisitesDigest != fixture.RollbackPrerequisitesDigest {
+		t.Fatalf("rollback prerequisites digest=%s err=%v", rollbackPrerequisitesDigest, err)
+	}
+
+	retired, err := fixture.RetirementEvidence.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		20_001,
+	)
+	if err != nil || retired.Transition != TransitionMigrationRetirement {
+		t.Fatalf("Swift retirement evidence rejected: payload=%+v err=%v", retired, err)
+	}
+	retirementManifestDigest, err := fixture.RetirementEvidence.
+		RetirementManifest.ReferenceDigest()
+	if err != nil || retirementManifestDigest != fixture.RetirementManifestDigest {
+		t.Fatalf("retirement manifest digest=%s err=%v", retirementManifestDigest, err)
+	}
+	retirementEvidenceDigest, err := fixture.RetirementEvidence.ReferenceDigest()
+	if err != nil || retirementEvidenceDigest != fixture.RetirementEvidenceDigest {
+		t.Fatalf("retirement evidence digest=%s err=%v", retirementEvidenceDigest, err)
 	}
 
 	cancelled, err := fixture.CancellationEvidence.Validate(
@@ -141,8 +172,29 @@ func TestMigrationFixtureRejectsTamperingExpiryAndBareSuccessors(t *testing.T) {
 	if _, err := activation.Validate(fixture.AuthorityAnchor, 5_000); err == nil {
 		t.Fatal("expired activation readiness accepted")
 	}
+	if payload, err := activation.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		20_001,
+	); err != nil || payload.Transition != TransitionMigrationActivation {
+		t.Fatalf("historical activation catch-up rejected: payload=%+v err=%v", payload, err)
+	}
+	if _, err := fixture.RollbackEvidence.Validate(fixture.AuthorityAnchor, 6_000); err == nil {
+		t.Fatal("ordinary rollback accepted expired reverse-transfer evidence")
+	}
+	if payload, err := fixture.RollbackEvidence.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		6_000,
+	); err != nil || payload.Transition != TransitionMigrationRollback {
+		t.Fatalf("historical rollback catch-up rejected: payload=%+v err=%v", payload, err)
+	}
 	if _, err := fixture.RollbackEvidence.Validate(fixture.AuthorityAnchor, 10_000); err == nil {
 		t.Fatal("rollback accepted at its strict deadline")
+	}
+	if _, err := fixture.RollbackEvidence.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		10_000,
+	); err == nil {
+		t.Fatal("historical rollback catch-up extended the strict deadline")
 	}
 
 	tampered := fixture.CustodyEnvelope
@@ -183,6 +235,269 @@ func TestMigrationFixtureRejectsTamperingExpiryAndBareSuccessors(t *testing.T) {
 	}
 }
 
+func TestMigrationHistoricalCatchUpRejectsSignedPrerequisiteSubstitution(t *testing.T) {
+	fixture := decodeMigrationPortableFixture(t)
+	activation := fixture.RollbackEvidence.ActivationEvidence
+	readinessPayload, err := activation.Readiness.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readinessPayload.ExpiresAtMilliseconds = 6_000
+	targetOffer, err := activation.Preparation.TargetOffer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDeployment, err := targetOffer.DeploymentOffer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternateReadiness, err := fixtureDeploymentSigner(t, targetDeployment.Deployment).
+		SignMigrationReadiness(readinessPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	substitutedActivation := activation
+	substitutedActivation.Readiness = alternateReadiness
+	if _, err := substitutedActivation.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		6_000,
+	); err == nil {
+		t.Fatal("authority-uncommitted signed activation readiness accepted")
+	}
+
+	rollback := fixture.RollbackEvidence
+	sourceReadinessPayload, err := rollback.SourceReadiness.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceReadinessPayload.ExpiresAtMilliseconds = 6_000
+	prepared, err := activation.Preparation.PreparationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternateSourceReadiness, err := fixtureDeploymentSigner(t, prepared.ActiveDeployment).
+		SignMigrationReadiness(sourceReadinessPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	substitutedRollback := rollback
+	substitutedRollback.SourceReadiness = alternateSourceReadiness
+	if _, err := substitutedRollback.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		6_000,
+	); err == nil {
+		t.Fatal("authority-uncommitted signed rollback readiness accepted")
+	}
+}
+
+func TestHistoricalRollbackUsesActivationPrerequisitesAtTheirOwnEffectiveTime(t *testing.T) {
+	fixture := decodeMigrationPortableFixture(t)
+	activation := fixture.RollbackEvidence.ActivationEvidence
+	targetOffer, err := activation.Preparation.TargetOffer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDeployment, err := targetOffer.DeploymentOffer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationReadinessPayload, err := activation.Readiness.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationReadinessPayload.ExpiresAtMilliseconds = 3_500
+	activation.Readiness, err = fixtureDeploymentSigner(t, targetDeployment.Deployment).
+		SignMigrationReadiness(activationReadinessPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationPayload, err := activation.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationPrerequisitesDigest, err := activation.PrerequisitesReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationPayload.MigrationPrerequisiteEvidenceDigest = &activationPrerequisitesDigest
+	activation.ActivationManifest = signedAuthorityManifest(
+		t,
+		activationPayload,
+		fixtureAuthorityPrivateKey(t, fixture.AuthorityAnchor),
+		fixture.AuthorityAnchor,
+	)
+	if _, err := activation.Validate(
+		fixture.AuthorityAnchor,
+		activationPayload.ValidFromMilliseconds,
+	); err != nil {
+		t.Fatalf("activation rejected at its own effective time: %v", err)
+	}
+	if _, err := activation.Validate(fixture.AuthorityAnchor, 3_900); err == nil {
+		t.Fatal("activation prerequisite unexpectedly remained live at rollback")
+	}
+
+	activationDigest, err := activation.ActivationManifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSnapshotPayload, err := fixture.RollbackEvidence.TargetSnapshot.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSnapshotPayload.AuthorityManifestDigest = activationDigest
+	targetSnapshotEncoded, err := canonicalJSON(targetSnapshotPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSigner := fixtureDeploymentSigner(t, activationPayload.ActiveDeployment)
+	targetSnapshotSignature, err := targetSigner.signRecord(
+		migrationSnapshotSignatureDomain,
+		targetSnapshotEncoded,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSnapshot := MigrationSnapshot{
+		Payload:   targetSnapshotEncoded,
+		Signature: targetSnapshotSignature,
+	}
+	targetSnapshotDigest, err := targetSnapshot.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceReadinessPayload, err := fixture.RollbackEvidence.SourceReadiness.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceReadinessPayload.AuthorityManifestDigest = activationDigest
+	sourceReadinessPayload.SnapshotReferenceDigest = targetSnapshotDigest
+	sourceReadiness, err := fixtureDeploymentSigner(t, activationPayload.PreparedDeployments[0]).
+		SignMigrationReadiness(sourceReadinessPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rollback := MigrationRollbackEvidence{
+		ActivationEvidence: activation,
+		RollbackManifest:   fixture.RollbackEvidence.RollbackManifest,
+		SourceReadiness:    sourceReadiness,
+		TargetSnapshot:     targetSnapshot,
+	}
+	rollbackPayload, err := rollback.RollbackManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackPayload.PredecessorManifestDigest = &activationDigest
+	rollbackPrerequisitesDigest, err := rollback.PrerequisitesReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackPayload.MigrationPrerequisiteEvidenceDigest = &rollbackPrerequisitesDigest
+	rollback.RollbackManifest = signedAuthorityManifest(
+		t,
+		rollbackPayload,
+		fixtureAuthorityPrivateKey(t, fixture.AuthorityAnchor),
+		fixture.AuthorityAnchor,
+	)
+	if payload, err := rollback.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		6_000,
+	); err != nil || payload.Transition != TransitionMigrationRollback {
+		t.Fatalf("rollback rejected activation valid at its own effective time: payload=%+v err=%v", payload, err)
+	}
+}
+
+func TestMigrationPrerequisiteRecordsRejectUnknownMissingNullAndDuplicateFields(t *testing.T) {
+	fixture := decodeMigrationPortableFixture(t)
+	activation := fixture.RollbackEvidence.ActivationEvidence
+	records := []struct {
+		name   string
+		value  any
+		decode func([]byte) error
+	}{
+		{
+			name: "activation",
+			value: MigrationActivationPrerequisites{
+				Preparation: activation.Preparation,
+				Readiness:   activation.Readiness,
+				Snapshot:    activation.Snapshot,
+			},
+			decode: func(input []byte) error {
+				var decoded MigrationActivationPrerequisites
+				return json.Unmarshal(input, &decoded)
+			},
+		},
+		{
+			name: "rollback",
+			value: MigrationRollbackPrerequisites{
+				ActivationEvidence: activation,
+				SourceReadiness:    fixture.RollbackEvidence.SourceReadiness,
+				TargetSnapshot:     fixture.RollbackEvidence.TargetSnapshot,
+			},
+			decode: func(input []byte) error {
+				var decoded MigrationRollbackPrerequisites
+				return json.Unmarshal(input, &decoded)
+			},
+		},
+	}
+	for _, record := range records {
+		t.Run(record.name, func(t *testing.T) {
+			encoded, err := json.Marshal(record.value)
+			if err != nil || len(encoded) < 2 || encoded[len(encoded)-1] != '}' {
+				t.Fatalf("encode prerequisite record: %v", err)
+			}
+			withUnknown := append(append([]byte(nil), encoded[:len(encoded)-1]...),
+				[]byte(`,"unknown":true}`)...)
+			if err := record.decode(withUnknown); err == nil {
+				t.Fatal("unknown prerequisite field accepted")
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			missingFields := make(map[string]json.RawMessage, len(fields))
+			for key, value := range fields {
+				missingFields[key] = value
+			}
+			for key := range missingFields {
+				delete(missingFields, key)
+				break
+			}
+			missing, err := json.Marshal(missingFields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := record.decode(missing); err == nil {
+				t.Fatal("missing prerequisite field accepted")
+			}
+			for key := range fields {
+				nullFields := make(map[string]json.RawMessage, len(fields))
+				for fieldKey, value := range fields {
+					nullFields[fieldKey] = value
+				}
+				nullFields[key] = json.RawMessage("null")
+				nullValue, err := json.Marshal(nullFields)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := record.decode(nullValue); err == nil {
+					t.Fatal("null prerequisite field accepted")
+				}
+				break
+			}
+			for key, value := range fields {
+				duplicate := append([]byte(`{"`+key+`":`), value...)
+				duplicate = append(duplicate, ',')
+				duplicate = append(duplicate, encoded[1:]...)
+				if err := record.decode(duplicate); err == nil {
+					t.Fatal("duplicate prerequisite field accepted")
+				}
+				break
+			}
+		})
+	}
+}
+
 func TestMigrationContractsRejectMalformedCollectionsAndCustodyKeys(t *testing.T) {
 	fixture := decodeMigrationPortableFixture(t)
 	snapshot, err := fixture.RollbackEvidence.ActivationEvidence.Snapshot.VerifiedPayload(nil)
@@ -213,11 +528,116 @@ func TestMigrationContractsRejectMalformedCollectionsAndCustodyKeys(t *testing.T
 	if manifest.Validate(nil) == nil {
 		t.Fatal("unknown service-authority transition accepted")
 	}
+	activated, err := fixture.RollbackEvidence.ActivationEvidence.
+		ActivationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated.MigrationPrerequisiteEvidenceDigest = nil
+	if activated.Validate(nil) == nil {
+		t.Fatal("activation without authority-signed prerequisite digest accepted")
+	}
+	rolledBack, err := fixture.RollbackEvidence.RollbackManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolledBack.MigrationPrerequisiteEvidenceDigest = nil
+	if rolledBack.Validate(nil) == nil {
+		t.Fatal("rollback without authority-signed prerequisite digest accepted")
+	}
+	prepared, err := fixture.RollbackEvidence.ActivationEvidence.Preparation.
+		PreparationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unexpectedDigest := fixture.ActivationPrerequisitesDigest
+	prepared.MigrationPrerequisiteEvidenceDigest = &unexpectedDigest
+	if prepared.Validate(nil) == nil {
+		t.Fatal("non-terminal migration manifest accepted a prerequisite digest")
+	}
 
 	envelope := fixture.CustodyEnvelope
 	envelope.Metadata.Kind = ArtifactServiceStateSnapshot
 	if envelope.Validate() == nil {
 		t.Fatal("bulk service state accepted in small custody envelope")
+	}
+}
+
+func TestHistoricalCancellationAndRetirementRequireExactChains(t *testing.T) {
+	fixture := decodeMigrationPortableFixture(t)
+	if payload, err := fixture.CancellationEvidence.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		30_000,
+	); err != nil || payload.Transition != TransitionMigrationCancellation {
+		t.Fatalf("historical cancellation rejected: payload=%+v err=%v", payload, err)
+	}
+	wrongPreparation := fixture.CancellationEvidence.Preparation
+	wrongPreparation.CurrentManifest = wrongPreparation.PreparationManifest
+	wrongCancellation := fixture.CancellationEvidence
+	wrongCancellation.Preparation = wrongPreparation
+	if _, err := wrongCancellation.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		30_000,
+	); err == nil {
+		t.Fatal("historical cancellation accepted the wrong predecessor chain")
+	}
+
+	activation := fixture.RetirementEvidence.ActivationEvidence
+	activationPayload, err := activation.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationValidUntil := int64(10_000)
+	activationPayload.ValidUntilMilliseconds = &activationValidUntil
+	activation.ActivationManifest = signedAuthorityManifest(
+		t,
+		activationPayload,
+		fixtureAuthorityPrivateKey(t, fixture.AuthorityAnchor),
+		fixture.AuthorityAnchor,
+	)
+	activationDigest, err := activation.ActivationManifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	retirementPayload, err := fixture.RetirementEvidence.RetirementManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	retirementPayload.PredecessorManifestDigest = &activationDigest
+	retirement := signedAuthorityManifest(
+		t,
+		retirementPayload,
+		fixtureAuthorityPrivateKey(t, fixture.AuthorityAnchor),
+		fixture.AuthorityAnchor,
+	)
+	halfOpen := MigrationRetirementEvidence{
+		ActivationEvidence: activation,
+		RetirementManifest: retirement,
+	}
+	if payload, err := halfOpen.ValidateHistoricalCatchUp(
+		fixture.AuthorityAnchor,
+		20_001,
+	); err != nil || payload.Transition != TransitionMigrationRetirement {
+		t.Fatalf("half-open activation-to-retirement boundary rejected: payload=%+v err=%v", payload, err)
+	}
+
+	wrongRetirementPayload := retirementPayload
+	wrongDigest, err := activation.Preparation.PreparationManifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongRetirementPayload.PredecessorManifestDigest = &wrongDigest
+	wrongRetirement := signedAuthorityManifest(
+		t,
+		wrongRetirementPayload,
+		fixtureAuthorityPrivateKey(t, fixture.AuthorityAnchor),
+		fixture.AuthorityAnchor,
+	)
+	if _, err := (MigrationRetirementEvidence{
+		ActivationEvidence: activation,
+		RetirementManifest: wrongRetirement,
+	}).ValidateHistoricalCatchUp(fixture.AuthorityAnchor, 20_001); err == nil {
+		t.Fatal("historical retirement accepted the wrong activation predecessor")
 	}
 }
 

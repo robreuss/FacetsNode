@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +79,231 @@ func TestStagedSnapshotRejectsWrongDeploymentKeyWithoutPoisoningFence(t *testing
 	legitimate := fixtureDeploymentSigner(t, current.ActiveDeployment)
 	if _, err := registry.SignStagedMigrationSnapshotAt(current.Scope, legitimate, 3_000); err != nil {
 		t.Fatalf("legitimate signer could not recover after wrong-key attempts: %v", err)
+	}
+}
+
+func TestHistoricalMigrationApplicationRemainsSequentialAndEvidenceBound(t *testing.T) {
+	fixture := decodeMigrationPortableFixture(t)
+	activation := fixture.RollbackEvidence.ActivationEvidence
+	targetOffer, err := activation.Preparation.TargetOffer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDeployment, err := targetOffer.DeploymentOffer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID := targetDeployment.Deployment.DeploymentID
+	target, _ := newMigrationRegistry(t, targetID)
+
+	if err := target.ApplyMigrationActivation(
+		activation,
+		fixture.AuthorityAnchor,
+		20_001,
+	); err == nil {
+		t.Fatal("historical activation jumped over the uninstalled preparation")
+	}
+	if err := target.ApplyMigrationPreparation(
+		activation.Preparation,
+		fixture.AuthorityAnchor,
+		2_200,
+	); err != nil {
+		t.Fatalf("target preparation failed: %v", err)
+	}
+	if err := target.ApplyMigrationActivation(
+		activation,
+		fixture.AuthorityAnchor,
+		20_001,
+	); err != nil {
+		t.Fatalf("exact sequential activation rejected after operational expiry: %v", err)
+	}
+	if err := target.ApplyMigrationActivation(
+		activation,
+		fixture.AuthorityAnchor,
+		30_000,
+	); err != nil {
+		t.Fatalf("exact installed activation retry was not idempotent: %v", err)
+	}
+
+	rollbackTarget, _ := newMigrationRegistry(t, targetID)
+	if err := rollbackTarget.ApplyMigrationPreparation(
+		activation.Preparation,
+		fixture.AuthorityAnchor,
+		2_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackTarget.ApplyMigrationActivation(
+		activation,
+		fixture.AuthorityAnchor,
+		3_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	reversePayload, err := fixture.RollbackEvidence.TargetSnapshot.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackTarget.StageMigrationWriteFence(
+		activation.ActivationManifest,
+		reversePayload,
+		fixture.AuthorityAnchor,
+		4_000,
+	); err != nil {
+		t.Fatal(err)
+	}
+	activatedPayload, err := activation.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackTarget.ConfirmMigrationWriteFenceSnapshotAt(
+		activatedPayload.Scope,
+		fixture.RollbackEvidence.TargetSnapshot,
+		4_000,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackTarget.ApplyMigrationRollback(
+		fixture.RollbackEvidence,
+		fixture.AuthorityAnchor,
+		6_000,
+	); err != nil {
+		t.Fatalf("exact sequential rollback rejected after operational expiry: %v", err)
+	}
+}
+
+func TestPersistedPredecessorEvidenceIdentityMustMatchNestedEvidence(t *testing.T) {
+	fixture := decodeMigrationPortableFixture(t)
+	activation := fixture.RollbackEvidence.ActivationEvidence
+	targetOffer, err := activation.Preparation.TargetOffer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDeployment, err := targetOffer.DeploymentOffer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID := targetDeployment.Deployment.DeploymentID
+	preparedPayload, err := activation.Preparation.PreparationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	preparationRegistry, preparationPath := newMigrationRegistry(t, targetID)
+	if err := preparationRegistry.ApplyMigrationPreparation(
+		activation.Preparation,
+		fixture.AuthorityAnchor,
+		2_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	persistTestEvidenceDigest(
+		t,
+		preparationRegistry,
+		preparedPayload.Scope,
+		strings.Repeat("0", 64),
+	)
+	if err := preparationRegistry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopenedPreparation, err := LoadBindingRegistry(preparationPath, targetID)
+	if err != nil {
+		t.Fatalf("reload preparation binding: %v", err)
+	}
+	t.Cleanup(func() { _ = reopenedPreparation.Close() })
+	if err := reopenedPreparation.ApplyMigrationActivation(
+		activation,
+		fixture.AuthorityAnchor,
+		20_001,
+	); err == nil {
+		t.Fatal("activation accepted a persisted preparation evidence mismatch")
+	}
+	if reopenedPreparation.bindings[preparedPayload.Scope].Revision != preparedPayload.Revision {
+		t.Fatal("failed activation modified the persisted predecessor")
+	}
+
+	activationRegistry, activationPath := newMigrationRegistry(t, targetID)
+	if err := activationRegistry.ApplyMigrationPreparation(
+		activation.Preparation,
+		fixture.AuthorityAnchor,
+		2_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := activationRegistry.ApplyMigrationActivation(
+		activation,
+		fixture.AuthorityAnchor,
+		3_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	reversePayload, err := fixture.RollbackEvidence.TargetSnapshot.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := activationRegistry.StageMigrationWriteFence(
+		activation.ActivationManifest,
+		reversePayload,
+		fixture.AuthorityAnchor,
+		4_000,
+	); err != nil {
+		t.Fatal(err)
+	}
+	activatedPayload, err := activation.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := activationRegistry.ConfirmMigrationWriteFenceSnapshotAt(
+		activatedPayload.Scope,
+		fixture.RollbackEvidence.TargetSnapshot,
+		4_000,
+	); err != nil {
+		t.Fatal(err)
+	}
+	persistTestEvidenceDigest(
+		t,
+		activationRegistry,
+		activatedPayload.Scope,
+		strings.Repeat("f", 64),
+	)
+	if err := activationRegistry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopenedActivation, err := LoadBindingRegistry(activationPath, targetID)
+	if err != nil {
+		t.Fatalf("reload activation binding: %v", err)
+	}
+	t.Cleanup(func() { _ = reopenedActivation.Close() })
+	if err := reopenedActivation.ApplyMigrationRollback(
+		fixture.RollbackEvidence,
+		fixture.AuthorityAnchor,
+		6_000,
+	); err == nil {
+		t.Fatal("rollback accepted a persisted activation evidence mismatch")
+	}
+	if reopenedActivation.bindings[activatedPayload.Scope].Revision != activatedPayload.Revision {
+		t.Fatal("failed rollback modified the persisted predecessor")
+	}
+}
+
+func persistTestEvidenceDigest(
+	t *testing.T,
+	registry *BindingRegistry,
+	scope Scope,
+	digest string,
+) {
+	t.Helper()
+	registry.mu.Lock()
+	binding, exists := registry.bindings[scope]
+	if !exists {
+		registry.mu.Unlock()
+		t.Fatal("missing test binding")
+	}
+	binding.TransitionEvidenceDigest = &digest
+	err := registry.installBindingLocked(scope, binding)
+	registry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("persist test evidence digest: %v", err)
 	}
 }
 

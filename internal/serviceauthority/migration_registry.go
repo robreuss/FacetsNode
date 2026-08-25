@@ -108,7 +108,14 @@ func (registry *BindingRegistry) ApplyMigrationCancellation(
 	) {
 		return nil
 	}
-	next, err := evidence.Validate(anchor, nowMilliseconds)
+	next, err := evidence.ValidateHistoricalCatchUp(anchor, nowMilliseconds)
+	if err != nil {
+		return ErrInvalid
+	}
+	preparationEvidenceDigest, err := migrationEvidenceDigest(
+		migrationPreparationEvidenceReferenceDomain,
+		evidence.Preparation,
+	)
 	if err != nil {
 		return ErrInvalid
 	}
@@ -121,6 +128,7 @@ func (registry *BindingRegistry) ApplyMigrationCancellation(
 		current,
 		evidence.CancellationManifest,
 		next,
+		&preparationEvidenceDigest,
 		&evidenceDigest,
 		func(binding CurrentBinding) (*MigrationWriteFence, error) {
 			switch registry.expectedDeploymentID {
@@ -360,7 +368,14 @@ func (registry *BindingRegistry) ApplyMigrationActivation(
 	) {
 		return nil
 	}
-	next, err := evidence.Validate(anchor, nowMilliseconds)
+	next, err := evidence.ValidateHistoricalCatchUp(anchor, nowMilliseconds)
+	if err != nil {
+		return ErrInvalid
+	}
+	preparationEvidenceDigest, err := migrationEvidenceDigest(
+		migrationPreparationEvidenceReferenceDomain,
+		evidence.Preparation,
+	)
 	if err != nil {
 		return ErrInvalid
 	}
@@ -373,6 +388,7 @@ func (registry *BindingRegistry) ApplyMigrationActivation(
 		current,
 		evidence.ActivationManifest,
 		next,
+		&preparationEvidenceDigest,
 		&evidenceDigest,
 		func(binding CurrentBinding) (*MigrationWriteFence, error) {
 			switch registry.expectedDeploymentID {
@@ -419,7 +435,14 @@ func (registry *BindingRegistry) ApplyMigrationRollback(
 	) {
 		return nil
 	}
-	next, err := evidence.Validate(anchor, nowMilliseconds)
+	next, err := evidence.ValidateHistoricalCatchUp(anchor, nowMilliseconds)
+	if err != nil {
+		return ErrInvalid
+	}
+	activationEvidenceDigest, err := migrationEvidenceDigest(
+		migrationActivationEvidenceReferenceDomain,
+		evidence.ActivationEvidence,
+	)
 	if err != nil {
 		return ErrInvalid
 	}
@@ -432,6 +455,7 @@ func (registry *BindingRegistry) ApplyMigrationRollback(
 		current,
 		evidence.RollbackManifest,
 		next,
+		&activationEvidenceDigest,
 		&evidenceDigest,
 		func(binding CurrentBinding) (*MigrationWriteFence, error) {
 			switch registry.expectedDeploymentID {
@@ -511,6 +535,7 @@ func (registry *BindingRegistry) ApplyServiceAuthoritySuccessor(
 		successor,
 		next,
 		nil,
+		nil,
 		fenceForNext,
 	)
 }
@@ -520,6 +545,7 @@ func (registry *BindingRegistry) installVerifiedSuccessor(
 	currentPayload ManifestPayload,
 	nextManifest Manifest,
 	nextPayload ManifestPayload,
+	requiredCurrentEvidenceDigest *string,
 	evidenceDigest *string,
 	fenceForNext func(CurrentBinding) (*MigrationWriteFence, error),
 ) error {
@@ -546,6 +572,10 @@ func (registry *BindingRegistry) installVerifiedSuccessor(
 		return ErrInvalid
 	}
 	if !exists || !bindingMatchesManifest(current, currentManifest, currentPayload, currentDigest) {
+		return ErrInvalid
+	}
+	if requiredCurrentEvidenceDigest != nil &&
+		!canonicalEqual(current.TransitionEvidenceDigest, requiredCurrentEvidenceDigest) {
 		return ErrInvalid
 	}
 	fence, err := fenceForNext(current)

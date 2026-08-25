@@ -303,6 +303,15 @@ func TestMigrationTransferSurvivesOnlyPredecessorManifestExpiry(t *testing.T) {
 	}
 	activationPayload.Migration = &migration
 	activationPayload.PredecessorManifestDigest = &preparedDigest
+	activationPrerequisiteDigest, err := (MigrationActivationPrerequisites{
+		Preparation: bounded,
+		Readiness:   readiness,
+		Snapshot:    snapshot,
+	}).ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationPayload.MigrationPrerequisiteEvidenceDigest = &activationPrerequisiteDigest
 	activationManifest := signedAuthorityManifest(
 		t,
 		activationPayload,

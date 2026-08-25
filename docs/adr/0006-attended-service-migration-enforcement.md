@@ -9,7 +9,10 @@
 FacetsNode mirrors the portable attended-migration contracts owned by Facets:
 target offers, preparation, migration authority, artifact descriptors, bounded
 custody envelopes, snapshots, readiness, activation evidence, rollback
-evidence, and the authority-manifest transition state machine.
+evidence, retirement evidence, and the authority-manifest transition state
+machine. The byte-identical Swift/Go portable fixture is schema v2; no v1
+migration fixture or compatibility decoder remains because Facets is
+unreleased.
 
 FacetsNode does not choose or sign Facets authority successors. A deployment
 may install preparation only after independently validating the exact target
@@ -75,6 +78,11 @@ and directory fsync. The binding also retains a domain-separated digest of the
 exact preparation, activation, or rollback evidence, so a retry remains
 idempotent after short-lived evidence expires while changed evidence cannot
 borrow an already accepted manifest. Conflicting retries fail.
+Installing activation additionally requires the installed predecessor binding
+to retain the digest of the exact nested preparation evidence. Installing
+rollback requires the installed predecessor to retain the digest of the exact
+nested activation evidence. A syntactically valid but different persisted
+evidence identity therefore cannot authorize the next transition.
 Reload independently revalidates manifest signatures, canonical payloads,
 snapshot signatures, digests, deployment relationships, and fence facts.
 On supported Unix systems, a normalized binding path also has one exclusive
@@ -85,11 +93,29 @@ prevents divergent in-memory successors from competing to replace the same
 file. Persistent authority fails unsupported on Windows until a native
 interprocess lock exists.
 
+Activation and rollback manifests commit an authority-signed SHA-256 digest of
+their exact canonical deployment-signed prerequisites. The activation record
+contains preparation, snapshot, and readiness; the rollback record contains
+activation evidence, target snapshot, and source readiness. Each record has a
+distinct domain separator, rejects unknown or missing top-level fields, and
+excludes its terminal manifest to avoid a digest cycle.
+
 An accepted preparation remains usable if only its superseded predecessor
-manifest later expires. Transfer reconstructs that predecessor at the
-historical overlap where the preparation was valid, but still requires the
-preparation manifest, target offer, snapshot, readiness, and activation to be
-live at cutover.
+manifest later expires. For an offline or delayed deployment, all short-lived
+operational prerequisites are reconstructed and validated at the terminal
+manifest's signed `validFromMilliseconds`; the terminal manifest is then
+independently required to remain live at receipt. Rollback's signed
+`validUntilMilliseconds` remains a strict half-open deadline and is never
+extended. Retirement evidence similarly binds exact activation evidence to
+its immediate retirement successor, including the valid half-open boundary
+where activation ends exactly when retirement begins.
+
+These historical validators do not authorize registry revision jumps. The
+operational FacetsNode registry still requires the exact immediately preceding
+manifest, its persisted evidence identity, and the applicable local durable
+fence before installing a successor. Historical bundles support delayed
+sequential application; they do not let a Node jump from an old initial
+binding directly to activation, rollback, or retirement.
 
 An exact already-confirmed snapshot retry remains idempotent after its
 short-lived evidence expires. A first confirmation at or after expiry still

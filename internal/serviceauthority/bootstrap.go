@@ -342,18 +342,19 @@ type TrustAnchor struct {
 }
 
 type ManifestPayload struct {
-	ActiveDeployment          DeploymentDescriptor   `json:"activeDeployment"`
-	IssuedAtMilliseconds      int64                  `json:"issuedAtMilliseconds"`
-	Migration                 *MigrationAuthority    `json:"migration,omitempty"`
-	PredecessorManifestDigest *string                `json:"predecessorManifestDigest,omitempty"`
-	PreparedDeployments       []DeploymentDescriptor `json:"preparedDeployments"`
-	Revision                  uint64                 `json:"revision"`
-	Scope                     Scope                  `json:"scope"`
-	Transition                string                 `json:"transition"`
-	TransportPolicy           TransportPolicy        `json:"transportPolicy"`
-	ValidFromMilliseconds     int64                  `json:"validFromMilliseconds"`
-	ValidUntilMilliseconds    *int64                 `json:"validUntilMilliseconds,omitempty"`
-	Version                   int                    `json:"version"`
+	ActiveDeployment                    DeploymentDescriptor   `json:"activeDeployment"`
+	IssuedAtMilliseconds                int64                  `json:"issuedAtMilliseconds"`
+	Migration                           *MigrationAuthority    `json:"migration,omitempty"`
+	MigrationPrerequisiteEvidenceDigest *string                `json:"migrationPrerequisiteEvidenceDigest,omitempty"`
+	PredecessorManifestDigest           *string                `json:"predecessorManifestDigest,omitempty"`
+	PreparedDeployments                 []DeploymentDescriptor `json:"preparedDeployments"`
+	Revision                            uint64                 `json:"revision"`
+	Scope                               Scope                  `json:"scope"`
+	Transition                          string                 `json:"transition"`
+	TransportPolicy                     TransportPolicy        `json:"transportPolicy"`
+	ValidFromMilliseconds               int64                  `json:"validFromMilliseconds"`
+	ValidUntilMilliseconds              *int64                 `json:"validUntilMilliseconds,omitempty"`
+	Version                             int                    `json:"version"`
 }
 
 type Manifest struct {

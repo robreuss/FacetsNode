@@ -135,6 +135,14 @@ signing—the exact deployment-signed snapshot and reference digest. A staged
 but not yet signed fence is valid and blocks writes after restart. Preparation,
 activation, and rollback bindings also retain a domain-separated digest of the
 complete accepted evidence so only an exact expired retry remains idempotent.
+Activation and rollback authority manifests separately commit the digest of
+their exact canonical operational prerequisites. Delayed sequential
+application validates those short-lived prerequisites at the terminal
+manifest's signed effective time and still requires the terminal to be current
+when received. The registry will not skip revisions: it requires the exact
+installed predecessor evidence identity and the applicable local fence before
+installing the next manifest. Retirement evidence is portable client catch-up
+proof; FacetsNode's generic successor path remains immediate-predecessor only.
 
 Migration snapshot signing is deliberately two-phase. The service state store
 first commits its state commitment and write-fence identifier; the registry
