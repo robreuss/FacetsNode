@@ -91,6 +91,10 @@ func (s *Server) handleProvisionRelayTenant(writer http.ResponseWriter, request 
 		s.writeError(writer, err)
 		return
 	}
+	if err := s.requestBodyScopeMatchesBinding(request, tenant.TenantID); err != nil {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return
+	}
 	result, err := s.relayStore.ProvisionTenant(request.Context(), tenant, provisioning)
 	if err != nil {
 		s.writeError(writer, err)

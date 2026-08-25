@@ -143,9 +143,27 @@ requests. Only the registry's staged-snapshot signer may use the deployment
 key. Activation and rollback require complete migration evidence and cannot be
 installed through the generic binding or successor methods. Exact retries are
 idempotent; conflicting payloads, signatures, revisions, or fences fail.
-The HTTP gate does not drain a write already inside a backend transaction;
-service-specific stores must enforce the same fence transactionally before a
-runtime migration claim is valid.
+Every bound capability route declares read or mutation access explicitly.
+Mutation middleware provisionally authorizes, acquires a scope-keyed shared
+lease, re-authorizes after admission, and retains the lease through the entire
+handler and its filesystem callbacks. A writer-preferring exclusive migration
+lease blocks new same-scope mutations and drains those already admitted in the
+same process. Relay GET/HEAD routes that perform expiry cleanup are classified
+as mutations rather than inferred from their HTTP method. The same conservative
+classification applies to bulk-grant issuance and participant-facing Shared
+Space reads that authenticate through the mutating relay fetch seam.
+
+This proves only an in-process bound-HTTP drain. It does not fence background
+tasks, unbound endpoints, direct store callers, or another FacetsNode process,
+and it cannot make a service-database commit atomic with registry-file fence
+persistence after a crash. Service-specific stores must still enforce the
+same fence transactionally before a runtime migration claim is valid.
+Pairing/rendezvous route IDs are not durably associated with a Facets service
+scope, so presenting any current same-kind binding can only acquire an
+arbitrary scope lease. Pairing state is outside the drain proof until that
+ownership is persisted and enforced, or pairing is disabled during migration.
+Pre-principal Device Sync account-admission creation and the intentionally
+unbound initial claim are also outside a per-principal drain proof.
 
 Once enabled:
 

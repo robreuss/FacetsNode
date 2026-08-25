@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -198,7 +197,7 @@ func TestMigrationCancellationClearsOnlySourceFenceAndStalesTarget(t *testing.T)
 	)
 	if err := source.AuthorizeRequestAt(
 		sourceRequest,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(3_000),
 	); err != nil {
 		t.Fatalf("cancelled source did not resume writes: %v", err)
@@ -215,7 +214,7 @@ func TestMigrationCancellationClearsOnlySourceFenceAndStalesTarget(t *testing.T)
 	)
 	if err := targetRegistry.AuthorizeRequestAt(
 		targetRequest,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(3_000),
 	); err == nil {
 		t.Fatal("cancelled target became serving")
@@ -234,7 +233,7 @@ func TestMigrationCancellationClearsOnlySourceFenceAndStalesTarget(t *testing.T)
 	t.Cleanup(func() { _ = reloadedSource.Close() })
 	if err := reloadedSource.AuthorizeRequestAt(
 		sourceRequest,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(3_000),
 	); err != nil {
 		t.Fatalf("source cancellation did not survive restart: %v", err)
@@ -246,7 +245,7 @@ func TestMigrationCancellationClearsOnlySourceFenceAndStalesTarget(t *testing.T)
 	t.Cleanup(func() { _ = reloadedTarget.Close() })
 	if err := reloadedTarget.AuthorizeRequestAt(
 		targetRequest,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(3_000),
 	); err == nil {
 		t.Fatal("reloaded cancelled target became serving")
@@ -366,7 +365,7 @@ func TestRetirementClearsTargetReverseFenceAndPreservesSourceFence(t *testing.T)
 	)
 	if err := target.AuthorizeRequestAt(
 		targetRequest,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(deadline),
 	); err != nil {
 		t.Fatalf("retired target did not resume writes: %v", err)
@@ -381,7 +380,7 @@ func TestRetirementClearsTargetReverseFenceAndPreservesSourceFence(t *testing.T)
 	t.Cleanup(func() { _ = reloadedTarget.Close() })
 	if err := reloadedTarget.AuthorizeRequestAt(
 		targetRequest,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(deadline),
 	); err != nil {
 		t.Fatalf("target retirement did not survive restart: %v", err)
@@ -483,7 +482,7 @@ func TestBindingAuthorizationRejectsExpiredManifestAtStrictBoundary(t *testing.T
 	)
 	if err := registry.AuthorizeRequestAt(
 		binding,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(1_999),
 	); err != nil {
 		t.Fatalf("current manifest was rejected before expiry: %v", err)
@@ -493,7 +492,7 @@ func TestBindingAuthorizationRejectsExpiredManifestAtStrictBoundary(t *testing.T
 	}
 	if err := registry.AuthorizeRequestAt(
 		binding,
-		http.MethodGet,
+		RequestRead,
 		time.UnixMilli(2_000),
 	); err == nil {
 		t.Fatal("expired manifest authorized a read at its strict deadline")

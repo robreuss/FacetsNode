@@ -190,13 +190,14 @@ func verifyBulkTransferGrant(
 
 func (registry *BindingRegistry) AuthorizeBulkTransfer(
 	binding RequestBinding,
+	access RequestAccess,
 	method string,
 	header http.Header,
 	now time.Time,
 	signer *DeploymentSigner,
 ) (BulkGrantPayload, error) {
 	if registry == nil || signer == nil || binding.TrafficClass != TrafficBulk ||
-		method == "" || registry.AuthorizeRequestAt(binding, method, now) != nil {
+		method == "" || registry.AuthorizeRequestAt(binding, access, now) != nil {
 		return BulkGrantPayload{}, ErrInvalid
 	}
 	resourceID, resourceErr := singleHeaderValue(header, HeaderBulkResourceID)
@@ -204,7 +205,8 @@ func (registry *BindingRegistry) AuthorizeBulkTransfer(
 	grantValue, grantErr := singleHeaderValue(header, HeaderBulkTransferGrant)
 	direction := BulkDirection(directionValue)
 	if resourceErr != nil || directionErr != nil || grantErr != nil ||
-		!validBulkResourceID(resourceID) || !direction.Valid() {
+		!validBulkResourceID(resourceID) || !direction.Valid() ||
+		(direction == BulkUpload && access != RequestMutation) {
 		return BulkGrantPayload{}, ErrInvalid
 	}
 	grant, payload, err := ParseBulkTransferGrantHeader(grantValue)
@@ -225,13 +227,7 @@ func (registry *BindingRegistry) AuthorizeBulkTransfer(
 		now.UnixMilli() >= payload.ExpiresAtMilliseconds {
 		return BulkGrantPayload{}, ErrInvalid
 	}
-	finalMethod := method
-	if payload.Direction == BulkUpload {
-		// Upload authorization is mutating even if a malformed route attempts to
-		// carry it through a nominally read-only HTTP method.
-		finalMethod = http.MethodPost
-	}
-	if registry.AuthorizeRequestAt(binding, finalMethod, now) != nil {
+	if registry.AuthorizeRequestAt(binding, access, now) != nil {
 		return BulkGrantPayload{}, ErrInvalid
 	}
 	return payload, nil

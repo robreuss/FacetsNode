@@ -76,6 +76,14 @@ func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request 
 		s.writeError(writer, err)
 		return
 	}
+	if err := s.requestBodyScopeMatchesBinding(
+		request,
+		input.SpaceID,
+		tenant.TenantID,
+	); err != nil {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return
+	}
 	provisioning := sharedspaces.SpaceProvisioning{
 		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
 		SpaceID: input.SpaceID, SecurityMode: input.SecurityMode,

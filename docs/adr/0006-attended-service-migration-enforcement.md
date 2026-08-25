@@ -42,11 +42,33 @@ registry then enforces this order:
 5. The former source clears its forward fence only while atomically installing
    the fully validated rollback successor that makes it active again.
 
-The HTTP boundary blocks requests arriving after the staged fence; it is not a
-substitute for draining or rejecting a request already inside a service-store
-transaction. Each Device Sync, Shared Spaces, and Compute Pool write path must
-enforce the same fence in its own transaction before runtime cutover can be
-claimed. That service-store integration is intentionally deferred here.
+Bound capability routes now declare read versus mutation access explicitly;
+HTTP verbs are not used as a proxy. A scope-keyed, writer-preferring in-process
+gate admits mutations before their handler runs, re-authorizes them after
+admission, and retains the lease until `ServeHTTP` returns. An exclusive
+migration lease blocks new mutations and drains all mutations already admitted
+through that middleware in the same FacetsNode process. This includes relay
+GET and HEAD operations, bulk-grant issuance, and Shared Space participant
+reads that transitively mutate checkpoint-expiry state, plus handlers that
+perform filesystem callbacks.
+
+That in-process drain is not a durable database fence. It does not cover a
+second FacetsNode process, a background task, an unbound route, or code that
+invokes a store directly. A crash can also separate a service-state commit
+from registry-fence persistence. Each Device Sync, Shared Spaces, and Compute
+Pool transaction must therefore atomically check/commit a fence in its own
+durable state store before runtime cutover can be claimed. That service-store
+integration remains intentionally deferred.
+
+Pairing/rendezvous records also have no persisted Facets service scope. Their
+route IDs cannot be checked against the scope in the authority headers, so a
+caller can present any current binding of the configured service kind. A
+scope-keyed lease therefore does not prove that pairing state was drained;
+pairing must gain and enforce durable scope ownership or be disabled during
+migration before that state can be included in a cutover claim.
+Device Sync account-admission creation is likewise pre-principal, while its
+claim route is intentionally unbound during initial authority enrollment;
+neither operation is part of a per-principal drain proof yet.
 
 Binding-file updates use an owner-only, fsynced temporary file, atomic rename,
 and directory fsync. The binding also retains a domain-separated digest of the
@@ -84,8 +106,9 @@ referenced.
 
 ## Verification boundary
 
-This checkpoint proves canonical Swift/Go parity and durable public
-authority/fence behavior in headless tests. It does not implement public
+This checkpoint proves canonical Swift/Go parity, durable public
+authority/fence behavior, and same-process bound-HTTP mutation draining in
+headless tests. It does not implement public
 migration routes, database/blob transfer orchestration, service-specific state
 commitments, onion-state handoff, attended UI, container cutover, or rollback
 on deployed hosts. Those remain required before any runtime migration claim.

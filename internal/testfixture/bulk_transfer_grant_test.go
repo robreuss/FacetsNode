@@ -48,7 +48,14 @@ func TestBulkTransferGrantPortableFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.AuthorizeBulkTransfer(binding, http.MethodPost, header, time.UnixMilli(1_500), signer); err != nil {
+	if _, err := registry.AuthorizeBulkTransfer(
+		binding,
+		serviceauthority.RequestMutation,
+		http.MethodPost,
+		header,
+		time.UnixMilli(1_500),
+		signer,
+	); err != nil {
 		t.Fatalf("portable grant signature rejected: %v", err)
 	}
 }

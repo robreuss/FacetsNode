@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -293,7 +292,7 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 		preparedPayload.Scope, preparedPayload.Revision, preparedDigest, sourceID,
 		activation.Preparation.PreparationManifest,
 	)
-	if err := source.AuthorizeRequest(sourceRequest, http.MethodPost); err != nil {
+	if err := source.AuthorizeRequest(sourceRequest, RequestMutation); err != nil {
 		t.Fatalf("source write rejected before fence: %v", err)
 	}
 	forwardSnapshot, err := activation.Snapshot.VerifiedPayload(nil)
@@ -316,10 +315,10 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	); err != nil {
 		t.Fatalf("exact source fence staging retry failed: %v", err)
 	}
-	if err := source.AuthorizeRequest(sourceRequest, http.MethodGet); err != nil {
+	if err := source.AuthorizeRequest(sourceRequest, RequestRead); err != nil {
 		t.Fatalf("source read rejected after fence: %v", err)
 	}
-	if err := source.AuthorizeRequest(sourceRequest, http.MethodPost); err == nil {
+	if err := source.AuthorizeRequest(sourceRequest, RequestMutation); err == nil {
 		t.Fatal("source write accepted after durable fence")
 	}
 	if err := source.Close(); err != nil {
@@ -330,7 +329,7 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 		t.Fatalf("staged unsigned fence did not survive restart: %v", err)
 	}
 	t.Cleanup(func() { _ = reloadedPendingSource.Close() })
-	if err := reloadedPendingSource.AuthorizeRequest(sourceRequest, http.MethodPost); err == nil {
+	if err := reloadedPendingSource.AuthorizeRequest(sourceRequest, RequestMutation); err == nil {
 		t.Fatal("reloaded staged fence accepted a write")
 	}
 	source = reloadedPendingSource
@@ -418,7 +417,7 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 		activatedPayload.Scope, activatedPayload.Revision, activatedDigest, targetID,
 		activation.ActivationManifest,
 	)
-	if err := target.AuthorizeRequest(targetRequest, http.MethodPost); err != nil {
+	if err := target.AuthorizeRequest(targetRequest, RequestMutation); err != nil {
 		t.Fatalf("target write rejected after activation: %v", err)
 	}
 	reverseSnapshot, err := fixture.RollbackEvidence.TargetSnapshot.VerifiedPayload(nil)
@@ -440,7 +439,7 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	); err != nil {
 		t.Fatalf("target reverse snapshot confirmation failed: %v", err)
 	}
-	if err := target.AuthorizeRequest(targetRequest, http.MethodPost); err == nil {
+	if err := target.AuthorizeRequest(targetRequest, RequestMutation); err == nil {
 		t.Fatal("target write accepted after reverse fence")
 	}
 
@@ -473,12 +472,12 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	)
 	if err := source.AuthorizeRequestAt(
 		rolledBackRequest,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(4_000),
 	); err != nil {
 		t.Fatalf("source did not clear its forward fence at validated rollback: %v", err)
 	}
-	if err := target.AuthorizeRequest(targetRequest, http.MethodGet); err == nil {
+	if err := target.AuthorizeRequest(targetRequest, RequestRead); err == nil {
 		t.Fatal("retired target authorized stale active binding after rollback")
 	}
 
@@ -495,7 +494,7 @@ func TestBindingRegistriesPersistFencesAndRequireEvidenceSpecificCutover(t *test
 	t.Cleanup(func() { _ = reloadedSource.Close() })
 	if err := reloadedSource.AuthorizeRequestAt(
 		rolledBackRequest,
-		http.MethodPost,
+		RequestMutation,
 		time.UnixMilli(4_000),
 	); err != nil {
 		t.Fatalf("reloaded source lost rollback activation: %v", err)

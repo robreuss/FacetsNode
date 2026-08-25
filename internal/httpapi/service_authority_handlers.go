@@ -99,6 +99,7 @@ func (s *Server) handleServiceDeploymentProof(
 
 func (s *Server) serviceAuthorityBindingHandler(
 	trafficClass serviceauthority.TrafficClass,
+	access serviceauthority.RequestAccess,
 	next http.Handler,
 ) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -109,7 +110,7 @@ func (s *Server) serviceAuthorityBindingHandler(
 			trafficClass,
 		)
 		if err != nil ||
-			s.serviceAuthorityBindings.AuthorizeRequestAt(binding, request.Method, now) != nil {
+			s.serviceAuthorityBindings.AuthorizeRequestAt(binding, access, now) != nil {
 			writeServiceAuthorityError(writer, http.StatusConflict)
 			return
 		}
@@ -122,9 +123,30 @@ func (s *Server) serviceAuthorityBindingHandler(
 			writeServiceAuthorityError(writer, http.StatusConflict)
 			return
 		}
+		var mutationLease *serviceauthority.ScopeLease
+		if access == serviceauthority.RequestMutation {
+			mutationLease, err = s.serviceAuthorityBindings.AcquireMutationLease(
+				request.Context(),
+				binding.Scope,
+			)
+			if err != nil {
+				writeServiceAuthorityError(writer, http.StatusConflict)
+				return
+			}
+			defer mutationLease.Release()
+			// A migration drain may have staged a fence while this request waited.
+			// Revalidate only after admission, then retain the lease through the
+			// complete handler, including any filesystem callback it invokes.
+			now = s.now()
+			if s.serviceAuthorityBindings.AuthorizeRequestAt(binding, access, now) != nil {
+				writeServiceAuthorityError(writer, http.StatusConflict)
+				return
+			}
+		}
 		if trafficClass == serviceauthority.TrafficBulk {
 			grant, err := s.serviceAuthorityBindings.AuthorizeBulkTransfer(
 				binding,
+				access,
 				request.Method,
 				request.Header,
 				now,
@@ -157,6 +179,31 @@ func requiredServiceAuthorityBinding(
 		return serviceauthority.RequestBinding{}, serviceauthority.ErrInvalid
 	}
 	return binding, nil
+}
+
+// Operator provisioning routes do not carry their new logical scope in the
+// path. Once authority binding is enabled, the decoded resource IDs must still
+// match the scope whose mutation lease protects the handler.
+func (s *Server) requestBodyScopeMatchesBinding(
+	request *http.Request,
+	resourceIDs ...uuid.UUID,
+) error {
+	if s.deploymentSigner == nil && s.serviceAuthorityBindings == nil {
+		return nil
+	}
+	if s.deploymentSigner == nil || s.serviceAuthorityBindings == nil {
+		return serviceauthority.ErrInvalid
+	}
+	binding, err := requiredServiceAuthorityBinding(request)
+	if err != nil || len(resourceIDs) == 0 {
+		return serviceauthority.ErrInvalid
+	}
+	for _, resourceID := range resourceIDs {
+		if resourceID == uuid.Nil || resourceID != binding.Scope.ScopeID {
+			return serviceauthority.ErrInvalid
+		}
+	}
+	return nil
 }
 
 func hasBulkTransferHeaders(header http.Header) bool {

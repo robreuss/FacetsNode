@@ -150,11 +150,19 @@ func NewWithRelay(
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	register := func(pattern string, surface traffic.Surface, handler http.HandlerFunc) {
+	read := serviceauthority.RequestRead
+	mutation := serviceauthority.RequestMutation
+	register := func(
+		pattern string,
+		surface traffic.Surface,
+		access serviceauthority.RequestAccess,
+		handler http.HandlerFunc,
+	) {
 		bound := http.Handler(handler)
 		if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
 			bound = s.serviceAuthorityBindingHandler(
 				serviceAuthorityTrafficClass(surface),
+				access,
 				bound,
 			)
 		}
@@ -178,166 +186,197 @@ func (s *Server) Handler() http.Handler {
 			s.handleServiceDeploymentProof,
 		)
 	}
-	register("POST /v1/pairing/routes", traffic.SurfaceRendezvous, s.handleCreateRoute)
+	register("POST /v1/pairing/routes", traffic.SurfaceRendezvous, mutation, s.handleCreateRoute)
 	register(
 		"PUT /v1/pairing/routes/{routeID}/messages/{messageID}",
 		traffic.SurfaceRendezvous,
+		mutation,
 		s.handlePublish,
 	)
-	register("GET /v1/pairing/routes/{routeID}/messages", traffic.SurfaceRendezvous, s.handleFetch)
+	register("GET /v1/pairing/routes/{routeID}/messages", traffic.SurfaceRendezvous, read, s.handleFetch)
 	register(
 		"POST /v1/pairing/routes/{routeID}/messages/{messageID}/acknowledgement",
 		traffic.SurfaceRendezvous,
+		mutation,
 		s.handleAcknowledge,
 	)
-	register("POST /v1/pairing/routes/{routeID}/close", traffic.SurfaceRendezvous, s.handleClose)
+	register("POST /v1/pairing/routes/{routeID}/close", traffic.SurfaceRendezvous, mutation, s.handleClose)
 	if s.relayStore != nil {
 		if s.operatorProvisioningOn {
-			register("POST /v1/relay/tenants", traffic.SurfaceManagement, s.handleProvisionRelayTenant)
+			register("POST /v1/relay/tenants", traffic.SurfaceManagement, mutation, s.handleProvisionRelayTenant)
 		}
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleProvisionRelayDomain,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/credential-rotations/{rotationID}",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleRotateRelayTenantCredential,
 		)
 		register(
 			"GET /v1/relay/tenants/{tenantID}/status",
 			traffic.SurfaceCheckpointAdmin,
+			read,
 			s.handleRelayTenantStatus,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleCreateRelaySubscription,
 		)
 		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions/{subscriptionID}",
 			traffic.SurfaceCheckpointAdmin,
+			read,
 			s.handleGetRelaySubscription,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscriptions/{subscriptionID}/status",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleChangeRelaySubscriptionStatus,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscription-rebootstrap",
 			traffic.SurfaceRelayMessage,
+			mutation,
 			s.handleRequestRelaySubscriptionRebootstrap,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscription-rebootstrap/completion",
 			traffic.SurfaceRelayMessage,
+			mutation,
 			s.handleCompleteRelaySubscriptionRebootstrap,
 		)
 		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/status",
 			traffic.SurfaceCheckpointAdmin,
+			read,
 			s.handleRelayDomainStatus,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleCreateRelayCheckpointFence,
 		)
 		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences/{fenceID}",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleGetRelayCheckpointFence,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoint-fences/{fenceID}/abort",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleAbortRelayCheckpointFence,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/candidates",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleStageRelayCheckpoint,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/activation",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleActivateRelayCheckpoint,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/collection-dry-run",
 			traffic.SurfaceCheckpointAdmin,
+			read,
 			s.handleDryRunRelayCheckpointCollection,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/checkpoints/{checkpointID}/collection",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleCollectRelayCheckpoint,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleCreateRelayMember,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/administration/credential-rotations/{rotationID}",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleRotateRelayAdministrationCredential,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members/{memberID}/credential-rotations/{rotationID}",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleRotateRelayMemberCredential,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleCreateRelayAdmission,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/collection",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleCollectRelayAdmissions,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/claim",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleClaimRelayAdmission,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/admissions/{admissionID}/revocation",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleRevokeRelayAdmission,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/members/{memberID}/revocation",
 			traffic.SurfaceCheckpointAdmin,
+			mutation,
 			s.handleRevokeRelayMember,
 		)
 		register(
 			"PUT /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}",
 			traffic.SurfaceRelayMessage,
+			mutation,
 			s.handlePublishRelayMessage,
 		)
 		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages",
 			traffic.SurfaceRelayMessage,
+			mutation,
 			s.handleFetchRelayMessages,
 		)
 		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}",
 			traffic.SurfaceRelayMessage,
+			mutation,
 			s.handleGetRelayMessage,
 		)
 		register(
 			"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/wake",
 			traffic.SurfaceRelayMessage,
+			mutation,
 			s.handleWaitForRelayMessages,
 		)
 		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/messages/{messageID}/acknowledgments",
 			traffic.SurfaceRelayMessage,
+			mutation,
 			s.handleAcknowledgeRelayMessage,
 		)
 		if s.blobContentStore != nil {
@@ -345,23 +384,26 @@ func (s *Server) Handler() http.Handler {
 				register(
 					"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/bulk-transfer-grants",
 					traffic.SurfaceCheckpointAdmin,
+					mutation,
 					s.handleCreateRelayBulkTransferGrant,
 				)
 			}
 			register(
 				"GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
 				traffic.SurfaceStorage,
+				mutation,
 				s.handleFetchRelayBlob,
 			)
 			if s.blobUploadContentStore != nil {
-				register("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads", traffic.SurfaceStorage, s.handleCreateRelayBlobUpload)
-				register("GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", traffic.SurfaceStorage, s.handleGetRelayBlobUpload)
-				register("PATCH /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", traffic.SurfaceStorage, s.handleAppendRelayBlobUpload)
-				register("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}/finalization", traffic.SurfaceStorage, s.handleFinalizeRelayBlobUpload)
+				register("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads", traffic.SurfaceStorage, mutation, s.handleCreateRelayBlobUpload)
+				register("GET /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", traffic.SurfaceStorage, read, s.handleGetRelayBlobUpload)
+				register("PATCH /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}", traffic.SurfaceStorage, mutation, s.handleAppendRelayBlobUpload)
+				register("POST /v1/relay/tenants/{tenantID}/domains/{domainID}/blob-uploads/{uploadID}/finalization", traffic.SurfaceStorage, mutation, s.handleFinalizeRelayBlobUpload)
 			}
 			register(
 				"HEAD /v1/relay/tenants/{tenantID}/domains/{domainID}/blobs/{blobID}",
 				traffic.SurfaceStorage,
+				mutation,
 				s.handleFetchRelayBlob,
 			)
 		}
@@ -371,6 +413,7 @@ func (s *Server) Handler() http.Handler {
 			register(
 				"POST /v1/device-sync/account-admissions",
 				traffic.SurfaceManagement,
+				mutation,
 				s.handleCreateDeviceSyncAccountAdmission,
 			)
 		}
@@ -384,42 +427,50 @@ func (s *Server) Handler() http.Handler {
 			register(
 				"POST /v1/device-sync/account-admissions/{admissionID}/claim",
 				traffic.SurfaceManagement,
+				mutation,
 				s.handleClaimDeviceSyncAccountAdmission,
 			)
 		}
 		register(
 			"GET /v1/device-sync/principals/{principalID}/status",
 			traffic.SurfaceManagement,
+			read,
 			s.handleGetDeviceSyncPrincipalStatus,
 		)
 		register(
 			"POST /v1/device-sync/principals/{principalID}/devices/{deviceID}/revocation",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleRevokeDeviceSyncDevice,
 		)
 		register(
 			"POST /v1/device-sync/principals/{principalID}/control-domains/{domainID}/device-admissions",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleCreateDeviceSyncDeviceAdmission,
 		)
 		register(
 			"POST /v1/device-sync/principals/{principalID}/device-admissions/{admissionID}/claim",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleClaimDeviceSyncDeviceAdmission,
 		)
 		register(
 			"POST /v1/device-sync/principals/{principalID}/spaces/{spaceID}",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleProvisionDeviceSyncSpace,
 		)
 		register(
 			"POST /v1/device-sync/principals/{principalID}/spaces/{spaceID}/domains/{domainID}/device-admissions",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleCreateDeviceSyncSpaceDeviceAdmission,
 		)
 		register(
 			"POST /v1/device-sync/principals/{principalID}/spaces/{spaceID}/device-admissions/{admissionID}/claim",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleClaimDeviceSyncSpaceDeviceAdmission,
 		)
 		// A join request is deliberately separate from account admission. Its
@@ -435,11 +486,13 @@ func (s *Server) Handler() http.Handler {
 		register(
 			"GET /v1/device-sync/principals/{principalID}/control-domains/{domainID}/join-requests/{pin}",
 			traffic.SurfaceManagement,
+			read,
 			s.handleLookupDeviceSyncJoinRequest,
 		)
 		register(
 			"PUT /v1/device-sync/principals/{principalID}/control-domains/{domainID}/join-requests/{requestID}/bootstrap",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleStoreDeviceSyncJoinBootstrap,
 		)
 	}
@@ -448,104 +501,124 @@ func (s *Server) Handler() http.Handler {
 			register(
 				"POST /v1/shared-spaces",
 				traffic.SurfaceManagement,
+				mutation,
 				s.handleProvisionSharedSpace,
 			)
 		}
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/status",
 			traffic.SurfaceManagement,
+			read,
 			s.handleGetSharedSpaceStatus,
 		)
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/authority-events",
 			traffic.SurfaceManagement,
+			read,
 			s.handleListSharedSpaceAuthorityEvents,
 		)
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/compute-bindings/{bindingID}",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleChangeSharedSpaceComputeBinding,
 		)
 		if s.sharedSpacesComputeCapabilitySigner != nil {
 			register(
 				"GET /v1/shared-spaces/compute-capability-verification-key",
 				traffic.SurfaceManagement,
+				read,
 				s.handleGetSharedSpaceComputeCapabilityVerificationKey,
 			)
 			register(
 				"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/compute-capabilities",
 				traffic.SurfaceManagement,
+				mutation,
 				s.handleIssueSharedSpaceComputeCapability,
 			)
 		}
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleCreateSharedSpaceInvitation,
 		)
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations",
 			traffic.SurfaceManagement,
+			read,
 			s.handleListSharedSpaceInvitations,
 		)
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations/{invitationID}/claim",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleClaimSharedSpaceInvitation,
 		)
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/invitations/{invitationID}/cancellation",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleCancelSharedSpaceInvitation,
 		)
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/role",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleChangeSharedSpaceParticipantRole,
 		)
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/devices/{deviceID}",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleEnrollSharedSpaceParticipantDevice,
 		)
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/devices/{deviceID}/revocation",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleRevokeSharedSpaceParticipantDevice,
 		)
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/revocation",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleRevokeSharedSpaceParticipant,
 		)
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/status",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleGetSharedSpaceParticipantStatus,
 		)
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/roster",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleGetSharedSpaceParticipantRoster,
 		)
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/roster-attestations",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleListSharedSpaceSecureRosterAttestations,
 		)
 		register(
 			"POST /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/presentation",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleUpdateSharedSpaceParticipantPresentation,
 		)
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/bootstrap",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleGetSharedSpaceParticipantBootstrap,
 		)
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/participants/{participantID}/key-grant",
 			traffic.SurfaceManagement,
+			mutation,
 			s.handleGetSharedSpaceParticipantKeyGrant,
 		)
 	}

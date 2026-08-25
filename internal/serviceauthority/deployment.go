@@ -302,6 +302,7 @@ type MigrationWriteFence struct {
 type BindingRegistry struct {
 	mu                   sync.RWMutex
 	bindings             map[Scope]CurrentBinding
+	mutationGate         *ScopeMutationGate
 	persistencePath      string
 	expectedDeploymentID uuid.UUID
 	persist              func(string, uuid.UUID, map[Scope]CurrentBinding) error
@@ -325,7 +326,10 @@ type BindingFileEntry struct {
 }
 
 func NewBindingRegistry() *BindingRegistry {
-	return &BindingRegistry{bindings: make(map[Scope]CurrentBinding)}
+	return &BindingRegistry{
+		bindings:     make(map[Scope]CurrentBinding),
+		mutationGate: NewScopeMutationGate(),
+	}
 }
 
 func LoadBindingRegistry(
@@ -372,6 +376,7 @@ func LoadBindingRegistry(
 	}
 	registry := &BindingRegistry{
 		bindings:             make(map[Scope]CurrentBinding),
+		mutationGate:         NewScopeMutationGate(),
 		persistencePath:      path,
 		expectedDeploymentID: expectedDeploymentID,
 		persist:              persistBindingFile,
@@ -733,23 +738,23 @@ func (registry *BindingRegistry) AuthorizeAt(binding RequestBinding, now time.Ti
 	return nil
 }
 
-// AuthorizeRequest additionally enforces a durable migration write fence.
-// Read-only requests may continue during attended transfer; any method that
-// can mutate service state fails closed until evidence-specific activation or
-// rollback clears the local fence.
-func (registry *BindingRegistry) AuthorizeRequest(binding RequestBinding, method string) error {
-	return registry.AuthorizeRequestAt(binding, method, time.Now())
+// AuthorizeRequest additionally enforces a durable migration write fence using
+// explicit route metadata. Read-only requests may continue during attended
+// transfer; any route that can mutate service state fails closed until
+// evidence-specific activation or rollback clears the local fence.
+func (registry *BindingRegistry) AuthorizeRequest(binding RequestBinding, access RequestAccess) error {
+	return registry.AuthorizeRequestAt(binding, access, time.Now())
 }
 
 func (registry *BindingRegistry) AuthorizeRequestAt(
 	binding RequestBinding,
-	method string,
+	access RequestAccess,
 	now time.Time,
 ) error {
 	if registry == nil || binding.Scope.Validate() != nil ||
 		binding.AuthorityRevision == 0 || !validDigest(binding.AuthorityDigest) ||
 		binding.DeploymentID == uuid.Nil || binding.RouteID == uuid.Nil ||
-		!binding.TrafficClass.Valid() {
+		!binding.TrafficClass.Valid() || !access.Valid() {
 		return ErrInvalid
 	}
 	registry.mu.RLock()
@@ -766,7 +771,7 @@ func (registry *BindingRegistry) AuthorizeRequestAt(
 		) {
 		return ErrInvalid
 	}
-	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+	if access == RequestRead {
 		return nil
 	}
 	if current.WriteFence != nil {

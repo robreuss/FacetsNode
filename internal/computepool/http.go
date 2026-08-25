@@ -120,7 +120,7 @@ func (handler *HTTPHandler) handlePoolStatus(
 		binding.Scope.ScopeID != poolID ||
 		handler.authorityBindings.AuthorizeRequestAt(
 			binding,
-			request.Method,
+			serviceauthority.RequestRead,
 			handler.now(),
 		) != nil {
 		writeComputePoolError(writer, http.StatusConflict, "stale_or_invalid_service_authority")

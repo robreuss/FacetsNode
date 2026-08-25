@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -23,6 +25,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
@@ -251,7 +254,11 @@ func TestAuthorityBindingRejectsWrongServiceKindAndResourceScope(t *testing.T) {
 	next := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusNoContent)
 	})
-	handler := server.serviceAuthorityBindingHandler(serviceauthority.TrafficControl, next)
+	handler := server.serviceAuthorityBindingHandler(
+		serviceauthority.TrafficControl,
+		serviceauthority.RequestMutation,
+		next,
+	)
 
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request.SetPathValue("principalID", otherPrincipalID.String())
@@ -275,6 +282,31 @@ func TestAuthorityBindingRejectsWrongServiceKindAndResourceScope(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("cross-service binding status=%d; want 409", recorder.Code)
+	}
+}
+
+func TestOperatorProvisioningBodyMustMatchLeasedAuthorityScope(t *testing.T) {
+	server := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seed := make([]byte, 32)
+	seed[31] = 6
+	signer, err := serviceauthority.NewDeploymentSigner(uuid.New(), seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.deploymentSigner = signer
+	server.serviceAuthorityBindings = serviceauthority.NewBindingRegistry()
+	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeSharedSpace, ScopeID: uuid.New()}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request = request.WithContext(context.WithValue(
+		request.Context(),
+		serviceAuthorityBindingContextKey{},
+		serviceauthority.RequestBinding{Scope: scope},
+	))
+	if err := server.requestBodyScopeMatchesBinding(request, scope.ScopeID); err != nil {
+		t.Fatalf("matching provisioning scope rejected: %v", err)
+	}
+	if err := server.requestBodyScopeMatchesBinding(request, uuid.New()); err == nil {
+		t.Fatal("cross-scope provisioning body accepted under another scope's lease")
 	}
 }
 
@@ -320,7 +352,11 @@ func TestBulkAuthorityMiddlewareRequiresExactOperationGrant(t *testing.T) {
 				writer.WriteHeader(http.StatusNoContent)
 			}
 		})
-		handler := server.serviceAuthorityBindingHandler(serviceauthority.TrafficBulk, next)
+		handler := server.serviceAuthorityBindingHandler(
+			serviceauthority.TrafficBulk,
+			serviceauthority.RequestMutation,
+			next,
+		)
 		request := httptest.NewRequest(http.MethodPost, "/", nil)
 		setAuthorityHeaders(
 			request.Header,
@@ -352,6 +388,359 @@ func TestBulkAuthorityMiddlewareRequiresExactOperationGrant(t *testing.T) {
 	}
 	if recorder := perform(true, payload.ResourceID, payload.MaximumByteCount+1); recorder.Code != http.StatusConflict {
 		t.Fatalf("oversized transfer status=%d; want 409", recorder.Code)
+	}
+}
+
+func TestMutationMiddlewareHoldsLeaseThroughCompleteHandler(t *testing.T) {
+	deploymentID := uuid.New()
+	scope := serviceauthority.Scope{
+		Kind:    serviceauthority.ScopeDeviceSync,
+		ScopeID: uuid.New(),
+	}
+	digest := repeatAuthorityHex("7")
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := serviceauthority.NewBindingRegistry()
+	if err := bindings.Activate(scope, testServiceAuthorityCurrentBinding(
+		t, 1, digest, deploymentID,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	server := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.SetServiceAuthorityDeployment(signer, bindings, serviceauthority.ScopeDeviceSync)
+	handlerEntered := make(chan struct{})
+	finishHandler := make(chan struct{})
+	defer func() {
+		select {
+		case <-finishHandler:
+		default:
+			close(finishHandler)
+		}
+	}()
+	next := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		close(handlerEntered)
+		<-finishHandler
+		writer.WriteHeader(http.StatusNoContent)
+	})
+	handler := server.serviceAuthorityBindingHandler(
+		serviceauthority.TrafficControl,
+		serviceauthority.RequestMutation,
+		next,
+	)
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request.SetPathValue("principalID", scope.ScopeID.String())
+	setAuthorityHeaders(
+		request.Header, scope, 1, digest, deploymentID, uuid.New(),
+		serviceauthority.TrafficControl,
+	)
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		response <- recorder
+	}()
+	select {
+	case <-handlerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("mutation handler was not entered")
+	}
+
+	drainResult := make(chan *serviceauthority.ScopeLease, 1)
+	go func() {
+		drain, acquireErr := bindings.AcquireMigrationDrain(context.Background(), scope)
+		if acquireErr == nil {
+			drainResult <- drain
+		}
+	}()
+	select {
+	case drain := <-drainResult:
+		drain.Release()
+		t.Fatal("migration drain acquired before the complete handler returned")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(finishHandler)
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusNoContent {
+			t.Fatalf("mutation status=%d; want 204", recorder.Code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mutation handler did not return")
+	}
+	select {
+	case drain := <-drainResult:
+		drain.Release()
+	case <-time.After(time.Second):
+		t.Fatal("migration drain did not acquire after the complete handler returned")
+	}
+}
+
+func TestMutationMiddlewareReleasesLeaseOnPanic(t *testing.T) {
+	deploymentID := uuid.New()
+	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeDeviceSync, ScopeID: uuid.New()}
+	digest := repeatAuthorityHex("8")
+	seed := make([]byte, 32)
+	seed[31] = 3
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := serviceauthority.NewBindingRegistry()
+	if err := bindings.Activate(scope, testServiceAuthorityCurrentBinding(
+		t, 1, digest, deploymentID,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	server := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.SetServiceAuthorityDeployment(signer, bindings, serviceauthority.ScopeDeviceSync)
+	handler := server.serviceAuthorityBindingHandler(
+		serviceauthority.TrafficControl,
+		serviceauthority.RequestMutation,
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("test panic") }),
+	)
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	request.SetPathValue("principalID", scope.ScopeID.String())
+	setAuthorityHeaders(
+		request.Header, scope, 1, digest, deploymentID, uuid.New(),
+		serviceauthority.TrafficControl,
+	)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("mutation handler did not panic")
+			}
+		}()
+		handler.ServeHTTP(httptest.NewRecorder(), request)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	drain, err := bindings.AcquireMigrationDrain(ctx, scope)
+	if err != nil {
+		t.Fatalf("panic leaked mutation lease: %v", err)
+	}
+	drain.Release()
+}
+
+func TestMutatingGETHEADAndGrantRoutesWaitForScopeDrain(t *testing.T) {
+	relayStore := relay.NewMemoryStore()
+	blobStore, err := relay.NewFileBlobContentStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewWithRelay(
+		nil,
+		relayStore,
+		blobStore,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deploymentID := uuid.New()
+	tenantID := uuid.New()
+	domainID := uuid.New()
+	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeDeviceSync, ScopeID: tenantID}
+	digest := repeatAuthorityHex("9")
+	seed := make([]byte, 32)
+	seed[31] = 4
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := serviceauthority.NewBindingRegistry()
+	if err := bindings.Activate(scope, testServiceAuthorityCurrentBinding(
+		t, 1, digest, deploymentID,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	server.SetServiceAuthorityDeployment(signer, bindings, serviceauthority.ScopeDeviceSync)
+	drain, err := bindings.AcquireMigrationDrain(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer drain.Release()
+
+	blobID := relay.BlobID([]byte("mutating-head-route"))
+	tests := []struct {
+		method       string
+		path         string
+		trafficClass serviceauthority.TrafficClass
+	}{
+		{
+			method: http.MethodGet,
+			path: fmt.Sprintf(
+				"/v1/relay/tenants/%s/domains/%s/checkpoint-fences/%s",
+				tenantID, domainID, uuid.New(),
+			),
+			trafficClass: serviceauthority.TrafficControl,
+		},
+		{
+			method: http.MethodGet,
+			path: fmt.Sprintf(
+				"/v1/relay/tenants/%s/domains/%s/messages",
+				tenantID, domainID,
+			),
+			trafficClass: serviceauthority.TrafficMessage,
+		},
+		{
+			method: http.MethodGet,
+			path: fmt.Sprintf(
+				"/v1/relay/tenants/%s/domains/%s/messages/wake",
+				tenantID, domainID,
+			),
+			trafficClass: serviceauthority.TrafficMessage,
+		},
+		{
+			method: http.MethodGet,
+			path: fmt.Sprintf(
+				"/v1/relay/tenants/%s/domains/%s/messages/%s",
+				tenantID, domainID, uuid.New(),
+			),
+			trafficClass: serviceauthority.TrafficMessage,
+		},
+		{
+			method: http.MethodGet,
+			path: fmt.Sprintf(
+				"/v1/relay/tenants/%s/domains/%s/blobs/%s",
+				tenantID, domainID, blobID,
+			),
+			trafficClass: serviceauthority.TrafficBulk,
+		},
+		{
+			method: http.MethodHead,
+			path: fmt.Sprintf(
+				"/v1/relay/tenants/%s/domains/%s/blobs/%s",
+				tenantID, domainID, blobID,
+			),
+			trafficClass: serviceauthority.TrafficBulk,
+		},
+		{
+			// Download-grant issuance reaches GetBlobMetadata, which currently
+			// performs checkpoint-fence expiry cleanup before signing the grant.
+			method: http.MethodPost,
+			path: fmt.Sprintf(
+				"/v1/relay/tenants/%s/domains/%s/bulk-transfer-grants",
+				tenantID, domainID,
+			),
+			trafficClass: serviceauthority.TrafficControl,
+		},
+	}
+	handler := server.Handler()
+	responses := make(chan int, len(tests))
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		setAuthorityHeaders(
+			request.Header, scope, 1, digest, deploymentID, uuid.New(),
+			test.trafficClass,
+		)
+		go func(request *http.Request) {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			responses <- recorder.Code
+		}(request)
+	}
+	select {
+	case status := <-responses:
+		t.Fatalf("transitively mutating relay route bypassed scope drain with status %d", status)
+	case <-time.After(50 * time.Millisecond):
+	}
+	drain.Release()
+	for range tests {
+		select {
+		case <-responses:
+		case <-time.After(time.Second):
+			t.Fatal("transitively mutating relay route did not resume after drain release")
+		}
+	}
+}
+
+func TestSharedParticipantReadRoutesWaitForScopeDrain(t *testing.T) {
+	server := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.SetSharedSpacesStore(sharedspaces.NewMemoryStore(relay.NewMemoryStore()))
+	computeSigner, err := sharedspaces.NewComputeCapabilitySigner(
+		bytes.Repeat([]byte{0x41}, 32),
+		"https://shared-spaces.test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetSharedSpacesComputeCapabilitySigner(computeSigner)
+
+	deploymentID := uuid.New()
+	spaceID := uuid.New()
+	domainID := uuid.New()
+	participantID := uuid.New()
+	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeSharedSpace, ScopeID: spaceID}
+	digest := repeatAuthorityHex("a")
+	seed := make([]byte, 32)
+	seed[31] = 5
+	deploymentSigner, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := serviceauthority.NewBindingRegistry()
+	if err := bindings.Activate(scope, testServiceAuthorityCurrentBinding(
+		t, 1, digest, deploymentID,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	server.SetServiceAuthorityDeployment(
+		deploymentSigner,
+		bindings,
+		serviceauthority.ScopeSharedSpace,
+	)
+	drain, err := bindings.AcquireMigrationDrain(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer drain.Release()
+
+	base := fmt.Sprintf(
+		"/v1/shared-spaces/%s/domains/%s/participants/%s",
+		spaceID, domainID, participantID,
+	)
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: base + "/status"},
+		{method: http.MethodGet, path: base + "/roster"},
+		{method: http.MethodGet, path: base + "/roster-attestations"},
+		{method: http.MethodGet, path: base + "/bootstrap"},
+		{method: http.MethodGet, path: base + "/key-grant"},
+		{method: http.MethodPost, path: base + "/compute-capabilities"},
+	}
+	handler := server.Handler()
+	responses := make(chan int, len(tests))
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		setAuthorityHeaders(
+			request.Header, scope, 1, digest, deploymentID, uuid.New(),
+			serviceauthority.TrafficControl,
+		)
+		go func(request *http.Request) {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			responses <- recorder.Code
+		}(request)
+	}
+	select {
+	case status := <-responses:
+		t.Fatalf("Shared participant read bypassed scope drain with status %d", status)
+	case <-time.After(50 * time.Millisecond):
+	}
+	drain.Release()
+	for range tests {
+		select {
+		case <-responses:
+		case <-time.After(time.Second):
+			t.Fatal("Shared participant read did not resume after drain release")
+		}
 	}
 }
 
