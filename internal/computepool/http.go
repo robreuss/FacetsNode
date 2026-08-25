@@ -116,7 +116,8 @@ func (handler *HTTPHandler) handlePoolStatus(
 		serviceauthority.TrafficControl,
 	)
 	if err != nil || binding.Scope.Kind != serviceauthority.ScopeComputePool ||
-		binding.Scope.ScopeID != poolID || handler.authorityBindings.Authorize(binding) != nil {
+		binding.Scope.ScopeID != poolID ||
+		handler.authorityBindings.AuthorizeRequest(binding, request.Method) != nil {
 		writeComputePoolError(writer, http.StatusConflict, "stale_or_invalid_service_authority")
 		return
 	}

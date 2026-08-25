@@ -185,13 +185,20 @@ func TestBindingRegistryRejectsRollbackEquivocationAndStaleHeaders(t *testing.T)
 }
 
 func TestBindingRegistryLoadsStrictDeploymentScopedState(t *testing.T) {
-	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
-	scopeID := uuid.MustParse("61000000-0000-0000-0000-000000000001")
+	fixture := newBootstrapFixture(t)
+	deploymentID := fixture.descriptor.DeploymentID
+	scopeID := fixture.scope.ScopeID
+	manifest := fixture.signedManifest(t, fixture.policy)
+	digest, err := manifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(t.TempDir(), "bindings.json")
 	data, err := json.Marshal(BindingFile{
 		Bindings: []BindingFileEntry{{
 			DeploymentID: deploymentID,
-			Digest:       repeatHex("1"),
+			Digest:       digest,
+			Manifest:     &manifest,
 			Revision:     1,
 			Scope: Scope{
 				Kind: ScopeDeviceSync, ScopeID: scopeID,
@@ -212,7 +219,7 @@ func TestBindingRegistryLoadsStrictDeploymentScopedState(t *testing.T) {
 	if err := registry.Authorize(RequestBinding{
 		Scope:             Scope{Kind: ScopeDeviceSync, ScopeID: scopeID},
 		AuthorityRevision: 1,
-		AuthorityDigest:   repeatHex("1"),
+		AuthorityDigest:   digest,
 		DeploymentID:      deploymentID,
 		RouteID:           uuid.New(),
 		TrafficClass:      TrafficControl,
@@ -241,11 +248,9 @@ func TestBindingRegistryLoadsStrictDeploymentScopedState(t *testing.T) {
 }
 
 func TestBindingRegistryPersistsFirstActivationAndReloadsIt(t *testing.T) {
-	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
-	scope := Scope{
-		Kind:    ScopeDeviceSync,
-		ScopeID: uuid.MustParse("61000000-0000-0000-0000-000000000001"),
-	}
+	fixture := newBootstrapFixture(t)
+	deploymentID := fixture.descriptor.DeploymentID
+	scope := fixture.scope
 	path := filepath.Join(t.TempDir(), "bindings.json")
 	empty, err := json.Marshal(BindingFile{Bindings: []BindingFileEntry{}, Version: SchemaVersion})
 	if err != nil {
@@ -258,7 +263,14 @@ func TestBindingRegistryPersistsFirstActivationAndReloadsIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("empty initial registry rejected: %v", err)
 	}
-	binding := testCurrentBinding(t, 1, repeatHex("1"), deploymentID)
+	manifest := fixture.signedManifest(t, fixture.policy)
+	digest, err := manifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := CurrentBinding{
+		Revision: 1, Digest: digest, DeploymentID: deploymentID, Manifest: &manifest,
+	}
 	if err := registry.Activate(scope, binding); err != nil {
 		t.Fatalf("first activation failed: %v", err)
 	}
@@ -282,6 +294,29 @@ func TestBindingRegistryPersistsFirstActivationAndReloadsIt(t *testing.T) {
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("persisted bindings are not owner-only: %o", info.Mode().Perm())
+	}
+}
+
+func TestBindingRegistryRejectsPersistedDigestWithoutSignedManifest(t *testing.T) {
+	fixture := newBootstrapFixture(t)
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	data, err := json.Marshal(BindingFile{
+		Bindings: []BindingFileEntry{{
+			DeploymentID: fixture.descriptor.DeploymentID,
+			Digest:       repeatHex("1"),
+			Revision:     1,
+			Scope:        fixture.scope,
+		}},
+		Version: SchemaVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBindingRegistry(path, fixture.descriptor.DeploymentID); err == nil {
+		t.Fatal("persisted authority digest accepted without its signed manifest")
 	}
 }
 

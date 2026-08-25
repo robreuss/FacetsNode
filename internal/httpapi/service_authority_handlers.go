@@ -106,7 +106,8 @@ func (s *Server) serviceAuthorityBindingHandler(
 			s.deploymentSigner.DeploymentID(),
 			trafficClass,
 		)
-		if err != nil || s.serviceAuthorityBindings.Authorize(binding) != nil {
+		if err != nil ||
+			s.serviceAuthorityBindings.AuthorizeRequest(binding, request.Method) != nil {
 			writeServiceAuthorityError(writer, http.StatusConflict)
 			return
 		}

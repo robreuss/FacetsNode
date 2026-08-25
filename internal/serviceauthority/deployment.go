@@ -271,9 +271,25 @@ func singleHeaderValue(header http.Header, name string) (string, error) {
 }
 
 type CurrentBinding struct {
-	Revision     uint64
-	Digest       string
-	DeploymentID uuid.UUID
+	Revision                 uint64
+	Digest                   string
+	DeploymentID             uuid.UUID
+	Manifest                 *Manifest
+	TransitionEvidenceDigest *string
+	WriteFence               *MigrationWriteFence
+}
+
+// MigrationWriteFence is the durable public evidence that this deployment
+// stopped accepting writes for one exact service scope before signing a
+// migration snapshot. The service state store must commit the named fence and
+// state commitment atomically before the deployment signs the snapshot; this
+// registry then makes the fence fail-closed at the HTTP authority boundary.
+type MigrationWriteFence struct {
+	AuthorityManifestDigest string             `json:"authorityManifestDigest"`
+	AuthorityRevision       uint64             `json:"authorityRevision"`
+	Snapshot                *MigrationSnapshot `json:"snapshot,omitempty"`
+	SnapshotPayload         []byte             `json:"snapshotPayload"`
+	SnapshotReferenceDigest *string            `json:"snapshotReferenceDigest,omitempty"`
 }
 
 type BindingRegistry struct {
@@ -289,10 +305,13 @@ type BindingFile struct {
 }
 
 type BindingFileEntry struct {
-	DeploymentID uuid.UUID `json:"deploymentID"`
-	Digest       string    `json:"digest"`
-	Revision     uint64    `json:"revision"`
-	Scope        Scope     `json:"scope"`
+	DeploymentID             uuid.UUID            `json:"deploymentID"`
+	Digest                   string               `json:"digest"`
+	Manifest                 *Manifest            `json:"manifest,omitempty"`
+	Revision                 uint64               `json:"revision"`
+	Scope                    Scope                `json:"scope"`
+	TransitionEvidenceDigest *string              `json:"transitionEvidenceDigest,omitempty"`
+	WriteFence               *MigrationWriteFence `json:"writeFence,omitempty"`
 }
 
 func NewBindingRegistry() *BindingRegistry {
@@ -333,20 +352,20 @@ func LoadBindingRegistry(
 	}
 	seen := make(map[Scope]struct{}, len(file.Bindings))
 	for _, entry := range file.Bindings {
-		if entry.DeploymentID != expectedDeploymentID {
-			return nil, ErrInvalid
-		}
 		if _, exists := seen[entry.Scope]; exists {
 			return nil, ErrInvalid
 		}
 		seen[entry.Scope] = struct{}{}
 		binding := CurrentBinding{
-			Revision:     entry.Revision,
-			Digest:       entry.Digest,
-			DeploymentID: entry.DeploymentID,
+			Revision:                 entry.Revision,
+			Digest:                   entry.Digest,
+			DeploymentID:             entry.DeploymentID,
+			Manifest:                 entry.Manifest,
+			TransitionEvidenceDigest: entry.TransitionEvidenceDigest,
+			WriteFence:               entry.WriteFence,
 		}
-		if entry.Scope.Validate() != nil || binding.Revision == 0 ||
-			!validDigest(binding.Digest) {
+		if entry.Scope.Validate() != nil ||
+			validateCurrentBinding(entry.Scope, binding, expectedDeploymentID) != nil {
 			return nil, ErrInvalid
 		}
 		registry.bindings[entry.Scope] = binding
@@ -354,20 +373,22 @@ func LoadBindingRegistry(
 	return registry, nil
 }
 
-// Activate is intentionally not exposed over HTTP. A caller must first
-// authenticate the Facets authority chain before installing this non-secret
-// active binding in the deployment runtime.
+// Activate is intentionally limited to initial activation and is not exposed
+// over HTTP. Persistent registries require the exact signed manifest; later
+// successors use the transition- or evidence-specific methods.
 func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) error {
-	if registry == nil || scope.Validate() != nil || binding.Revision == 0 ||
-		!validDigest(binding.Digest) || binding.DeploymentID == uuid.Nil {
+	if registry == nil || scope.Validate() != nil ||
+		validateCurrentBinding(scope, binding, registry.expectedDeploymentID) != nil {
 		return ErrInvalid
+	}
+	if binding.Manifest != nil {
+		payload, err := binding.Manifest.VerifiedPayload()
+		if err != nil || payload.Transition != TransitionInitialActivation {
+			return ErrInvalid
+		}
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if registry.expectedDeploymentID != uuid.Nil &&
-		binding.DeploymentID != registry.expectedDeploymentID {
-		return ErrInvalid
-	}
 	if current, exists := registry.bindings[scope]; exists {
 		if binding.Revision < current.Revision ||
 			(binding.Revision == current.Revision &&
@@ -407,16 +428,18 @@ func persistBindingFile(
 	}
 	entries := make([]BindingFileEntry, 0, len(bindings))
 	for scope, binding := range bindings {
-		if scope.Validate() != nil || binding.Revision == 0 ||
-			!validDigest(binding.Digest) ||
-			binding.DeploymentID != expectedDeploymentID {
+		if scope.Validate() != nil ||
+			validateCurrentBinding(scope, binding, expectedDeploymentID) != nil {
 			return ErrInvalid
 		}
 		entries = append(entries, BindingFileEntry{
-			DeploymentID: binding.DeploymentID,
-			Digest:       binding.Digest,
-			Revision:     binding.Revision,
-			Scope:        scope,
+			DeploymentID:             binding.DeploymentID,
+			Digest:                   binding.Digest,
+			Manifest:                 binding.Manifest,
+			Revision:                 binding.Revision,
+			Scope:                    scope,
+			TransitionEvidenceDigest: binding.TransitionEvidenceDigest,
+			WriteFence:               binding.WriteFence,
 		})
 	}
 	sort.Slice(entries, func(left, right int) bool {
@@ -476,6 +499,94 @@ func persistBindingFile(
 	return nil
 }
 
+func validateCurrentBinding(
+	scope Scope,
+	binding CurrentBinding,
+	expectedDeploymentID uuid.UUID,
+) error {
+	if binding.Revision == 0 || !validDigest(binding.Digest) || binding.DeploymentID == uuid.Nil {
+		return ErrInvalid
+	}
+	if binding.Manifest == nil {
+		if binding.TransitionEvidenceDigest != nil || binding.WriteFence != nil ||
+			expectedDeploymentID != uuid.Nil {
+			return ErrInvalid
+		}
+		return nil
+	}
+	payload, err := binding.Manifest.VerifiedPayload()
+	digest, digestErr := binding.Manifest.ReferenceDigest()
+	if err != nil || digestErr != nil || payload.Scope != scope || payload.Revision != binding.Revision ||
+		digest != binding.Digest || payload.ActiveDeployment.DeploymentID != binding.DeploymentID {
+		return ErrInvalid
+	}
+	if expectedDeploymentID != uuid.Nil && !manifestNamesDeployment(payload, expectedDeploymentID) {
+		return ErrInvalid
+	}
+	requiresEvidence := payload.Transition == TransitionMigrationPreparation ||
+		payload.Transition == TransitionMigrationActivation ||
+		payload.Transition == TransitionMigrationRollback
+	if requiresEvidence != (binding.TransitionEvidenceDigest != nil) ||
+		(binding.TransitionEvidenceDigest != nil && !validDigest(*binding.TransitionEvidenceDigest)) {
+		return ErrInvalid
+	}
+	if binding.WriteFence != nil &&
+		binding.WriteFence.validate(scope, binding, expectedDeploymentID) != nil {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func manifestNamesDeployment(payload ManifestPayload, deploymentID uuid.UUID) bool {
+	if payload.ActiveDeployment.DeploymentID == deploymentID {
+		return true
+	}
+	for _, deployment := range payload.PreparedDeployments {
+		if deployment.DeploymentID == deploymentID {
+			return true
+		}
+	}
+	return payload.Migration != nil &&
+		(payload.Migration.SourceDeploymentID == deploymentID ||
+			payload.Migration.TargetDeploymentID == deploymentID)
+}
+
+func (fence MigrationWriteFence) validate(
+	scope Scope,
+	binding CurrentBinding,
+	expectedDeploymentID uuid.UUID,
+) error {
+	var payload MigrationSnapshotPayload
+	if decodeCanonical(fence.SnapshotPayload, &payload) != nil || payload.Validate(nil) != nil ||
+		!validDigest(fence.AuthorityManifestDigest) ||
+		fence.AuthorityRevision == 0 || fence.AuthorityRevision > binding.Revision ||
+		payload.Scope != scope || payload.AuthorityManifestDigest != fence.AuthorityManifestDigest ||
+		(expectedDeploymentID != uuid.Nil && payload.ExportingDeploymentID != expectedDeploymentID) {
+		return ErrInvalid
+	}
+	if fence.Snapshot == nil {
+		if fence.SnapshotReferenceDigest != nil {
+			return ErrInvalid
+		}
+	} else {
+		verified, err := fence.Snapshot.VerifiedPayload(nil)
+		digest, digestErr := fence.Snapshot.ReferenceDigest()
+		if err != nil || digestErr != nil || !canonicalEqual(verified, payload) ||
+			!bytes.Equal(fence.Snapshot.Payload, fence.SnapshotPayload) ||
+			fence.SnapshotReferenceDigest == nil || digest != *fence.SnapshotReferenceDigest {
+			return ErrInvalid
+		}
+	}
+	if binding.Manifest != nil {
+		manifest, err := binding.Manifest.VerifiedPayload()
+		if err != nil || manifest.Migration == nil ||
+			manifest.Migration.MigrationID != payload.MigrationID {
+			return ErrInvalid
+		}
+	}
+	return nil
+}
+
 func (registry *BindingRegistry) Authorize(binding RequestBinding) error {
 	if registry == nil {
 		return ErrInvalid
@@ -486,6 +597,31 @@ func (registry *BindingRegistry) Authorize(binding RequestBinding) error {
 	if !exists || current.Revision != binding.AuthorityRevision ||
 		current.DeploymentID != binding.DeploymentID ||
 		subtle.ConstantTimeCompare([]byte(current.Digest), []byte(binding.AuthorityDigest)) != 1 {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// AuthorizeRequest additionally enforces a durable migration write fence.
+// Read-only requests may continue during attended transfer; any method that
+// can mutate service state fails closed until evidence-specific activation or
+// rollback clears the local fence.
+func (registry *BindingRegistry) AuthorizeRequest(binding RequestBinding, method string) error {
+	if registry == nil {
+		return ErrInvalid
+	}
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	current, exists := registry.bindings[binding.Scope]
+	if !exists || current.Revision != binding.AuthorityRevision ||
+		current.DeploymentID != binding.DeploymentID ||
+		subtle.ConstantTimeCompare([]byte(current.Digest), []byte(binding.AuthorityDigest)) != 1 {
+		return ErrInvalid
+	}
+	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+		return nil
+	}
+	if current.WriteFence != nil {
 		return ErrInvalid
 	}
 	return nil

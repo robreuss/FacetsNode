@@ -385,6 +385,7 @@ func (s *Server) handleClaimDeviceSyncAccountAdmission(writer http.ResponseWrite
 		authorityBinding = &serviceauthority.CurrentBinding{
 			Revision: manifest.Revision, Digest: digest,
 			DeploymentID: manifest.ActiveDeployment.DeploymentID,
+			Manifest:     &input.ServiceAuthorityEnrollment.Manifest,
 		}
 	}
 	result, err := s.deviceSyncStore.ClaimAccountAdmission(

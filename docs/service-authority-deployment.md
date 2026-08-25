@@ -78,6 +78,16 @@ deployment input with no group/world write permission and this schema:
     {
       "deploymentID": "63000000-0000-0000-0000-000000000001",
       "digest": "<64 lowercase hexadecimal characters>",
+      "manifest": {
+        "payload": "<canonical signed manifest payload>",
+        "signature": {
+          "algorithm": "ES256",
+          "publicSigningKeyX963": "<canonical base64url public key>",
+          "signature": "<canonical base64url raw signature>",
+          "signerID": "<Facets authority UUID>",
+          "signingKeyFingerprint": "<64 lowercase hexadecimal characters>"
+        }
+      },
       "revision": 1,
       "scope": {
         "kind": "device_sync",
@@ -89,8 +99,9 @@ deployment input with no group/world write permission and this schema:
 }
 ```
 
-Duplicate scopes, another deployment ID, malformed digests, unknown fields,
-and trailing JSON are rejected at startup. An empty binding list is valid for
+Duplicate scopes, a deployment ID not authorized for the local host by the
+signed manifest, malformed digests, unknown fields, and trailing JSON are
+rejected at startup. An empty binding list is valid for
 a new deployment. The source that
 produces this file must first authenticate the corresponding Facets-signed
 manifest chain; FacetsNode does not create or repair authority successors.
@@ -103,6 +114,27 @@ success; a changed retry fails closed. It then permits only an identical
 binding or the next consecutive revision. The Facets authority public key
 remains in the client-verified manifest and is not copied into this server-side
 binding file.
+
+An attended migration enriches the same entry with the exact signed manifest.
+The active `deploymentID` may then name the other deployment only while that
+manifest still names the local deployment as the migration source, target, or
+prepared deployment. A fenced exporter also persists `writeFence`, containing
+the authority revision/digest, canonical snapshot payload, and—after
+signing—the exact deployment-signed snapshot and reference digest. A staged
+but not yet signed fence is valid and blocks writes after restart. Preparation,
+activation, and rollback bindings also retain a domain-separated digest of the
+complete accepted evidence so only an exact expired retry remains idempotent.
+
+Migration snapshot signing is deliberately two-phase. The service state store
+first commits its state commitment and write-fence identifier; the registry
+then durably stages that exact canonical payload and blocks mutating HTTP
+requests. Only the registry's staged-snapshot signer may use the deployment
+key. Activation and rollback require complete migration evidence and cannot be
+installed through the generic binding or successor methods. Exact retries are
+idempotent; conflicting payloads, signatures, revisions, or fences fail.
+The HTTP gate does not drain a write already inside a backend transaction;
+service-specific stores must enforce the same fence transactionally before a
+runtime migration claim is valid.
 
 Once enabled:
 
@@ -127,13 +159,16 @@ Once enabled:
 - `/livez`, `/readyz`, and `/metrics` remain available to the private
   management plane without a client service scope.
 
-This registry now provides durable Device Sync initial binding activation but
-does not yet provide migration orchestration. Shared Spaces initial authority
-enrollment and temporary admission-to-scope binding remain later enablement
-gates. Compute Pool is a development skeleton, requires deployment
-authentication, and does not yet expose onion ingress. Later activation,
-migration, and recovery mechanisms must update this same fail-closed registry
-rather than introduce another authority source.
+This registry now provides durable Device Sync initial binding activation,
+portable attended-migration evidence validation, successor persistence, and a
+fail-closed two-phase write-fence/signing boundary. It does not yet provide
+public migration routes, service-state/blob copy orchestration, onion-state
+handoff, operator cutover, or deployed rollback. Shared Spaces initial
+authority enrollment and temporary admission-to-scope binding remain later
+enablement gates. Compute Pool is a development skeleton, requires deployment
+authentication, and does not yet expose onion ingress. Recovery remains
+fail-closed and must use this same registry rather than introduce another
+authority source.
 
 The transfer grant is signed by the active deployment key, not the longer-lived
 Facets authority key. FacetsNode issues it only after the existing bearer has

@@ -344,6 +344,7 @@ type TrustAnchor struct {
 type ManifestPayload struct {
 	ActiveDeployment          DeploymentDescriptor   `json:"activeDeployment"`
 	IssuedAtMilliseconds      int64                  `json:"issuedAtMilliseconds"`
+	Migration                 *MigrationAuthority    `json:"migration,omitempty"`
 	PredecessorManifestDigest *string                `json:"predecessorManifestDigest,omitempty"`
 	PreparedDeployments       []DeploymentDescriptor `json:"preparedDeployments"`
 	Revision                  uint64                 `json:"revision"`
@@ -429,7 +430,7 @@ func (enrollment InitialEnrollment) validate(
 	var manifest ManifestPayload
 	if verifyCanonicalRecord(enrollment.Manifest.Payload, enrollment.Manifest.Signature,
 		"Facets service authority manifest v1\x00", &manifest) != nil ||
-		manifest.Version != SchemaVersion || manifest.Scope != expectedScope ||
+		manifest.Validate(nil) != nil || manifest.Scope != expectedScope ||
 		manifest.Revision != 1 || manifest.Transition != "initial_activation" ||
 		manifest.PredecessorManifestDigest != nil ||
 		manifest.IssuedAtMilliseconds < offer.IssuedAtMilliseconds ||
@@ -538,6 +539,9 @@ func (signer *DeploymentSigner) signRecord(domain string, payload []byte) (Signa
 }
 
 func verifyCanonicalRecord(payload []byte, signature Signature, domain string, target any) error {
+	if len(payload) == 0 || len(payload) > 262_144 {
+		return ErrInvalid
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

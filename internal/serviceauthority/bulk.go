@@ -222,7 +222,9 @@ func (registry *BindingRegistry) AuthorizeBulkTransfer(
 	registry.mu.RLock()
 	current, exists := registry.bindings[binding.Scope]
 	registry.mu.RUnlock()
-	if !exists || current.DeploymentID != signer.DeploymentID() ||
+	if !exists || current.Revision != binding.AuthorityRevision ||
+		current.Digest != binding.AuthorityDigest ||
+		current.DeploymentID != signer.DeploymentID() ||
 		verifyBulkTransferGrant(grant, payload, signer) != nil ||
 		payload.Scope != binding.Scope || payload.AuthorityManifestDigest != binding.AuthorityDigest ||
 		payload.DeploymentID != binding.DeploymentID || payload.RouteID != binding.RouteID ||
