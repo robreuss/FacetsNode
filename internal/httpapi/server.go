@@ -168,6 +168,11 @@ func (s *Server) Handler() http.Handler {
 	registerUnbound("GET /metrics", traffic.SurfaceManagement, s.handleMetrics)
 	if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
 		registerUnbound(
+			"POST /v1/service-deployment/bootstrap-proof",
+			traffic.SurfaceManagement,
+			s.handleServiceBootstrapDeploymentProof,
+		)
+		registerUnbound(
 			"POST /v1/service-deployment/proof",
 			traffic.SurfaceManagement,
 			s.handleServiceDeploymentProof,
@@ -369,11 +374,19 @@ func (s *Server) Handler() http.Handler {
 				s.handleCreateDeviceSyncAccountAdmission,
 			)
 		}
-		register(
-			"POST /v1/device-sync/account-admissions/{admissionID}/claim",
-			traffic.SurfaceManagement,
-			s.handleClaimDeviceSyncAccountAdmission,
-		)
+		if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
+			registerUnbound(
+				"POST /v1/device-sync/account-admissions/{admissionID}/claim",
+				traffic.SurfaceManagement,
+				s.handleClaimDeviceSyncAccountAdmission,
+			)
+		} else {
+			register(
+				"POST /v1/device-sync/account-admissions/{admissionID}/claim",
+				traffic.SurfaceManagement,
+				s.handleClaimDeviceSyncAccountAdmission,
+			)
+		}
 		register(
 			"GET /v1/device-sync/principals/{principalID}/status",
 			traffic.SurfaceManagement,
@@ -413,8 +426,12 @@ func (s *Server) Handler() http.Handler {
 		// six-digit PIN only helps an existing trusted device locate a
 		// candidate-created encrypted mailbox; it never becomes Device Sync
 		// authority or content-key material.
-		register("POST /v1/device-sync/join-requests", traffic.SurfaceRendezvous, s.handleCreateDeviceSyncJoinRequest)
-		register("GET /v1/device-sync/join-requests/{requestID}/bootstrap", traffic.SurfaceRendezvous, s.handleFetchDeviceSyncJoinBootstrap)
+		// The candidate does not receive the signed Device Sync authority
+		// snapshot until it opens this mailbox's sponsor-encrypted bootstrap.
+		// These two narrowly capability-protected routes therefore remain
+		// unbound; they carry no Facets bearer, plaintext, or content key.
+		registerUnbound("POST /v1/device-sync/join-requests", traffic.SurfaceRendezvous, s.handleCreateDeviceSyncJoinRequest)
+		registerUnbound("GET /v1/device-sync/join-requests/{requestID}/bootstrap", traffic.SurfaceRendezvous, s.handleFetchDeviceSyncJoinBootstrap)
 		register(
 			"GET /v1/device-sync/principals/{principalID}/control-domains/{domainID}/join-requests/{pin}",
 			traffic.SurfaceManagement,

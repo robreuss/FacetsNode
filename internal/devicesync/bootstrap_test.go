@@ -5,12 +5,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 func TestIssueAccountBootstrapCreatesOneTimeCredentialAndSetupURL(t *testing.T) {
@@ -19,7 +23,9 @@ func TestIssueAccountBootstrapCreatesOneTimeCredentialAndSetupURL(t *testing.T) 
 	now := time.UnixMilli(1_900_000_000_000)
 
 	issued, err := devicesync.IssueAccountBootstrap(
-		context.Background(), store, "https://sync.example.test/", 15*time.Minute, now, random,
+		context.Background(), store, "https://sync.example.test/",
+		testDeploymentOffer(t, "https://sync.example.test", now, 15*time.Minute),
+		15*time.Minute, now, random,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +46,7 @@ func TestIssueAccountBootstrapCreatesOneTimeCredentialAndSetupURL(t *testing.T) 
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded != issued.Bootstrap {
+	if !reflect.DeepEqual(decoded, issued.Bootstrap) {
 		t.Fatalf("decoded=%+v issued=%+v", decoded, issued.Bootstrap)
 	}
 }
@@ -57,7 +63,9 @@ func TestIssueAccountBootstrapRejectsUnsafeEndpointAndLifetime(t *testing.T) {
 		{endpoint: "https://sync.example.test", lifetime: time.Minute},
 	} {
 		if _, err := devicesync.IssueAccountBootstrap(
-			context.Background(), store, testCase.endpoint, testCase.lifetime,
+			context.Background(), store, testCase.endpoint,
+			testDeploymentOffer(t, "https://sync.example.test", now, 15*time.Minute),
+			testCase.lifetime,
 			now, bytes.NewReader(bytes.Repeat([]byte{0x6b}, 64)),
 		); err == nil {
 			t.Fatalf("endpoint=%q lifetime=%s was accepted", testCase.endpoint, testCase.lifetime)
@@ -65,16 +73,63 @@ func TestIssueAccountBootstrapRejectsUnsafeEndpointAndLifetime(t *testing.T) {
 	}
 }
 
-func TestIssueAccountBootstrapAllowsLoopbackHTTP(t *testing.T) {
+func TestIssueAccountBootstrapRejectsEndpointOutsideSignedRoutes(t *testing.T) {
 	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
-	issued, err := devicesync.IssueAccountBootstrap(
-		context.Background(), store, "http://127.0.0.1:18080/", 15*time.Minute,
-		time.UnixMilli(1_900_000_000_000), bytes.NewReader(bytes.Repeat([]byte{0x4c}, 64)),
+	now := time.UnixMilli(1_900_000_000_000)
+	_, err := devicesync.IssueAccountBootstrap(
+		context.Background(), store, "https://other.example.test",
+		testDeploymentOffer(t, "https://sync.example.test", now, 15*time.Minute),
+		15*time.Minute, now, bytes.NewReader(bytes.Repeat([]byte{0x4c}, 64)),
 	)
+	if err == nil {
+		t.Fatal("endpoint outside signed control routes accepted")
+	}
+}
+
+func testDeploymentOffer(
+	t *testing.T,
+	endpoint string,
+	now time.Time,
+	lifetime time.Duration,
+) serviceauthority.DeploymentOffer {
+	t.Helper()
+	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if issued.Bootstrap.ServiceEndpoint != "http://127.0.0.1:18080" {
-		t.Fatalf("endpoint=%q", issued.Bootstrap.ServiceEndpoint)
+	routeID := uuid.MustParse("62000000-0000-0000-0000-000000000001")
+	template := serviceauthority.DeploymentOfferTemplate{
+		Deployment: serviceauthority.DeploymentDescriptor{
+			CreatedAtMilliseconds: now.Add(-time.Hour).UnixMilli(),
+			DeploymentID:          deploymentID,
+			PublicSigningKeyX963:  signer.PublicSigningKeyX963(),
+			Routes: []serviceauthority.TransportRoute{{
+				Endpoint:     endpoint,
+				Kind:         serviceauthority.RouteDirectHTTPS,
+				NetworkScope: serviceauthority.NetworkPublic,
+				RouteID:      routeID,
+				ServerAuthentication: serviceauthority.ServerAuthentication{
+					Kind: "web_pki",
+				},
+			}},
+			SigningKeyFingerprint: signer.SigningKeyFingerprint(),
+			Version:               serviceauthority.SchemaVersion,
+		},
+		TransportPolicy: serviceauthority.TransportPolicy{
+			AllowsPublicDirectBulkTransfer: true,
+			BulkRouteIDs:                   []uuid.UUID{routeID},
+			ControlRouteIDs:                []uuid.UUID{routeID},
+			MessageRouteIDs:                []uuid.UUID{routeID},
+			Version:                        serviceauthority.SchemaVersion,
+		},
+		Version: serviceauthority.SchemaVersion,
 	}
+	offer, err := template.SignOffer(signer, now, now.Add(lifetime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return offer
 }

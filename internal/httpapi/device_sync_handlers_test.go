@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 func TestDeviceSyncAccountAdmissionClaimsPrincipalExactlyOnce(t *testing.T) {
@@ -123,6 +126,171 @@ func TestDeviceSyncAccountAdmissionClaimsPrincipalExactlyOnce(t *testing.T) {
 	)
 	requireStatus(t, changed, http.StatusConflict)
 	_ = changed.Body.Close()
+}
+
+func TestDeviceSyncAccountClaimActivatesClientSignedInitialAuthorityBinding(t *testing.T) {
+	now := int64(1_100)
+	operatorToken := relayTestToken(221)
+	relayStore := relay.NewMemoryStore()
+	server := newDeviceSyncTestServer(t, relayStore, operatorToken, now)
+	credential := deviceSyncAdmissionCredential{
+		AdmissionID:        uuid.New(),
+		AuthorizationToken: relayTestToken(222),
+	}
+	admission := deviceSyncAdmissionCreateInput{
+		Version:               devicesync.SchemaVersion,
+		RetryID:               uuid.New(),
+		AdmissionCredential:   credential,
+		ExpiresAtMilliseconds: now + devicesync.MinimumAdmissionLifetimeMilliseconds,
+	}
+	created := performRelayJSON(
+		t,
+		server.Handler(),
+		http.MethodPost,
+		"/v1/device-sync/account-admissions",
+		admission,
+		operatorToken,
+		uuid.Nil,
+	)
+	requireStatus(t, created, http.StatusCreated)
+	_ = created.Body.Close()
+
+	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
+	routeID := uuid.MustParse("62000000-0000-0000-0000-000000000001")
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingDirectory := t.TempDir()
+	bindingPath := filepath.Join(bindingDirectory, "bindings.json")
+	emptyBindings, err := json.Marshal(serviceauthority.BindingFile{
+		Bindings: []serviceauthority.BindingFileEntry{},
+		Version:  serviceauthority.SchemaVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bindingPath, emptyBindings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := serviceauthority.LoadBindingRegistry(bindingPath, deploymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetServiceAuthorityDeployment(
+		signer,
+		bindings,
+		serviceauthority.ScopeDeviceSync,
+	)
+	handler := server.Handler()
+	controlDomain := newRelayDomainProvisioningRequest(now, 223, 224)
+	scope := serviceauthority.Scope{
+		Kind:    serviceauthority.ScopeDeviceSync,
+		ScopeID: controlDomain.AdministrationCredential.TenantID,
+	}
+	enrollment := testInitialServiceAuthorityEnrollment(
+		t,
+		signer,
+		scope,
+		routeID,
+	)
+	claim := deviceSyncPrincipalClaimInput{
+		Version:                    devicesync.SchemaVersion,
+		RetryID:                    uuid.New(),
+		PrincipalID:                scope.ScopeID,
+		InitialDeviceID:            controlDomain.MemberCredential.MemberID,
+		ServiceAuthorityEnrollment: &enrollment,
+		TenantProvisioning: newRelayTenantProvisioningRequest(
+			controlDomain,
+			relayTestToken(225),
+		),
+	}
+	claimPath := "/v1/device-sync/account-admissions/" +
+		credential.AdmissionID.String() + "/claim"
+
+	missing := claim
+	missing.ServiceAuthorityEnrollment = nil
+	response := performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		claimPath,
+		missing,
+		credential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusBadRequest)
+	_ = response.Body.Close()
+
+	// Force the public-binding write to fail after the Device Sync store has
+	// committed. The handler must withhold success, then allow an exact retry
+	// to repair and durably activate the binding.
+	if err := os.Remove(bindingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(bindingPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	response = performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		claimPath,
+		claim,
+		credential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusConflict)
+	_ = response.Body.Close()
+	if err := os.Remove(bindingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bindingPath, emptyBindings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response = performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		claimPath,
+		claim,
+		credential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusOK)
+	_ = response.Body.Close()
+	manifestDigest, err := enrollment.Manifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.Authorize(serviceauthority.RequestBinding{
+		Scope:             scope,
+		AuthorityRevision: 1,
+		AuthorityDigest:   manifestDigest,
+		DeploymentID:      deploymentID,
+		RouteID:           routeID,
+		TrafficClass:      serviceauthority.TrafficControl,
+	}); err != nil {
+		t.Fatalf("claimed initial authority binding was not activated: %v", err)
+	}
+
+	// The setup offer expires at 2,000. Once the store has committed this exact
+	// claim, expiry must not turn a lost-response retry into a false failure.
+	now = 2_100
+	server.now = func() time.Time { return time.UnixMilli(now) }
+	response = performRelayJSON(
+		t,
+		handler,
+		http.MethodPost,
+		claimPath,
+		claim,
+		credential.AuthorizationToken,
+		uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusOK)
+	_ = response.Body.Close()
 }
 
 func TestDeviceSyncAccountAdmissionAppliesOperatorEntitlement(t *testing.T) {

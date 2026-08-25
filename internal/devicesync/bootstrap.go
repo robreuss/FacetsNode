@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 const accountBootstrapURLPrefix = "facets://device-sync/bootstrap#"
@@ -21,11 +23,12 @@ const accountBootstrapURLPrefix = "facets://device-sync/bootstrap#"
 // operator transfers to Facets. It authorizes creation of one Device Sync
 // principal; it does not contain content keys or grant content authority.
 type AccountBootstrap struct {
-	Version               int       `json:"version"`
-	ServiceEndpoint       string    `json:"serviceEndpoint"`
-	AdmissionID           uuid.UUID `json:"admissionID"`
-	AuthorizationToken    string    `json:"authorizationToken"`
-	ExpiresAtMilliseconds int64     `json:"expiresAtMilliseconds"`
+	Version               int                              `json:"version"`
+	ServiceEndpoint       string                           `json:"serviceEndpoint"`
+	AdmissionID           uuid.UUID                        `json:"admissionID"`
+	AuthorizationToken    string                           `json:"authorizationToken"`
+	DeploymentOffer       serviceauthority.DeploymentOffer `json:"deploymentOffer"`
+	ExpiresAtMilliseconds int64                            `json:"expiresAtMilliseconds"`
 }
 
 func (bootstrap AccountBootstrap) Validate() error {
@@ -45,6 +48,18 @@ func (bootstrap AccountBootstrap) Validate() error {
 	}
 	if endpoint != bootstrap.ServiceEndpoint {
 		return fmt.Errorf("Device Sync service endpoint is not canonical")
+	}
+	offer, err := bootstrap.DeploymentOffer.VerifiedPayload(nil)
+	if err != nil || offer.ExpiresAtMilliseconds != bootstrap.ExpiresAtMilliseconds {
+		return fmt.Errorf("Device Sync deployment offer is invalid")
+	}
+	template := serviceauthority.DeploymentOfferTemplate{
+		Deployment:      offer.Deployment,
+		TransportPolicy: offer.TransportPolicy,
+		Version:         serviceauthority.SchemaVersion,
+	}
+	if !template.ContainsControlEndpoint(bootstrap.ServiceEndpoint) {
+		return fmt.Errorf("Device Sync service endpoint is not an offered control route")
 	}
 	return nil
 }
@@ -73,6 +88,7 @@ func IssueAccountBootstrap(
 	ctx context.Context,
 	store AccountAdmissionIssuer,
 	serviceEndpoint string,
+	deploymentOffer serviceauthority.DeploymentOffer,
 	lifetime time.Duration,
 	now time.Time,
 	random io.Reader,
@@ -80,6 +96,18 @@ func IssueAccountBootstrap(
 	endpoint, err := normalizeServiceEndpoint(serviceEndpoint)
 	if err != nil {
 		return IssuedAccountBootstrap{}, err
+	}
+	offer, err := deploymentOffer.VerifiedPayload(nil)
+	if err != nil {
+		return IssuedAccountBootstrap{}, fmt.Errorf("deployment offer rejected: %w", err)
+	}
+	template := serviceauthority.DeploymentOfferTemplate{
+		Deployment:      offer.Deployment,
+		TransportPolicy: offer.TransportPolicy,
+		Version:         serviceauthority.SchemaVersion,
+	}
+	if !template.ContainsControlEndpoint(endpoint) {
+		return IssuedAccountBootstrap{}, fmt.Errorf("service endpoint is not an offered control route")
 	}
 	lifetimeMilliseconds := lifetime.Milliseconds()
 	if lifetimeMilliseconds < MinimumAdmissionLifetimeMilliseconds ||
@@ -110,6 +138,10 @@ func IssueAccountBootstrap(
 		return IssuedAccountBootstrap{}, err
 	}
 	nowMilliseconds := now.UnixMilli()
+	if offer.IssuedAtMilliseconds != nowMilliseconds ||
+		offer.ExpiresAtMilliseconds != nowMilliseconds+lifetimeMilliseconds {
+		return IssuedAccountBootstrap{}, fmt.Errorf("deployment offer lifetime does not match account admission")
+	}
 	admission := AccountAdmission{
 		Version: SchemaVersion, RetryID: retryID, AdmissionID: admissionID,
 		AuthorizationDigest: digest, CreatedAtMilliseconds: nowMilliseconds,
@@ -121,6 +153,7 @@ func IssueAccountBootstrap(
 	bootstrap := AccountBootstrap{
 		Version: SchemaVersion, ServiceEndpoint: endpoint,
 		AdmissionID: admissionID, AuthorizationToken: credential.Token,
+		DeploymentOffer:       deploymentOffer,
 		ExpiresAtMilliseconds: admission.ExpiresAtMilliseconds,
 	}
 	setupURL, err := bootstrap.SetupURL()

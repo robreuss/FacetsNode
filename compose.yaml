@@ -30,6 +30,10 @@ services:
       FACETS_DEVICE_SYNC_LISTEN_ADDR: :8080
       FACETS_DEVICE_SYNC_OPERATOR_TOKEN: ${FACETS_DEVICE_SYNC_OPERATOR_TOKEN:?Set FACETS_DEVICE_SYNC_OPERATOR_TOKEN in .env}
       FACETS_DEVICE_SYNC_PUBLIC_URL: ${FACETS_DEVICE_SYNC_PUBLIC_URL:?Set FACETS_DEVICE_SYNC_PUBLIC_URL in .env}
+      FACETS_DEVICE_SYNC_DEPLOYMENT_ID: ${FACETS_DEVICE_SYNC_DEPLOYMENT_ID:?Set the nonzero deployment UUID in .env}
+      FACETS_DEVICE_SYNC_DEPLOYMENT_SIGNING_KEY_FILE: /run/secrets/facets-device-sync/deployment-signing-key
+      FACETS_DEVICE_SYNC_DEPLOYMENT_ROUTE_POLICY_FILE: /etc/facets-device-sync/service-authority/deployment-routes.json
+      FACETS_DEVICE_SYNC_SERVICE_AUTHORITY_BINDINGS_FILE: /var/lib/facets-device-sync/service-authority/bindings.json
       FACETS_DEVICE_SYNC_BLOB_ROOT: /var/lib/facets-device-sync/blobs
       FACETS_DEVICE_SYNC_BLOB_UPLOAD_TTL: ${FACETS_DEVICE_SYNC_BLOB_UPLOAD_TTL:-168h}
       FACETS_DEVICE_SYNC_BLOB_ORPHAN_GRACE: ${FACETS_DEVICE_SYNC_BLOB_ORPHAN_GRACE:-24h}
@@ -74,6 +78,9 @@ services:
       - /tmp:size=16m,mode=1777
     volumes:
       - facets-device-sync-blobs:/var/lib/facets-device-sync/blobs
+      - ${FACETS_DEVICE_SYNC_AUTHORITY_KEY_DIRECTORY:?Set the protected deployment-key directory}:/run/secrets/facets-device-sync:ro
+      - ${FACETS_DEVICE_SYNC_AUTHORITY_POLICY_DIRECTORY:?Set the protected route-policy directory}:/etc/facets-device-sync/service-authority:ro
+      - ${FACETS_DEVICE_SYNC_AUTHORITY_STATE_DIRECTORY:?Set the writable authority-state directory}:/var/lib/facets-device-sync/service-authority
     cap_drop:
       - ALL
     security_opt:

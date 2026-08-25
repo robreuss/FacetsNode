@@ -32,6 +32,7 @@ type Config struct {
 	TrafficLimits                traffic.Limits
 	DeploymentID                 uuid.UUID
 	DeploymentSigningKeyFile     string
+	DeploymentRoutePolicyFile    string
 	ServiceAuthorityBindingsFile string
 	OnionIngressToken            []byte
 }
@@ -97,10 +98,14 @@ func Load(service Service) (Config, error) {
 	}
 	deploymentIDName := prefix + "_DEPLOYMENT_ID"
 	deploymentKeyFileName := prefix + "_DEPLOYMENT_SIGNING_KEY_FILE"
+	deploymentRoutePolicyFileName := prefix + "_DEPLOYMENT_ROUTE_POLICY_FILE"
 	bindingFileName := prefix + "_SERVICE_AUTHORITY_BINDINGS_FILE"
 	deploymentIDText := strings.TrimSpace(os.Getenv(deploymentIDName))
 	configuration.DeploymentSigningKeyFile = strings.TrimSpace(
 		os.Getenv(deploymentKeyFileName),
+	)
+	configuration.DeploymentRoutePolicyFile = strings.TrimSpace(
+		os.Getenv(deploymentRoutePolicyFileName),
 	)
 	configuration.ServiceAuthorityBindingsFile = strings.TrimSpace(
 		os.Getenv(bindingFileName),
@@ -112,18 +117,22 @@ func Load(service Service) (Config, error) {
 	if configuration.DeploymentSigningKeyFile != "" {
 		configuredDeploymentValues++
 	}
+	if configuration.DeploymentRoutePolicyFile != "" {
+		configuredDeploymentValues++
+	}
 	if configuration.ServiceAuthorityBindingsFile != "" {
 		configuredDeploymentValues++
 	}
-	if configuredDeploymentValues != 0 && configuredDeploymentValues != 3 {
+	if configuredDeploymentValues != 0 && configuredDeploymentValues != 4 {
 		return Config{}, fmt.Errorf(
-			"%s, %s, and %s must be configured together",
+			"%s, %s, %s, and %s must be configured together",
 			deploymentIDName,
 			deploymentKeyFileName,
+			deploymentRoutePolicyFileName,
 			bindingFileName,
 		)
 	}
-	if configuredDeploymentValues == 3 {
+	if configuredDeploymentValues == 4 {
 		configuration.DeploymentID, err = uuid.Parse(deploymentIDText)
 		if err != nil || configuration.DeploymentID == uuid.Nil {
 			return Config{}, fmt.Errorf("%s must be a nonzero UUID", deploymentIDName)
@@ -156,11 +165,12 @@ func Load(service Service) (Config, error) {
 	if service == ComputePool && configuration.OperatorToken == "" {
 		return Config{}, fmt.Errorf("%s_OPERATOR_TOKEN is required", prefix)
 	}
-	if service == ComputePool && configuredDeploymentValues != 3 {
+	if service == ComputePool && configuredDeploymentValues != 4 {
 		return Config{}, fmt.Errorf(
-			"%s, %s, and %s are required for the Compute Pool Service",
+			"%s, %s, %s, and %s are required for the Compute Pool Service",
 			deploymentIDName,
 			deploymentKeyFileName,
+			deploymentRoutePolicyFileName,
 			bindingFileName,
 		)
 	}

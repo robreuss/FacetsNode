@@ -2,10 +2,16 @@ package httpapi
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -137,6 +143,88 @@ func TestDeploymentProofAndCapabilityRoutesRequireCurrentAuthorityBinding(t *tes
 	handler.ServeHTTP(recorder, capability)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("bulk metadata on control request status=%d; want 409", recorder.Code)
+	}
+}
+
+func TestBootstrapDeploymentProofRequiresSignedOfferButNoActiveBinding(t *testing.T) {
+	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
+	routeID := uuid.MustParse("62000000-0000-0000-0000-000000000001")
+	scope := serviceauthority.Scope{
+		Kind:    serviceauthority.ScopeDeviceSync,
+		ScopeID: uuid.MustParse("61000000-0000-0000-0000-000000000001"),
+	}
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer := testBootstrapDeploymentOffer(t, signer, routeID)
+	digest, err := offer.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofRequest := serviceauthority.BootstrapProofRequest{
+		Challenge:             base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		DeploymentID:          deploymentID,
+		DeploymentOfferDigest: digest,
+		RouteID:               routeID,
+		Scope:                 scope,
+		TrafficClass:          serviceauthority.TrafficControl,
+		Version:               serviceauthority.SchemaVersion,
+	}
+	body, err := json.Marshal(bootstrapDeploymentProofInput{
+		DeploymentOffer: offer,
+		Request:         proofRequest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.now = func() time.Time { return time.UnixMilli(1_100) }
+	server.SetServiceAuthorityDeployment(
+		signer,
+		serviceauthority.NewBindingRegistry(),
+		serviceauthority.ScopeDeviceSync,
+	)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/service-deployment/bootstrap-proof",
+		bytes.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("bootstrap proof status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var proof serviceauthority.BootstrapProof
+	if err := json.Unmarshal(recorder.Body.Bytes(), &proof); err != nil {
+		t.Fatal(err)
+	}
+	var payload serviceauthority.BootstrapProofPayload
+	if err := json.Unmarshal(proof.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Request != proofRequest || payload.IssuedAtMilliseconds != 1_100 {
+		t.Fatalf("unexpected bootstrap deployment proof: %+v", payload)
+	}
+
+	proofRequest.DeploymentOfferDigest = repeatAuthorityHex("f")
+	body, _ = json.Marshal(bootstrapDeploymentProofInput{
+		DeploymentOffer: offer,
+		Request:         proofRequest,
+	})
+	request = httptest.NewRequest(
+		http.MethodPost,
+		"/v1/service-deployment/bootstrap-proof",
+		bytes.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("wrong-offer bootstrap proof status=%d; want 400", recorder.Code)
 	}
 }
 
@@ -445,4 +533,123 @@ func repeatAuthorityHex(value string) string {
 		result += value
 	}
 	return result
+}
+
+func testBootstrapDeploymentOffer(
+	t *testing.T,
+	signer *serviceauthority.DeploymentSigner,
+	routeID uuid.UUID,
+) serviceauthority.DeploymentOffer {
+	t.Helper()
+	pin := repeatAuthorityHex("1")
+	route := serviceauthority.TransportRoute{
+		Endpoint:     "https://facets-box.local:8443",
+		Kind:         serviceauthority.RouteDirectHTTPS,
+		NetworkScope: serviceauthority.NetworkTrustedLAN,
+		RouteID:      routeID,
+		ServerAuthentication: serviceauthority.ServerAuthentication{
+			Kind: "pinned_spki_sha256", PinnedSPKISHA256: &pin,
+		},
+	}
+	descriptor := serviceauthority.DeploymentDescriptor{
+		CreatedAtMilliseconds: 900,
+		DeploymentID:          signer.DeploymentID(),
+		PublicSigningKeyX963:  signer.PublicSigningKeyX963(),
+		Routes:                []serviceauthority.TransportRoute{route},
+		SigningKeyFingerprint: signer.SigningKeyFingerprint(),
+		Version:               serviceauthority.SchemaVersion,
+	}
+	policy := serviceauthority.TransportPolicy{
+		BulkRouteIDs:    []uuid.UUID{routeID},
+		ControlRouteIDs: []uuid.UUID{routeID},
+		MessageRouteIDs: []uuid.UUID{routeID},
+		Version:         serviceauthority.SchemaVersion,
+	}
+	offer, err := signer.SignDeploymentOffer(serviceauthority.DeploymentOfferPayload{
+		Deployment:            descriptor,
+		ExpiresAtMilliseconds: 2_000,
+		IssuedAtMilliseconds:  1_000,
+		TransportPolicy:       policy,
+		Version:               serviceauthority.SchemaVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return offer
+}
+
+func testInitialServiceAuthorityEnrollment(
+	t *testing.T,
+	signer *serviceauthority.DeploymentSigner,
+	scope serviceauthority.Scope,
+	routeID uuid.UUID,
+) serviceauthority.InitialEnrollment {
+	t.Helper()
+	offer := testBootstrapDeploymentOffer(t, signer, routeID)
+	offerPayload, err := offer.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityScalar := make([]byte, 32)
+	authorityScalar[31] = 1
+	d := new(big.Int).SetBytes(authorityScalar)
+	x, y := elliptic.P256().ScalarBaseMult(authorityScalar)
+	key := &ecdsa.PrivateKey{
+		PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y},
+		D:         d,
+	}
+	authorityID := uuid.MustParse("64000000-0000-0000-0000-000000000001")
+	public := elliptic.Marshal(elliptic.P256(), x, y)
+	fingerprint := sha256.Sum256(public)
+	manifestPayload := serviceauthority.ManifestPayload{
+		ActiveDeployment:      offerPayload.Deployment,
+		IssuedAtMilliseconds:  1_000,
+		PreparedDeployments:   []serviceauthority.DeploymentDescriptor{},
+		Revision:              1,
+		Scope:                 scope,
+		Transition:            "initial_activation",
+		TransportPolicy:       offerPayload.TransportPolicy,
+		ValidFromMilliseconds: 1_000,
+		Version:               serviceauthority.SchemaVersion,
+	}
+	encoded, err := json.Marshal(manifestPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(append(
+		[]byte("Facets service authority manifest v1\x00"),
+		encoded...,
+	))
+	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Cmp(new(big.Int).Rsh(new(big.Int).Set(elliptic.P256().Params().N), 1)) > 0 {
+		s.Sub(elliptic.P256().Params().N, s)
+	}
+	raw := make([]byte, 64)
+	r.FillBytes(raw[:32])
+	s.FillBytes(raw[32:])
+	manifest := serviceauthority.Manifest{
+		Payload: encoded,
+		Signature: serviceauthority.Signature{
+			Algorithm:             "ES256",
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(public),
+			Signature:             base64.RawURLEncoding.EncodeToString(raw),
+			SignerID:              authorityID,
+			SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+		},
+	}
+	return serviceauthority.InitialEnrollment{
+		Anchor: serviceauthority.TrustAnchor{
+			PublicSigningKeyX963:  base64.RawURLEncoding.EncodeToString(public),
+			Scope:                 scope,
+			SignerID:              authorityID,
+			SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+			Version:               serviceauthority.SchemaVersion,
+		},
+		DeploymentOffer: offer,
+		Manifest:        manifest,
+		Version:         serviceauthority.SchemaVersion,
+	}
 }

@@ -46,6 +46,12 @@ capability digests without content keys.
    do not require the Facets authority private key to remain online or to be
    shared with participants. Clients choose the route first and validate the
    returned grant against the active deployment key and accepted manifest.
+10. Initial Device Sync enrollment starts from a deployment-key-signed,
+    short-lived route offer. The client proves live possession of that
+    deployment key before releasing its one-time operator bearer, then creates
+    and signs revision 1 with its independent Facets principal authority.
+    FacetsNode verifies the enrollment and durably stores only the public
+    current-binding facts.
 
 ## Compromise boundary
 

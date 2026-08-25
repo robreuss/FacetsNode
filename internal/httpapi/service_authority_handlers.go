@@ -10,10 +10,52 @@ import (
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
-const maximumDeploymentProofRequestByteCount = 4 * 1024
+const (
+	maximumDeploymentProofRequestByteCount          = 4 * 1024
+	maximumBootstrapDeploymentProofRequestByteCount = 256 * 1024
+)
 
 type bulkGrantContextKey struct{}
 type serviceAuthorityBindingContextKey struct{}
+
+type bootstrapDeploymentProofInput struct {
+	DeploymentOffer serviceauthority.DeploymentOffer       `json:"deploymentOffer"`
+	Request         serviceauthority.BootstrapProofRequest `json:"request"`
+}
+
+func (s *Server) handleServiceBootstrapDeploymentProof(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	var input bootstrapDeploymentProofInput
+	if err := decodeJSONWithLimit(
+		writer,
+		request,
+		&input,
+		maximumBootstrapDeploymentProofRequestByteCount,
+		func(string) error { return serviceauthority.ErrInvalid },
+	); err != nil || input.Request.Validate(
+		input.DeploymentOffer,
+		s.deploymentSigner.DeploymentID(),
+	) != nil {
+		writeServiceAuthorityError(writer, http.StatusBadRequest)
+		return
+	}
+	if input.Request.Scope.Kind != s.serviceAuthorityScopeKind {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return
+	}
+	proof, err := s.deploymentSigner.SignBootstrapProof(
+		input.Request,
+		input.DeploymentOffer,
+		s.now(),
+	)
+	if err != nil {
+		writeServiceAuthorityError(writer, http.StatusBadRequest)
+		return
+	}
+	writeJSON(writer, http.StatusOK, proof)
+}
 
 func (s *Server) handleServiceDeploymentProof(
 	writer http.ResponseWriter,

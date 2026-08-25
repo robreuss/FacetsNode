@@ -13,6 +13,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/postgres"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 func issueAccountAdmission(service config.Service, arguments []string) error {
@@ -56,8 +57,28 @@ func issueAccountAdmission(service config.Service, arguments []string) error {
 		return fmt.Errorf("database migration failed: %w", err)
 	}
 	store := postgres.NewRelayStore(pool, configuration.BlobUploadTTL, configuration.CheckpointFenceTTL)
+	signer, err := serviceauthority.LoadDeploymentSigner(
+		configuration.DeploymentID,
+		configuration.DeploymentSigningKeyFile,
+	)
+	if err != nil {
+		return fmt.Errorf("deployment signing custody rejected: %w", err)
+	}
+	template, err := serviceauthority.LoadDeploymentOfferTemplate(
+		configuration.DeploymentRoutePolicyFile,
+		signer,
+	)
+	if err != nil {
+		return fmt.Errorf("deployment route policy rejected: %w", err)
+	}
+	now := time.Now()
+	expiresAt := now.Add(*lifetime)
+	offer, err := template.SignOffer(signer, now, expiresAt)
+	if err != nil {
+		return fmt.Errorf("sign deployment offer: %w", err)
+	}
 	issued, err := devicesync.IssueAccountBootstrap(
-		ctx, store, *endpoint, *lifetime, time.Now(), nil,
+		ctx, store, *endpoint, offer, *lifetime, now, nil,
 	)
 	if err != nil {
 		return err

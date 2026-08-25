@@ -118,6 +118,13 @@ func Main(service config.Service) {
 			logger.Error("deployment signing custody rejected", "error", err)
 			os.Exit(1)
 		}
+		if _, err := serviceauthority.LoadDeploymentOfferTemplate(
+			configuration.DeploymentRoutePolicyFile,
+			deploymentSigner,
+		); err != nil {
+			logger.Error("deployment route policy rejected", "error", err)
+			os.Exit(1)
+		}
 		bindings, err := serviceauthority.LoadBindingRegistry(
 			configuration.ServiceAuthorityBindingsFile,
 			configuration.DeploymentID,
@@ -233,6 +240,12 @@ func runComputePoolService(
 	)
 	if err != nil {
 		return fmt.Errorf("Compute Pool deployment signing custody rejected: %w", err)
+	}
+	if _, err := serviceauthority.LoadDeploymentOfferTemplate(
+		configuration.DeploymentRoutePolicyFile,
+		deploymentSigner,
+	); err != nil {
+		return fmt.Errorf("Compute Pool deployment route policy rejected: %w", err)
 	}
 	bindings, err := serviceauthority.LoadBindingRegistry(
 		configuration.ServiceAuthorityBindingsFile,

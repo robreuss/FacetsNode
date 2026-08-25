@@ -16,6 +16,8 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -275,8 +277,10 @@ type CurrentBinding struct {
 }
 
 type BindingRegistry struct {
-	mu       sync.RWMutex
-	bindings map[Scope]CurrentBinding
+	mu                   sync.RWMutex
+	bindings             map[Scope]CurrentBinding
+	persistencePath      string
+	expectedDeploymentID uuid.UUID
 }
 
 type BindingFile struct {
@@ -319,11 +323,14 @@ func LoadBindingRegistry(
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, ErrInvalid
 	}
-	if file.Version != SchemaVersion ||
-		len(file.Bindings) == 0 {
+	if file.Version != SchemaVersion {
 		return nil, ErrInvalid
 	}
-	registry := NewBindingRegistry()
+	registry := &BindingRegistry{
+		bindings:             make(map[Scope]CurrentBinding),
+		persistencePath:      path,
+		expectedDeploymentID: expectedDeploymentID,
+	}
 	seen := make(map[Scope]struct{}, len(file.Bindings))
 	for _, entry := range file.Bindings {
 		if entry.DeploymentID != expectedDeploymentID {
@@ -333,13 +340,16 @@ func LoadBindingRegistry(
 			return nil, ErrInvalid
 		}
 		seen[entry.Scope] = struct{}{}
-		if err := registry.Activate(entry.Scope, CurrentBinding{
+		binding := CurrentBinding{
 			Revision:     entry.Revision,
 			Digest:       entry.Digest,
 			DeploymentID: entry.DeploymentID,
-		}); err != nil {
-			return nil, err
 		}
+		if entry.Scope.Validate() != nil || binding.Revision == 0 ||
+			!validDigest(binding.Digest) {
+			return nil, ErrInvalid
+		}
+		registry.bindings[entry.Scope] = binding
 	}
 	return registry, nil
 }
@@ -354,6 +364,10 @@ func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) e
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.expectedDeploymentID != uuid.Nil &&
+		binding.DeploymentID != registry.expectedDeploymentID {
+		return ErrInvalid
+	}
 	if current, exists := registry.bindings[scope]; exists {
 		if binding.Revision < current.Revision ||
 			(binding.Revision == current.Revision &&
@@ -365,7 +379,100 @@ func (registry *BindingRegistry) Activate(scope Scope, binding CurrentBinding) e
 			return ErrInvalid
 		}
 	}
-	registry.bindings[scope] = binding
+	next := make(map[Scope]CurrentBinding, len(registry.bindings)+1)
+	for existingScope, existingBinding := range registry.bindings {
+		next[existingScope] = existingBinding
+	}
+	next[scope] = binding
+	if registry.persistencePath != "" {
+		if err := persistBindingFile(
+			registry.persistencePath,
+			registry.expectedDeploymentID,
+			next,
+		); err != nil {
+			return err
+		}
+	}
+	registry.bindings = next
+	return nil
+}
+
+func persistBindingFile(
+	path string,
+	expectedDeploymentID uuid.UUID,
+	bindings map[Scope]CurrentBinding,
+) error {
+	if strings.TrimSpace(path) == "" || expectedDeploymentID == uuid.Nil {
+		return ErrInvalid
+	}
+	entries := make([]BindingFileEntry, 0, len(bindings))
+	for scope, binding := range bindings {
+		if scope.Validate() != nil || binding.Revision == 0 ||
+			!validDigest(binding.Digest) ||
+			binding.DeploymentID != expectedDeploymentID {
+			return ErrInvalid
+		}
+		entries = append(entries, BindingFileEntry{
+			DeploymentID: binding.DeploymentID,
+			Digest:       binding.Digest,
+			Revision:     binding.Revision,
+			Scope:        scope,
+		})
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		if entries[left].Scope.Kind != entries[right].Scope.Kind {
+			return entries[left].Scope.Kind < entries[right].Scope.Kind
+		}
+		return bytes.Compare(
+			entries[left].Scope.ScopeID[:],
+			entries[right].Scope.ScopeID[:],
+		) < 0
+	})
+	encoded, err := json.Marshal(BindingFile{
+		Bindings: entries,
+		Version:  SchemaVersion,
+	})
+	if err != nil {
+		return fmt.Errorf("encode service authority bindings: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".facets-service-authority-bindings-*")
+	if err != nil {
+		return fmt.Errorf("create service authority binding update: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	committed := false
+	defer func() {
+		_ = temporary.Close()
+		if !committed {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return fmt.Errorf("protect service authority binding update: %w", err)
+	}
+	if _, err := temporary.Write(encoded); err != nil {
+		return fmt.Errorf("write service authority binding update: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("sync service authority binding update: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close service authority binding update: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("activate service authority binding update: %w", err)
+	}
+	committed = true
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		return fmt.Errorf("open service authority binding directory: %w", err)
+	}
+	defer directoryFile.Close()
+	if err := directoryFile.Sync(); err != nil {
+		return fmt.Errorf("sync service authority binding directory: %w", err)
+	}
 	return nil
 }
 

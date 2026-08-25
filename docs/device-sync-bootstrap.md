@@ -52,6 +52,15 @@ it does not expose operator admission issuance on public HTTPS ingress.
 
 Hosted admission services use the equivalent private management request.
 
+The server must have deployment authentication configured. The setup value
+contains a short-lived deployment-key-signed offer whose exact control route
+matches `FACETS_DEVICE_SYNC_PUBLIC_URL` (or `--endpoint`) and whose expiry is
+identical to the account admission. Before Facets releases the admission
+bearer, it validates the offer, authenticates the route's TLS/application
+identity, and obtains a fresh live proof from the offered deployment key. An
+onion key, DNS record, reverse proxy, or copied setup value alone is therefore
+insufficient to make Facets send the bearer to another deployment.
+
 An operator or hosted admission service generates a random UUID and independent
 32-byte unpadded base64url token. It sends the credential over the private
 management surface:
@@ -104,7 +113,10 @@ the service overwrites the relay tenant capacity with this stored snapshot.
 
 The client constructs relay tenant provisioning whose tenant ID equals its new
 Device Sync principal ID. The initial domain is its protected principal control
-channel, and the initial member ID equals the new Facets device ID.
+channel, and the initial member ID equals the new Facets device ID. It also
+creates a Facets-principal-signed revision-1 service-authority manifest that
+binds that principal to the live deployment offer. Facets authority, deployment
+identity, TLS identity, and any onion identity remain independent.
 
 ```http
 POST /v1/device-sync/account-admissions/<admission-id>/claim
@@ -118,9 +130,12 @@ initial-device member credential. Every bearer is generated independently. The
 principal ID must equal every tenant scope; the initial device ID must equal the
 control-domain member ID.
 
-The complete request is one PostgreSQL transaction: account admission claim,
-relay tenant, control domain, subscription, initial member, Device Sync
-principal, and first-device registration either all commit or all roll back.
+The complete request is one PostgreSQL transaction plus a fail-closed durable
+public binding activation: account admission claim, relay tenant, control
+domain, subscription, initial member, Device Sync principal, first-device
+registration, and the exact manifest revision/digest either all become
+accepted or the claim fails. The service verifies the signed initial enrollment
+but never receives the Facets authority private key.
 The admission can create only one principal. An exact response-lost retry
 returns `duplicate`; altered reuse returns a conflict.
 

@@ -274,6 +274,10 @@ func configureComputePool(t *testing.T) {
 		"/var/lib/facets-compute-pool/deployment-signing-key",
 	)
 	t.Setenv(
+		"FACETS_COMPUTE_POOL_DEPLOYMENT_ROUTE_POLICY_FILE",
+		"/var/lib/facets-compute-pool/deployment-route-policy.json",
+	)
+	t.Setenv(
 		"FACETS_COMPUTE_POOL_SERVICE_AUTHORITY_BINDINGS_FILE",
 		"/var/lib/facets-compute-pool/service-authority-bindings.json",
 	)
@@ -291,6 +295,10 @@ func TestDeploymentAuthenticationConfigurationIsAllOrNothing(t *testing.T) {
 		"/var/lib/facets-device-sync/deployment-signing-key",
 	)
 	t.Setenv(
+		"FACETS_DEVICE_SYNC_DEPLOYMENT_ROUTE_POLICY_FILE",
+		"/var/lib/facets-device-sync/deployment-route-policy.json",
+	)
+	t.Setenv(
 		"FACETS_DEVICE_SYNC_SERVICE_AUTHORITY_BINDINGS_FILE",
 		"/var/lib/facets-device-sync/service-authority-bindings.json",
 	)
@@ -300,6 +308,7 @@ func TestDeploymentAuthenticationConfigurationIsAllOrNothing(t *testing.T) {
 	}
 	if configuration.DeploymentID != deploymentID ||
 		configuration.DeploymentSigningKeyFile == "" ||
+		configuration.DeploymentRoutePolicyFile == "" ||
 		configuration.ServiceAuthorityBindingsFile == "" {
 		t.Fatalf("deployment authentication configuration=%+v", configuration)
 	}

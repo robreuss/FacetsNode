@@ -240,6 +240,51 @@ func TestBindingRegistryLoadsStrictDeploymentScopedState(t *testing.T) {
 	}
 }
 
+func TestBindingRegistryPersistsFirstActivationAndReloadsIt(t *testing.T) {
+	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
+	scope := Scope{
+		Kind:    ScopeDeviceSync,
+		ScopeID: uuid.MustParse("61000000-0000-0000-0000-000000000001"),
+	}
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	empty, err := json.Marshal(BindingFile{Bindings: []BindingFileEntry{}, Version: SchemaVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, empty, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := LoadBindingRegistry(path, deploymentID)
+	if err != nil {
+		t.Fatalf("empty initial registry rejected: %v", err)
+	}
+	binding := testCurrentBinding(t, 1, repeatHex("1"), deploymentID)
+	if err := registry.Activate(scope, binding); err != nil {
+		t.Fatalf("first activation failed: %v", err)
+	}
+	reloaded, err := LoadBindingRegistry(path, deploymentID)
+	if err != nil {
+		t.Fatalf("persisted registry rejected: %v", err)
+	}
+	if err := reloaded.Authorize(RequestBinding{
+		Scope:             scope,
+		AuthorityRevision: binding.Revision,
+		AuthorityDigest:   binding.Digest,
+		DeploymentID:      binding.DeploymentID,
+		RouteID:           uuid.New(),
+		TrafficClass:      TrafficControl,
+	}); err != nil {
+		t.Fatalf("reloaded activation not authoritative: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("persisted bindings are not owner-only: %o", info.Mode().Perm())
+	}
+}
+
 func testProofRequest(deploymentID uuid.UUID) ProofRequest {
 	return ProofRequest{
 		AuthorityManifestDigest: repeatHex("1"),

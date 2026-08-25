@@ -7,6 +7,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -24,11 +25,12 @@ type deviceSyncAdmissionCreateInput struct {
 }
 
 type deviceSyncPrincipalClaimInput struct {
-	Version            int                          `json:"version"`
-	RetryID            uuid.UUID                    `json:"retryID"`
-	PrincipalID        uuid.UUID                    `json:"principalID"`
-	InitialDeviceID    uuid.UUID                    `json:"initialDeviceID"`
-	TenantProvisioning relayTenantProvisioningInput `json:"tenantProvisioning"`
+	Version                    int                                 `json:"version"`
+	RetryID                    uuid.UUID                           `json:"retryID"`
+	PrincipalID                uuid.UUID                           `json:"principalID"`
+	InitialDeviceID            uuid.UUID                           `json:"initialDeviceID"`
+	ServiceAuthorityEnrollment *serviceauthority.InitialEnrollment `json:"serviceAuthorityEnrollment,omitempty"`
+	TenantProvisioning         relayTenantProvisioningInput        `json:"tenantProvisioning"`
 }
 
 type deviceSyncDeviceAdmissionCreateInput struct {
@@ -353,15 +355,58 @@ func (s *Server) handleClaimDeviceSyncAccountAdmission(writer http.ResponseWrite
 		))
 		return
 	}
+	now := s.nowMilliseconds()
+	var authorityBinding *serviceauthority.CurrentBinding
+	if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
+		if input.ServiceAuthorityEnrollment == nil {
+			s.writeError(writer, devicesync.NewProtocolError(
+				devicesync.CodeInvalidPrincipal,
+				"initial service authority enrollment is required",
+			))
+			return
+		}
+		scope := serviceauthority.Scope{
+			Kind: serviceauthority.ScopeDeviceSync, ScopeID: input.PrincipalID,
+		}
+		manifest, enrollmentErr := input.ServiceAuthorityEnrollment.ValidateForAdmissionClaim(scope, now)
+		digest, digestErr := input.ServiceAuthorityEnrollment.Manifest.ReferenceDigest()
+		if enrollmentErr != nil || digestErr != nil ||
+			manifest.ActiveDeployment.DeploymentID != s.deploymentSigner.DeploymentID() ||
+			manifest.ActiveDeployment.PublicSigningKeyX963 !=
+				s.deploymentSigner.PublicSigningKeyX963() ||
+			manifest.ActiveDeployment.SigningKeyFingerprint !=
+				s.deploymentSigner.SigningKeyFingerprint() {
+			s.writeError(writer, devicesync.NewProtocolError(
+				devicesync.CodeInvalidPrincipal,
+				"initial service authority enrollment is invalid",
+			))
+			return
+		}
+		authorityBinding = &serviceauthority.CurrentBinding{
+			Revision: manifest.Revision, Digest: digest,
+			DeploymentID: manifest.ActiveDeployment.DeploymentID,
+		}
+	}
 	result, err := s.deviceSyncStore.ClaimAccountAdmission(
 		request.Context(),
 		devicesync.AdmissionCredential{AdmissionID: admissionID, Token: token},
 		provisioning,
-		s.nowMilliseconds(),
+		now,
 	)
 	if err != nil {
 		s.writeError(writer, err)
 		return
+	}
+	if authorityBinding != nil {
+		if err := s.serviceAuthorityBindings.Activate(
+			serviceauthority.Scope{
+				Kind: serviceauthority.ScopeDeviceSync, ScopeID: input.PrincipalID,
+			},
+			*authorityBinding,
+		); err != nil {
+			writeServiceAuthorityError(writer, http.StatusConflict)
+			return
+		}
 	}
 	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
