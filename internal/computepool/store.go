@@ -19,7 +19,7 @@ type Store interface {
 	UpdatePool(context.Context, uint64, Pool) error
 	DeletePool(context.Context, uuid.UUID, uint64) error
 	PutWorkerEnrollment(context.Context, uint64, WorkerEnrollment) error
-	PutWorkerCard(context.Context, uint64, WorkerCard) error
+	PutWorkerCard(context.Context, uint64, SignedWorkerCard) error
 	PutOffering(context.Context, uint64, Offering) error
 	GetPoolStatus(context.Context, uuid.UUID) (Status, error)
 }
@@ -28,7 +28,7 @@ type Status struct {
 	Version           int                `json:"version"`
 	Pool              Pool               `json:"pool"`
 	WorkerEnrollments []WorkerEnrollment `json:"workerEnrollments"`
-	WorkerCards       []WorkerCard       `json:"workerCards"`
+	WorkerCards       []SignedWorkerCard `json:"workerCards"`
 	Offerings         []Offering         `json:"offerings"`
 }
 
@@ -38,6 +38,7 @@ func (status Status) Validate() error {
 	}
 	enrollments := make(map[uuid.UUID]struct{}, len(status.WorkerEnrollments))
 	enrollmentOwners := make(map[uuid.UUID]uuid.UUID, len(status.WorkerEnrollments))
+	enrollmentByID := make(map[uuid.UUID]WorkerEnrollment, len(status.WorkerEnrollments))
 	previousEnrollmentID := ""
 	for _, enrollment := range status.WorkerEnrollments {
 		if enrollment.Validate() != nil || enrollment.PoolID != status.Pool.PoolID ||
@@ -46,14 +47,17 @@ func (status Status) Validate() error {
 		}
 		enrollments[enrollment.EnrollmentID] = struct{}{}
 		enrollmentOwners[enrollment.EnrollmentID] = enrollment.WorkerOwnerAuthorityID
+		enrollmentByID[enrollment.EnrollmentID] = enrollment
 		previousEnrollmentID = enrollment.EnrollmentID.String()
 	}
 	cards := make(map[uuid.UUID]WorkerCard, len(status.WorkerCards))
 	previousCardID := ""
-	for _, card := range status.WorkerCards {
+	for _, signedCard := range status.WorkerCards {
+		card := signedCard.Card
 		owner, enrollmentFound := enrollmentOwners[card.WorkerEnrollmentID]
 		if card.Validate() != nil || card.PoolID != status.Pool.PoolID || !enrollmentFound ||
-			card.WorkerOwnerAuthorityID != owner || card.WorkerCardID.String() <= previousCardID {
+			card.WorkerOwnerAuthorityID != owner || card.WorkerCardID.String() <= previousCardID ||
+			signedCard.Validate(enrollmentByID[card.WorkerEnrollmentID]) != nil {
 			return ErrInvalid
 		}
 		cards[card.WorkerCardID] = card
@@ -79,7 +83,7 @@ type MemoryStore struct {
 	mu          sync.RWMutex
 	pools       map[uuid.UUID]Pool
 	enrollments map[uuid.UUID]WorkerEnrollment
-	cards       map[uuid.UUID]WorkerCard
+	cards       map[uuid.UUID]SignedWorkerCard
 	offerings   map[uuid.UUID]Offering
 }
 
@@ -87,7 +91,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		pools:       make(map[uuid.UUID]Pool),
 		enrollments: make(map[uuid.UUID]WorkerEnrollment),
-		cards:       make(map[uuid.UUID]WorkerCard),
+		cards:       make(map[uuid.UUID]SignedWorkerCard),
 		offerings:   make(map[uuid.UUID]Offering),
 	}
 }
@@ -159,8 +163,8 @@ func (store *MemoryStore) DeletePool(
 			delete(store.offerings, offeringID)
 		}
 	}
-	for cardID, card := range store.cards {
-		if card.PoolID == poolID {
+	for cardID, signedCard := range store.cards {
+		if signedCard.Card.PoolID == poolID {
 			delete(store.cards, cardID)
 		}
 	}
@@ -170,8 +174,9 @@ func (store *MemoryStore) DeletePool(
 func (store *MemoryStore) PutWorkerCard(
 	_ context.Context,
 	previousRevision uint64,
-	card WorkerCard,
+	signedCard SignedWorkerCard,
 ) error {
+	card := signedCard.Card
 	if card.Validate() != nil || card.Revision != previousRevision+1 {
 		return ErrInvalid
 	}
@@ -182,7 +187,11 @@ func (store *MemoryStore) PutWorkerCard(
 		enrollment.WorkerOwnerAuthorityID != card.WorkerOwnerAuthorityID {
 		return ErrNotFound
 	}
-	current, found := store.cards[card.WorkerCardID]
+	if signedCard.Validate(enrollment) != nil {
+		return ErrInvalid
+	}
+	currentSigned, found := store.cards[card.WorkerCardID]
+	current := currentSigned.Card
 	if !found {
 		if previousRevision != 0 {
 			return ErrNotFound
@@ -194,7 +203,7 @@ func (store *MemoryStore) PutWorkerCard(
 		card.UpdatedAtMilliseconds < current.UpdatedAtMilliseconds {
 		return ErrConflict
 	}
-	store.cards[card.WorkerCardID] = cloneWorkerCard(card)
+	store.cards[card.WorkerCardID] = cloneSignedWorkerCard(signedCard)
 	return nil
 }
 
@@ -248,9 +257,10 @@ func (store *MemoryStore) PutOffering(
 	if !found || enrollment.PoolID != offering.PoolID {
 		return ErrNotFound
 	}
-	card, found := store.cards[offering.WorkerCardID]
+	signedCard, found := store.cards[offering.WorkerCardID]
+	card := signedCard.Card
 	cardDigest, digestError := card.Digest()
-	if !found || card.PoolID != offering.PoolID || card.WorkerEnrollmentID != offering.WorkerEnrollmentID ||
+	if !found || signedCard.Validate(enrollment) != nil || card.PoolID != offering.PoolID || card.WorkerEnrollmentID != offering.WorkerEnrollmentID ||
 		offering.WorkerCardRevision != card.Revision || digestError != nil ||
 		offering.WorkerCardDigest != cardDigest {
 		return ErrNotFound
@@ -293,14 +303,14 @@ func (store *MemoryStore) GetPoolStatus(
 	sort.Slice(enrollments, func(left, right int) bool {
 		return enrollments[left].EnrollmentID.String() < enrollments[right].EnrollmentID.String()
 	})
-	cards := make([]WorkerCard, 0)
-	for _, card := range store.cards {
-		if card.PoolID == poolID {
-			cards = append(cards, cloneWorkerCard(card))
+	cards := make([]SignedWorkerCard, 0)
+	for _, signedCard := range store.cards {
+		if signedCard.Card.PoolID == poolID {
+			cards = append(cards, cloneSignedWorkerCard(signedCard))
 		}
 	}
 	sort.Slice(cards, func(left, right int) bool {
-		return cards[left].WorkerCardID.String() < cards[right].WorkerCardID.String()
+		return cards[left].Card.WorkerCardID.String() < cards[right].Card.WorkerCardID.String()
 	})
 	offerings := make([]Offering, 0)
 	for _, offering := range store.offerings {
@@ -331,4 +341,9 @@ func cloneOffering(offering Offering) Offering {
 func cloneWorkerCard(card WorkerCard) WorkerCard {
 	card.Claims = append([]AssuranceClaim(nil), card.Claims...)
 	return card
+}
+
+func cloneSignedWorkerCard(signedCard SignedWorkerCard) SignedWorkerCard {
+	signedCard.Card = cloneWorkerCard(signedCard.Card)
+	return signedCard
 }

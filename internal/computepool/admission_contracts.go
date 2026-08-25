@@ -12,6 +12,23 @@ const (
 	maximumConsentLifetimeMillis  = int64(30 * 24 * 60 * 60 * 1_000)
 )
 
+type P256SigningAuthority struct {
+	SignerID              uuid.UUID
+	SigningKeyFingerprint string
+}
+
+func (authority P256SigningAuthority) Validate() error {
+	if authority.SignerID == uuid.Nil || !validSHA256Hex(authority.SigningKeyFingerprint) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func (authority P256SigningAuthority) authorizes(signature ES256Signature) bool {
+	return authority.SignerID == signature.SignerID &&
+		authority.SigningKeyFingerprint == signature.SigningKeyFingerprint
+}
+
 type ConsentReceipt struct {
 	Version                 int            `json:"version"`
 	ReceiptID               uuid.UUID      `json:"receiptID"`
@@ -43,6 +60,20 @@ func (receipt ConsentReceipt) Validate() error {
 }
 
 func (receipt ConsentReceipt) Digest() (string, error) { return canonicalDigest(receipt) }
+
+func (receipt ConsentReceipt) ValidatePlan(plan DisclosurePlan, consentingDeviceAuthority P256SigningAuthority) error {
+	if receipt.Validate() != nil || plan.Validate() != nil ||
+		!consentingDeviceAuthority.authorizes(receipt.Signature) || receipt.PlanID != plan.PlanID ||
+		plan.Decision != DecisionConsentRequired || receipt.ConsentedAtMilliseconds < plan.CreatedAtMilliseconds ||
+		receipt.ConsentedAtMilliseconds >= plan.ExpiresAtMilliseconds {
+		return ErrInvalid
+	}
+	digest, err := plan.Digest()
+	if err != nil || digest != receipt.PlanDigest {
+		return ErrInvalid
+	}
+	return nil
+}
 
 type DisclosureAction string
 
@@ -248,7 +279,9 @@ func (admission PoolAdmission) ValidateAuthorization(authorization InvocationAut
 	if admission.Validate() != nil || authorization.Validate() != nil || authorization.AuthorizationID != admission.InvocationAuthorizationID ||
 		authorization.PoolID != admission.PoolID || authorization.WorkerCardID != admission.WorkerCardID ||
 		authorization.WorkerCardRevision != admission.WorkerCardRevision || authorization.WorkerCardDigest != admission.WorkerCardDigest ||
-		authorization.OfferingID != admission.OfferingID || authorization.OfferingRevision != admission.OfferingRevision {
+		authorization.OfferingID != admission.OfferingID || authorization.OfferingRevision != admission.OfferingRevision ||
+		admission.AdmittedAtMilliseconds < authorization.AuthorizedAtMilliseconds ||
+		admission.ExpiresAtMilliseconds > authorization.ExpiresAtMilliseconds {
 		return ErrInvalid
 	}
 	digest, err := authorization.Digest()
@@ -256,6 +289,50 @@ func (admission PoolAdmission) ValidateAuthorization(authorization InvocationAut
 		return ErrInvalid
 	}
 	return nil
+}
+
+func (admission PoolAdmission) ValidateInputRelease(
+	authorization InvocationAuthorization,
+	signedWorkerCard SignedWorkerCard,
+	enrollment WorkerEnrollment,
+	offering Offering,
+	expectedPoolAuthority P256SigningAuthority,
+	permittedInvocationAuthorities []P256SigningAuthority,
+	evaluatedAtMilliseconds int64,
+) error {
+	if admission.ValidateAuthorization(authorization) != nil ||
+		signedWorkerCard.Validate(enrollment) != nil || expectedPoolAuthority.Validate() != nil ||
+		!expectedPoolAuthority.authorizes(admission.Signature) ||
+		!anyP256AuthorityAuthorizes(permittedInvocationAuthorities, authorization.Signature) ||
+		evaluatedAtMilliseconds < admission.AdmittedAtMilliseconds ||
+		evaluatedAtMilliseconds < authorization.AuthorizedAtMilliseconds ||
+		evaluatedAtMilliseconds >= admission.LeaseExpiresAtMilliseconds ||
+		evaluatedAtMilliseconds >= admission.ExpiresAtMilliseconds ||
+		evaluatedAtMilliseconds >= authorization.ExpiresAtMilliseconds {
+		return ErrInvalid
+	}
+	card := signedWorkerCard.Card
+	cardDigest, err := card.Digest()
+	if err != nil || enrollment.EnrollmentID != admission.WorkerEnrollmentID ||
+		enrollment.PoolID != admission.PoolID || !enrollment.Enabled ||
+		card.WorkerCardID != admission.WorkerCardID || card.Revision != admission.WorkerCardRevision ||
+		cardDigest != admission.WorkerCardDigest || offering.OfferingID != admission.OfferingID ||
+		offering.PoolID != admission.PoolID || offering.WorkerEnrollmentID != admission.WorkerEnrollmentID ||
+		offering.WorkerCardID != admission.WorkerCardID || offering.WorkerCardRevision != admission.WorkerCardRevision ||
+		offering.WorkerCardDigest != admission.WorkerCardDigest || offering.Revision != admission.OfferingRevision ||
+		!offering.Enabled {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func anyP256AuthorityAuthorizes(authorities []P256SigningAuthority, signature ES256Signature) bool {
+	for _, authority := range authorities {
+		if authority.Validate() == nil && authority.authorizes(signature) {
+			return true
+		}
+	}
+	return false
 }
 
 type JobState string

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"math/big"
 	"strings"
@@ -298,6 +299,27 @@ func (ack PolicyAcknowledgement) Validate() error {
 type SignedWorkerCard struct {
 	Card      WorkerCard       `json:"card"`
 	Signature Ed25519Signature `json:"signature"`
+}
+
+func NewSignedWorkerCard(card WorkerCard, privateKey ed25519.PrivateKey) (SignedWorkerCard, error) {
+	if card.Validate() != nil || len(privateKey) != ed25519.PrivateKeySize {
+		return SignedWorkerCard{}, ErrInvalid
+	}
+	encoded, err := canonicalJSON(card)
+	if err != nil {
+		return SignedWorkerCard{}, ErrInvalid
+	}
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	fingerprint := sha256.Sum256(publicKey)
+	return SignedWorkerCard{
+		Card: card,
+		Signature: Ed25519Signature{
+			Algorithm: "Ed25519", SignerID: card.WorkerEnrollmentID,
+			PublicSigningKeyEd25519: base64.RawURLEncoding.EncodeToString(publicKey),
+			SigningKeyFingerprint:   hex.EncodeToString(fingerprint[:]),
+			Signature:               base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, append([]byte(workerCardDomain), encoded...))),
+		},
+	}, nil
 }
 
 func (signed SignedWorkerCard) Validate(enrollment WorkerEnrollment) error {

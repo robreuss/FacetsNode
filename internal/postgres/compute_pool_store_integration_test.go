@@ -2,6 +2,10 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
 	"testing"
@@ -78,7 +82,7 @@ func TestPostgresComputePoolLifecycleIsIndependent(t *testing.T) {
 func postgresComputePoolFixture() (
 	computepool.Pool,
 	computepool.WorkerEnrollment,
-	computepool.WorkerCard,
+	computepool.SignedWorkerCard,
 	computepool.Offering,
 ) {
 	poolID := uuid.MustParse("81000000-0000-0000-0000-000000000001")
@@ -93,13 +97,16 @@ func postgresComputePoolFixture() (
 		DisplayName: "PostgreSQL Compute", Enabled: true, Revision: 1,
 		CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
 	}
+	workerPrivateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	workerPublicKey := workerPrivateKey.Public().(ed25519.PublicKey)
+	workerFingerprint := sha256.Sum256(workerPublicKey)
 	enrollment := computepool.WorkerEnrollment{
 		Version:      computepool.SchemaVersion,
 		EnrollmentID: uuid.MustParse("83000000-0000-0000-0000-000000000001"),
 		PoolID:       poolID, WorkerID: uuid.MustParse("84000000-0000-0000-0000-000000000001"),
 		WorkerOwnerAuthorityID:  uuid.MustParse("85000000-0000-0000-0000-000000000001"),
-		PublicSigningKeyEd25519: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-		SigningKeyFingerprint:   "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
+		PublicSigningKeyEd25519: base64.RawURLEncoding.EncodeToString(workerPublicKey),
+		SigningKeyFingerprint:   hex.EncodeToString(workerFingerprint[:]),
 		ConsentRevision:         1, Enabled: true, Revision: 1,
 		CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
 	}
@@ -111,6 +118,10 @@ func postgresComputePoolFixture() (
 		"example.provider",
 	)
 	cardDigest, err := card.Digest()
+	if err != nil {
+		panic(err)
+	}
+	signedCard, err := computepool.NewSignedWorkerCard(card, workerPrivateKey)
 	if err != nil {
 		panic(err)
 	}
@@ -136,7 +147,7 @@ func postgresComputePoolFixture() (
 		ResourceCeiling: ceiling, Enabled: true, Revision: 1,
 		CreatedAtMilliseconds: 1_000, UpdatedAtMilliseconds: 1_000,
 	}
-	return pool, enrollment, card, offering
+	return pool, enrollment, signedCard, offering
 }
 
 func stringOf(value string, count int) string {

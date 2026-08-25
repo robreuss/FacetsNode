@@ -24,6 +24,13 @@ func EvaluateJobLifecycle(
 	transitions []PoolJobTransition,
 	executions []WorkerExecutionReceipt,
 	applications []ResultApplicationReceipt,
+	authorization InvocationAuthorization,
+	admission PoolAdmission,
+	signedWorkerCard SignedWorkerCard,
+	workerEnrollment WorkerEnrollment,
+	offering Offering,
+	permittedInvocationAuthorities []P256SigningAuthority,
+	permittedApplicationAuthorities []P256SigningAuthority,
 	expectedPoolID uuid.UUID,
 	expectedPoolAuthorityID uuid.UUID,
 	expectedPoolSigningKeyFingerprint string,
@@ -76,25 +83,46 @@ func EvaluateJobLifecycle(
 		return JobLifecycleEvaluation{}, err
 	}
 	jobID := uniqueTransitions[0].JobID
+	poolAuthority := P256SigningAuthority{
+		SignerID: expectedPoolAuthorityID, SigningKeyFingerprint: expectedPoolSigningKeyFingerprint,
+	}
+	if admission.JobID != jobID || admission.PoolID != expectedPoolID ||
+		admission.ValidateInputRelease(authorization, signedWorkerCard, workerEnrollment, offering,
+			poolAuthority, permittedInvocationAuthorities, admission.AdmittedAtMilliseconds) != nil {
+		return JobLifecycleEvaluation{}, ErrInvalidLifecycle
+	}
 	for _, receipt := range executionByID {
-		if receipt.JobID != jobID {
+		if receipt.JobID != jobID ||
+			receipt.ValidateAdmission(admission, authorization, workerEnrollment) != nil ||
+			receipt.StartedAtMilliseconds >= admission.LeaseExpiresAtMilliseconds ||
+			receipt.FinishedAtMilliseconds > admission.ExpiresAtMilliseconds ||
+			receipt.FinishedAtMilliseconds > authorization.ExpiresAtMilliseconds {
 			return JobLifecycleEvaluation{}, ErrInvalidLifecycle
 		}
 	}
 	for _, receipt := range applicationByID {
-		if receipt.JobID != jobID {
+		execution, found := executionByID[receipt.ExecutionReceiptID]
+		if receipt.JobID != jobID || !found ||
+			!anyP256AuthorityAuthorizes(permittedApplicationAuthorities, receipt.Signature) ||
+			receipt.ValidateExecution(execution) != nil {
 			return JobLifecycleEvaluation{}, ErrInvalidLifecycle
 		}
 	}
+	authorizationDigest, _ := authorization.Digest()
+	admissionDigest, _ := admission.Digest()
 	var previous *PoolJobTransition
 	sawResultApplied := false
+	appliedEvidenceDigest := ""
 	for index := range uniqueTransitions {
 		transition := &uniqueTransitions[index]
 		if transition.JobID != jobID {
 			return JobLifecycleEvaluation{}, ErrInvalidLifecycle
 		}
 		if previous == nil {
-			if transition.Sequence != 1 || transition.PredecessorDigest != nil || transition.State != JobAuthorized {
+			if transition.Sequence != 1 || transition.PredecessorDigest != nil || transition.State != JobAuthorized ||
+				transition.EvidenceDigest == nil || *transition.EvidenceDigest != authorizationDigest ||
+				transition.OccurredAtMilliseconds < authorization.AuthorizedAtMilliseconds ||
+				transition.OccurredAtMilliseconds >= authorization.ExpiresAtMilliseconds {
 				return JobLifecycleEvaluation{}, ErrInvalidLifecycle
 			}
 		} else {
@@ -105,19 +133,35 @@ func EvaluateJobLifecycle(
 				return JobLifecycleEvaluation{}, ErrInvalidLifecycle
 			}
 		}
+		if transition.State == JobAdmitted {
+			if transition.EvidenceDigest == nil || *transition.EvidenceDigest != admissionDigest ||
+				transition.OccurredAtMilliseconds < admission.AdmittedAtMilliseconds ||
+				transition.OccurredAtMilliseconds >= admission.ExpiresAtMilliseconds {
+				return JobLifecycleEvaluation{}, ErrInvalidLifecycle
+			}
+		}
+		if (transition.State == JobLeased || transition.State == JobExecuting) &&
+			transition.OccurredAtMilliseconds >= admission.LeaseExpiresAtMilliseconds {
+			return JobLifecycleEvaluation{}, ErrInvalidLifecycle
+		}
 		if transition.State == JobResultStaged || transition.State == JobResultDelivered {
-			if transition.EvidenceDigest == nil || !containsExecutionDigest(executionByID, *transition.EvidenceDigest) {
+			receipt, found := executionForDigest(executionByID, transition.EvidenceDigest)
+			if !found || receipt.FinishedAtMilliseconds > transition.OccurredAtMilliseconds {
 				return JobLifecycleEvaluation{}, ErrInvalidLifecycle
 			}
 		}
 		if transition.State == JobResultApplied {
-			if transition.EvidenceDigest == nil || !containsApplicationDigest(applicationByID, *transition.EvidenceDigest) {
+			receipt, found := applicationForDigest(applicationByID, transition.EvidenceDigest)
+			if !found || receipt.AppliedAtMilliseconds > transition.OccurredAtMilliseconds {
 				return JobLifecycleEvaluation{}, ErrInvalidLifecycle
 			}
 			sawResultApplied = true
+			appliedEvidenceDigest = *transition.EvidenceDigest
 		}
-		if transition.State == JobCompleted && !sawResultApplied {
-			return JobLifecycleEvaluation{}, ErrInvalidLifecycle
+		if transition.State == JobCompleted {
+			if !sawResultApplied || transition.EvidenceDigest == nil || *transition.EvidenceDigest != appliedEvidenceDigest {
+				return JobLifecycleEvaluation{}, ErrInvalidLifecycle
+			}
 		}
 		previous = transition
 	}
@@ -178,24 +222,30 @@ func dedupeApplications(receipts []ResultApplicationReceipt) (map[uuid.UUID]Resu
 	return byID, len(receipts) - len(byID), nil
 }
 
-func containsExecutionDigest(receipts map[uuid.UUID]WorkerExecutionReceipt, digest string) bool {
+func executionForDigest(receipts map[uuid.UUID]WorkerExecutionReceipt, digest *string) (WorkerExecutionReceipt, bool) {
+	if digest == nil {
+		return WorkerExecutionReceipt{}, false
+	}
 	for _, receipt := range receipts {
 		candidate, _ := receipt.Digest()
-		if candidate == digest {
-			return true
+		if candidate == *digest {
+			return receipt, true
 		}
 	}
-	return false
+	return WorkerExecutionReceipt{}, false
 }
 
-func containsApplicationDigest(receipts map[uuid.UUID]ResultApplicationReceipt, digest string) bool {
+func applicationForDigest(receipts map[uuid.UUID]ResultApplicationReceipt, digest *string) (ResultApplicationReceipt, bool) {
+	if digest == nil {
+		return ResultApplicationReceipt{}, false
+	}
 	for _, receipt := range receipts {
 		candidate, _ := receipt.Digest()
-		if candidate == digest {
-			return true
+		if candidate == *digest {
+			return receipt, true
 		}
 	}
-	return false
+	return ResultApplicationReceipt{}, false
 }
 
 func allowedJobTransition(from, to JobState) bool {

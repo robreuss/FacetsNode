@@ -14,6 +14,42 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestConsentReceiptBindsPlanAndKnownDeviceAuthority(t *testing.T) {
+	deviceID := uuid.MustParse("80000000-0000-0000-0000-000000000001")
+	deviceKey := testP256Key(6)
+	destination := DisclosureDestination{Kind: DestinationPublicAudience, DestinationIdentifier: "public.example"}
+	object := DisclosureObjectScope{ObjectID: "facets-object-1", ContentDigest: testHex("a"), PrivacyClass: PrivacyRestricted, SelectedFields: []string{"body"}}
+	partition := DisclosurePartition{
+		PartitionID: uuid.MustParse("80000000-0000-0000-0000-000000000002"), ObjectIDs: []string{object.ObjectID},
+		EffectivePrivacyClass: PrivacyRestricted, Destination: destination, Decision: DecisionConsentRequired,
+		FrictionCodes: []DisclosureFrictionCode{FrictionRestrictedToPublic},
+	}
+	plan := DisclosurePlan{
+		Version: 1, PlanID: uuid.MustParse("80000000-0000-0000-0000-000000000003"), Action: DisclosureShare,
+		Objects: []DisclosureObjectScope{object}, PrivacyComposition: []DisclosurePrivacyComposition{{PrivacyClass: PrivacyRestricted, ObjectCount: 1}},
+		Destination: destination, Consequences: []string{"public_disclosure"}, FrictionCodes: []DisclosureFrictionCode{FrictionRestrictedToPublic},
+		Partitions: []DisclosurePartition{partition}, Decision: DecisionConsentRequired, CreatedAtMilliseconds: 10, ExpiresAtMilliseconds: 100,
+	}
+	planDigest, err := plan.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := ConsentReceipt{
+		Version: 1, ReceiptID: uuid.MustParse("80000000-0000-0000-0000-000000000004"), PlanID: plan.PlanID,
+		PlanDigest: planDigest, ConsentingDeviceID: deviceID, ConsentedAtMilliseconds: 20,
+	}
+	receipt.Signature = testSignES256(t, deviceID, deviceKey, receipt.signingPayload(), consentReceiptDomain)
+	authority := P256SigningAuthority{SignerID: deviceID, SigningKeyFingerprint: receipt.Signature.SigningKeyFingerprint}
+	if err := receipt.ValidatePlan(plan, authority); err != nil {
+		t.Fatalf("valid receipt: %v", err)
+	}
+	rogue := authority
+	rogue.SigningKeyFingerprint = testHex("f")
+	if err := receipt.ValidatePlan(plan, rogue); err == nil {
+		t.Fatal("expected self-selected device key to fail")
+	}
+}
+
 func TestSignedAdmissionChainBindsExactWorkerAndOffering(t *testing.T) {
 	clientID := uuid.MustParse("81000000-0000-0000-0000-000000000001")
 	poolID := uuid.MustParse("81000000-0000-0000-0000-000000000002")
@@ -74,6 +110,13 @@ func TestSignedAdmissionChainBindsExactWorkerAndOffering(t *testing.T) {
 	if err := admission.ValidateAuthorization(authorization); err != nil {
 		t.Fatalf("bound authorization: %v", err)
 	}
+	extended := admission
+	extended.ExpiresAtMilliseconds = authorization.ExpiresAtMilliseconds + 1
+	extended.LeaseExpiresAtMilliseconds = extended.ExpiresAtMilliseconds
+	extended.Signature = testSignES256(t, poolAuthorityID, poolKey, extended.signingPayload(), poolAdmissionDomain)
+	if err := extended.ValidateAuthorization(authorization); err == nil {
+		t.Fatal("expected admission extending beyond authorization to fail")
+	}
 	admissionDigest, _ := admission.Digest()
 	execution := WorkerExecutionReceipt{
 		Version: 1, ReceiptID: uuid.MustParse("81000000-0000-0000-0000-000000000013"), JobID: admission.JobID,
@@ -101,10 +144,64 @@ func TestJobLifecycleRequiresAppliedResultAndAcceptsExactDuplicates(t *testing.T
 	deviceID := uuid.MustParse("82000000-0000-0000-0000-000000000005")
 	authorityKey := testP256Key(3)
 	deviceKey := testP256Key(4)
-	_, workerKey, _ := ed25519.GenerateKey(nil)
+	invocationAuthorityID := uuid.MustParse("82000000-0000-0000-0000-000000000010")
+	invocationKey := testP256Key(5)
+	workerPublic, workerKey, _ := ed25519.GenerateKey(nil)
+	workerFingerprint := sha256.Sum256(workerPublic)
+	enrollment := WorkerEnrollment{
+		Version: SchemaVersion, EnrollmentID: workerID, PoolID: poolID,
+		WorkerID:                uuid.MustParse("82000000-0000-0000-0000-000000000011"),
+		WorkerOwnerAuthorityID:  uuid.MustParse("82000000-0000-0000-0000-000000000012"),
+		PublicSigningKeyEd25519: base64.RawURLEncoding.EncodeToString(workerPublic),
+		SigningKeyFingerprint:   hex.EncodeToString(workerFingerprint[:]), ConsentRevision: 1,
+		Enabled: true, Revision: 1, CreatedAtMilliseconds: 1, UpdatedAtMilliseconds: 1,
+	}
+	card := WorkerCard{
+		Version:      WorkerCardSchemaVersion,
+		WorkerCardID: uuid.MustParse("82000000-0000-0000-0000-000000000013"), PoolID: poolID,
+		WorkerEnrollmentID: workerID, WorkerOwnerAuthorityID: enrollment.WorkerOwnerAuthorityID,
+		DisplayName: "Lifecycle Worker", RuntimeIdentifier: "lifecycle.runtime", BuildIdentifier: "lifecycle-build",
+		Claims: testClaims(), Revision: 1, CreatedAtMilliseconds: 1, UpdatedAtMilliseconds: 1,
+	}
+	signedCard := SignedWorkerCard{Card: card, Signature: testSignEd25519(t, workerID, workerKey, card, workerCardDomain)}
+	cardDigest, _ := card.Digest()
+	none := RetentionPolicy{Mode: RetentionNone}
+	offering := Offering{
+		Version: SchemaVersion, OfferingID: uuid.MustParse("82000000-0000-0000-0000-000000000014"),
+		PoolID: poolID, WorkerEnrollmentID: workerID, WorkerCardID: card.WorkerCardID,
+		WorkerCardRevision: 1, WorkerCardDigest: cardDigest, ProviderIdentifier: "facets.lifecycle",
+		ModelIdentifiers: []string{"lifecycle.model"}, AllowedOperations: []string{"classify"},
+		InteractionModes: []InteractionMode{InteractionBatch},
+		DataHandlingProfile: DataHandlingProfile{
+			PlaintextBoundary: PlaintextBoundaryFacetsManagedLocalRuntime, NetworkEgress: NetworkEgressNone,
+			RequestRetention: none, ResultRetention: none, DiagnosticRetention: none,
+			TrainingUse: TrainingProhibited, ToolAccess: ToolAccessNone, ProviderIdentifier: "facets.lifecycle",
+		},
+		PricingRevision: 1, ResourceCeiling: ResourceCeiling{MaximumInputBytes: 1024, MaximumOutputBytes: 1024, MaximumMemoryBytes: 4096, MaximumWallTimeMilliseconds: 1000},
+		Enabled: true, Revision: 1, CreatedAtMilliseconds: 1, UpdatedAtMilliseconds: 1,
+	}
+	authorization := InvocationAuthorization{
+		Version: 1, AuthorizationID: uuid.MustParse("82000000-0000-0000-0000-000000000015"),
+		RequestID: uuid.MustParse("82000000-0000-0000-0000-000000000016"), PoolID: poolID,
+		WorkerCardID: card.WorkerCardID, WorkerCardRevision: card.Revision, WorkerCardDigest: cardDigest,
+		OfferingID: offering.OfferingID, OfferingRevision: offering.Revision,
+		RequestDigest: testHex("5"), PayloadDigest: testHex("8"), DisclosurePlanDigest: testHex("9"),
+		AuthorizedPrivacyClass: PrivacyPersonal, AuthorizedAtMilliseconds: 10, ExpiresAtMilliseconds: 100,
+	}
+	authorization.Signature = testSignES256(t, invocationAuthorityID, invocationKey, authorization.signingPayload(), invocationAuthorizationDomain)
+	authorizationDigest, _ := authorization.Digest()
+	admission := PoolAdmission{
+		Version: 1, AdmissionID: uuid.MustParse("82000000-0000-0000-0000-000000000007"), JobID: jobID,
+		PoolID: poolID, InvocationAuthorizationID: authorization.AuthorizationID, InvocationAuthorizationDigest: authorizationDigest,
+		WorkerEnrollmentID: workerID, WorkerCardID: card.WorkerCardID, WorkerCardRevision: card.Revision,
+		WorkerCardDigest: cardDigest, OfferingID: offering.OfferingID, OfferingRevision: offering.Revision,
+		ResourceCeiling: offering.ResourceCeiling, BudgetCeiling: BudgetCeiling{MaximumCostMinorUnits: 100, CurrencyIdentifier: "USD"},
+		AdmittedAtMilliseconds: 20, ExpiresAtMilliseconds: 100, LeaseExpiresAtMilliseconds: 80,
+	}
+	admission.Signature = testSignES256(t, authorityID, authorityKey, admission.signingPayload(), poolAdmissionDomain)
 	execution := WorkerExecutionReceipt{
 		Version: 1, ReceiptID: uuid.MustParse("82000000-0000-0000-0000-000000000006"), JobID: jobID,
-		AdmissionID: uuid.MustParse("82000000-0000-0000-0000-000000000007"), AdmissionDigest: testHex("4"),
+		AdmissionID: admission.AdmissionID, AdmissionDigest: mustDigest(t, admission),
 		WorkerEnrollmentID: workerID, Attempt: 1, RequestDigest: testHex("5"), ResultDigest: testHex("6"),
 		StartedAtMilliseconds: 50, FinishedAtMilliseconds: 60,
 	}
@@ -122,17 +219,36 @@ func TestJobLifecycleRequiresAppliedResultAndAcceptsExactDuplicates(t *testing.T
 		state    JobState
 		evidence *string
 	}{
-		{JobAuthorized, nil}, {JobAdmitted, nil}, {JobQueued, nil}, {JobLeased, nil}, {JobExecuting, nil},
+		{JobAuthorized, stringPointer(authorizationDigest)}, {JobAdmitted, stringPointer(mustDigest(t, admission))}, {JobQueued, nil}, {JobLeased, nil}, {JobExecuting, nil},
 		{JobResultStaged, &executionDigest}, {JobResultDelivered, &executionDigest}, {JobResultApplied, &applicationDigest}, {JobCompleted, &applicationDigest},
 	}
 	transitions := testTransitions(t, states, jobID, poolID, authorityID, authorityKey)
 	fingerprint := transitions[0].Signature.SigningKeyFingerprint
-	evaluation, err := EvaluateJobLifecycle(append(transitions, transitions[len(transitions)-1]), []WorkerExecutionReceipt{execution, execution}, []ResultApplicationReceipt{application, application}, poolID, authorityID, fingerprint)
+	evaluation, err := EvaluateJobLifecycle(
+		append(transitions, transitions[len(transitions)-1]),
+		[]WorkerExecutionReceipt{execution, execution}, []ResultApplicationReceipt{application, application},
+		authorization, admission, signedCard, enrollment, offering,
+		[]P256SigningAuthority{{SignerID: invocationAuthorityID, SigningKeyFingerprint: authorization.Signature.SigningKeyFingerprint}},
+		[]P256SigningAuthority{{SignerID: deviceID, SigningKeyFingerprint: application.Signature.SigningKeyFingerprint}},
+		poolID, authorityID, fingerprint,
+	)
 	if err != nil {
 		t.Fatalf("lifecycle: %v", err)
 	}
 	if evaluation.CurrentState != JobCompleted || evaluation.DuplicateTransitionCount != 1 || evaluation.DuplicateExecutionReceiptCount != 1 || evaluation.DuplicateApplicationReceiptCount != 1 {
 		t.Fatalf("unexpected evaluation: %+v", evaluation)
+	}
+	_, rogueWorkerKey, _ := ed25519.GenerateKey(nil)
+	forgedExecution := execution
+	forgedExecution.Signature = testSignEd25519(t, workerID, rogueWorkerKey, forgedExecution.signingPayload(), workerExecutionDomain)
+	if _, err := EvaluateJobLifecycle(
+		transitions, []WorkerExecutionReceipt{forgedExecution}, []ResultApplicationReceipt{application},
+		authorization, admission, signedCard, enrollment, offering,
+		[]P256SigningAuthority{{SignerID: invocationAuthorityID, SigningKeyFingerprint: authorization.Signature.SigningKeyFingerprint}},
+		[]P256SigningAuthority{{SignerID: deviceID, SigningKeyFingerprint: application.Signature.SigningKeyFingerprint}},
+		poolID, authorityID, fingerprint,
+	); err == nil {
+		t.Fatal("expected self-selected Worker receipt key to fail")
 	}
 	prematureStates := append([]struct {
 		state    JobState
@@ -142,11 +258,28 @@ func TestJobLifecycleRequiresAppliedResultAndAcceptsExactDuplicates(t *testing.T
 		state    JobState
 		evidence *string
 	}{JobCompleted, &applicationDigest})
-	premature := testTransitions(t, prematureStates, uuid.MustParse("82000000-0000-0000-0000-000000000009"), poolID, authorityID, authorityKey)
-	if _, err := EvaluateJobLifecycle(premature, nil, nil, poolID, authorityID, fingerprint); err == nil {
+	premature := testTransitions(t, prematureStates, jobID, poolID, authorityID, authorityKey)
+	if _, err := EvaluateJobLifecycle(
+		premature, []WorkerExecutionReceipt{execution}, []ResultApplicationReceipt{application},
+		authorization, admission, signedCard, enrollment, offering,
+		[]P256SigningAuthority{{SignerID: invocationAuthorityID, SigningKeyFingerprint: authorization.Signature.SigningKeyFingerprint}},
+		[]P256SigningAuthority{{SignerID: deviceID, SigningKeyFingerprint: application.Signature.SigningKeyFingerprint}},
+		poolID, authorityID, fingerprint,
+	); err == nil {
 		t.Fatal("expected completion before result application to fail")
 	}
 }
+
+func mustDigest(t *testing.T, value any) string {
+	t.Helper()
+	digest, err := canonicalDigest(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func stringPointer(value string) *string { return &value }
 
 func testP256Key(seed int64) *ecdsa.PrivateKey {
 	d := big.NewInt(seed)
@@ -198,7 +331,7 @@ func testTransitions(t *testing.T, states []struct {
 	result := make([]PoolJobTransition, 0, len(states))
 	var predecessor *string
 	for index, item := range states {
-		transition := PoolJobTransition{Version: 1, TransitionID: uuid.New(), JobID: jobID, PoolID: poolID, Sequence: uint64(index + 1), PredecessorDigest: predecessor, State: item.state, EvidenceDigest: item.evidence, OccurredAtMilliseconds: int64(index + 1)}
+		transition := PoolJobTransition{Version: 1, TransitionID: uuid.New(), JobID: jobID, PoolID: poolID, Sequence: uint64(index + 1), PredecessorDigest: predecessor, State: item.state, EvidenceDigest: item.evidence, OccurredAtMilliseconds: int64((index + 1) * 10)}
 		transition.Signature = testSignES256(t, authorityID, key, transition.signingPayload(), poolJobTransitionDomain)
 		result = append(result, transition)
 		digest, _ := transition.Digest()

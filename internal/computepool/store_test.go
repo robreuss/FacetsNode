@@ -33,7 +33,7 @@ func TestMemoryStoreKeepsPoolWorkerAndOfferingAuthoritySeparate(t *testing.T) {
 		t.Fatalf("Compute Pool status=%+v error=%v", status, err)
 	}
 	if status.Pool.OwnerAuthorityID == status.WorkerEnrollments[0].WorkerOwnerAuthorityID ||
-		status.WorkerCards[0].WorkerOwnerAuthorityID != status.WorkerEnrollments[0].WorkerOwnerAuthorityID {
+		status.WorkerCards[0].Card.WorkerOwnerAuthorityID != status.WorkerEnrollments[0].WorkerOwnerAuthorityID {
 		t.Fatal("Pool ownership silently became Worker ownership")
 	}
 }
@@ -48,6 +48,11 @@ func TestMemoryStoreRejectsRollbackAndCrossPoolOffering(t *testing.T) {
 	}
 	if err := store.PutWorkerEnrollment(ctx, 0, fixture.WorkerEnrollments[0]); err != nil {
 		t.Fatal(err)
+	}
+	tamperedCard := fixture.WorkerCards[0]
+	tamperedCard.Signature.Signature = strings.Repeat("A", len(tamperedCard.Signature.Signature))
+	if err := store.PutWorkerCard(ctx, 0, tamperedCard); err == nil {
+		t.Fatal("tampered signed Worker Card was persisted")
 	}
 	if err := store.PutWorkerCard(ctx, 0, fixture.WorkerCards[0]); err != nil {
 		t.Fatal(err)

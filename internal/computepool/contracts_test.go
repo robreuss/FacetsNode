@@ -18,7 +18,7 @@ type portableFixture struct {
 	Pool              Pool               `json:"pool"`
 	PoolAuthority     AuthorityReference `json:"poolAuthority"`
 	Version           int                `json:"version"`
-	WorkerCards       []WorkerCard       `json:"workerCards"`
+	WorkerCards       []SignedWorkerCard `json:"workerCards"`
 	WorkerEnrollments []WorkerEnrollment `json:"workerEnrollments"`
 }
 
@@ -33,10 +33,11 @@ func TestPortableComputePoolContractsMatchSwiftFixture(t *testing.T) {
 	}
 	for index := range fixture.WorkerEnrollments {
 		enrollment := fixture.WorkerEnrollments[index]
-		card := fixture.WorkerCards[index]
+		signedCard := fixture.WorkerCards[index]
+		card := signedCard.Card
 		offering := fixture.Offerings[index]
 		cardDigest, err := card.Digest()
-		if enrollment.Validate() != nil || card.Validate() != nil || offering.Validate() != nil ||
+		if enrollment.Validate() != nil || signedCard.Validate(enrollment) != nil || offering.Validate() != nil ||
 			enrollment.PoolID != fixture.Pool.PoolID || card.PoolID != fixture.Pool.PoolID ||
 			offering.PoolID != fixture.Pool.PoolID || card.WorkerEnrollmentID != enrollment.EnrollmentID ||
 			offering.WorkerEnrollmentID != enrollment.EnrollmentID || offering.WorkerCardID != card.WorkerCardID ||
