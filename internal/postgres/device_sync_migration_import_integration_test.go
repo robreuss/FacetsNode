@@ -1,9 +1,15 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,8 +17,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/robreuss/FacetsNode/internal/devicesync"
 	postgresstore "github.com/robreuss/FacetsNode/internal/postgres"
+	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
 func TestPostgresPreparedDeviceSyncMigrationImportIsAtomicAndStandby(
@@ -38,8 +47,8 @@ func TestPostgresPreparedDeviceSyncMigrationImportIsAtomicAndStandby(
 
 	fixture := loadPostgresDeviceSyncEnforcementFixture(t)
 	preparation := fixture.RollbackEvidence.ActivationEvidence.Preparation
-	snapshot := fixture.RollbackEvidence.ActivationEvidence.Snapshot
-	snapshotPayload, err := snapshot.VerifiedPayload(nil)
+	originalSnapshot := fixture.RollbackEvidence.ActivationEvidence.Snapshot
+	snapshotPayload, err := originalSnapshot.VerifiedPayload(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,72 +58,139 @@ func TestPostgresPreparedDeviceSyncMigrationImportIsAtomicAndStandby(
 	}
 	principalID := snapshotPayload.Scope.ScopeID
 	targetDeploymentID := prepared.PreparedDeployments[0].DeploymentID
+	current, err := preparation.CurrentManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceSigner := postgresFixtureDeploymentSigner(t, current.ActiveDeployment)
+	store := postgresstore.NewRelayStore(pool)
+	initialBinding := postgresInitialServiceAuthorityBinding(
+		t, fixture, preparation.CurrentManifest, sourceSigner, 1_100,
+	)
+	initialDeviceID := uuid.New()
+	sourceAuthority := postgresBootstrapDeviceSyncPrincipal(
+		t, ctx, store, principalID, initialDeviceID, 1_100, initialBinding,
+	)
+	if err := store.ActivateBoundDeviceSyncScope(
+		ctx, principalID, sourceSigner.DeploymentID(), initialBinding.Revision(),
+		initialBinding.ManifestDigest(), 1_100,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, emptyBlobInventory, emptyArtifactDigests :=
+		exportPostgresDeviceSyncMigrationState(t, ctx, pool, principalID)
+	populatePostgresDeviceSyncMigrationRepresentativeState(
+		t, ctx, pool, store, sourceAuthority, initialDeviceID,
+	)
+	stateArtifact, blobInventory, artifactDigests :=
+		exportPostgresDeviceSyncMigrationState(t, ctx, pool, principalID)
+
+	for index := range snapshotPayload.Artifacts {
+		if snapshotPayload.Artifacts[index].Kind == serviceauthority.ArtifactServiceStateSnapshot {
+			snapshotPayload.Artifacts[index].ByteCount = artifactDigests.StateArtifactByteCount
+			snapshotPayload.Artifacts[index].TransferDigest = artifactDigests.StateArtifactSHA256.String()
+		}
+	}
+	snapshotPayload.Artifacts = append(snapshotPayload.Artifacts,
+		serviceauthority.MigrationArtifactDescriptor{
+			ArtifactID:     uuid.MustParse("6f000000-0000-0000-0000-000000000005"),
+			ByteCount:      artifactDigests.BlobInventoryByteCount,
+			Kind:           serviceauthority.ArtifactBlobInventory,
+			TransferDigest: artifactDigests.BlobInventorySHA256.String(),
+		})
+	snapshotPayload.StateCommitmentDigest = artifactDigests.StateCommitment.String()
+	snapshot := signPostgresPreparedDeviceSyncMigrationSnapshot(
+		t, preparation, fixture.AuthorityAnchor, sourceSigner, snapshotPayload,
+	)
+	mismatchedPayload := snapshotPayload
+	mismatchedPayload.Artifacts = append(
+		[]serviceauthority.MigrationArtifactDescriptor(nil), snapshotPayload.Artifacts...,
+	)
+	for index := range mismatchedPayload.Artifacts {
+		if mismatchedPayload.Artifacts[index].Kind == serviceauthority.ArtifactBlobInventory {
+			mismatchedPayload.Artifacts[index].ByteCount = emptyArtifactDigests.BlobInventoryByteCount
+			mismatchedPayload.Artifacts[index].TransferDigest = emptyArtifactDigests.BlobInventorySHA256.String()
+		}
+	}
+	mismatchedPayload.StateCommitmentDigest = postgresstore.DeviceSyncMigrationStateCommitment(
+		artifactDigests.StateArtifactSHA256,
+		emptyArtifactDigests.BlobInventorySHA256,
+	).String()
+	mismatchedSnapshot := signPostgresPreparedDeviceSyncMigrationSnapshot(
+		t, preparation, fixture.AuthorityAnchor, sourceSigner, mismatchedPayload,
+	)
+	if _, err := pool.Exec(ctx, `
+		TRUNCATE device_sync_account_admissions, relay_tenants CASCADE
+	`); err != nil {
+		t.Fatal(err)
+	}
+
 	initial := postgresstore.DeviceSyncInitialAuthorityEvidence{
 		Manifest:                preparation.CurrentManifest,
 		ValidatedAtMilliseconds: 1_100,
 	}
-	store := postgresstore.NewRelayStore(pool)
-	callbackCount := 0
-	callbackFailure := errors.New("injected semantic import failure")
+	// The portable fixture snapshot intentionally predates the mandatory blob
+	// inventory. Even though it is correctly signed, the canonical Device Sync
+	// importer must reject it before creating any target state.
 	if _, err := store.ImportPreparedDeviceSyncMigrationStandby(
-		ctx, targetDeploymentID, preparation, snapshot,
+		ctx, targetDeploymentID, preparation, originalSnapshot,
 		fixture.AuthorityAnchor, initial, 3_000,
-		func(
-			ctx context.Context,
-			tx postgresstore.DeviceSyncStandbyImportTransaction,
-			validated serviceauthority.ValidatedMigrationTransfer,
-		) error {
-			callbackCount++
-			if err := materializeMinimalDeviceSyncImport(
-				ctx, tx, validated.Snapshot.Scope.ScopeID,
-			); err != nil {
-				return err
-			}
-			return callbackFailure
+		postgresstore.DeviceSyncMigrationStagedArtifacts{
+			ServiceState:  bytes.NewReader(stateArtifact),
+			BlobInventory: bytes.NewReader(blobInventory),
 		},
-	); !errors.Is(err, callbackFailure) || callbackCount != 1 {
-		t.Fatalf("failed import err=%v callbacks=%d", err, callbackCount)
+	); err == nil {
+		t.Fatal("signed Device Sync snapshot without blob inventory was accepted")
 	}
 	assertNoDeviceSyncImportResidue(t, ctx, pool, principalID)
+
+	// This snapshot is itself valid and exactly describes the supplied bytes,
+	// but its empty blob inventory contradicts the blob references in the
+	// service-state artifact. The importer must detect that only after
+	// materialization and roll the entire target transaction back.
+	if _, err := store.ImportPreparedDeviceSyncMigrationStandby(
+		ctx, targetDeploymentID, preparation, mismatchedSnapshot,
+		fixture.AuthorityAnchor, initial, 3_000,
+		postgresstore.DeviceSyncMigrationStagedArtifacts{
+			ServiceState:  bytes.NewReader(stateArtifact),
+			BlobInventory: bytes.NewReader(emptyBlobInventory),
+		},
+	); err == nil || !strings.Contains(
+		err.Error(),
+		"materialized Device Sync target state does not reproduce signed artifact commitment",
+	) {
+		t.Fatalf("self-consistent mismatched inventory error=%v", err)
+	}
+	assertNoDeviceSyncImportResidue(t, ctx, pool, principalID)
+
+	tamperedState := append([]byte(nil), stateArtifact...)
+	tamperedState[0] ^= 0x01
 	if _, err := store.ImportPreparedDeviceSyncMigrationStandby(
 		ctx, targetDeploymentID, preparation, snapshot,
 		fixture.AuthorityAnchor, initial, 3_000,
-		func(
-			context.Context,
-			postgresstore.DeviceSyncStandbyImportTransaction,
-			serviceauthority.ValidatedMigrationTransfer,
-		) error {
-			return nil
+		postgresstore.DeviceSyncMigrationStagedArtifacts{
+			ServiceState:  bytes.NewReader(tamperedState),
+			BlobInventory: bytes.NewReader(blobInventory),
 		},
-	); err == nil || !strings.Contains(
-		err.Error(), "did not create exact semantic parents",
-	) {
-		t.Fatalf("incomplete semantic import error=%v", err)
+	); err == nil {
+		t.Fatal("tampered Device Sync migration state artifact was accepted")
 	}
 	assertNoDeviceSyncImportResidue(t, ctx, pool, principalID)
 
 	imported, err := store.ImportPreparedDeviceSyncMigrationStandby(
 		ctx, targetDeploymentID, preparation, snapshot,
 		fixture.AuthorityAnchor, initial, 3_000,
-		func(
-			ctx context.Context,
-			tx postgresstore.DeviceSyncStandbyImportTransaction,
-			validated serviceauthority.ValidatedMigrationTransfer,
-		) error {
-			callbackCount++
-			if validated.Snapshot.Scope.ScopeID != principalID ||
-				validated.Migration.MigrationID != snapshotPayload.MigrationID {
-				return errors.New("materializer received another migration")
-			}
-			return materializeMinimalDeviceSyncImport(ctx, tx, principalID)
+		postgresstore.DeviceSyncMigrationStagedArtifacts{
+			ServiceState:  bytes.NewReader(stateArtifact),
+			BlobInventory: bytes.NewReader(blobInventory),
 		},
 	)
-	if err != nil || callbackCount != 2 || imported.PrincipalID != principalID ||
+	if err != nil || imported.PrincipalID != principalID ||
 		imported.MigrationID != snapshotPayload.MigrationID ||
 		imported.ImportingDeploymentID != targetDeploymentID ||
 		imported.ExportingDeploymentID != prepared.ActiveDeployment.DeploymentID ||
 		imported.StateCommitmentDigest != snapshotPayload.StateCommitmentDigest {
-		t.Fatalf("imported=%+v err=%v callbacks=%d", imported, err, callbackCount)
+		t.Fatalf("imported=%+v err=%v", imported, err)
 	}
 	state, err := store.GetDeviceSyncScopeEnforcement(ctx, principalID)
 	if err != nil || state.State != postgresstore.DeviceSyncScopeStandby ||
@@ -137,21 +213,22 @@ func TestPostgresPreparedDeviceSyncMigrationImportIsAtomicAndStandby(
 	// after both the snapshot and target offer have expired.
 	retried, err := store.ImportPreparedDeviceSyncMigrationStandby(
 		ctx, targetDeploymentID, preparation, snapshot,
-		fixture.AuthorityAnchor, initial, 20_001, nil,
+		fixture.AuthorityAnchor, initial, 20_001,
+		postgresstore.DeviceSyncMigrationStagedArtifacts{},
 	)
-	if err != nil || callbackCount != 2 ||
+	if err != nil ||
 		retried.ImportedAtMilliseconds != imported.ImportedAtMilliseconds ||
 		retried.SnapshotReferenceDigest != imported.SnapshotReferenceDigest {
-		t.Fatalf("expired exact retry=%+v err=%v callbacks=%d", retried, err, callbackCount)
+		t.Fatalf("expired exact retry=%+v err=%v", retried, err)
 	}
 	conflictingInitial := initial
 	conflictingInitial.ValidatedAtMilliseconds = 1_200
 	if _, err := store.ImportPreparedDeviceSyncMigrationStandby(
 		ctx, targetDeploymentID, preparation, snapshot,
-		fixture.AuthorityAnchor, conflictingInitial, 20_001, nil,
-	); !errors.Is(err, postgresstore.ErrDeviceSyncMigrationImportConflict) ||
-		callbackCount != 2 {
-		t.Fatalf("conflicting retry err=%v callbacks=%d", err, callbackCount)
+		fixture.AuthorityAnchor, conflictingInitial, 20_001,
+		postgresstore.DeviceSyncMigrationStagedArtifacts{},
+	); !errors.Is(err, postgresstore.ErrDeviceSyncMigrationImportConflict) {
+		t.Fatalf("conflicting retry err=%v", err)
 	}
 
 	if _, err := pool.Exec(ctx, `
@@ -199,72 +276,265 @@ func TestPostgresPreparedDeviceSyncMigrationImportIsAtomicAndStandby(
 	}
 }
 
-func materializeMinimalDeviceSyncImport(
+func signPostgresPreparedDeviceSyncMigrationSnapshot(
+	t *testing.T,
+	preparation serviceauthority.MigrationPreparation,
+	anchor serviceauthority.TrustAnchor,
+	signer *serviceauthority.DeploymentSigner,
+	payload serviceauthority.MigrationSnapshotPayload,
+) serviceauthority.MigrationSnapshot {
+	t.Helper()
+	current, err := preparation.CurrentManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentDigest, err := preparation.CurrentManifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	if err := os.WriteFile(
+		bindingPath, []byte(`{"bindings":[],"version":1}`), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := serviceauthority.LoadBindingRegistry(
+		bindingPath, current.ActiveDeployment.DeploymentID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	initialManifest := preparation.CurrentManifest
+	if err := registry.Activate(current.Scope, serviceauthority.CurrentBinding{
+		Revision:     current.Revision,
+		Digest:       currentDigest,
+		DeploymentID: current.ActiveDeployment.DeploymentID,
+		Manifest:     &initialManifest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.ApplyMigrationPreparation(
+		preparation, anchor, 2_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.StageMigrationWriteFence(
+		preparation.PreparationManifest, payload, anchor, 3_000,
+	); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := registry.SignStagedMigrationSnapshotAt(
+		current.Scope, signer, 3_000,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalPayload, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(snapshot.Payload, canonicalPayload) {
+		t.Fatal("signed migration snapshot payload differs from requested canonical payload")
+	}
+	return snapshot
+}
+
+func populatePostgresDeviceSyncMigrationRepresentativeState(
+	t *testing.T,
 	ctx context.Context,
-	tx postgresstore.DeviceSyncStandbyImportTransaction,
-	principalID uuid.UUID,
-) error {
-	admissionID := uuid.New()
-	domainID := uuid.New()
-	deviceID := uuid.New()
-	subscriptionID := uuid.New()
-	statements := []struct {
-		query string
-		args  []any
+	pool *pgxpool.Pool,
+	store *postgresstore.RelayStore,
+	authority postgresDeviceSyncAuthority,
+	initialDeviceID uuid.UUID,
+) {
+	t.Helper()
+	tenantID := authority.TenantCredential.TenantID
+	domainID := authority.ControlDomain.Registration.DomainID
+	subscriptionID := authority.ControlDomain.Subscription.SubscriptionID
+	publisher := relay.Credential{
+		TenantID: tenantID, DomainID: domainID, MemberID: initialDeviceID,
+		Token: postgresRelayToken(24),
+	}
+	secondDeviceID := uuid.New()
+	recipient, _ := postgresEnrollDeviceSyncDevice(
+		t, ctx, store, authority, secondDeviceID, 1_190,
+	)
+	carrier, err := testfixture.LoadRelayCarrier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := carrier.Envelope
+	envelope.TenantID = tenantID
+	envelope.DomainID = domainID
+	envelope.MessageID = uuid.New()
+	envelope.PublisherMemberID = initialDeviceID
+	envelope.CreatedAtMilliseconds = 1_200
+	if _, err := store.Publish(ctx, publisher, envelope, 1_200); err != nil {
+		t.Fatal(err)
+	}
+	for _, acknowledgment := range []struct {
+		stage relay.AcknowledgmentStage
+		at    int64
 	}{
-		{`INSERT INTO device_sync_account_admissions (
-			admission_id,retry_id,version,authorization_digest,
-			created_at_milliseconds,expires_at_milliseconds,
-			claimed_at_milliseconds,claimed_principal_id
-		) VALUES ($1,$2,1,$3,1000,10000,1100,$4)`,
-			[]any{admissionID, uuid.New(), strings.Repeat("1", 64), principalID}},
-		{`INSERT INTO relay_tenants (
-			tenant_id,version,provisioning_retry_id,
-			provisioning_authorization_digest,created_at_milliseconds,
-			maximum_domain_count,maximum_aggregate_message_count,
-			maximum_aggregate_message_byte_count,maximum_aggregate_blob_count,
-			maximum_aggregate_blob_byte_count,domain_count
-		) VALUES ($1,1,$2,$3,1000,10,100,100000,100,100000,1)`,
-			[]any{principalID, uuid.New(), strings.Repeat("2", 64)}},
-		{`INSERT INTO relay_domains (
-			tenant_id,domain_id,provisioning_retry_id,version,
-			administration_digest,created_at_milliseconds,
-			maximum_message_count,maximum_message_byte_count,
-			maximum_blob_count,maximum_blob_byte_count
-		) VALUES ($1,$2,$3,1,$4,1000,100,100000,100,100000)`,
-			[]any{principalID, domainID, uuid.New(), strings.Repeat("3", 64)}},
-		{`INSERT INTO relay_subscriptions (
-			tenant_id,domain_id,subscription_id,create_retry_id,version,
-			status,start_sequence,created_at_milliseconds,
-			updated_at_milliseconds
-		) VALUES ($1,$2,$3,$4,1,'active',0,1000,1000)`,
-			[]any{principalID, domainID, subscriptionID, uuid.New()}},
-		{`INSERT INTO relay_members (
-			tenant_id,domain_id,member_id,subscription_id,version,
-			authorization_digest,capabilities,created_at_milliseconds
-		) VALUES ($1,$2,$3,$4,1,$5,ARRAY['fetch','publish'],1000)`,
-			[]any{principalID, domainID, deviceID, subscriptionID, strings.Repeat("4", 64)}},
-		{`INSERT INTO device_sync_principals (
-			principal_id,claim_retry_id,account_admission_id,tenant_id,
-			control_domain_id,initial_device_id,created_at_milliseconds
-		) VALUES ($1,$2,$3,$1,$4,$5,1100)`,
-			[]any{principalID, uuid.New(), admissionID, domainID, deviceID}},
-		{`INSERT INTO device_sync_devices (
-			principal_id,device_id,tenant_id,control_domain_id,
-			control_member_id,created_at_milliseconds
-		) VALUES ($1,$2,$1,$3,$2,1100)`,
-			[]any{principalID, deviceID, domainID}},
-	}
-	for _, statement := range statements {
-		rows, err := tx.Execute(ctx, statement.query, statement.args...)
-		if err != nil {
-			return err
-		}
-		if rows != 1 {
-			return errors.New("semantic import statement affected an unexpected row count")
+		{stage: relay.AcknowledgmentAccepted, at: 1_204},
+		{stage: relay.AcknowledgmentApplied, at: 1_205},
+	} {
+		if _, err := store.Acknowledge(
+			ctx, recipient, envelope.MessageID, acknowledgment.stage, acknowledgment.at,
+		); err != nil {
+			t.Fatal(err)
 		}
 	}
-	return nil
+
+	blobBytes := []byte("device-sync-migration-representative-blob")
+	blobID := relay.BlobID(blobBytes)
+	if err := store.PrepareBlobPublish(
+		ctx, publisher, blobID, int64(len(blobBytes)), 1_210,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitBlobPublish(
+		ctx, publisher, blobID, int64(len(blobBytes)), 1_210,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	fenceRequest := relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: 1_220,
+	}
+	fence, err := store.CreateCheckpointFence(ctx, publisher, fenceRequest, 1_220)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedEnvelope := envelope
+	retainedEnvelope.MessageID = uuid.New()
+	retainedEnvelope.CreatedAtMilliseconds = 1_221
+	if _, err := store.Publish(ctx, publisher, retainedEnvelope, 1_221); err != nil {
+		t.Fatal(err)
+	}
+	candidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: tenantID, DomainID: domainID,
+		PublisherSubscriptionID: subscriptionID, KeyEpoch: 1,
+		CoveredThroughCursor: fence.BoundaryCursor,
+		RetainedMessageIDs:   []uuid.UUID{retainedEnvelope.MessageID},
+		RetainedBlobIDs:      []string{blobID}, CreatedAtMilliseconds: 1_230,
+	}
+	if staged, err := store.StageCheckpoint(
+		ctx, publisher, candidate, 1_230,
+	); err != nil || staged.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("stage representative checkpoint=%+v err=%v", staged, err)
+	}
+	activation := relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		ActivatedAtMilliseconds: 1_240,
+	}
+	if activated, err := store.ActivateCheckpoint(
+		ctx, authority.ControlAdministrationCredential, activation, 1_240,
+	); err != nil || activated.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("activate representative checkpoint=%+v err=%v", activated, err)
+	}
+
+	uploadID := uuid.New()
+	chunkDigest := sha256.Sum256(blobBytes)
+	createRetryID := uuid.New()
+	finalizeRetryID := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO relay_blob_uploads (
+			tenant_id,domain_id,upload_id,create_retry_id,subscription_id,
+			publisher_member_id,relay_blob_id,byte_count,committed_offset,state,
+			created_at_milliseconds,updated_at_milliseconds,
+			expires_at_milliseconds,finalized_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,'finalized',1210,1215,2000,1215)
+	`, tenantID, domainID, uploadID, createRetryID, subscriptionID,
+		initialDeviceID, blobID, int64(len(blobBytes))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO relay_blob_upload_chunks (
+			tenant_id,domain_id,upload_id,chunk_offset,byte_count,
+			chunk_sha256,committed_at_milliseconds
+		) VALUES ($1,$2,$3,0,$4,$5,1215)
+	`, tenantID, domainID, uploadID, int64(len(blobBytes)),
+		hex.EncodeToString(chunkDigest[:])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO relay_blob_upload_finalizations (
+			tenant_id,domain_id,retry_id,upload_id,relay_blob_id,
+			byte_count,finalized_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,1215)
+	`, tenantID, domainID, finalizeRetryID, uploadID, blobID,
+		int64(len(blobBytes))); err != nil {
+		t.Fatal(err)
+	}
+
+	requestCredential := devicesync.JoinRequestCredential{
+		RequestID: uuid.New(), Token: postgresRelayToken(90),
+	}
+	pollingDigest, err := devicesync.JoinRequestPollingAuthorizationDigest(requestCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinDigest, err := devicesync.JoinRequestPINAuthorizationDigest("654321")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinRequest := devicesync.JoinRequest{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		RequestID: requestCredential.RequestID, CandidateDeviceID: uuid.New(),
+		CandidateBootstrapPublicKey: base64.RawURLEncoding.EncodeToString([]byte("candidate-public-key")),
+		PollingAuthorizationDigest:  pollingDigest, PINAuthorizationDigest: pinDigest,
+		CreatedAtMilliseconds: 1_250,
+		ExpiresAtMilliseconds: 1_250 + devicesync.MinimumJoinRequestLifetimeMilliseconds,
+	}
+	if created, err := store.CreateJoinRequest(
+		ctx, joinRequest, 1_250,
+	); err != nil || created.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("create representative join request=%+v err=%v", created, err)
+	}
+	bootstrap := devicesync.JoinBootstrapEnvelope{
+		Version: devicesync.SchemaVersion, RequestID: joinRequest.RequestID,
+		Algorithm: "test", EphemeralPublicKey: base64.RawURLEncoding.EncodeToString([]byte("ephemeral")),
+		Nonce:                 base64.RawURLEncoding.EncodeToString([]byte("nonce")),
+		Ciphertext:            base64.RawURLEncoding.EncodeToString([]byte("ciphertext")),
+		AuthenticationTag:     base64.RawURLEncoding.EncodeToString([]byte("tag")),
+		CreatedAtMilliseconds: 1_260, ExpiresAtMilliseconds: joinRequest.ExpiresAtMilliseconds,
+	}
+	if acceptance, err := store.StoreJoinRequestBootstrap(
+		ctx, authority.ControlAdministrationCredential, bootstrap, 1_260,
+	); err != nil || acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("store representative join bootstrap=%q err=%v", acceptance, err)
+	}
+
+	revocation := devicesync.DeviceRevocation{
+		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
+		PrincipalID: tenantID, DeviceID: secondDeviceID,
+	}
+	if revoked, err := store.RevokeDevice(
+		ctx, authority.TenantCredential, revocation, 1_280,
+	); err != nil || revoked.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("revoke representative Device Sync device=%+v err=%v", revoked, err)
+	}
+
+	rebootstrap := relay.SubscriptionRebootstrapRequest{
+		RetryID: uuid.New(), RequestedAtMilliseconds: 1_290,
+	}
+	if requested, err := store.RequestSubscriptionRebootstrap(
+		ctx, publisher, rebootstrap, 1_290,
+	); err != nil || requested.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("request representative rebootstrap=%+v err=%v", requested, err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO relay_audit_events (
+			tenant_id,domain_id,event_type,occurred_at_milliseconds
+		) VALUES ($1,$2,'migration_tied_event',1300),
+		         ($1,$2,'migration_tied_event',1300)
+	`, tenantID, domainID); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertNoDeviceSyncImportResidue(

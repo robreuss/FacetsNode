@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -192,6 +193,12 @@ func TestPostgresDeviceSyncScopeAuthorityAndExportFenceAreAtomic(t *testing.T) {
 		}
 		if storedState != string(locked.State) {
 			return nil, errors.New("materializer did not observe locked state")
+		}
+		var stateArtifact, blobInventory bytes.Buffer
+		if _, err := postgresstore.ExportDeviceSyncMigrationState(
+			ctx, readTx, principalID, &stateArtifact, &blobInventory,
+		); err != nil {
+			return nil, fmt.Errorf("canonical exporter could not compose with source fence: %w", err)
 		}
 		return append([]byte(nil), snapshotPayload...), nil
 	}

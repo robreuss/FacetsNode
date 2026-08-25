@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
@@ -134,20 +135,20 @@ type DeviceSyncMigrationImportRecord struct {
 }
 
 // DeviceSyncStandbyImportTransaction is an internal trusted-code seam, not a
-// SQL capability sandbox. Execute, Query, and QueryRow can run arbitrary SQL.
+// SQL capability sandbox. Exec, Query, and QueryRow can run arbitrary SQL.
 // A materializer must insert only the authenticated principal's semantic relay
 // and Device Sync rows; this store owns the import/enforcement evidence rows.
 type DeviceSyncStandbyImportTransaction interface {
-	Execute(context.Context, string, ...any) (int64, error)
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-// DeviceSyncStandbyImportMaterializer populates semantic service rows inside
+// deviceSyncStandbyImportMaterializer populates semantic service rows inside
 // the same transaction that later installs immutable import evidence and the
 // prepared-target standby enforcement row. It is never invoked for an exact
 // durable retry.
-type DeviceSyncStandbyImportMaterializer func(
+type deviceSyncStandbyImportMaterializer func(
 	context.Context,
 	DeviceSyncStandbyImportTransaction,
 	serviceauthority.ValidatedMigrationTransfer,
@@ -157,16 +158,12 @@ type deviceSyncStandbyImportTransaction struct {
 	tx pgx.Tx
 }
 
-func (transaction deviceSyncStandbyImportTransaction) Execute(
+func (transaction deviceSyncStandbyImportTransaction) Exec(
 	ctx context.Context,
 	query string,
 	arguments ...any,
-) (int64, error) {
-	result, err := transaction.tx.Exec(ctx, query, arguments...)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+) (pgconn.CommandTag, error) {
+	return transaction.tx.Exec(ctx, query, arguments...)
 }
 
 func (transaction deviceSyncStandbyImportTransaction) Query(
@@ -480,7 +477,9 @@ func (s *RelayStore) MaterializeAndFenceDeviceSyncMigrationExport(
 		nowMilliseconds < 0 {
 		return DeviceSyncMigrationExportRecord{}, serviceauthority.ErrInvalid
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead,
+	})
 	if err != nil {
 		return DeviceSyncMigrationExportRecord{}, fmt.Errorf(
 			"begin Device Sync migration export materialization: %w", err,
@@ -635,7 +634,7 @@ func (s *RelayStore) MaterializeAndFenceDeviceSyncMigrationExport(
 // independently re-materialize StateCommitmentDigest, sign readiness, activate
 // the target, or expose an HTTP/operator route. An exact already-committed retry
 // is returned before temporal validation and never invokes materializer.
-func (s *RelayStore) ImportPreparedDeviceSyncMigrationStandby(
+func (s *RelayStore) importPreparedDeviceSyncMigrationStandby(
 	ctx context.Context,
 	localDeploymentID uuid.UUID,
 	preparation serviceauthority.MigrationPreparation,
@@ -643,7 +642,7 @@ func (s *RelayStore) ImportPreparedDeviceSyncMigrationStandby(
 	anchor serviceauthority.TrustAnchor,
 	initial DeviceSyncInitialAuthorityEvidence,
 	nowMilliseconds int64,
-	materializer DeviceSyncStandbyImportMaterializer,
+	materializer deviceSyncStandbyImportMaterializer,
 ) (DeviceSyncMigrationImportRecord, error) {
 	candidate, initialAuthority, err := buildDeviceSyncMigrationImportCandidate(
 		localDeploymentID, preparation, snapshot, anchor, initial, nowMilliseconds,
