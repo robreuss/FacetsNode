@@ -412,6 +412,16 @@ type MigrationPreparation struct {
 	TargetOffer         MigrationTargetOffer `json:"targetOffer"`
 }
 
+// ReferenceDigest returns the domain-separated digest of the exact canonical
+// preparation evidence. It does not replace authority or temporal validation;
+// callers accepting a transfer must use MigrationSnapshot.ValidatePreparedTransfer.
+func (preparation MigrationPreparation) ReferenceDigest() (string, error) {
+	return migrationEvidenceDigest(
+		migrationPreparationEvidenceReferenceDomain,
+		preparation,
+	)
+}
+
 func (preparation MigrationPreparation) Validate(
 	anchor TrustAnchor,
 	nowMilliseconds int64,
@@ -781,6 +791,17 @@ type MigrationSnapshot struct {
 	Signature Signature `json:"signature"`
 }
 
+// ValidatedMigrationTransfer is a defensive projection of the exact prepared
+// migration facts authenticated by MigrationSnapshot.ValidatePreparedTransfer.
+// Its values are decoded copies and do not mutate the signed evidence.
+type ValidatedMigrationTransfer struct {
+	Migration             MigrationAuthority
+	PreparationManifest   ManifestPayload
+	Snapshot              MigrationSnapshotPayload
+	TargetDeploymentOffer DeploymentOfferPayload
+	TargetOffer           MigrationTargetOfferPayload
+}
+
 func (snapshot MigrationSnapshot) VerifiedPayload(nowMilliseconds *int64) (MigrationSnapshotPayload, error) {
 	var payload MigrationSnapshotPayload
 	if verifyCanonicalRecord(snapshot.Payload, snapshot.Signature,
@@ -796,6 +817,48 @@ func (snapshot MigrationSnapshot) ReferenceDigest() (string, error) {
 		return "", err
 	}
 	return signedReferenceDigest(migrationSnapshotReferenceDomain, snapshot.Payload, snapshot.Signature)
+}
+
+// ValidatePreparedTransfer authenticates the complete preparation at the
+// transfer instant and validates this source-signed snapshot against its exact
+// authority manifest, migration, source deployment, and offered target. It is
+// the public target-import verification seam; it intentionally preserves the
+// existing strict preparation, target-offer, and snapshot validity windows.
+func (snapshot MigrationSnapshot) ValidatePreparedTransfer(
+	preparation MigrationPreparation,
+	anchor TrustAnchor,
+	nowMilliseconds int64,
+) (ValidatedMigrationTransfer, error) {
+	migration, target, err := preparation.validateForTransfer(anchor, nowMilliseconds)
+	if err != nil {
+		return ValidatedMigrationTransfer{}, ErrInvalid
+	}
+	prepared, err := preparation.PreparationManifest.Authorize(anchor, nowMilliseconds)
+	if err != nil {
+		return ValidatedMigrationTransfer{}, ErrInvalid
+	}
+	targetDeployment, err := target.DeploymentOffer.VerifiedPayload(&nowMilliseconds)
+	if err != nil {
+		return ValidatedMigrationTransfer{}, ErrInvalid
+	}
+	validatedSnapshot, err := snapshot.validateTransfer(
+		preparation.PreparationManifest,
+		prepared,
+		migration,
+		prepared.ActiveDeployment,
+		targetDeployment.Deployment,
+		nowMilliseconds,
+	)
+	if err != nil {
+		return ValidatedMigrationTransfer{}, ErrInvalid
+	}
+	return ValidatedMigrationTransfer{
+		Migration:             migration,
+		PreparationManifest:   prepared,
+		Snapshot:              validatedSnapshot,
+		TargetDeploymentOffer: targetDeployment,
+		TargetOffer:           target,
+	}, nil
 }
 
 func (snapshot MigrationSnapshot) validateTransfer(
