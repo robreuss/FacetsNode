@@ -107,6 +107,7 @@ func TestDeviceSyncTargetCoordinatorCopiesBlobsBeforeReadinessAndRetriesExactly(
 	if err != nil {
 		t.Fatal(err)
 	}
+	bindings := newTargetBindingRegistry(t, targetSigner.DeploymentID())
 	importer := &targetImporterStub{expected: payload, state: state, inventory: inventory}
 	importer.afterImport = func() error {
 		return targetBlobs.DeleteBlob(
@@ -114,7 +115,8 @@ func TestDeviceSyncTargetCoordinatorCopiesBlobsBeforeReadinessAndRetriesExactly(
 		)
 	}
 	coordinator := DeviceSyncTargetCoordinator{
-		Importer: importer, Custody: custody, BlobStore: targetBlobs, Signer: targetSigner,
+		Importer: importer, Custody: custody, BlobStore: targetBlobs,
+		Bindings: bindings, Signer: targetSigner,
 	}
 	request := DeviceSyncTargetPreparationRequest{
 		Preparation: preparation, Snapshot: snapshot, Anchor: anchor,
@@ -129,6 +131,12 @@ func TestDeviceSyncTargetCoordinatorCopiesBlobsBeforeReadinessAndRetriesExactly(
 	if first.Transfer.BlobCount != 1 || first.Transfer.ByteCount != int64(len(blobBytes)) ||
 		importer.calls != 1 {
 		t.Fatalf("first preparation=%+v importer calls=%d", first.Transfer, importer.calls)
+	}
+	identities, err := bindings.CurrentBindingIdentities(serviceauthority.ScopeDeviceSync)
+	if err != nil || len(identities) != 1 || identities[0].Scope != payload.Scope ||
+		identities[0].DeploymentID != payload.ExportingDeploymentID ||
+		identities[0].TransitionEvidenceDigest == nil {
+		t.Fatalf("prepared target binding=%+v err=%v", identities, err)
 	}
 	readinessPayload, err := first.Readiness.VerifiedPayload(nil)
 	if err != nil || readinessPayload.AppliedStateCommitmentDigest != payload.StateCommitmentDigest ||
@@ -219,7 +227,8 @@ func TestDeviceSyncTargetCoordinatorRejectsTamperedArtifactBeforeBlobCopyOrImpor
 	tampered := append([]byte(nil), state...)
 	tampered[0] ^= 0xff
 	_, err = (&DeviceSyncTargetCoordinator{
-		Importer: importer, Custody: custody, BlobStore: blobTarget, Signer: targetSigner,
+		Importer: importer, Custody: custody, BlobStore: blobTarget,
+		Bindings: newTargetBindingRegistry(t, targetSigner.DeploymentID()), Signer: targetSigner,
 	}).Prepare(context.Background(), DeviceSyncTargetPreparationRequest{
 		Preparation: preparation, Snapshot: snapshot, Anchor: anchor,
 		ServiceState: bytes.NewReader(tampered), BlobInventory: bytes.NewReader(inventory),
@@ -228,6 +237,23 @@ func TestDeviceSyncTargetCoordinatorRejectsTamperedArtifactBeforeBlobCopyOrImpor
 	if err == nil || importer.calls != 0 {
 		t.Fatalf("tampered state err=%v importer calls=%d", err, importer.calls)
 	}
+}
+
+func newTargetBindingRegistry(
+	t *testing.T,
+	deploymentID uuid.UUID,
+) *serviceauthority.BindingRegistry {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "bindings.json")
+	if err := os.WriteFile(path, []byte(`{"bindings":[],"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := serviceauthority.LoadBindingRegistry(path, deploymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	return registry
 }
 
 func TestWalkBlobInventoryAuthenticatesBeforeVisitorSideEffects(t *testing.T) {

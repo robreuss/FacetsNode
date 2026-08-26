@@ -17,7 +17,9 @@ snapshot:
 3. the exact logical state is imported and independently reproduced by the
    PostgreSQL migration importer; and
 4. a second idempotent blob pass succeeds after the imported database rows have
-   become authoritative.
+   become authoritative; and
+5. the exact signed preparation is durably installed in the target deployment's
+   BindingRegistry.
 
 The resulting deployment-signed readiness binds the migration, scope,
 preparation-manifest digest, snapshot reference digest, importing deployment,
@@ -90,8 +92,12 @@ Those custody kinds require their own complete transfer and verification gate.
 - A failure before import leaves at most authenticated orphan blob files, which
   existing maintenance may collect.
 - A failure after import leaves a non-writable standby. Repeating the exact
-  operation resumes blob verification and uses the PostgreSQL import's exact
-  retry behavior.
+  operation resumes blob verification, uses the PostgreSQL import's exact retry
+  behavior, and repairs a missing exact target registry binding before any
+  readiness is signed.
+- A conflicting or unavailable target registry fails closed after import and
+  cannot produce readiness. This can leave an inert database standby, never a
+  serving target.
 - A live stored readiness record is returned byte-for-byte. After expiry, a new
   readiness may be signed only while the authenticated snapshot remains live.
 - Changed artifacts, signed evidence, signer identity, or import identity fail
@@ -111,7 +117,7 @@ It does not provide:
 - Facets-authorized activation, source retirement, rollback, or cancellation
   cleanup;
 - onion-service-state custody transfer;
-- startup reconciliation for partially prepared target custody;
+- unattended cleanup of abandoned partially prepared target custody;
 - operator commands, HTTP routes, product UI, container cutover, or deployed
   host evidence; or
 - Shared Spaces or Compute Pool state migration.
@@ -123,7 +129,8 @@ migration claim is made.
 
 Focused tests cover exact artifact custody, signed descriptor binding,
 content-addressed blob transfer, post-import repair of a deliberately removed
-blob, exact readiness reuse, tampered artifact rejection before import, tampered
-durable readiness rejection, and the no-visitor-before-authentication rule.
+blob, exact target binding before readiness, exact readiness reuse, tampered
+artifact rejection before import, tampered durable readiness rejection, and the
+no-visitor-before-authentication rule.
 Repository-wide Go, race, vet, executable, PostgreSQL, and deployment evidence
 are recorded separately at the commit checkpoint.

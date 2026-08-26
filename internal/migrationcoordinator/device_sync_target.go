@@ -68,6 +68,7 @@ type DeviceSyncTargetCoordinator struct {
 	Importer  DeviceSyncStandbyImporter
 	Custody   *FileArtifactCustody
 	BlobStore relay.BlobContentStore
+	Bindings  *serviceauthority.BindingRegistry
 	Signer    *serviceauthority.DeploymentSigner
 }
 
@@ -76,7 +77,8 @@ func (coordinator *DeviceSyncTargetCoordinator) Prepare(
 	request DeviceSyncTargetPreparationRequest,
 ) (DeviceSyncTargetPreparationResult, error) {
 	if coordinator == nil || coordinator.Importer == nil || coordinator.Custody == nil ||
-		coordinator.BlobStore == nil || coordinator.Signer == nil || ctx == nil ||
+		coordinator.BlobStore == nil || coordinator.Bindings == nil ||
+		coordinator.Signer == nil || ctx == nil ||
 		request.ServiceState == nil || request.BlobInventory == nil || request.BlobSource == nil ||
 		request.Now.IsZero() {
 		return DeviceSyncTargetPreparationResult{}, serviceauthority.ErrInvalid
@@ -186,6 +188,19 @@ func (coordinator *DeviceSyncTargetCoordinator) Prepare(
 	if verifiedReport != report {
 		return DeviceSyncTargetPreparationResult{}, errors.New(
 			"Device Sync migration verified blob inventory differs from transferred content",
+		)
+	}
+
+	// The database import and the registry are intentionally separate durable
+	// stores. Persist the same authenticated preparation in the registry before
+	// producing readiness. If the process fails after the database commit, an
+	// exact retry reuses the immutable import and repairs this binding; if the
+	// registry update fails, no readiness can escape from the target.
+	if err := coordinator.Bindings.ApplyMigrationPreparation(
+		request.Preparation, request.Anchor, nowMilliseconds,
+	); err != nil {
+		return DeviceSyncTargetPreparationResult{}, fmt.Errorf(
+			"bind Device Sync target migration preparation: %w", err,
 		)
 	}
 
