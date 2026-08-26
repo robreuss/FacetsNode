@@ -593,6 +593,246 @@ func (s *RelayStore) ApplyDeviceSyncMigrationActivation(
 	return nil
 }
 
+// ApplyDeviceSyncMigrationCancellation consumes the exact authority-signed
+// cancellation of one migration preparation and atomically unwinds the local
+// database side. The source becomes writable again whether cancellation
+// arrives before or after export. An imported target becomes retired and can
+// never serve the copied state. Immutable export/import records remain as
+// audit evidence, while their active pointers are cleared.
+//
+// An exact already-applied retry is accepted before temporal validation. A
+// first application still requires a live cancellation manifest and an exact
+// prepared predecessor in this database.
+func (s *RelayStore) ApplyDeviceSyncMigrationCancellation(
+	ctx context.Context,
+	localDeploymentID uuid.UUID,
+	evidence serviceauthority.MigrationCancellationEvidence,
+	anchor serviceauthority.TrustAnchor,
+	nowMilliseconds int64,
+) error {
+	if ctx == nil || localDeploymentID == uuid.Nil || nowMilliseconds < 0 {
+		return serviceauthority.ErrInvalid
+	}
+	cancellation, err := evidence.CancellationManifest.VerifiedPayload()
+	if err != nil || cancellation.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		cancellation.Transition != serviceauthority.TransitionMigrationCancellation ||
+		cancellation.Migration == nil ||
+		(localDeploymentID != cancellation.Migration.SourceDeploymentID &&
+			localDeploymentID != cancellation.Migration.TargetDeploymentID) {
+		return serviceauthority.ErrInvalid
+	}
+	evidenceDigest, err := evidence.ReferenceDigest()
+	if err != nil || !validDeviceSyncDigest(evidenceDigest) {
+		return serviceauthority.ErrInvalid
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("begin Device Sync migration cancellation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	current, err := loadDeviceSyncScopeEnforcement(
+		ctx, tx, cancellation.Scope.ScopeID, "FOR UPDATE",
+	)
+	if err != nil {
+		return err
+	}
+	targetSide := localDeploymentID == cancellation.Migration.TargetDeploymentID
+	terminalState := DeviceSyncScopeWritable
+	if targetSide {
+		terminalState = DeviceSyncScopeRetired
+	}
+	if current.State == terminalState &&
+		current.LocalDeploymentID != nil &&
+		*current.LocalDeploymentID == localDeploymentID &&
+		deviceSyncAuthorityMatchesExactManifest(
+			current.Authority, evidence.CancellationManifest, evidenceDigest,
+		) && current.ActiveExportWriteFenceID == nil &&
+		current.ActiveMigrationImportID == nil {
+		return nil
+	}
+
+	validatedCancellation, err := evidence.ValidateHistoricalCatchUp(
+		anchor, nowMilliseconds,
+	)
+	if err != nil || validatedCancellation.Scope != cancellation.Scope ||
+		validatedCancellation.Revision != cancellation.Revision ||
+		validatedCancellation.ActiveDeployment.DeploymentID !=
+			cancellation.Migration.SourceDeploymentID {
+		return serviceauthority.ErrInvalid
+	}
+	nextAuthority, err := DeviceSyncScopeAuthorityFromManifest(
+		evidence.CancellationManifest, &evidenceDigest, nowMilliseconds,
+	)
+	if err != nil {
+		return err
+	}
+	preparationDigest, err := evidence.Preparation.ReferenceDigest()
+	if err != nil || current.Authority == nil ||
+		current.LocalDeploymentID == nil ||
+		*current.LocalDeploymentID != localDeploymentID ||
+		!deviceSyncAuthorityMatchesExactManifest(
+			current.Authority,
+			evidence.Preparation.PreparationManifest,
+			preparationDigest,
+		) {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	if targetSide {
+		if err := validateDeviceSyncCancellationTarget(
+			ctx, tx, current, evidence,
+		); err != nil {
+			return err
+		}
+	} else if err := validateDeviceSyncCancellationSource(
+		ctx, tx, current, evidence,
+	); err != nil {
+		return err
+	}
+
+	result, err := tx.Exec(ctx, `
+		UPDATE device_sync_scope_enforcement
+		SET state=$2, authority_validated_at_milliseconds=$3,
+			authority_revision=$4, authority_manifest_digest=$5,
+			authority_manifest_record=$6, active_deployment_id=$7,
+			transition_evidence_digest=$8,
+			active_export_write_fence_id=NULL,
+			active_migration_import_id=NULL, updated_at=now()
+		WHERE principal_id=$1 AND tenant_id=$1
+	`, cancellation.Scope.ScopeID, terminalState,
+		nextAuthority.ValidatedAtMilliseconds, int64(nextAuthority.Revision),
+		nextAuthority.ManifestDigest, nextAuthority.ManifestRecord,
+		nextAuthority.ActiveDeploymentID,
+		nextAuthority.TransitionEvidenceDigest)
+	if err != nil {
+		return fmt.Errorf("persist Device Sync migration cancellation: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("Device Sync migration cancellation affected an unexpected row count")
+	}
+	stored, err := loadDeviceSyncScopeEnforcement(
+		ctx, tx, cancellation.Scope.ScopeID, "FOR SHARE",
+	)
+	if err != nil || stored.State != terminalState ||
+		stored.LocalDeploymentID == nil ||
+		*stored.LocalDeploymentID != localDeploymentID ||
+		!deviceSyncScopeAuthorityEqual(stored.Authority, &nextAuthority) ||
+		stored.ActiveExportWriteFenceID != nil ||
+		stored.ActiveMigrationImportID != nil {
+		if err != nil {
+			return err
+		}
+		return errors.New("persisted Device Sync migration cancellation is inconsistent")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Device Sync migration cancellation: %w", err)
+	}
+	return nil
+}
+
+func validateDeviceSyncCancellationSource(
+	ctx context.Context,
+	tx pgx.Tx,
+	current DeviceSyncScopeEnforcement,
+	evidence serviceauthority.MigrationCancellationEvidence,
+) error {
+	prepared, err := evidence.Preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || prepared.Migration == nil ||
+		current.ActiveMigrationImportID != nil {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	if current.State == DeviceSyncScopeWritable &&
+		current.ActiveExportWriteFenceID == nil {
+		return nil
+	}
+	if current.State != DeviceSyncScopeExportFenced ||
+		current.ActiveExportWriteFenceID == nil {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	exported, found, err := loadDeviceSyncMigrationExport(
+		ctx, tx, current.PrincipalID, *current.ActiveExportWriteFenceID, "FOR SHARE",
+	)
+	if err != nil {
+		return err
+	}
+	if !found || !deviceSyncCancellationSourceRecordMatches(
+		current, exported, evidence, prepared,
+	) {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	return nil
+}
+
+func deviceSyncCancellationSourceRecordMatches(
+	current DeviceSyncScopeEnforcement,
+	exported DeviceSyncMigrationExportRecord,
+	evidence serviceauthority.MigrationCancellationEvidence,
+	prepared serviceauthority.ManifestPayload,
+) bool {
+	preparationManifestDigest, err := evidence.Preparation.PreparationManifest.ReferenceDigest()
+	return err == nil && prepared.Migration != nil &&
+		current.State == DeviceSyncScopeExportFenced &&
+		current.ActiveMigrationImportID == nil &&
+		current.ActiveExportWriteFenceID != nil &&
+		exported.PrincipalID == current.PrincipalID &&
+		exported.TenantID == current.TenantID &&
+		exported.ExportWriteFenceID == *current.ActiveExportWriteFenceID &&
+		exported.MigrationID == prepared.Migration.MigrationID &&
+		exported.ExportingDeploymentID == prepared.Migration.SourceDeploymentID &&
+		exported.ImportingDeploymentID == prepared.Migration.TargetDeploymentID &&
+		exported.AuthorityRevision == prepared.Revision &&
+		exported.AuthorityManifestDigest == preparationManifestDigest
+}
+
+func validateDeviceSyncCancellationTarget(
+	ctx context.Context,
+	tx pgx.Tx,
+	current DeviceSyncScopeEnforcement,
+	evidence serviceauthority.MigrationCancellationEvidence,
+) error {
+	prepared, err := evidence.Preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || prepared.Migration == nil ||
+		current.State != DeviceSyncScopeStandby ||
+		current.ActiveExportWriteFenceID != nil ||
+		current.ActiveMigrationImportID == nil ||
+		*current.ActiveMigrationImportID != prepared.Migration.MigrationID {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	imported, found, err := loadDeviceSyncMigrationImport(
+		ctx, tx, current.PrincipalID, prepared.Migration.MigrationID,
+		prepared.Migration.TargetDeploymentID, "FOR SHARE",
+	)
+	if err != nil {
+		return err
+	}
+	if !found || !deviceSyncCancellationTargetRecordMatches(
+		current, imported, evidence, prepared,
+	) {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	return nil
+}
+
+func deviceSyncCancellationTargetRecordMatches(
+	current DeviceSyncScopeEnforcement,
+	imported DeviceSyncMigrationImportRecord,
+	evidence serviceauthority.MigrationCancellationEvidence,
+	prepared serviceauthority.ManifestPayload,
+) bool {
+	canonicalPreparation, err := json.Marshal(evidence.Preparation)
+	return err == nil && prepared.Migration != nil &&
+		current.State == DeviceSyncScopeStandby &&
+		current.ActiveExportWriteFenceID == nil &&
+		current.ActiveMigrationImportID != nil &&
+		*current.ActiveMigrationImportID == prepared.Migration.MigrationID &&
+		imported.PrincipalID == current.PrincipalID &&
+		imported.TenantID == current.TenantID &&
+		imported.MigrationID == prepared.Migration.MigrationID &&
+		imported.ExportingDeploymentID == prepared.Migration.SourceDeploymentID &&
+		imported.ImportingDeploymentID == prepared.Migration.TargetDeploymentID &&
+		bytes.Equal(imported.CanonicalPreparationRecord, canonicalPreparation)
+}
+
 func validateDeviceSyncActivationTarget(
 	ctx context.Context,
 	tx pgx.Tx,

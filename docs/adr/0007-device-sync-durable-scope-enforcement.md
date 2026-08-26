@@ -69,10 +69,10 @@ It introduces no authority and therefore remains repairable after an offer has
 expired. An exact already-claimed retry may reconstruct the same enrollment at
 a later validation time; retry identity deliberately excludes invocation time.
 A different signed Manifest is a conflict even when provisioning is identical.
-Imported-target activation and source write retirement now have an exact
-evidence-bound PostgreSQL primitive described by ADR 0011. Public exposure,
-cross-store orchestration, and automatic restart reconciliation still require
-the migration coordinator.
+Imported-target activation and source write retirement have an exact
+evidence-bound PostgreSQL primitive and restart coordinator described by ADR
+0011. Exact cancellation database transitions are described by ADR 0012;
+cancellation does not yet have cross-store orchestration or startup recovery.
 
 Registry identity conflicts return the existing stale/invalid authority 409.
 Registry custody/persistence failures and database activation failures return
@@ -192,11 +192,12 @@ attended migration production-ready:
   background, or migration-coordinator call site and is not production
   reachable;
 - no production snapshot-state/blob materializer or snapshot signer is wired;
-- imported-target standby, authenticated copy, target catch-up, activation,
-  old-host retirement, rollback-direction export, and recovery coordination
-  are not implemented;
-- restart readiness deliberately rejects `export_fenced` and `retired` rows
-  until the migration coordinator owns their recovery path;
+- no route or operator workflow invokes source export, target import, activation,
+  or cancellation even though those headless primitives exist;
+- activation has exact restart recovery; cancellation, retirement, and rollback
+  do not yet have equivalent cross-store journals and recovery coordination;
+- restart readiness deliberately rejects unresolved `export_fenced` and
+  `retired` rows unless a specialized migration recovery path resolves them;
 - database triggers make direct internal store writes fail closed once a scope
   is non-writable, but they do not authenticate client revision, Manifest
   digest, route, or traffic class; new production entry points must still use
@@ -205,5 +206,6 @@ attended migration production-ready:
   described above.
 
 Accordingly, the implemented evidence supports durable current-host write
-enforcement and exact initial-activation crash repair. It does not support a
-runtime or deployment claim for server migration, rollback, or recovery.
+enforcement plus headless export, import, activation recovery, and exact local
+cancellation transitions. It does not yet support an attended runtime or
+deployment claim for server migration, cancellation, retirement, or rollback.

@@ -14,6 +14,15 @@ const (
 	migrationRollbackEvidenceReferenceDomain     = "Facets service migration rollback evidence reference v1\x00"
 )
 
+// ReferenceDigest identifies the complete cancellation evidence, including
+// the exact preparation and its authority-signed terminal successor.
+func (evidence MigrationCancellationEvidence) ReferenceDigest() (string, error) {
+	return migrationEvidenceDigest(
+		migrationCancellationEvidenceReferenceDomain,
+		evidence,
+	)
+}
+
 // ApplyMigrationPreparation installs an authority-signed preparation only
 // after validating the exact target offer it names. It does not create a
 // target, copy state, sign a snapshot, or activate either deployment.
@@ -95,10 +104,7 @@ func (registry *BindingRegistry) ApplyMigrationCancellation(
 	if registry == nil || registry.expectedDeploymentID == uuid.Nil {
 		return ErrInvalid
 	}
-	evidenceDigest, err := migrationEvidenceDigest(
-		migrationCancellationEvidenceReferenceDomain,
-		evidence,
-	)
+	evidenceDigest, err := evidence.ReferenceDigest()
 	if err != nil {
 		return ErrInvalid
 	}

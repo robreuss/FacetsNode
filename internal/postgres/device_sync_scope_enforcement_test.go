@@ -17,14 +17,101 @@ import (
 )
 
 type deviceSyncEnforcementMigrationFixture struct {
-	AuthorityAnchor           serviceauthority.TrustAnchor `json:"authorityAnchor"`
-	ActivationEvidenceDigest  string                       `json:"activationEvidenceDigest"`
-	PreparationEvidenceDigest string                       `json:"preparationEvidenceDigest"`
-	RollbackEvidenceDigest    string                       `json:"rollbackEvidenceDigest"`
-	RollbackEvidence          struct {
+	AuthorityAnchor            serviceauthority.TrustAnchor                   `json:"authorityAnchor"`
+	ActivationEvidenceDigest   string                                         `json:"activationEvidenceDigest"`
+	CancellationEvidence       serviceauthority.MigrationCancellationEvidence `json:"cancellationEvidence"`
+	CancellationEvidenceDigest string                                         `json:"cancellationEvidenceDigest"`
+	PreparationEvidenceDigest  string                                         `json:"preparationEvidenceDigest"`
+	RollbackEvidenceDigest     string                                         `json:"rollbackEvidenceDigest"`
+	RollbackEvidence           struct {
 		ActivationEvidence serviceauthority.MigrationActivationEvidence `json:"activationEvidence"`
 		RollbackManifest   serviceauthority.Manifest                    `json:"rollbackManifest"`
 	} `json:"rollbackEvidence"`
+}
+
+func TestDeviceSyncMigrationCancellationRequiresExactPreparedDatabaseSide(
+	t *testing.T,
+) {
+	fixture := loadDeviceSyncEnforcementMigrationFixture(t)
+	evidence := fixture.CancellationEvidence
+	prepared, err := evidence.Preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || prepared.Migration == nil {
+		t.Fatalf("prepared payload=%+v err=%v", prepared, err)
+	}
+	digest, err := evidence.ReferenceDigest()
+	if err != nil || digest != fixture.CancellationEvidenceDigest {
+		t.Fatalf("cancellation digest=%s err=%v", digest, err)
+	}
+	cancellationPreparationDigest, err := evidence.Preparation.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparationAuthority, err := DeviceSyncScopeAuthorityFromManifest(
+		evidence.Preparation.PreparationManifest,
+		&cancellationPreparationDigest,
+		prepared.ValidFromMilliseconds,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sourceID := prepared.Migration.SourceDeploymentID
+	fenceID := uuid.New()
+	source := DeviceSyncScopeEnforcement{
+		PrincipalID: prepared.Scope.ScopeID, TenantID: prepared.Scope.ScopeID,
+		State: DeviceSyncScopeExportFenced, LocalDeploymentID: &sourceID,
+		Authority: &preparationAuthority, ActiveExportWriteFenceID: &fenceID,
+	}
+	preparationManifestDigest, err := evidence.Preparation.PreparationManifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported := DeviceSyncMigrationExportRecord{
+		PrincipalID: prepared.Scope.ScopeID, TenantID: prepared.Scope.ScopeID,
+		MigrationID: prepared.Migration.MigrationID, ExportWriteFenceID: fenceID,
+		AuthorityRevision:       prepared.Revision,
+		AuthorityManifestDigest: preparationManifestDigest,
+		ExportingDeploymentID:   prepared.Migration.SourceDeploymentID,
+		ImportingDeploymentID:   prepared.Migration.TargetDeploymentID,
+	}
+	if !deviceSyncCancellationSourceRecordMatches(source, exported, evidence, prepared) {
+		t.Fatal("exact source export did not authorize cancellation")
+	}
+	changedExport := exported
+	changedExport.MigrationID = uuid.New()
+	if deviceSyncCancellationSourceRecordMatches(source, changedExport, evidence, prepared) {
+		t.Fatal("conflicting source export authorized cancellation")
+	}
+
+	targetID := prepared.Migration.TargetDeploymentID
+	migrationID := prepared.Migration.MigrationID
+	target := DeviceSyncScopeEnforcement{
+		PrincipalID: prepared.Scope.ScopeID, TenantID: prepared.Scope.ScopeID,
+		State: DeviceSyncScopeStandby, LocalDeploymentID: &targetID,
+		Authority: &preparationAuthority, ActiveMigrationImportID: &migrationID,
+	}
+	canonicalPreparation, err := json.Marshal(evidence.Preparation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported := DeviceSyncMigrationImportRecord{
+		PrincipalID: prepared.Scope.ScopeID, TenantID: prepared.Scope.ScopeID,
+		MigrationID:                prepared.Migration.MigrationID,
+		ExportingDeploymentID:      prepared.Migration.SourceDeploymentID,
+		ImportingDeploymentID:      prepared.Migration.TargetDeploymentID,
+		CanonicalPreparationRecord: canonicalPreparation,
+	}
+	if !deviceSyncCancellationTargetRecordMatches(target, imported, evidence, prepared) {
+		t.Fatal("exact target import did not authorize cancellation retirement")
+	}
+	changedImport := imported
+	changedImport.CanonicalPreparationRecord = append(
+		[]byte(nil), imported.CanonicalPreparationRecord...,
+	)
+	changedImport.CanonicalPreparationRecord[0] ^= 0x01
+	if deviceSyncCancellationTargetRecordMatches(target, changedImport, evidence, prepared) {
+		t.Fatal("conflicting target import authorized cancellation retirement")
+	}
 }
 
 func TestDeviceSyncScopeAuthorityRequiresExactCanonicalEvidence(t *testing.T) {

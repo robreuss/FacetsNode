@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -22,12 +23,154 @@ import (
 )
 
 type postgresDeviceSyncEnforcementFixture struct {
-	AuthorityAnchor           serviceauthority.TrustAnchor `json:"authorityAnchor"`
-	ActivationEvidenceDigest  string                       `json:"activationEvidenceDigest"`
-	PreparationEvidenceDigest string                       `json:"preparationEvidenceDigest"`
-	RollbackEvidence          struct {
+	AuthorityAnchor            serviceauthority.TrustAnchor                   `json:"authorityAnchor"`
+	ActivationEvidenceDigest   string                                         `json:"activationEvidenceDigest"`
+	CancellationEvidence       serviceauthority.MigrationCancellationEvidence `json:"cancellationEvidence"`
+	CancellationEvidenceDigest string                                         `json:"cancellationEvidenceDigest"`
+	PreparationEvidenceDigest  string                                         `json:"preparationEvidenceDigest"`
+	RollbackEvidence           struct {
 		ActivationEvidence serviceauthority.MigrationActivationEvidence `json:"activationEvidence"`
 	} `json:"rollbackEvidence"`
+}
+
+func TestPostgresDeviceSyncMigrationCancellationUnfencesExactSource(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_SERVER_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
+	pool := openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		TRUNCATE device_sync_account_admissions, relay_tenants CASCADE
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := loadPostgresDeviceSyncEnforcementFixture(t)
+	evidence := fixture.CancellationEvidence
+	currentManifest := evidence.Preparation.CurrentManifest
+	currentPayload, err := currentManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	principalID := currentPayload.Scope.ScopeID
+	localSigner := postgresFixtureDeploymentSigner(t, currentPayload.ActiveDeployment)
+	initialAuthority := postgresInitialServiceAuthorityBinding(
+		t, fixture, currentManifest, localSigner, 1_100,
+	)
+	store := postgresstore.NewRelayStore(pool)
+	_ = postgresBootstrapDeviceSyncPrincipal(
+		t, ctx, store, principalID, uuid.New(), 1_100, initialAuthority,
+	)
+	if err := store.ActivateBoundDeviceSyncScope(
+		ctx, principalID, localSigner.DeploymentID(), initialAuthority.Revision(),
+		initialAuthority.ManifestDigest(), 1_100,
+	); err != nil {
+		t.Fatal(err)
+	}
+	preparation := evidence.Preparation.PreparationManifest
+	prepared, err := preparation.VerifiedPayload()
+	if err != nil || prepared.Migration == nil {
+		t.Fatalf("prepared=%+v err=%v", prepared, err)
+	}
+	preparationEvidenceDigest, err := evidence.Preparation.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvanceDeviceSyncWritableAuthority(
+		ctx, principalID, localSigner.DeploymentID(), preparation,
+		&preparationEvidenceDigest, 2_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	preparationManifestDigest, err := preparation.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fenceID := uuid.New()
+	snapshotPayload := serviceauthority.MigrationSnapshotPayload{
+		Artifacts: []serviceauthority.MigrationArtifactDescriptor{
+			{
+				ArtifactID: uuid.New(), ByteCount: 0,
+				Kind:           serviceauthority.ArtifactServiceStateSnapshot,
+				TransferDigest: strings.Repeat("6", 64),
+			},
+			{
+				ArtifactID: uuid.New(), ByteCount: 0,
+				Kind:           serviceauthority.ArtifactBlobInventory,
+				TransferDigest: strings.Repeat("7", 64),
+			},
+		},
+		AuthorityManifestDigest: preparationManifestDigest,
+		CapturedAtMilliseconds:  2_500,
+		ExpiresAtMilliseconds:   10_000,
+		ExportWriteFenceID:      fenceID,
+		ExportingDeploymentID:   prepared.Migration.SourceDeploymentID,
+		ImportingDeploymentID:   prepared.Migration.TargetDeploymentID,
+		MigrationID:             prepared.Migration.MigrationID,
+		Scope:                   prepared.Scope,
+		SnapshotID:              uuid.New(),
+		StateCommitmentDigest:   strings.Repeat("8", 64),
+		Version:                 serviceauthority.SchemaVersion,
+	}
+	sort.Slice(snapshotPayload.Artifacts, func(left, right int) bool {
+		return bytes.Compare(
+			snapshotPayload.Artifacts[left].ArtifactID[:],
+			snapshotPayload.Artifacts[right].ArtifactID[:],
+		) < 0
+	})
+	canonicalSnapshot, err := json.Marshal(snapshotPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MaterializeAndFenceDeviceSyncMigrationExport(
+		ctx, principalID, localSigner.DeploymentID(), prepared.Revision,
+		preparationManifestDigest, prepared.Migration.MigrationID, fenceID, 2_500,
+		func(context.Context, postgresstore.DeviceSyncSnapshotReadTransaction,
+			postgresstore.DeviceSyncScopeEnforcement) ([]byte, error) {
+			return canonicalSnapshot, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyDeviceSyncMigrationCancellation(
+		ctx, localSigner.DeploymentID(), evidence, fixture.AuthorityAnchor, 20_001,
+	); err != nil {
+		t.Fatalf("cancel fenced source: %v", err)
+	}
+	// Exact restart repair remains valid after the terminal evidence acceptance.
+	if err := store.ApplyDeviceSyncMigrationCancellation(
+		ctx, localSigner.DeploymentID(), evidence, fixture.AuthorityAnchor, 30_000,
+	); err != nil {
+		t.Fatalf("retry source cancellation: %v", err)
+	}
+	state, err := store.GetDeviceSyncScopeEnforcement(ctx, principalID)
+	if err != nil || state.State != postgresstore.DeviceSyncScopeWritable ||
+		state.Authority == nil || state.ActiveExportWriteFenceID != nil ||
+		state.ActiveMigrationImportID != nil ||
+		state.Authority.TransitionEvidenceDigest == nil ||
+		*state.Authority.TransitionEvidenceDigest != fixture.CancellationEvidenceDigest {
+		t.Fatalf("cancelled source state=%+v err=%v", state, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE relay_tenants SET updated_at=now() WHERE tenant_id=$1
+	`, principalID); err != nil {
+		t.Fatalf("cancelled source remained write fenced: %v", err)
+	}
+	var immutableExportCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM device_sync_migration_exports
+		WHERE principal_id=$1 AND export_write_fence_id=$2
+	`, principalID, fenceID).Scan(&immutableExportCount); err != nil ||
+		immutableExportCount != 1 {
+		t.Fatalf("immutable export count=%d err=%v", immutableExportCount, err)
+	}
 }
 
 func TestPostgresDeviceSyncScopeAuthorityAndExportFenceAreAtomic(t *testing.T) {
