@@ -437,6 +437,245 @@ func TestDeviceSyncRollbackSourceCannotCreateExpiredReverseExport(t *testing.T) 
 	}
 }
 
+func TestDeviceSyncRollbackSourceOperationRecoversCommittedExportFence(t *testing.T) {
+	preparation, anchor := loadPreparedMigrationFixture(t)
+	prepared, err := preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || prepared.Migration == nil {
+		t.Fatal(err)
+	}
+	forwardSnapshot, forwardPayload := signSnapshotForArtifacts(
+		t, preparation, anchor, []byte("forward state"),
+		encodeBlobInventory(t, prepared.Scope.ScopeID, nil),
+	)
+	activation := buildActivationEvidence(
+		t, preparation, forwardSnapshot, forwardPayload, anchor,
+	)
+	activationPayload, err := activation.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := []byte("journaled reverse export state")
+	inventory := encodeBlobInventory(t, prepared.Scope.ScopeID, nil)
+	store := &sourceExportStoreStub{}
+	custody, err := NewFileArtifactCustody(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &DeviceSyncSourceCoordinator{
+		Exporter: store, Custody: custody,
+		Bindings: newTargetBindingRegistry(
+			t, activationPayload.ActiveDeployment.DeploymentID,
+		),
+		Signer:          signerForDeployment(t, activationPayload.ActiveDeployment),
+		LogicalExporter: sourceLogicalExporter(state, inventory),
+	}
+	operationCoordinator := DeviceSyncRollbackSourceOperationCoordinator{
+		Source: source,
+	}
+	request := DeviceSyncRollbackSourcePreparationRequest{
+		ActivationEvidence: activation, Anchor: anchor,
+		ExportWriteFenceID:      uuid.MustParse("80000000-0000-0000-0000-000000000001"),
+		SnapshotID:              uuid.MustParse("80000000-0000-0000-0000-000000000002"),
+		ServiceStateArtifactID:  uuid.MustParse("80000000-0000-0000-0000-000000000003"),
+		BlobInventoryArtifactID: uuid.MustParse("80000000-0000-0000-0000-000000000004"),
+		Now:                     time.UnixMilli(3_600),
+	}
+	wrongSeed := make([]byte, 32)
+	wrongSeed[31] = 32
+	wrongSigner, err := serviceauthority.NewDeploymentSigner(
+		activationPayload.ActiveDeployment.DeploymentID, wrongSeed,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongCustody, err := NewFileArtifactCustody(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongStore := &sourceExportStoreStub{}
+	wrongCoordinator := DeviceSyncRollbackSourceOperationCoordinator{
+		Source: &DeviceSyncSourceCoordinator{
+			Exporter: wrongStore, Custody: wrongCustody,
+			Bindings: source.Bindings, Signer: wrongSigner,
+			LogicalExporter: source.LogicalExporter,
+		},
+	}
+	if _, err := wrongCoordinator.Begin(
+		context.Background(), request,
+	); err == nil || wrongStore.calls != 0 {
+		t.Fatalf(
+			"rollback source accepted deployment ID with wrong key calls=%d err=%v",
+			wrongStore.calls, err,
+		)
+	}
+	if operations, err := wrongCustody.listDeviceSyncRollbackSourceOperations(
+		context.Background(),
+	); err != nil || len(operations) != 0 {
+		t.Fatalf("wrong-key rollback source journal=%+v err=%v", operations, err)
+	}
+	if _, err := operationCoordinator.Begin(context.Background(), request); err == nil {
+		t.Fatal("rollback source operation passed without registry activation")
+	}
+	if store.record == nil || store.materializerCalls != 1 {
+		t.Fatal("rollback source operation did not retain its committed export")
+	}
+	operations, err := custody.listDeviceSyncRollbackSourceOperations(
+		context.Background(),
+	)
+	if err != nil || len(operations) != 1 || operations[0].completed {
+		t.Fatalf("pending rollback source operation=%+v err=%v", operations, err)
+	}
+	pendingOperation := operations[0]
+	statuses, err := operationCoordinator.ListStatus(
+		context.Background(), time.UnixMilli(3_600),
+	)
+	if err != nil || len(statuses) != 1 ||
+		statuses[0].State != DeviceSyncRollbackSourceOperationAccepted ||
+		statuses[0].SnapshotReferenceDigest != nil ||
+		statuses[0].StateCommitmentDigest != nil {
+		t.Fatalf("pending rollback source status=%+v err=%v", statuses, err)
+	}
+	statusOnlyCoordinator := DeviceSyncRollbackSourceOperationCoordinator{
+		Source: &DeviceSyncSourceCoordinator{
+			Custody: custody, Signer: source.Signer,
+		},
+	}
+	if statuses, err := statusOnlyCoordinator.ListStatus(
+		context.Background(), time.UnixMilli(3_600),
+	); err != nil || len(statuses) != 1 ||
+		statuses[0].State != DeviceSyncRollbackSourceOperationAccepted {
+		t.Fatalf("rollback source control-only status=%+v err=%v", statuses, err)
+	}
+	conflictingOperation := request
+	conflictingOperation.SnapshotID = uuid.New()
+	if _, err := operationCoordinator.Begin(
+		context.Background(), conflictingOperation,
+	); err == nil || store.calls != 1 {
+		t.Fatalf(
+			"conflicting rollback source operation calls=%d err=%v",
+			store.calls, err,
+		)
+	}
+
+	reopenedCustody, err := NewFileArtifactCustody(custody.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredBindings := newTargetBindingRegistry(
+		t, activationPayload.ActiveDeployment.DeploymentID,
+	)
+	if err := recoveredBindings.ApplyMigrationPreparation(
+		preparation, anchor, 2_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoveredBindings.ApplyMigrationActivation(
+		activation, anchor, 3_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	source.Custody = reopenedCustody
+	source.Bindings = recoveredBindings
+	if recovered, err := operationCoordinator.Recover(
+		context.Background(), time.UnixMilli(3_500),
+	); err == nil || recovered != nil || store.materializerCalls != 1 {
+		t.Fatalf(
+			"backward-clock rollback source recovery=%+v materializer=%d err=%v",
+			recovered, store.materializerCalls, err,
+		)
+	}
+	recovered, err := operationCoordinator.Recover(
+		context.Background(), time.UnixMilli(3_700),
+	)
+	if err != nil || len(recovered) != 1 || !recovered[0].Recovered ||
+		store.materializerCalls != 1 {
+		t.Fatalf(
+			"rollback source recovery=%+v materializer=%d err=%v",
+			recovered, store.materializerCalls, err,
+		)
+	}
+	assertSourceTransferBytes(
+		t, recovered[0].Preparation.Transfer, state, inventory,
+	)
+	operations, err = reopenedCustody.listDeviceSyncRollbackSourceOperations(
+		context.Background(),
+	)
+	if err != nil || len(operations) != 1 || !operations[0].completed {
+		t.Fatalf("prepared rollback source operation=%+v err=%v", operations, err)
+	}
+	if err := reopenedCustody.completeDeviceSyncRollbackSourceOperation(
+		pendingOperation, source.Signer, recovered[0].Preparation,
+	); err != nil {
+		t.Fatalf("stale pending operation completion retry: %v", err)
+	}
+	statuses, err = operationCoordinator.ListStatus(
+		context.Background(), time.UnixMilli(3_800),
+	)
+	if err != nil || len(statuses) != 1 ||
+		statuses[0].State != DeviceSyncRollbackSourceOperationPrepared ||
+		statuses[0].SnapshotReferenceDigest == nil ||
+		statuses[0].StateCommitmentDigest == nil {
+		t.Fatalf("prepared rollback source status=%+v err=%v", statuses, err)
+	}
+	second, err := operationCoordinator.Recover(
+		context.Background(), time.UnixMilli(3_800),
+	)
+	if err != nil || len(second) != 0 || store.materializerCalls != 1 {
+		t.Fatalf(
+			"completed rollback source recovery=%+v materializer=%d err=%v",
+			second, store.materializerCalls, err,
+		)
+	}
+	expiredRetry := request
+	expiredRetry.Now = time.UnixMilli(10_001)
+	exact, err := operationCoordinator.Begin(
+		context.Background(), expiredRetry,
+	)
+	if err != nil || exact.Recovered || store.materializerCalls != 1 ||
+		exact.Preparation.Snapshot.Signature.Signature !=
+			recovered[0].Preparation.Snapshot.Signature.Signature {
+		t.Fatalf(
+			"completed rollback source exact retry=%+v materializer=%d err=%v",
+			exact, store.materializerCalls, err,
+		)
+	}
+	operationPath := filepath.Join(
+		reopenedCustody.root, rollbackSourceOperationRootName,
+		prepared.Scope.ScopeID.String(), prepared.Migration.MigrationID.String(),
+		request.SnapshotID.String(), rollbackSourceOperationFileName,
+	)
+	operationRecord, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedIndex := bytes.Index(operationRecord, []byte(`"prepared":`))
+	payloadIndex := -1
+	if preparedIndex >= 0 {
+		relative := bytes.Index(
+			operationRecord[preparedIndex:], []byte(`"payload":"`),
+		)
+		if relative >= 0 {
+			payloadIndex = preparedIndex + relative + len(`"payload":"`)
+		}
+	}
+	if payloadIndex < 0 || payloadIndex >= len(operationRecord) {
+		t.Fatal("prepared operation payload is missing")
+	}
+	if operationRecord[payloadIndex] == 'A' {
+		operationRecord[payloadIndex] = 'B'
+	} else {
+		operationRecord[payloadIndex] = 'A'
+	}
+	if err := os.WriteFile(operationPath, operationRecord, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopenedCustody.listDeviceSyncRollbackSourceOperations(
+		context.Background(),
+	); err == nil {
+		t.Fatal("tampered prepared rollback source operation was accepted")
+	}
+}
+
 func TestDeviceSyncRollbackTargetReplacesStateBeforeReadiness(t *testing.T) {
 	ctx := context.Background()
 	preparation, anchor := loadPreparedMigrationFixture(t)

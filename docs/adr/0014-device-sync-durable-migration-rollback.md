@@ -63,6 +63,16 @@ deployment key, and acceptance instant before completing an interrupted
 cutover. An exact caller retry may reuse the accepted journal after operational
 evidence expires; new late acceptance remains prohibited.
 
+The reverse-export source also has a deployment-signed local operation journal.
+It binds the complete activation evidence, acceptance instant, migration,
+scope, write-fence, snapshot, and both artifact identifiers before PostgreSQL
+may be fenced. Recovery replays only those exact identifiers and never
+re-materializes a committed export. Reaching final signed artifact custody
+atomically adds a second deployment signature over the operation acceptance,
+snapshot reference, and state commitment. Thus `accepted` versus `prepared`
+status derives from signed content rather than an unauthenticated filename.
+One migration may have only one local reverse-export operation.
+
 ## User meaning
 
 During an attended Move Server flow, rollback means “move the service back to
@@ -96,17 +106,21 @@ changed artifact still fails closed.
 
 One medium operational deferral remains for the attended workflow: a fresh
 reverse export commits the PostgreSQL write fence before the registry fence.
-The coordinator supports an exact live retry, and every write remains blocked,
-but production startup does not yet autonomously resume that pre-terminal
-source-preparation stage. The attended operator backend must persist its
-operation identifiers and retry it before service readiness. Deployed
-two-host transfer, public status/cancellation behavior, custody fault injection,
-and client observation also remain outside this checkpoint.
+The new headless operation coordinator durably persists the operation before
+that boundary and can recover the exact pending operation. It is deliberately
+not wired into ordinary Device Sync startup: the scope remains write-fenced
+while transfer is pending, and the current data-service readiness gate must not
+pretend that state is writable. A future attended control process must run the
+recovery/status surface while the data plane is unavailable, then coordinate
+the other host and Facets-authorized successor. Deployed two-host transfer,
+public operator routes, status/cancellation UX, and client observation remain
+outside this checkpoint.
 
 ## Verification boundary
 
-This checkpoint provides portable signature validation, database/custody
-primitives, headless coordinators, restart recovery, focused tests, and a live
+This checkpoint provides portable authority validation, deployment-signed
+local operation evidence, database/custody primitives, headless coordinators,
+restart recovery, focused tests, and a live
 PostgreSQL 17 reverse-import/rollback gate over representative Device Sync
 state. The live gate proves divergent state replacement, tamper rejection,
 non-writable standby behavior, exact expired retry, restored writes, immutable
