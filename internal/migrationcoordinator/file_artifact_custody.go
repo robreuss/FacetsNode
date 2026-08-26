@@ -94,6 +94,28 @@ func NewFileArtifactCustody(root string) (*FileArtifactCustody, error) {
 	return &FileArtifactCustody{root: root}, nil
 }
 
+// InspectFileArtifactCustody opens custody for read-only status inspection.
+// An absent root represents empty custody; this function never creates,
+// chmods, or otherwise repairs filesystem state.
+func InspectFileArtifactCustody(root string) (*FileArtifactCustody, error) {
+	if root == "" || !filepath.IsAbs(root) {
+		return nil, errors.New("migration artifact custody root must be absolute")
+	}
+	root = filepath.Clean(root)
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return &FileArtifactCustody{root: root}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("migration artifact custody root is not private")
+	}
+	return &FileArtifactCustody{root: root}, nil
+}
+
 type PreparedDeviceSyncTransfer struct {
 	directory               string
 	metadata                fileArtifactCustodyMetadata

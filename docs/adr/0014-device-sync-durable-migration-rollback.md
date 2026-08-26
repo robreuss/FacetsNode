@@ -112,9 +112,17 @@ not wired into ordinary Device Sync startup: the scope remains write-fenced
 while transfer is pending, and the current data-service readiness gate must not
 pretend that state is writable. A future attended control process must run the
 recovery/status surface while the data plane is unavailable, then coordinate
-the other host and Facets-authorized successor. Deployed two-host transfer,
-public operator routes, status/cancellation UX, and client observation remain
-outside this checkpoint.
+the other host and Facets-authorized successor.
+
+The Device Sync binary provides the local-only control command
+`rollback-source status|recover`. It opens no listener. `status` requires OS
+access to the configured deployment signing key and private operation custody,
+but does not require PostgreSQL or the binding registry. `recover` additionally
+requires PostgreSQL and exclusive access to the deployment binding registry;
+it can resume only a previously signed accepted operation and cannot select
+new identifiers or initiate rollback. Ordinary startup remains fail-closed.
+Deployed two-host transfer, public operator routes, status/cancellation UX, and
+client observation remain outside this checkpoint.
 
 ## Verification boundary
 

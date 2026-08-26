@@ -25,15 +25,15 @@ const (
 )
 
 type DeviceSyncRollbackSourceOperationStatus struct {
-	AcceptedAtMilliseconds   int64
-	ActivationEvidenceDigest string
-	ExportWriteFenceID       uuid.UUID
-	MigrationID              uuid.UUID
-	PrincipalID              uuid.UUID
-	SnapshotID               uuid.UUID
-	SnapshotReferenceDigest  *string
-	State                    DeviceSyncRollbackSourceOperationState
-	StateCommitmentDigest    *string
+	AcceptedAtMilliseconds   int64                                  `json:"acceptedAtMilliseconds"`
+	ActivationEvidenceDigest string                                 `json:"activationEvidenceDigest"`
+	ExportWriteFenceID       uuid.UUID                              `json:"exportWriteFenceID"`
+	MigrationID              uuid.UUID                              `json:"migrationID"`
+	PrincipalID              uuid.UUID                              `json:"principalID"`
+	SnapshotID               uuid.UUID                              `json:"snapshotID"`
+	SnapshotReferenceDigest  *string                                `json:"snapshotReferenceDigest,omitempty"`
+	State                    DeviceSyncRollbackSourceOperationState `json:"state"`
+	StateCommitmentDigest    *string                                `json:"stateCommitmentDigest,omitempty"`
 }
 
 // DeviceSyncRollbackSourceOperationCoordinator persists the exact reverse

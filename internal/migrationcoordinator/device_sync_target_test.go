@@ -196,6 +196,13 @@ func TestDeviceSyncTargetCoordinatorCopiesBlobsBeforeReadinessAndRetriesExactly(
 
 func TestFileArtifactCustodyRejectsSymlinkRoot(t *testing.T) {
 	parent := t.TempDir()
+	missing := filepath.Join(parent, "missing")
+	if _, err := InspectFileArtifactCustody(missing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("read-only custody inspection created its root: %v", err)
+	}
 	target := filepath.Join(parent, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
@@ -206,6 +213,9 @@ func TestFileArtifactCustodyRejectsSymlinkRoot(t *testing.T) {
 	}
 	if _, err := NewFileArtifactCustody(link); err == nil {
 		t.Fatal("symlink migration artifact custody root was accepted")
+	}
+	if _, err := InspectFileArtifactCustody(link); err == nil {
+		t.Fatal("read-only custody inspection accepted a symlink root")
 	}
 }
 
