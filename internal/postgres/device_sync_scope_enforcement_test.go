@@ -18,14 +18,12 @@ import (
 
 type deviceSyncEnforcementMigrationFixture struct {
 	AuthorityAnchor           serviceauthority.TrustAnchor `json:"authorityAnchor"`
+	ActivationEvidenceDigest  string                       `json:"activationEvidenceDigest"`
 	PreparationEvidenceDigest string                       `json:"preparationEvidenceDigest"`
 	RollbackEvidenceDigest    string                       `json:"rollbackEvidenceDigest"`
 	RollbackEvidence          struct {
-		ActivationEvidence struct {
-			Preparation serviceauthority.MigrationPreparation `json:"preparation"`
-			Snapshot    serviceauthority.MigrationSnapshot    `json:"snapshot"`
-		} `json:"activationEvidence"`
-		RollbackManifest serviceauthority.Manifest `json:"rollbackManifest"`
+		ActivationEvidence serviceauthority.MigrationActivationEvidence `json:"activationEvidence"`
+		RollbackManifest   serviceauthority.Manifest                    `json:"rollbackManifest"`
 	} `json:"rollbackEvidence"`
 }
 
@@ -273,6 +271,100 @@ func TestDeviceSyncMigrationImportCandidateAuthenticatesHistoricalEvidence(
 		preparation, tampered, fixture.AuthorityAnchor, initial, 20_001,
 	); !errors.Is(err, serviceauthority.ErrInvalid) {
 		t.Fatalf("tampered signed snapshot error=%v", err)
+	}
+}
+
+func TestDeviceSyncMigrationActivationRequiresExactImportedOrExportedEvidence(
+	t *testing.T,
+) {
+	fixture := loadDeviceSyncEnforcementMigrationFixture(t)
+	evidence := fixture.RollbackEvidence.ActivationEvidence
+	preparation := evidence.Preparation
+	snapshot, err := evidence.Snapshot.VerifiedPayload(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || prepared.Migration == nil {
+		t.Fatalf("prepared payload=%+v err=%v", prepared, err)
+	}
+	initial := DeviceSyncInitialAuthorityEvidence{
+		Manifest:                preparation.CurrentManifest,
+		ValidatedAtMilliseconds: 1_100,
+	}
+	imported, _, err := buildDeviceSyncMigrationImportCandidate(
+		snapshot.ImportingDeploymentID, preparation, evidence.Snapshot,
+		fixture.AuthorityAnchor, initial, 3_000,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparationAuthority, err := DeviceSyncScopeAuthorityFromManifest(
+		preparation.PreparationManifest,
+		&fixture.PreparationEvidenceDigest,
+		2_200,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID := snapshot.ImportingDeploymentID
+	migrationID := snapshot.MigrationID
+	target := DeviceSyncScopeEnforcement{
+		PrincipalID:             snapshot.Scope.ScopeID,
+		TenantID:                snapshot.Scope.ScopeID,
+		State:                   DeviceSyncScopeStandby,
+		LocalDeploymentID:       &targetID,
+		Authority:               &preparationAuthority,
+		ActiveMigrationImportID: &migrationID,
+	}
+	if !deviceSyncActivationTargetRecordMatches(
+		target, imported, evidence, snapshot,
+	) {
+		t.Fatal("exact target import did not authorize activation")
+	}
+	changedImport := imported
+	changedImport.StateCommitmentDigest = strings.Repeat("e", 64)
+	if deviceSyncActivationTargetRecordMatches(
+		target, changedImport, evidence, snapshot,
+	) {
+		t.Fatal("changed target import authorized activation")
+	}
+
+	sourceID := snapshot.ExportingDeploymentID
+	fenceID := snapshot.ExportWriteFenceID
+	source := DeviceSyncScopeEnforcement{
+		PrincipalID:              snapshot.Scope.ScopeID,
+		TenantID:                 snapshot.Scope.ScopeID,
+		State:                    DeviceSyncScopeExportFenced,
+		LocalDeploymentID:        &sourceID,
+		Authority:                &preparationAuthority,
+		ActiveExportWriteFenceID: &fenceID,
+	}
+	exported := DeviceSyncMigrationExportRecord{
+		PrincipalID:              snapshot.Scope.ScopeID,
+		TenantID:                 snapshot.Scope.ScopeID,
+		MigrationID:              snapshot.MigrationID,
+		ExportWriteFenceID:       snapshot.ExportWriteFenceID,
+		SnapshotID:               snapshot.SnapshotID,
+		ExportingDeploymentID:    snapshot.ExportingDeploymentID,
+		ImportingDeploymentID:    snapshot.ImportingDeploymentID,
+		CanonicalSnapshotPayload: append([]byte(nil), evidence.Snapshot.Payload...),
+		StateCommitmentDigest:    snapshot.StateCommitmentDigest,
+	}
+	if !deviceSyncActivationSourceRecordMatches(
+		source, exported, evidence, snapshot,
+	) {
+		t.Fatal("exact source export did not authorize retirement")
+	}
+	changedExport := exported
+	changedExport.CanonicalSnapshotPayload = append(
+		[]byte(nil), exported.CanonicalSnapshotPayload...,
+	)
+	changedExport.CanonicalSnapshotPayload[0] ^= 0x01
+	if deviceSyncActivationSourceRecordMatches(
+		source, changedExport, evidence, snapshot,
+	) {
+		t.Fatal("changed source export authorized retirement")
 	}
 }
 

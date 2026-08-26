@@ -1008,6 +1008,16 @@ type MigrationActivationEvidence struct {
 	Snapshot           MigrationSnapshot    `json:"snapshot"`
 }
 
+// ReferenceDigest identifies the complete activation evidence, including its
+// authority-signed terminal manifest. It is the exact transition-evidence
+// digest persisted by BindingRegistry and durable service-state stores.
+func (evidence MigrationActivationEvidence) ReferenceDigest() (string, error) {
+	return migrationEvidenceDigest(
+		migrationActivationEvidenceReferenceDomain,
+		evidence,
+	)
+}
+
 func (evidence MigrationActivationEvidence) PrerequisitesReferenceDigest() (string, error) {
 	return MigrationActivationPrerequisites{
 		Preparation: evidence.Preparation,
@@ -1118,6 +1128,15 @@ type MigrationRollbackEvidence struct {
 	RollbackManifest   Manifest                    `json:"rollbackManifest"`
 	SourceReadiness    MigrationReadiness          `json:"sourceReadiness"`
 	TargetSnapshot     MigrationSnapshot           `json:"targetSnapshot"`
+}
+
+// ReferenceDigest identifies the complete rollback evidence, including its
+// authority-signed terminal manifest.
+func (evidence MigrationRollbackEvidence) ReferenceDigest() (string, error) {
+	return migrationEvidenceDigest(
+		migrationRollbackEvidenceReferenceDomain,
+		evidence,
+	)
 }
 
 func (evidence MigrationRollbackEvidence) PrerequisitesReferenceDigest() (string, error) {

@@ -450,6 +450,263 @@ func (s *RelayStore) AdvanceDeviceSyncWritableAuthority(
 	return nil
 }
 
+// ApplyDeviceSyncMigrationActivation consumes the complete Facets-authorized
+// activation evidence and atomically moves one local database side of the
+// migration across cutover. The imported target becomes writable; the fenced
+// source becomes retired and remains non-writable. BindingRegistry must be
+// advanced first by the local coordinator, making a database failure a
+// restart-repairable fail-closed state rather than a split-brain window.
+//
+// An exact already-applied retry is accepted before temporal validation. A
+// first application still requires a live terminal activation manifest and
+// historically valid signed prerequisites.
+func (s *RelayStore) ApplyDeviceSyncMigrationActivation(
+	ctx context.Context,
+	localDeploymentID uuid.UUID,
+	evidence serviceauthority.MigrationActivationEvidence,
+	anchor serviceauthority.TrustAnchor,
+	nowMilliseconds int64,
+) error {
+	if ctx == nil || localDeploymentID == uuid.Nil || nowMilliseconds < 0 {
+		return serviceauthority.ErrInvalid
+	}
+	activation, err := evidence.ActivationManifest.VerifiedPayload()
+	if err != nil || activation.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		activation.Transition != serviceauthority.TransitionMigrationActivation ||
+		activation.Migration == nil ||
+		(localDeploymentID != activation.Migration.SourceDeploymentID &&
+			localDeploymentID != activation.Migration.TargetDeploymentID) {
+		return serviceauthority.ErrInvalid
+	}
+	evidenceDigest, err := evidence.ReferenceDigest()
+	if err != nil || !validDeviceSyncDigest(evidenceDigest) {
+		return serviceauthority.ErrInvalid
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("begin Device Sync migration activation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	current, err := loadDeviceSyncScopeEnforcement(
+		ctx, tx, activation.Scope.ScopeID, "FOR UPDATE",
+	)
+	if err != nil {
+		return err
+	}
+	targetSide := localDeploymentID == activation.Migration.TargetDeploymentID
+	terminalState := DeviceSyncScopeRetired
+	if targetSide {
+		terminalState = DeviceSyncScopeWritable
+	}
+	if current.State == terminalState &&
+		current.LocalDeploymentID != nil &&
+		*current.LocalDeploymentID == localDeploymentID &&
+		deviceSyncAuthorityMatchesExactManifest(
+			current.Authority, evidence.ActivationManifest, evidenceDigest,
+		) {
+		return nil
+	}
+
+	validatedActivation, err := evidence.ValidateHistoricalCatchUp(
+		anchor, nowMilliseconds,
+	)
+	if err != nil || validatedActivation.Scope != activation.Scope ||
+		validatedActivation.Revision != activation.Revision ||
+		validatedActivation.ActiveDeployment.DeploymentID !=
+			activation.Migration.TargetDeploymentID {
+		return serviceauthority.ErrInvalid
+	}
+	nextAuthority, err := DeviceSyncScopeAuthorityFromManifest(
+		evidence.ActivationManifest, &evidenceDigest, nowMilliseconds,
+	)
+	if err != nil {
+		return err
+	}
+	preparationDigest, err := evidence.Preparation.ReferenceDigest()
+	if err != nil || current.Authority == nil ||
+		current.LocalDeploymentID == nil ||
+		*current.LocalDeploymentID != localDeploymentID ||
+		!deviceSyncAuthorityMatchesExactManifest(
+			current.Authority,
+			evidence.Preparation.PreparationManifest,
+			preparationDigest,
+		) {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	snapshot, err := evidence.Snapshot.VerifiedPayload(nil)
+	if err != nil || snapshot.Scope != activation.Scope ||
+		snapshot.MigrationID != activation.Migration.MigrationID ||
+		snapshot.ExportingDeploymentID != activation.Migration.SourceDeploymentID ||
+		snapshot.ImportingDeploymentID != activation.Migration.TargetDeploymentID {
+		return serviceauthority.ErrInvalid
+	}
+	if targetSide {
+		if err := validateDeviceSyncActivationTarget(
+			ctx, tx, current, evidence, snapshot,
+		); err != nil {
+			return err
+		}
+	} else if err := validateDeviceSyncActivationSource(
+		ctx, tx, current, evidence, snapshot,
+	); err != nil {
+		return err
+	}
+
+	result, err := tx.Exec(ctx, `
+		UPDATE device_sync_scope_enforcement
+		SET state=$2, authority_validated_at_milliseconds=$3,
+			authority_revision=$4, authority_manifest_digest=$5,
+			authority_manifest_record=$6, active_deployment_id=$7,
+			transition_evidence_digest=$8,
+			active_export_write_fence_id=NULL,
+			active_migration_import_id=NULL, updated_at=now()
+		WHERE principal_id=$1 AND tenant_id=$1
+	`, activation.Scope.ScopeID, terminalState,
+		nextAuthority.ValidatedAtMilliseconds, int64(nextAuthority.Revision),
+		nextAuthority.ManifestDigest, nextAuthority.ManifestRecord,
+		nextAuthority.ActiveDeploymentID,
+		nextAuthority.TransitionEvidenceDigest)
+	if err != nil {
+		return fmt.Errorf("persist Device Sync migration activation: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("Device Sync migration activation affected an unexpected row count")
+	}
+	stored, err := loadDeviceSyncScopeEnforcement(
+		ctx, tx, activation.Scope.ScopeID, "FOR SHARE",
+	)
+	if err != nil || stored.State != terminalState ||
+		stored.LocalDeploymentID == nil ||
+		*stored.LocalDeploymentID != localDeploymentID ||
+		!deviceSyncScopeAuthorityEqual(stored.Authority, &nextAuthority) ||
+		stored.ActiveExportWriteFenceID != nil ||
+		stored.ActiveMigrationImportID != nil {
+		if err != nil {
+			return err
+		}
+		return errors.New("persisted Device Sync migration activation is inconsistent")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Device Sync migration activation: %w", err)
+	}
+	return nil
+}
+
+func validateDeviceSyncActivationTarget(
+	ctx context.Context,
+	tx pgx.Tx,
+	current DeviceSyncScopeEnforcement,
+	evidence serviceauthority.MigrationActivationEvidence,
+	snapshot serviceauthority.MigrationSnapshotPayload,
+) error {
+	if current.State != DeviceSyncScopeStandby ||
+		current.ActiveExportWriteFenceID != nil ||
+		current.ActiveMigrationImportID == nil ||
+		*current.ActiveMigrationImportID != snapshot.MigrationID {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	imported, found, err := loadDeviceSyncMigrationImport(
+		ctx, tx, current.PrincipalID, snapshot.MigrationID,
+		snapshot.ImportingDeploymentID, "FOR SHARE",
+	)
+	if err != nil {
+		return err
+	}
+	if !found || !deviceSyncActivationTargetRecordMatches(
+		current, imported, evidence, snapshot,
+	) {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	return nil
+}
+
+func deviceSyncActivationTargetRecordMatches(
+	current DeviceSyncScopeEnforcement,
+	imported DeviceSyncMigrationImportRecord,
+	evidence serviceauthority.MigrationActivationEvidence,
+	snapshot serviceauthority.MigrationSnapshotPayload,
+) bool {
+	preparationRecord, preparationErr := json.Marshal(evidence.Preparation)
+	snapshotRecord, snapshotErr := json.Marshal(evidence.Snapshot)
+	return preparationErr == nil && snapshotErr == nil &&
+		current.State == DeviceSyncScopeStandby &&
+		current.ActiveExportWriteFenceID == nil &&
+		current.ActiveMigrationImportID != nil &&
+		*current.ActiveMigrationImportID == snapshot.MigrationID &&
+		imported.PrincipalID == current.PrincipalID &&
+		imported.TenantID == current.TenantID &&
+		imported.MigrationID == snapshot.MigrationID &&
+		imported.ImportingDeploymentID == snapshot.ImportingDeploymentID &&
+		bytes.Equal(imported.CanonicalPreparationRecord, preparationRecord) &&
+		bytes.Equal(imported.CanonicalSnapshotRecord, snapshotRecord) &&
+		imported.SnapshotID == snapshot.SnapshotID &&
+		imported.ExportWriteFenceID == snapshot.ExportWriteFenceID &&
+		imported.StateCommitmentDigest == snapshot.StateCommitmentDigest
+}
+
+func validateDeviceSyncActivationSource(
+	ctx context.Context,
+	tx pgx.Tx,
+	current DeviceSyncScopeEnforcement,
+	evidence serviceauthority.MigrationActivationEvidence,
+	snapshot serviceauthority.MigrationSnapshotPayload,
+) error {
+	if current.State != DeviceSyncScopeExportFenced ||
+		current.ActiveMigrationImportID != nil ||
+		current.ActiveExportWriteFenceID == nil ||
+		*current.ActiveExportWriteFenceID != snapshot.ExportWriteFenceID {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	exported, found, err := loadDeviceSyncMigrationExport(
+		ctx, tx, current.PrincipalID, snapshot.ExportWriteFenceID, "FOR SHARE",
+	)
+	if err != nil {
+		return err
+	}
+	if !found || !deviceSyncActivationSourceRecordMatches(
+		current, exported, evidence, snapshot,
+	) {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	return nil
+}
+
+func deviceSyncActivationSourceRecordMatches(
+	current DeviceSyncScopeEnforcement,
+	exported DeviceSyncMigrationExportRecord,
+	evidence serviceauthority.MigrationActivationEvidence,
+	snapshot serviceauthority.MigrationSnapshotPayload,
+) bool {
+	return current.State == DeviceSyncScopeExportFenced &&
+		current.ActiveMigrationImportID == nil &&
+		current.ActiveExportWriteFenceID != nil &&
+		*current.ActiveExportWriteFenceID == snapshot.ExportWriteFenceID &&
+		exported.PrincipalID == current.PrincipalID &&
+		exported.TenantID == current.TenantID &&
+		exported.MigrationID == snapshot.MigrationID &&
+		exported.SnapshotID == snapshot.SnapshotID &&
+		exported.ExportWriteFenceID == snapshot.ExportWriteFenceID &&
+		exported.ExportingDeploymentID == snapshot.ExportingDeploymentID &&
+		exported.ImportingDeploymentID == snapshot.ImportingDeploymentID &&
+		bytes.Equal(exported.CanonicalSnapshotPayload, evidence.Snapshot.Payload) &&
+		exported.StateCommitmentDigest == snapshot.StateCommitmentDigest
+}
+
+func deviceSyncAuthorityMatchesExactManifest(
+	authority *DeviceSyncScopeAuthority,
+	manifest serviceauthority.Manifest,
+	evidenceDigest string,
+) bool {
+	if authority == nil || authority.ValidatedAtMilliseconds < 0 {
+		return false
+	}
+	expected, err := DeviceSyncScopeAuthorityFromManifest(
+		manifest, &evidenceDigest, authority.ValidatedAtMilliseconds,
+	)
+	return err == nil && deviceSyncScopeAuthorityEqual(authority, &expected)
+}
+
 // MaterializeAndFenceDeviceSyncMigrationExport acquires the durable scope row
 // FOR UPDATE before invoking materializer. The callback reads/materializes the
 // snapshot while that transaction is open; only then does the same transaction

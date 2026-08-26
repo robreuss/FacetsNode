@@ -23,12 +23,10 @@ import (
 
 type postgresDeviceSyncEnforcementFixture struct {
 	AuthorityAnchor           serviceauthority.TrustAnchor `json:"authorityAnchor"`
+	ActivationEvidenceDigest  string                       `json:"activationEvidenceDigest"`
 	PreparationEvidenceDigest string                       `json:"preparationEvidenceDigest"`
 	RollbackEvidence          struct {
-		ActivationEvidence struct {
-			Preparation serviceauthority.MigrationPreparation `json:"preparation"`
-			Snapshot    serviceauthority.MigrationSnapshot    `json:"snapshot"`
-		} `json:"activationEvidence"`
+		ActivationEvidence serviceauthority.MigrationActivationEvidence `json:"activationEvidence"`
 	} `json:"rollbackEvidence"`
 }
 
@@ -386,6 +384,51 @@ func TestPostgresDeviceSyncScopeAuthorityAndExportFenceAreAtomic(t *testing.T) {
 		WHERE principal_id=$1
 	`, principalID, uuid.New()); err == nil {
 		t.Fatal("active fence accepted a non-existent export record")
+	}
+
+	activationEvidence := fixture.RollbackEvidence.ActivationEvidence
+	if err := store.ApplyDeviceSyncMigrationActivation(
+		ctx, localSigner.DeploymentID(), activationEvidence,
+		fixture.AuthorityAnchor, 3_200,
+	); err != nil {
+		t.Fatalf("apply source migration activation: %v", err)
+	}
+	// Exact recovery remains available after the terminal evidence expires.
+	if err := store.ApplyDeviceSyncMigrationActivation(
+		ctx, localSigner.DeploymentID(), activationEvidence,
+		fixture.AuthorityAnchor, 20_001,
+	); err != nil {
+		t.Fatalf("retry source migration activation: %v", err)
+	}
+	state, err = store.GetDeviceSyncScopeEnforcement(ctx, principalID)
+	if err != nil || state.State != postgresstore.DeviceSyncScopeRetired ||
+		state.LocalDeploymentID == nil ||
+		*state.LocalDeploymentID != localSigner.DeploymentID() ||
+		state.Authority == nil ||
+		state.Authority.ActiveDeploymentID != snapshot.ImportingDeploymentID ||
+		state.Authority.TransitionEvidenceDigest == nil ||
+		*state.Authority.TransitionEvidenceDigest != fixture.ActivationEvidenceDigest ||
+		state.ActiveExportWriteFenceID != nil ||
+		state.ActiveMigrationImportID != nil {
+		t.Fatalf("retired source activation state=%+v err=%v", state, err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE relay_tenants SET updated_at=now() WHERE tenant_id=$1
+	`, principalID); err == nil || !strings.Contains(
+		err.Error(), "not writable in this transaction",
+	) {
+		t.Fatalf("retired source allowed a semantic write: %v", err)
+	}
+	tamperedActivation := activationEvidence
+	tamperedActivation.Readiness.Payload = append(
+		[]byte(nil), tamperedActivation.Readiness.Payload...,
+	)
+	tamperedActivation.Readiness.Payload[0] ^= 0x01
+	if err := store.ApplyDeviceSyncMigrationActivation(
+		ctx, localSigner.DeploymentID(), tamperedActivation,
+		fixture.AuthorityAnchor, 3_200,
+	); err == nil {
+		t.Fatal("retired source accepted conflicting activation evidence")
 	}
 }
 

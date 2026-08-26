@@ -69,8 +69,10 @@ It introduces no authority and therefore remains repairable after an offer has
 expired. An exact already-claimed retry may reconstruct the same enrollment at
 a later validation time; retry identity deliberately excludes invocation time.
 A different signed Manifest is a conflict even when provisioning is identical.
-Imported-target activation is not exposed by this checkpoint and requires the
-future migration coordinator.
+Imported-target activation and source write retirement now have an exact
+evidence-bound PostgreSQL primitive described by ADR 0011. Public exposure,
+cross-store orchestration, and automatic restart reconciliation still require
+the migration coordinator.
 
 Registry identity conflicts return the existing stale/invalid authority 409.
 Registry custody/persistence failures and database activation failures return

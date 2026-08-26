@@ -390,10 +390,7 @@ func (registry *BindingRegistry) ApplyMigrationActivation(
 	if registry == nil || registry.expectedDeploymentID == uuid.Nil {
 		return ErrInvalid
 	}
-	evidenceDigest, err := migrationEvidenceDigest(
-		migrationActivationEvidenceReferenceDomain,
-		evidence,
-	)
+	evidenceDigest, err := evidence.ReferenceDigest()
 	if err != nil {
 		return ErrInvalid
 	}
@@ -457,10 +454,7 @@ func (registry *BindingRegistry) ApplyMigrationRollback(
 	if registry == nil || registry.expectedDeploymentID == uuid.Nil {
 		return ErrInvalid
 	}
-	evidenceDigest, err := migrationEvidenceDigest(
-		migrationRollbackEvidenceReferenceDomain,
-		evidence,
-	)
+	evidenceDigest, err := evidence.ReferenceDigest()
 	if err != nil {
 		return ErrInvalid
 	}
@@ -474,10 +468,7 @@ func (registry *BindingRegistry) ApplyMigrationRollback(
 	if err != nil {
 		return ErrInvalid
 	}
-	activationEvidenceDigest, err := migrationEvidenceDigest(
-		migrationActivationEvidenceReferenceDomain,
-		evidence.ActivationEvidence,
-	)
+	activationEvidenceDigest, err := evidence.ActivationEvidence.ReferenceDigest()
 	if err != nil {
 		return ErrInvalid
 	}

@@ -76,10 +76,8 @@ func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
 	if err != nil || preparationEvidenceDigest != fixture.PreparationEvidenceDigest {
 		t.Fatalf("preparation evidence digest=%s err=%v", preparationEvidenceDigest, err)
 	}
-	activationEvidenceDigest, err := migrationEvidenceDigest(
-		migrationActivationEvidenceReferenceDomain,
-		fixture.RollbackEvidence.ActivationEvidence,
-	)
+	activationEvidenceDigest, err := fixture.RollbackEvidence.ActivationEvidence.
+		ReferenceDigest()
 	if err != nil || activationEvidenceDigest != fixture.ActivationEvidenceDigest {
 		t.Fatalf("activation evidence digest=%s err=%v", activationEvidenceDigest, err)
 	}
@@ -97,10 +95,7 @@ func TestSwiftMigrationPortableFixtureValidatesInGo(t *testing.T) {
 	if err != nil || rollbackDigest != fixture.RollbackManifestDigest {
 		t.Fatalf("rollback digest=%s err=%v", rollbackDigest, err)
 	}
-	rollbackEvidenceDigest, err := migrationEvidenceDigest(
-		migrationRollbackEvidenceReferenceDomain,
-		fixture.RollbackEvidence,
-	)
+	rollbackEvidenceDigest, err := fixture.RollbackEvidence.ReferenceDigest()
 	if err != nil || rollbackEvidenceDigest != fixture.RollbackEvidenceDigest {
 		t.Fatalf("rollback evidence digest=%s err=%v", rollbackEvidenceDigest, err)
 	}
