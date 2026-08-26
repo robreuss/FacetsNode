@@ -36,15 +36,17 @@ var ErrDeviceSyncScopeEnforcementNotFound = errors.New(
 type DeviceSyncScopeEnforcementState string
 
 const (
-	DeviceSyncScopeStandby      DeviceSyncScopeEnforcementState = "standby"
-	DeviceSyncScopeWritable     DeviceSyncScopeEnforcementState = "writable"
-	DeviceSyncScopeExportFenced DeviceSyncScopeEnforcementState = "export_fenced"
-	DeviceSyncScopeRetired      DeviceSyncScopeEnforcementState = "retired"
+	DeviceSyncScopeStandby         DeviceSyncScopeEnforcementState = "standby"
+	DeviceSyncScopeWritable        DeviceSyncScopeEnforcementState = "writable"
+	DeviceSyncScopeExportFenced    DeviceSyncScopeEnforcementState = "export_fenced"
+	DeviceSyncScopeRollbackStandby DeviceSyncScopeEnforcementState = "rollback_standby"
+	DeviceSyncScopeRetired         DeviceSyncScopeEnforcementState = "retired"
 )
 
 func (state DeviceSyncScopeEnforcementState) valid() bool {
 	return state == DeviceSyncScopeStandby || state == DeviceSyncScopeWritable ||
-		state == DeviceSyncScopeExportFenced || state == DeviceSyncScopeRetired
+		state == DeviceSyncScopeExportFenced ||
+		state == DeviceSyncScopeRollbackStandby || state == DeviceSyncScopeRetired
 }
 
 // DeviceSyncScopeAuthority is the exact authority record committed beside the
@@ -62,13 +64,18 @@ type DeviceSyncScopeAuthority struct {
 }
 
 type DeviceSyncScopeEnforcement struct {
-	PrincipalID              uuid.UUID
-	TenantID                 uuid.UUID
-	State                    DeviceSyncScopeEnforcementState
-	LocalDeploymentID        *uuid.UUID
-	Authority                *DeviceSyncScopeAuthority
-	ActiveExportWriteFenceID *uuid.UUID
-	ActiveMigrationImportID  *uuid.UUID
+	PrincipalID                             uuid.UUID
+	TenantID                                uuid.UUID
+	State                                   DeviceSyncScopeEnforcementState
+	LocalDeploymentID                       *uuid.UUID
+	InitialDeploymentID                     *uuid.UUID
+	InitialAuthorityValidatedAtMilliseconds *int64
+	InitialAuthorityManifestDigest          *string
+	InitialAuthorityManifestRecord          []byte
+	Authority                               *DeviceSyncScopeAuthority
+	ActiveExportWriteFenceID                *uuid.UUID
+	ActiveMigrationImportID                 *uuid.UUID
+	ActiveRollbackImportID                  *uuid.UUID
 }
 
 // DeviceSyncMigrationExportRecord is the validated immutable database record
@@ -118,6 +125,43 @@ type DeviceSyncMigrationImportRecord struct {
 	CanonicalPreparationRecord              []byte
 	PreparationRecordSHA256                 string
 	PreparationManifestRecord               []byte
+	CanonicalSnapshotRecord                 []byte
+	SnapshotRecordSHA256                    string
+	SnapshotReferenceDigest                 string
+	SnapshotPayloadSHA256                   string
+	StateCommitmentDigest                   string
+	CanonicalArtifactDescriptors            []byte
+	ArtifactDescriptorsSHA256               string
+	ArtifactCount                           int
+	ServiceStateArtifactID                  uuid.UUID
+	ServiceStateArtifactByteCount           int64
+	ServiceStateArtifactTransferDigest      string
+	CapturedAtMilliseconds                  int64
+	ExpiresAtMilliseconds                   int64
+	ImportedAtMilliseconds                  int64
+	InitialDeploymentID                     uuid.UUID
+	InitialAuthorityValidatedAtMilliseconds int64
+	InitialAuthorityManifestDigest          string
+	InitialAuthorityManifestRecord          []byte
+}
+
+// DeviceSyncMigrationRollbackImportRecord is immutable evidence that the
+// retired source replaced its stale semantic state with one exact reverse
+// snapshot while activation still named the target authoritative. It is not
+// authority to write; a complete rollback successor remains mandatory.
+type DeviceSyncMigrationRollbackImportRecord struct {
+	PrincipalID                             uuid.UUID
+	TenantID                                uuid.UUID
+	MigrationID                             uuid.UUID
+	SnapshotID                              uuid.UUID
+	ExportWriteFenceID                      uuid.UUID
+	AuthorityRevision                       uint64
+	AuthorityManifestDigest                 string
+	ActivationEvidenceDigest                string
+	ExportingDeploymentID                   uuid.UUID
+	ImportingDeploymentID                   uuid.UUID
+	CanonicalActivationEvidenceRecord       []byte
+	ActivationEvidenceRecordSHA256          string
 	CanonicalSnapshotRecord                 []byte
 	SnapshotRecordSHA256                    string
 	SnapshotReferenceDigest                 string
@@ -886,7 +930,7 @@ func (s *RelayStore) ApplyDeviceSyncMigrationRetirement(
 		deviceSyncAuthorityMatchesExactManifest(
 			current.Authority, evidence.RetirementManifest, evidenceDigest,
 		) && current.ActiveExportWriteFenceID == nil &&
-		current.ActiveMigrationImportID == nil {
+		current.ActiveMigrationImportID == nil && current.ActiveRollbackImportID == nil {
 		return nil
 	}
 	validatedRetirement, err := evidence.ValidateHistoricalCatchUp(
@@ -920,10 +964,16 @@ func (s *RelayStore) ApplyDeviceSyncMigrationRetirement(
 		); err != nil {
 			return err
 		}
-	} else if current.State != DeviceSyncScopeRetired ||
-		current.ActiveExportWriteFenceID != nil ||
-		current.ActiveMigrationImportID != nil {
-		return ErrDeviceSyncMigrationImportConflict
+	} else {
+		retiredWithoutRollback := current.State == DeviceSyncScopeRetired &&
+			current.ActiveRollbackImportID == nil
+		preparedRollback := current.State == DeviceSyncScopeRollbackStandby &&
+			current.ActiveRollbackImportID != nil
+		if (!retiredWithoutRollback && !preparedRollback) ||
+			current.ActiveExportWriteFenceID != nil ||
+			current.ActiveMigrationImportID != nil {
+			return ErrDeviceSyncMigrationImportConflict
+		}
 	}
 	result, err := tx.Exec(ctx, `
 		UPDATE device_sync_scope_enforcement
@@ -932,7 +982,8 @@ func (s *RelayStore) ApplyDeviceSyncMigrationRetirement(
 			authority_manifest_record=$6, active_deployment_id=$7,
 			transition_evidence_digest=$8,
 			active_export_write_fence_id=NULL,
-			active_migration_import_id=NULL, updated_at=now()
+			active_migration_import_id=NULL,
+			active_rollback_import_id=NULL, updated_at=now()
 		WHERE principal_id=$1 AND tenant_id=$1
 	`, retirement.Scope.ScopeID, terminalState,
 		nextAuthority.ValidatedAtMilliseconds, int64(nextAuthority.Revision),
@@ -953,7 +1004,7 @@ func (s *RelayStore) ApplyDeviceSyncMigrationRetirement(
 		*stored.LocalDeploymentID != localDeploymentID ||
 		!deviceSyncScopeAuthorityEqual(stored.Authority, &nextAuthority) ||
 		stored.ActiveExportWriteFenceID != nil ||
-		stored.ActiveMigrationImportID != nil {
+		stored.ActiveMigrationImportID != nil || stored.ActiveRollbackImportID != nil {
 		if err != nil {
 			return err
 		}
@@ -1198,7 +1249,7 @@ func (s *RelayStore) MaterializeAndFenceDeviceSyncMigrationExport(
 	); err != nil {
 		return DeviceSyncMigrationExportRecord{}, err
 	}
-	if err := validatePreparedDeviceSyncMigrationIdentity(
+	if err := validateDeviceSyncMigrationExportIdentity(
 		current, expectedMigrationID,
 	); err != nil {
 		return DeviceSyncMigrationExportRecord{}, err
@@ -1226,7 +1277,7 @@ func (s *RelayStore) MaterializeAndFenceDeviceSyncMigrationExport(
 	if payload.Validate(&nowMilliseconds) != nil {
 		return DeviceSyncMigrationExportRecord{}, serviceauthority.ErrInvalid
 	}
-	if err := validatePreparedDeviceSyncExport(current, payload); err != nil {
+	if err := validateDeviceSyncMigrationExport(current, payload); err != nil {
 		return DeviceSyncMigrationExportRecord{}, err
 	}
 	result, err := tx.Exec(ctx, `
@@ -1630,7 +1681,7 @@ func validateDeviceSyncAuthorityIdentity(
 	return nil
 }
 
-func validatePreparedDeviceSyncExport(
+func validateDeviceSyncMigrationExport(
 	current DeviceSyncScopeEnforcement,
 	payload serviceauthority.MigrationSnapshotPayload,
 ) error {
@@ -1644,24 +1695,37 @@ func validatePreparedDeviceSyncExport(
 		return err
 	}
 	authorityPayload, err := authorityManifest.VerifiedPayload()
-	if err != nil || authorityPayload.Transition !=
-		serviceauthority.TransitionMigrationPreparation ||
-		authorityPayload.Migration == nil ||
+	if err != nil || authorityPayload.Migration == nil ||
 		len(authorityPayload.PreparedDeployments) != 1 ||
 		payload.MigrationID != authorityPayload.Migration.MigrationID ||
 		payload.Scope != authorityPayload.Scope ||
 		payload.AuthorityManifestDigest != current.Authority.ManifestDigest ||
 		payload.ExportingDeploymentID != authorityPayload.ActiveDeployment.DeploymentID ||
-		payload.ExportingDeploymentID != authorityPayload.Migration.SourceDeploymentID ||
-		payload.ImportingDeploymentID != authorityPayload.Migration.TargetDeploymentID ||
 		payload.ImportingDeploymentID != authorityPayload.PreparedDeployments[0].DeploymentID ||
 		payload.CapturedAtMilliseconds < authorityPayload.ValidFromMilliseconds {
-		return errors.New("Device Sync migration export does not match the prepared migration")
+		return errors.New("Device Sync migration export does not match durable migration authority")
+	}
+	switch authorityPayload.Transition {
+	case serviceauthority.TransitionMigrationPreparation:
+		if payload.ExportingDeploymentID != authorityPayload.Migration.SourceDeploymentID ||
+			payload.ImportingDeploymentID != authorityPayload.Migration.TargetDeploymentID {
+			return errors.New("Device Sync migration export does not match prepared direction")
+		}
+	case serviceauthority.TransitionMigrationActivation:
+		if authorityPayload.Migration.RollbackUntilMilliseconds == nil ||
+			payload.ExpiresAtMilliseconds >
+				*authorityPayload.Migration.RollbackUntilMilliseconds ||
+			payload.ExportingDeploymentID != authorityPayload.Migration.TargetDeploymentID ||
+			payload.ImportingDeploymentID != authorityPayload.Migration.SourceDeploymentID {
+			return errors.New("Device Sync migration export does not match rollback direction")
+		}
+	default:
+		return errors.New("Device Sync authority does not permit a migration export")
 	}
 	return nil
 }
 
-func validatePreparedDeviceSyncMigrationIdentity(
+func validateDeviceSyncMigrationExportIdentity(
 	current DeviceSyncScopeEnforcement,
 	expectedMigrationID uuid.UUID,
 ) error {
@@ -1675,11 +1739,13 @@ func validatePreparedDeviceSyncMigrationIdentity(
 		return err
 	}
 	payload, err := manifest.VerifiedPayload()
-	if err != nil || payload.Transition !=
-		serviceauthority.TransitionMigrationPreparation || payload.Migration == nil ||
+	if err != nil || (payload.Transition !=
+		serviceauthority.TransitionMigrationPreparation &&
+		payload.Transition != serviceauthority.TransitionMigrationActivation) ||
+		payload.Migration == nil ||
 		payload.Migration.MigrationID != expectedMigrationID {
 		return errors.New(
-			"Device Sync migration export does not match prepared migration identity",
+			"Device Sync migration export does not match durable migration identity",
 		)
 	}
 	return nil
@@ -1940,7 +2006,8 @@ func loadDeviceSyncScopeEnforcement(
 			authority_manifest_digest,authority_manifest_record,
 			active_deployment_id,transition_evidence_digest,
 			authority_validated_at_milliseconds,
-			active_export_write_fence_id,active_migration_import_id
+			active_export_write_fence_id,active_migration_import_id,
+			active_rollback_import_id
 		FROM device_sync_scope_enforcement
 		WHERE principal_id=$1 AND tenant_id=$1
 	`
@@ -1949,10 +2016,6 @@ func loadDeviceSyncScopeEnforcement(
 	}
 	current := DeviceSyncScopeEnforcement{PrincipalID: principalID}
 	var revision *int64
-	var initialDeploymentID *uuid.UUID
-	var initialAuthorityValidatedAtMilliseconds *int64
-	var initialAuthorityManifestDigest *string
-	var initialAuthorityManifestRecord []byte
 	var manifestDigest *string
 	var manifestRecord []byte
 	var activeDeploymentID *uuid.UUID
@@ -1960,11 +2023,14 @@ func loadDeviceSyncScopeEnforcement(
 	var authorityValidatedAtMilliseconds *int64
 	err := querier.QueryRow(ctx, query, principalID).Scan(
 		&current.TenantID, &current.State, &current.LocalDeploymentID,
-		&initialDeploymentID, &initialAuthorityValidatedAtMilliseconds,
-		&initialAuthorityManifestDigest, &initialAuthorityManifestRecord,
+		&current.InitialDeploymentID,
+		&current.InitialAuthorityValidatedAtMilliseconds,
+		&current.InitialAuthorityManifestDigest,
+		&current.InitialAuthorityManifestRecord,
 		&revision, &manifestDigest, &manifestRecord, &activeDeploymentID,
 		&transitionEvidenceDigest, &authorityValidatedAtMilliseconds,
 		&current.ActiveExportWriteFenceID, &current.ActiveMigrationImportID,
+		&current.ActiveRollbackImportID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DeviceSyncScopeEnforcement{}, ErrDeviceSyncScopeEnforcementNotFound
@@ -1980,14 +2046,15 @@ func loadDeviceSyncScopeEnforcement(
 		)
 	}
 	allAuthorityNil := current.LocalDeploymentID == nil &&
-		initialDeploymentID == nil &&
-		initialAuthorityValidatedAtMilliseconds == nil &&
-		initialAuthorityManifestDigest == nil &&
-		len(initialAuthorityManifestRecord) == 0 && revision == nil &&
+		current.InitialDeploymentID == nil &&
+		current.InitialAuthorityValidatedAtMilliseconds == nil &&
+		current.InitialAuthorityManifestDigest == nil &&
+		len(current.InitialAuthorityManifestRecord) == 0 && revision == nil &&
 		manifestDigest == nil && len(manifestRecord) == 0 &&
 		activeDeploymentID == nil && transitionEvidenceDigest == nil &&
 		authorityValidatedAtMilliseconds == nil &&
-		current.ActiveMigrationImportID == nil
+		current.ActiveMigrationImportID == nil &&
+		current.ActiveRollbackImportID == nil
 	if allAuthorityNil {
 		if current.State != DeviceSyncScopeStandby ||
 			current.ActiveExportWriteFenceID != nil {
@@ -1997,10 +2064,10 @@ func loadDeviceSyncScopeEnforcement(
 		}
 		return current, nil
 	}
-	if current.LocalDeploymentID == nil || initialDeploymentID == nil ||
-		initialAuthorityValidatedAtMilliseconds == nil ||
-		initialAuthorityManifestDigest == nil ||
-		len(initialAuthorityManifestRecord) == 0 ||
+	if current.LocalDeploymentID == nil || current.InitialDeploymentID == nil ||
+		current.InitialAuthorityValidatedAtMilliseconds == nil ||
+		current.InitialAuthorityManifestDigest == nil ||
+		len(current.InitialAuthorityManifestRecord) == 0 ||
 		revision == nil || *revision <= 0 ||
 		manifestDigest == nil || len(manifestRecord) == 0 || activeDeploymentID == nil {
 		return DeviceSyncScopeEnforcement{}, errors.New(
@@ -2034,7 +2101,7 @@ func loadDeviceSyncScopeEnforcement(
 	}
 	current.Authority = &authority
 	initialManifest, err := decodeCanonicalDeviceSyncAuthorityManifest(
-		initialAuthorityManifestRecord,
+		current.InitialAuthorityManifestRecord,
 	)
 	if err != nil {
 		return DeviceSyncScopeEnforcement{}, err
@@ -2042,13 +2109,13 @@ func loadDeviceSyncScopeEnforcement(
 	initialPayload, err := initialManifest.VerifiedPayload()
 	initialDigest, digestErr := initialManifest.ReferenceDigest()
 	if err != nil || digestErr != nil ||
-		*initialAuthorityValidatedAtMilliseconds < 0 ||
-		initialPayload.Validate(initialAuthorityValidatedAtMilliseconds) != nil ||
+		*current.InitialAuthorityValidatedAtMilliseconds < 0 ||
+		initialPayload.Validate(current.InitialAuthorityValidatedAtMilliseconds) != nil ||
 		initialPayload.Scope.Kind != serviceauthority.ScopeDeviceSync ||
 		initialPayload.Scope.ScopeID != principalID || initialPayload.Revision != 1 ||
 		initialPayload.Transition != serviceauthority.TransitionInitialActivation ||
-		initialPayload.ActiveDeployment.DeploymentID != *initialDeploymentID ||
-		initialDigest != *initialAuthorityManifestDigest {
+		initialPayload.ActiveDeployment.DeploymentID != *current.InitialDeploymentID ||
+		initialDigest != *current.InitialAuthorityManifestDigest {
 		return DeviceSyncScopeEnforcement{}, errors.New(
 			"stored Device Sync initial authority is inconsistent",
 		)
@@ -2056,13 +2123,17 @@ func loadDeviceSyncScopeEnforcement(
 	localMatchesActive := *current.LocalDeploymentID == authority.ActiveDeploymentID
 	preparedTargetStandby := current.State == DeviceSyncScopeStandby &&
 		!localMatchesActive && current.ActiveMigrationImportID != nil
+	preparedRollbackStandby := current.State == DeviceSyncScopeRollbackStandby &&
+		!localMatchesActive && current.ActiveRollbackImportID != nil
 	if current.State == DeviceSyncScopeStandby && !localMatchesActive &&
 		!preparedTargetStandby ||
+		current.State == DeviceSyncScopeRollbackStandby && !preparedRollbackStandby ||
 		(current.State == DeviceSyncScopeWritable ||
 			current.State == DeviceSyncScopeExportFenced) && !localMatchesActive ||
 		((current.State == DeviceSyncScopeExportFenced) !=
 			(current.ActiveExportWriteFenceID != nil)) ||
-		!preparedTargetStandby && current.ActiveMigrationImportID != nil {
+		!preparedTargetStandby && current.ActiveMigrationImportID != nil ||
+		!preparedRollbackStandby && current.ActiveRollbackImportID != nil {
 		return DeviceSyncScopeEnforcement{}, errors.New(
 			"stored Device Sync deployment or export fence state is inconsistent",
 		)
@@ -2081,18 +2152,43 @@ func loadDeviceSyncScopeEnforcement(
 			authority.TransitionEvidenceDigest == nil ||
 			imported.PreparationReferenceDigest !=
 				*authority.TransitionEvidenceDigest ||
-			imported.InitialDeploymentID != *initialDeploymentID ||
+			imported.InitialDeploymentID != *current.InitialDeploymentID ||
 			imported.InitialAuthorityValidatedAtMilliseconds !=
-				*initialAuthorityValidatedAtMilliseconds ||
+				*current.InitialAuthorityValidatedAtMilliseconds ||
 			imported.InitialAuthorityManifestDigest !=
-				*initialAuthorityManifestDigest ||
+				*current.InitialAuthorityManifestDigest ||
 			!bytes.Equal(
 				imported.InitialAuthorityManifestRecord,
-				initialAuthorityManifestRecord,
+				current.InitialAuthorityManifestRecord,
 			) ||
 			!bytes.Equal(imported.PreparationManifestRecord, manifestRecord) {
 			return DeviceSyncScopeEnforcement{}, errors.New(
 				"stored Device Sync prepared-target standby lacks exact import evidence",
+			)
+		}
+	}
+	if preparedRollbackStandby {
+		imported, found, err := loadDeviceSyncMigrationRollbackImport(
+			ctx, querier, principalID, *current.ActiveRollbackImportID,
+			*current.LocalDeploymentID, "",
+		)
+		if err != nil {
+			return DeviceSyncScopeEnforcement{}, err
+		}
+		if !found || imported.ExportingDeploymentID != authority.ActiveDeploymentID ||
+			imported.AuthorityRevision != authority.Revision ||
+			imported.AuthorityManifestDigest != authority.ManifestDigest ||
+			imported.InitialDeploymentID != *current.InitialDeploymentID ||
+			imported.InitialAuthorityValidatedAtMilliseconds !=
+				*current.InitialAuthorityValidatedAtMilliseconds ||
+			imported.InitialAuthorityManifestDigest !=
+				*current.InitialAuthorityManifestDigest ||
+			!bytes.Equal(
+				imported.InitialAuthorityManifestRecord,
+				current.InitialAuthorityManifestRecord,
+			) {
+			return DeviceSyncScopeEnforcement{}, errors.New(
+				"stored Device Sync rollback standby lacks exact import evidence",
 			)
 		}
 	}
@@ -2527,8 +2623,19 @@ func cloneDeviceSyncScopeEnforcement(
 ) DeviceSyncScopeEnforcement {
 	cloned := value
 	cloned.LocalDeploymentID = cloneUUIDPointer(value.LocalDeploymentID)
+	cloned.InitialDeploymentID = cloneUUIDPointer(value.InitialDeploymentID)
+	cloned.InitialAuthorityValidatedAtMilliseconds = cloneInt64Pointer(
+		value.InitialAuthorityValidatedAtMilliseconds,
+	)
+	cloned.InitialAuthorityManifestDigest = cloneStringPointer(
+		value.InitialAuthorityManifestDigest,
+	)
+	cloned.InitialAuthorityManifestRecord = append(
+		[]byte(nil), value.InitialAuthorityManifestRecord...,
+	)
 	cloned.ActiveExportWriteFenceID = cloneUUIDPointer(value.ActiveExportWriteFenceID)
 	cloned.ActiveMigrationImportID = cloneUUIDPointer(value.ActiveMigrationImportID)
+	cloned.ActiveRollbackImportID = cloneUUIDPointer(value.ActiveRollbackImportID)
 	if value.Authority != nil {
 		authority := *value.Authority
 		authority.ManifestRecord = append([]byte(nil), value.Authority.ManifestRecord...)
@@ -2557,6 +2664,14 @@ func cloneStringPointer(value *string) *string {
 }
 
 func cloneUUIDPointer(value *uuid.UUID) *uuid.UUID {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneInt64Pointer(value *int64) *int64 {
 	if value == nil {
 		return nil
 	}

@@ -6,7 +6,10 @@ CREATE TABLE device_sync_scope_enforcement (
     tenant_id uuid NOT NULL UNIQUE,
     initial_claim_transaction_id xid8 NOT NULL,
     state text NOT NULL CHECK (
-        state IN ('standby', 'writable', 'export_fenced', 'retired')
+        state IN (
+            'standby', 'writable', 'export_fenced',
+            'rollback_standby', 'retired'
+        )
     ),
     local_deployment_id uuid,
     initial_deployment_id uuid,
@@ -39,6 +42,7 @@ CREATE TABLE device_sync_scope_enforcement (
     ),
     active_export_write_fence_id uuid,
     active_migration_import_id uuid,
+    active_rollback_import_id uuid,
     stored_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (principal_id, tenant_id),
@@ -69,7 +73,8 @@ CREATE TABLE device_sync_scope_enforcement (
             authority_manifest_record IS NOT NULL AND active_deployment_id IS NOT NULL)
     ),
     CHECK (
-        (state = 'standby' AND active_export_write_fence_id IS NULL AND (
+        (state = 'standby' AND active_export_write_fence_id IS NULL AND
+            active_rollback_import_id IS NULL AND (
             (local_deployment_id IS NULL AND authority_revision IS NULL AND
                 active_migration_import_id IS NULL) OR
             (local_deployment_id = active_deployment_id AND
@@ -81,12 +86,17 @@ CREATE TABLE device_sync_scope_enforcement (
         )) OR
         (state = 'writable' AND local_deployment_id = active_deployment_id AND
             authority_revision IS NOT NULL AND active_export_write_fence_id IS NULL AND
-            active_migration_import_id IS NULL) OR
+            active_migration_import_id IS NULL AND active_rollback_import_id IS NULL) OR
         (state = 'export_fenced' AND local_deployment_id = active_deployment_id AND
             authority_revision IS NOT NULL AND active_export_write_fence_id IS NOT NULL AND
-            active_migration_import_id IS NULL) OR
+            active_migration_import_id IS NULL AND active_rollback_import_id IS NULL) OR
+        (state = 'rollback_standby' AND
+            local_deployment_id <> active_deployment_id AND
+            authority_revision IS NOT NULL AND active_export_write_fence_id IS NULL AND
+            active_migration_import_id IS NULL AND active_rollback_import_id IS NOT NULL) OR
         (state = 'retired' AND authority_revision IS NOT NULL AND
-            active_export_write_fence_id IS NULL AND active_migration_import_id IS NULL)
+            active_export_write_fence_id IS NULL AND active_migration_import_id IS NULL AND
+            active_rollback_import_id IS NULL)
     )
 );
 
@@ -246,11 +256,141 @@ CREATE TABLE device_sync_migration_imports (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+-- Reverse import evidence is deliberately distinct from a fresh target
+-- preparation. It binds the activation-authorized target-to-source snapshot
+-- that replaced the retired source's stale semantic rows while the target
+-- remained authoritative. The source stays non-writable until a complete
+-- rollback successor is installed.
+CREATE TABLE device_sync_migration_rollback_imports (
+    principal_id uuid NOT NULL,
+    tenant_id uuid NOT NULL,
+    migration_id uuid NOT NULL,
+    snapshot_id uuid NOT NULL,
+    export_write_fence_id uuid NOT NULL,
+    authority_revision bigint NOT NULL CHECK (authority_revision > 0),
+    authority_manifest_digest text NOT NULL CHECK (
+        authority_manifest_digest ~ '^[0-9a-f]{64}$'
+    ),
+    activation_evidence_digest text NOT NULL CHECK (
+        activation_evidence_digest ~ '^[0-9a-f]{64}$'
+    ),
+    exporting_deployment_id uuid NOT NULL,
+    importing_deployment_id uuid NOT NULL,
+    canonical_activation_evidence_record bytea NOT NULL CHECK (
+        octet_length(canonical_activation_evidence_record) > 0 AND
+        octet_length(canonical_activation_evidence_record) <= 8388608
+    ),
+    activation_evidence_record_sha256 text NOT NULL CHECK (
+        activation_evidence_record_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    canonical_snapshot_record bytea NOT NULL CHECK (
+        octet_length(canonical_snapshot_record) > 0 AND
+        octet_length(canonical_snapshot_record) <= 8388608
+    ),
+    snapshot_record_sha256 text NOT NULL CHECK (
+        snapshot_record_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    snapshot_reference_digest text NOT NULL CHECK (
+        snapshot_reference_digest ~ '^[0-9a-f]{64}$'
+    ),
+    snapshot_payload_sha256 text NOT NULL CHECK (
+        snapshot_payload_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    state_commitment_digest text NOT NULL CHECK (
+        state_commitment_digest ~ '^[0-9a-f]{64}$'
+    ),
+    canonical_artifact_descriptors bytea NOT NULL CHECK (
+        octet_length(canonical_artifact_descriptors) > 0 AND
+        octet_length(canonical_artifact_descriptors) <= 262144
+    ),
+    artifact_descriptors_sha256 text NOT NULL CHECK (
+        artifact_descriptors_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    artifact_count integer NOT NULL CHECK (artifact_count > 0),
+    service_state_artifact_id uuid NOT NULL,
+    service_state_artifact_byte_count bigint NOT NULL CHECK (
+        service_state_artifact_byte_count >= 0
+    ),
+    service_state_artifact_transfer_digest text NOT NULL CHECK (
+        service_state_artifact_transfer_digest ~ '^[0-9a-f]{64}$'
+    ),
+    captured_at_milliseconds bigint NOT NULL CHECK (
+        captured_at_milliseconds >= 0
+    ),
+    expires_at_milliseconds bigint NOT NULL CHECK (
+        expires_at_milliseconds > captured_at_milliseconds
+    ),
+    imported_at_milliseconds bigint NOT NULL CHECK (
+        imported_at_milliseconds >= captured_at_milliseconds AND
+        imported_at_milliseconds < expires_at_milliseconds
+    ),
+    initial_deployment_id uuid NOT NULL,
+    initial_authority_validated_at_milliseconds bigint NOT NULL CHECK (
+        initial_authority_validated_at_milliseconds >= 0
+    ),
+    initial_authority_manifest_digest text NOT NULL CHECK (
+        initial_authority_manifest_digest ~ '^[0-9a-f]{64}$'
+    ),
+    initial_authority_manifest_record bytea NOT NULL CHECK (
+        octet_length(initial_authority_manifest_record) > 0 AND
+        octet_length(initial_authority_manifest_record) <= 1048576
+    ),
+	import_transaction_id xid8 NOT NULL,
+    stored_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (principal_id, migration_id, importing_deployment_id),
+    UNIQUE (principal_id, snapshot_id, importing_deployment_id),
+    UNIQUE (
+        principal_id, tenant_id, migration_id, importing_deployment_id,
+        exporting_deployment_id, authority_revision, authority_manifest_digest,
+        activation_evidence_digest, initial_deployment_id,
+        initial_authority_validated_at_milliseconds,
+        initial_authority_manifest_digest
+    ),
+    CHECK (principal_id = tenant_id),
+    CHECK (exporting_deployment_id <> importing_deployment_id),
+    FOREIGN KEY (principal_id, tenant_id)
+        REFERENCES device_sync_scope_enforcement(principal_id, tenant_id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE FUNCTION bind_device_sync_rollback_import_transaction()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.import_transaction_id := pg_current_xact_id();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER device_sync_rollback_import_transaction_is_bound
+BEFORE INSERT ON device_sync_migration_rollback_imports
+FOR EACH ROW
+EXECUTE FUNCTION bind_device_sync_rollback_import_transaction();
+
 ALTER TABLE device_sync_scope_enforcement
     ADD CONSTRAINT device_sync_scope_enforcement_active_fence_fk
     FOREIGN KEY (principal_id, tenant_id, active_export_write_fence_id)
     REFERENCES device_sync_migration_exports(
         principal_id, tenant_id, export_write_fence_id
+    ) DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE device_sync_scope_enforcement
+    ADD CONSTRAINT device_sync_scope_enforcement_active_rollback_import_fk
+    FOREIGN KEY (
+        principal_id, tenant_id, active_rollback_import_id,
+        local_deployment_id, active_deployment_id,
+        authority_revision, authority_manifest_digest,
+        transition_evidence_digest, initial_deployment_id,
+        initial_authority_validated_at_milliseconds,
+        initial_authority_manifest_digest
+    ) REFERENCES device_sync_migration_rollback_imports (
+        principal_id, tenant_id, migration_id,
+        importing_deployment_id, exporting_deployment_id,
+        authority_revision, authority_manifest_digest,
+        activation_evidence_digest, initial_deployment_id,
+        initial_authority_validated_at_milliseconds,
+        initial_authority_manifest_digest
     ) DEFERRABLE INITIALLY DEFERRED;
 
 -- The composite reference makes the exceptional target standby shape exact at
@@ -395,6 +535,11 @@ BEFORE UPDATE OR DELETE ON device_sync_migration_imports
 FOR EACH ROW
 EXECUTE FUNCTION preserve_device_sync_migration_import();
 
+CREATE TRIGGER device_sync_migration_rollback_import_is_immutable
+BEFORE UPDATE OR DELETE ON device_sync_migration_rollback_imports
+FOR EACH ROW
+EXECUTE FUNCTION preserve_device_sync_migration_import();
+
 -- A Device Sync principal is permanent in this unreleased authority model.
 -- Rejecting the principal row deletion also rejects a relay-tenant deletion
 -- that would otherwise cascade through it, while relay tenants belonging only
@@ -449,14 +594,18 @@ AS $$
 DECLARE
     scope_state text;
     stored_initial_claim_transaction_id xid8;
+	active_rollback_import_id uuid;
+	rollback_import_transaction_id xid8;
     current_transaction_id xid8;
 BEGIN
     IF scope_id IS NULL THEN
         RETURN;
     END IF;
 
-    SELECT enforcement.state, enforcement.initial_claim_transaction_id
-    INTO scope_state, stored_initial_claim_transaction_id
+    SELECT enforcement.state, enforcement.initial_claim_transaction_id,
+		enforcement.active_rollback_import_id
+    INTO scope_state, stored_initial_claim_transaction_id,
+		active_rollback_import_id
     FROM device_sync_scope_enforcement AS enforcement
     WHERE enforcement.principal_id = scope_id
       AND enforcement.tenant_id = scope_id
@@ -477,6 +626,23 @@ BEGIN
         stored_initial_claim_transaction_id = current_transaction_id THEN
         RETURN;
     END IF;
+
+	-- A reverse import may replace semantic rows only in the transaction that
+	-- created the immutable evidence named by the non-writable standby. The
+	-- transaction identity is database-authored, so later callers cannot reuse
+	-- rollback_standby as a general mutation bypass.
+	IF scope_state = 'rollback_standby' AND
+		active_rollback_import_id IS NOT NULL THEN
+		SELECT import_transaction_id
+		INTO rollback_import_transaction_id
+		FROM device_sync_migration_rollback_imports
+		WHERE principal_id = scope_id
+		  AND tenant_id = scope_id
+		  AND migration_id = active_rollback_import_id;
+		IF FOUND AND rollback_import_transaction_id = current_transaction_id THEN
+			RETURN;
+		END IF;
+	END IF;
 
     RAISE EXCEPTION
         'Device Sync scope % is not writable in this transaction',
@@ -528,7 +694,8 @@ BEGIN
           AND table_name NOT IN (
               'device_sync_scope_enforcement',
               'device_sync_migration_exports',
-              'device_sync_migration_imports'
+			  'device_sync_migration_imports',
+			  'device_sync_migration_rollback_imports'
           )
         GROUP BY table_name
         ORDER BY table_name

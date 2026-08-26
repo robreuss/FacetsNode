@@ -146,6 +146,93 @@ func MaterializeValidatedDeviceSyncMigrationState(
 	return nil
 }
 
+// MaterializeValidatedDeviceSyncMigrationRollbackState verifies a reverse
+// transfer and replaces the retired source's semantic rows exactly. The
+// caller owns the serializable transaction and must install non-writable
+// rollback-standby evidence before commit.
+func MaterializeValidatedDeviceSyncMigrationRollbackState(
+	ctx context.Context,
+	tx DeviceSyncMigrationStateImportTransaction,
+	validated serviceauthority.ValidatedMigrationRollbackTransfer,
+	staged DeviceSyncMigrationStagedArtifacts,
+) error {
+	principalID := validated.Snapshot.Scope.ScopeID
+	if validated.Snapshot.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		principalID == uuid.Nil || staged.ServiceState == nil || staged.BlobInventory == nil {
+		return serviceauthority.ErrInvalid
+	}
+	stateDescriptor, inventoryDescriptor, err :=
+		deviceSyncMigrationRequiredArtifactDescriptors(validated.Snapshot)
+	if err != nil {
+		return err
+	}
+	stateDigest, err := parseDeviceSyncMigrationDigest(stateDescriptor.TransferDigest)
+	if err != nil {
+		return err
+	}
+	inventoryDigest, err := parseDeviceSyncMigrationDigest(inventoryDescriptor.TransferDigest)
+	if err != nil {
+		return err
+	}
+	expectedCommitment := DeviceSyncMigrationStateCommitment(stateDigest, inventoryDigest)
+	if expectedCommitment.String() != validated.Snapshot.StateCommitmentDigest {
+		return errors.New("Device Sync rollback descriptors do not reproduce signed state commitment")
+	}
+	if err := verifyDeviceSyncMigrationStagedArtifact(
+		ctx, staged.ServiceState, stateDescriptor.ByteCount, stateDigest,
+	); err != nil {
+		return fmt.Errorf("verify Device Sync rollback service-state descriptor: %w", err)
+	}
+	if err := verifyDeviceSyncMigrationStagedArtifact(
+		ctx, staged.BlobInventory, inventoryDescriptor.ByteCount, inventoryDigest,
+	); err != nil {
+		return fmt.Errorf("verify Device Sync rollback blob-inventory descriptor: %w", err)
+	}
+	if err := ValidateDeviceSyncMigrationBlobInventory(
+		ctx, staged.BlobInventory, principalID, inventoryDigest,
+	); err != nil {
+		return fmt.Errorf("validate Device Sync rollback blob inventory: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "SAVEPOINT facets_device_sync_migration_rollback_materialize"); err != nil {
+		return fmt.Errorf("create Device Sync rollback materialization savepoint: %w", err)
+	}
+	rollback := func(cause error) error {
+		cleanupContext, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelCleanup()
+		_, rollbackErr := tx.Exec(cleanupContext, "ROLLBACK TO SAVEPOINT facets_device_sync_migration_rollback_materialize")
+		_, releaseErr := tx.Exec(cleanupContext, "RELEASE SAVEPOINT facets_device_sync_migration_rollback_materialize")
+		if rollbackErr != nil {
+			return errors.Join(cause, fmt.Errorf("rollback Device Sync rollback materialization: %w", rollbackErr))
+		}
+		if releaseErr != nil {
+			return errors.Join(cause, fmt.Errorf("release Device Sync rollback materialization rollback: %w", releaseErr))
+		}
+		return cause
+	}
+	if err := ReplaceDeviceSyncMigrationState(
+		ctx, tx, principalID, stateDigest, staged.ServiceState,
+	); err != nil {
+		return rollback(err)
+	}
+	reproduced, err := ExportDeviceSyncMigrationState(
+		ctx, tx, principalID, io.Discard, io.Discard,
+	)
+	if err != nil {
+		return rollback(fmt.Errorf("reproduce Device Sync rollback state: %w", err))
+	}
+	if reproduced.StateArtifactSHA256 != stateDigest ||
+		reproduced.StateArtifactByteCount != stateDescriptor.ByteCount ||
+		reproduced.BlobInventorySHA256 != inventoryDigest ||
+		reproduced.BlobInventoryByteCount != inventoryDescriptor.ByteCount ||
+		reproduced.StateCommitment != expectedCommitment {
+		return rollback(errors.New("materialized Device Sync rollback state does not reproduce signed artifact commitment"))
+	}
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT facets_device_sync_migration_rollback_materialize"); err != nil {
+		return fmt.Errorf("release Device Sync rollback materialization savepoint: %w", err)
+	}
+	return nil
+}
+
 func deviceSyncMigrationRequiredArtifactDescriptors(
 	snapshot serviceauthority.MigrationSnapshotPayload,
 ) (serviceauthority.MigrationArtifactDescriptor, serviceauthority.MigrationArtifactDescriptor, error) {

@@ -880,6 +880,153 @@ func InsertDeviceSyncMigrationState(
 	return nil
 }
 
+var deviceSyncMigrationReplacementRoots = map[string]struct{}{
+	"device_sync_account_admissions": {},
+	"relay_tenants":                  {},
+	"device_sync_principals":         {},
+}
+
+// ReplaceDeviceSyncMigrationState replaces one already-present principal's
+// semantic rows from an authenticated artifact. Deployment authority and
+// migration evidence are excluded by schema inventory and remain untouched.
+// Stable root identities are updated in place because their permanent rows
+// anchor the independent authority store; all other included rows are deleted
+// and reinserted inside one savepoint.
+func ReplaceDeviceSyncMigrationState(
+	ctx context.Context,
+	tx DeviceSyncMigrationStateImportTransaction,
+	expectedPrincipalID uuid.UUID,
+	expectedSHA256 DeviceSyncMigrationDigest,
+	source io.ReadSeeker,
+) (returnErr error) {
+	if err := verifyDeviceSyncMigrationTransferDigest(ctx, source, expectedSHA256); err != nil {
+		return err
+	}
+	if err := ValidateDeviceSyncMigrationStateSchema(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "SAVEPOINT facets_device_sync_migration_state_replace"); err != nil {
+		return fmt.Errorf("create Device Sync migration replacement savepoint: %w", err)
+	}
+	rollback := func(cause error) error {
+		cleanupContext, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelCleanup()
+		_, rollbackErr := tx.Exec(cleanupContext, "ROLLBACK TO SAVEPOINT facets_device_sync_migration_state_replace")
+		_, releaseErr := tx.Exec(cleanupContext, "RELEASE SAVEPOINT facets_device_sync_migration_state_replace")
+		if rollbackErr != nil {
+			return errors.Join(cause, fmt.Errorf("rollback Device Sync migration replacement: %w", rollbackErr))
+		}
+		if releaseErr != nil {
+			return errors.Join(cause, fmt.Errorf("release Device Sync migration replacement rollback: %w", releaseErr))
+		}
+		return cause
+	}
+	if _, err := tx.Exec(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
+		return rollback(fmt.Errorf("defer Device Sync migration replacement constraints: %w", err))
+	}
+	for index := len(deviceSyncMigrationTableSpecs) - 1; index >= 0; index-- {
+		spec := deviceSyncMigrationTableSpecs[index]
+		if _, preserved := deviceSyncMigrationReplacementRoots[spec.name]; preserved {
+			continue
+		}
+		tag, err := tx.Exec(
+			ctx,
+			"DELETE FROM "+quoteDeviceSyncMigrationIdentifier(spec.name)+
+				" WHERE "+deviceSyncMigrationScopePredicate(spec),
+			expectedPrincipalID,
+		)
+		if err != nil {
+			return rollback(fmt.Errorf("clear Device Sync migration table %s: %w", spec.name, err))
+		}
+		_ = tag
+	}
+
+	insertQueries := make(map[string]string, len(deviceSyncMigrationTableSpecs))
+	err := decodeDeviceSyncMigrationState(
+		ctx, source, expectedPrincipalID, expectedSHA256,
+		func(spec deviceSyncMigrationTableSpec, row []deviceSyncMigrationScalar) error {
+			if _, preserved := deviceSyncMigrationReplacementRoots[spec.name]; preserved {
+				return updateDeviceSyncMigrationReplacementRoot(ctx, tx, spec, row)
+			}
+			query, exists := insertQueries[spec.name]
+			if !exists {
+				query = deviceSyncMigrationInsertQuery(spec)
+				insertQueries[spec.name] = query
+			}
+			arguments := make([]any, 0, len(row))
+			for index, value := range row {
+				if !spec.columns[index].virtual {
+					arguments = append(arguments, deviceSyncMigrationScalarArgument(value))
+				}
+			}
+			tag, err := tx.Exec(ctx, query, arguments...)
+			if err != nil {
+				return fmt.Errorf("insert replacement Device Sync migration table %s: %w", spec.name, err)
+			}
+			if tag.RowsAffected() != 1 {
+				return fmt.Errorf("insert replacement Device Sync migration table %s affected %d rows", spec.name, tag.RowsAffected())
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return rollback(err)
+	}
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT facets_device_sync_migration_state_replace"); err != nil {
+		return fmt.Errorf("release Device Sync migration replacement savepoint: %w", err)
+	}
+	return nil
+}
+
+func updateDeviceSyncMigrationReplacementRoot(
+	ctx context.Context,
+	tx DeviceSyncMigrationStateImportTransaction,
+	spec deviceSyncMigrationTableSpec,
+	row []deviceSyncMigrationScalar,
+) error {
+	keyIndexes := make(map[int]struct{}, len(spec.keyColumnIndexes))
+	for _, index := range spec.keyColumnIndexes {
+		keyIndexes[index] = struct{}{}
+	}
+	sets := make([]string, 0, len(spec.columns))
+	conditions := make([]string, 0, len(spec.keyColumnIndexes))
+	arguments := make([]any, 0, len(spec.columns))
+	for index, column := range spec.columns {
+		if column.virtual {
+			continue
+		}
+		if _, key := keyIndexes[index]; key {
+			arguments = append(arguments, deviceSyncMigrationScalarArgument(row[index]))
+			conditions = append(conditions, fmt.Sprintf(
+				"%s IS NOT DISTINCT FROM $%d::%s",
+				quoteDeviceSyncMigrationIdentifier(column.name), len(arguments), column.databaseType,
+			))
+			continue
+		}
+		arguments = append(arguments, deviceSyncMigrationScalarArgument(row[index]))
+		sets = append(sets, fmt.Sprintf(
+			"%s=$%d::%s",
+			quoteDeviceSyncMigrationIdentifier(column.name), len(arguments), column.databaseType,
+		))
+	}
+	if len(sets) == 0 || len(conditions) == 0 {
+		return errors.New("Device Sync migration replacement root has no update surface")
+	}
+	tag, err := tx.Exec(
+		ctx,
+		"UPDATE "+quoteDeviceSyncMigrationIdentifier(spec.name)+" SET "+
+			strings.Join(sets, ",")+" WHERE "+strings.Join(conditions, " AND "),
+		arguments...,
+	)
+	if err != nil {
+		return fmt.Errorf("update Device Sync migration root %s: %w", spec.name, err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("Device Sync migration root %s identity changed or is missing", spec.name)
+	}
+	return nil
+}
+
 func verifyDeviceSyncMigrationTransferDigest(
 	ctx context.Context,
 	source io.ReadSeeker,

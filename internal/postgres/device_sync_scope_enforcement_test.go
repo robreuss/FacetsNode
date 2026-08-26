@@ -523,9 +523,10 @@ func TestDeviceSyncScopeEnforcementMigrationContainsHardConstraints(t *testing.T
 	}
 	text := string(contents)
 	required := []string{
-		"state IN ('standby', 'writable', 'export_fenced', 'retired')",
+		"'rollback_standby', 'retired'",
 		"local_deployment_id uuid",
 		"active_migration_import_id uuid",
+		"active_rollback_import_id uuid",
 		"initial_claim_transaction_id xid8 NOT NULL",
 		"device_sync_initial_claim_transaction_is_bound",
 		"initial_authority_validated_at_milliseconds bigint",
@@ -543,6 +544,13 @@ func TestDeviceSyncScopeEnforcementMigrationContainsHardConstraints(t *testing.T
 		"device_sync_scope_enforcement_active_import_fk",
 		"device_sync_migration_import_is_immutable",
 		"'device_sync_migration_imports'",
+		"CREATE TABLE device_sync_migration_rollback_imports",
+		"canonical_activation_evidence_record bytea NOT NULL",
+		"device_sync_scope_enforcement_active_rollback_import_fk",
+		"device_sync_migration_rollback_import_is_immutable",
+		"device_sync_rollback_import_transaction_is_bound",
+		"rollback_import_transaction_id = current_transaction_id",
+		"device_sync_migration_rollback_import_is_immutable",
 		"device_sync_principal_requires_enforcement",
 		"device_sync_principal_enforcement_is_permanent",
 		"scope enforcement row cannot be deleted",

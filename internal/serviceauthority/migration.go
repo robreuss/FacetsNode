@@ -1102,6 +1102,63 @@ type MigrationRollbackPrerequisites struct {
 	TargetSnapshot     MigrationSnapshot           `json:"targetSnapshot"`
 }
 
+// ValidatedMigrationRollbackTransfer is the authenticated target-to-source
+// snapshot that may be materialized on the retired source while activation
+// remains authoritative. Materialization alone never authorizes writes.
+type ValidatedMigrationRollbackTransfer struct {
+	ActivationManifest ManifestPayload          `json:"activationManifest"`
+	Migration          MigrationAuthority       `json:"migration"`
+	Snapshot           MigrationSnapshotPayload `json:"snapshot"`
+	SourceDeployment   DeploymentDescriptor     `json:"sourceDeployment"`
+}
+
+// ValidateRollbackTransfer authenticates the reverse snapshot independently
+// of readiness and the terminal rollback Manifest. This is the preparation
+// boundary used by the old source before it signs MigrationReadiness.
+func (snapshot MigrationSnapshot) ValidateRollbackTransfer(
+	activationEvidence MigrationActivationEvidence,
+	anchor TrustAnchor,
+	nowMilliseconds int64,
+) (ValidatedMigrationRollbackTransfer, error) {
+	activationPayload, err := activationEvidence.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		return ValidatedMigrationRollbackTransfer{}, ErrInvalid
+	}
+	if _, err := activationEvidence.Validate(
+		anchor, activationPayload.ValidFromMilliseconds,
+	); err != nil {
+		return ValidatedMigrationRollbackTransfer{}, ErrInvalid
+	}
+	current, err := activationEvidence.ActivationManifest.Authorize(
+		anchor, nowMilliseconds,
+	)
+	if err != nil || current.Transition != TransitionMigrationActivation ||
+		current.Migration == nil ||
+		current.Migration.RollbackUntilMilliseconds == nil ||
+		nowMilliseconds >= *current.Migration.RollbackUntilMilliseconds ||
+		len(current.PreparedDeployments) != 1 {
+		return ValidatedMigrationRollbackTransfer{}, ErrInvalid
+	}
+	source := current.PreparedDeployments[0]
+	validatedSnapshot, err := snapshot.validateTransfer(
+		activationEvidence.ActivationManifest,
+		current,
+		*current.Migration,
+		current.ActiveDeployment,
+		source,
+		nowMilliseconds,
+	)
+	if err != nil {
+		return ValidatedMigrationRollbackTransfer{}, ErrInvalid
+	}
+	return ValidatedMigrationRollbackTransfer{
+		ActivationManifest: current,
+		Migration:          *current.Migration,
+		Snapshot:           validatedSnapshot,
+		SourceDeployment:   source,
+	}, nil
+}
+
 func (prerequisites *MigrationRollbackPrerequisites) UnmarshalJSON(input []byte) error {
 	type wire MigrationRollbackPrerequisites
 	var decoded wire

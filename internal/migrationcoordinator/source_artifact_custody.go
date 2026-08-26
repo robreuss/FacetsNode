@@ -21,17 +21,18 @@ const (
 	sourceDraftCustodyVersion = 1
 	sourceDraftRootName       = "source-device-sync"
 	snapshotPayloadFileName   = "snapshot-payload.json"
+	authorityEvidenceFileName = "authority-evidence.json"
 )
 
 type sourceDeviceSyncDraftMetadata struct {
-	BlobInventoryArtifactID    uuid.UUID `json:"blobInventoryArtifactID"`
-	CanonicalPayloadSHA256     string    `json:"canonicalPayloadSHA256"`
-	MigrationID                uuid.UUID `json:"migrationID"`
-	PreparationReferenceDigest string    `json:"preparationReferenceDigest"`
-	PrincipalID                uuid.UUID `json:"principalID"`
-	ServiceStateArtifactID     uuid.UUID `json:"serviceStateArtifactID"`
-	SnapshotID                 uuid.UUID `json:"snapshotID"`
-	Version                    int       `json:"version"`
+	BlobInventoryArtifactID uuid.UUID `json:"blobInventoryArtifactID"`
+	CanonicalPayloadSHA256  string    `json:"canonicalPayloadSHA256"`
+	MigrationID             uuid.UUID `json:"migrationID"`
+	AuthorityEvidenceDigest string    `json:"authorityEvidenceDigest"`
+	PrincipalID             uuid.UUID `json:"principalID"`
+	ServiceStateArtifactID  uuid.UUID `json:"serviceStateArtifactID"`
+	SnapshotID              uuid.UUID `json:"snapshotID"`
+	Version                 int       `json:"version"`
 }
 
 type sourceDeviceSyncScratch struct {
@@ -122,6 +123,51 @@ func (custody *FileArtifactCustody) stageSourceDeviceSyncDraft(
 	serviceStatePath string,
 	blobInventoryPath string,
 ) (sourceDeviceSyncArtifactDraft, error) {
+	preparationDigest, err := preparation.ReferenceDigest()
+	if err != nil {
+		return sourceDeviceSyncArtifactDraft{}, err
+	}
+	preparationRecord, err := json.Marshal(preparation)
+	if err != nil {
+		return sourceDeviceSyncArtifactDraft{}, err
+	}
+	return custody.stageSourceDeviceSyncDraftEvidence(
+		ctx, preparationRecord, preparationDigest, payload, canonicalPayload,
+		serviceStatePath, blobInventoryPath,
+	)
+}
+
+func (custody *FileArtifactCustody) stageSourceDeviceSyncRollbackDraft(
+	ctx context.Context,
+	activation serviceauthority.MigrationActivationEvidence,
+	payload serviceauthority.MigrationSnapshotPayload,
+	canonicalPayload []byte,
+	serviceStatePath string,
+	blobInventoryPath string,
+) (sourceDeviceSyncArtifactDraft, error) {
+	activationDigest, err := activation.ReferenceDigest()
+	if err != nil {
+		return sourceDeviceSyncArtifactDraft{}, err
+	}
+	activationRecord, err := json.Marshal(activation)
+	if err != nil {
+		return sourceDeviceSyncArtifactDraft{}, err
+	}
+	return custody.stageSourceDeviceSyncDraftEvidence(
+		ctx, activationRecord, activationDigest, payload, canonicalPayload,
+		serviceStatePath, blobInventoryPath,
+	)
+}
+
+func (custody *FileArtifactCustody) stageSourceDeviceSyncDraftEvidence(
+	ctx context.Context,
+	authorityEvidenceRecord []byte,
+	authorityEvidenceDigest string,
+	payload serviceauthority.MigrationSnapshotPayload,
+	canonicalPayload []byte,
+	serviceStatePath string,
+	blobInventoryPath string,
+) (sourceDeviceSyncArtifactDraft, error) {
 	if custody == nil || ctx == nil || serviceStatePath == "" || blobInventoryPath == "" ||
 		payload.Scope.Kind != serviceauthority.ScopeDeviceSync || payload.Validate(nil) != nil {
 		return sourceDeviceSyncArtifactDraft{}, serviceauthority.ErrInvalid
@@ -134,15 +180,11 @@ func (custody *FileArtifactCustody) stageSourceDeviceSyncDraft(
 	if err != nil {
 		return sourceDeviceSyncArtifactDraft{}, err
 	}
-	preparationDigest, err := preparation.ReferenceDigest()
-	if err != nil {
-		return sourceDeviceSyncArtifactDraft{}, err
-	}
 	payloadDigest := sha256.Sum256(canonicalPayload)
 	metadata := sourceDeviceSyncDraftMetadata{
 		BlobInventoryArtifactID: inventoryDescriptor.ArtifactID,
 		CanonicalPayloadSHA256:  hex.EncodeToString(payloadDigest[:]),
-		MigrationID:             payload.MigrationID, PreparationReferenceDigest: preparationDigest,
+		MigrationID:             payload.MigrationID, AuthorityEvidenceDigest: authorityEvidenceDigest,
 		PrincipalID: payload.Scope.ScopeID, ServiceStateArtifactID: stateDescriptor.ArtifactID,
 		SnapshotID: payload.SnapshotID, Version: sourceDraftCustodyVersion,
 	}
@@ -152,10 +194,6 @@ func (custody *FileArtifactCustody) stageSourceDeviceSyncDraft(
 	draft := sourceDeviceSyncArtifactDraft{
 		directory: custody.sourceDraftDirectory(metadata), metadata: metadata,
 		serviceStateDescriptor: stateDescriptor, blobInventoryDescriptor: inventoryDescriptor,
-	}
-	preparationRecord, err := json.Marshal(preparation)
-	if err != nil {
-		return sourceDeviceSyncArtifactDraft{}, err
 	}
 	metadataRecord, err := json.Marshal(metadata)
 	if err != nil {
@@ -176,7 +214,7 @@ func (custody *FileArtifactCustody) stageSourceDeviceSyncDraft(
 	custody.mu.Lock()
 	defer custody.mu.Unlock()
 	if found, err := verifySourceDraftDirectory(
-		ctx, draft, preparationRecord, canonicalPayload, metadataRecord,
+		ctx, draft, authorityEvidenceRecord, canonicalPayload, metadataRecord,
 	); found || err != nil {
 		return draft, err
 	}
@@ -202,9 +240,9 @@ func (custody *FileArtifactCustody) stageSourceDeviceSyncDraft(
 		return sourceDeviceSyncArtifactDraft{}, err
 	}
 	for name, value := range map[string][]byte{
-		preparationFileName:     preparationRecord,
-		snapshotPayloadFileName: canonicalPayload,
-		metadataFileName:        metadataRecord,
+		authorityEvidenceFileName: authorityEvidenceRecord,
+		snapshotPayloadFileName:   canonicalPayload,
+		metadataFileName:          metadataRecord,
 	} {
 		if len(value) > maximumEvidenceByteCount {
 			return sourceDeviceSyncArtifactDraft{}, errors.New("Device Sync source draft evidence is too large")
@@ -235,6 +273,45 @@ func (custody *FileArtifactCustody) openSourceDeviceSyncDraft(
 	payload serviceauthority.MigrationSnapshotPayload,
 	canonicalPayload []byte,
 ) (sourceDeviceSyncArtifactDraft, error) {
+	preparationDigest, err := preparation.ReferenceDigest()
+	if err != nil {
+		return sourceDeviceSyncArtifactDraft{}, err
+	}
+	preparationRecord, err := json.Marshal(preparation)
+	if err != nil {
+		return sourceDeviceSyncArtifactDraft{}, err
+	}
+	return custody.openSourceDeviceSyncDraftEvidence(
+		ctx, preparationRecord, preparationDigest, payload, canonicalPayload,
+	)
+}
+
+func (custody *FileArtifactCustody) openSourceDeviceSyncRollbackDraft(
+	ctx context.Context,
+	activation serviceauthority.MigrationActivationEvidence,
+	payload serviceauthority.MigrationSnapshotPayload,
+	canonicalPayload []byte,
+) (sourceDeviceSyncArtifactDraft, error) {
+	activationDigest, err := activation.ReferenceDigest()
+	if err != nil {
+		return sourceDeviceSyncArtifactDraft{}, err
+	}
+	activationRecord, err := json.Marshal(activation)
+	if err != nil {
+		return sourceDeviceSyncArtifactDraft{}, err
+	}
+	return custody.openSourceDeviceSyncDraftEvidence(
+		ctx, activationRecord, activationDigest, payload, canonicalPayload,
+	)
+}
+
+func (custody *FileArtifactCustody) openSourceDeviceSyncDraftEvidence(
+	ctx context.Context,
+	authorityEvidenceRecord []byte,
+	authorityEvidenceDigest string,
+	payload serviceauthority.MigrationSnapshotPayload,
+	canonicalPayload []byte,
+) (sourceDeviceSyncArtifactDraft, error) {
 	if custody == nil || ctx == nil || payload.Validate(nil) != nil {
 		return sourceDeviceSyncArtifactDraft{}, serviceauthority.ErrInvalid
 	}
@@ -242,25 +319,17 @@ func (custody *FileArtifactCustody) openSourceDeviceSyncDraft(
 	if err != nil {
 		return sourceDeviceSyncArtifactDraft{}, err
 	}
-	preparationDigest, err := preparation.ReferenceDigest()
-	if err != nil {
-		return sourceDeviceSyncArtifactDraft{}, err
-	}
 	payloadDigest := sha256.Sum256(canonicalPayload)
 	metadata := sourceDeviceSyncDraftMetadata{
 		BlobInventoryArtifactID: inventoryDescriptor.ArtifactID,
 		CanonicalPayloadSHA256:  hex.EncodeToString(payloadDigest[:]),
-		MigrationID:             payload.MigrationID, PreparationReferenceDigest: preparationDigest,
+		MigrationID:             payload.MigrationID, AuthorityEvidenceDigest: authorityEvidenceDigest,
 		PrincipalID: payload.Scope.ScopeID, ServiceStateArtifactID: stateDescriptor.ArtifactID,
 		SnapshotID: payload.SnapshotID, Version: sourceDraftCustodyVersion,
 	}
 	draft := sourceDeviceSyncArtifactDraft{
 		directory: custody.sourceDraftDirectory(metadata), metadata: metadata,
 		serviceStateDescriptor: stateDescriptor, blobInventoryDescriptor: inventoryDescriptor,
-	}
-	preparationRecord, err := json.Marshal(preparation)
-	if err != nil {
-		return sourceDeviceSyncArtifactDraft{}, err
 	}
 	metadataRecord, err := json.Marshal(metadata)
 	if err != nil {
@@ -269,7 +338,7 @@ func (custody *FileArtifactCustody) openSourceDeviceSyncDraft(
 	custody.mu.Lock()
 	defer custody.mu.Unlock()
 	found, err := verifySourceDraftDirectory(
-		ctx, draft, preparationRecord, canonicalPayload, metadataRecord,
+		ctx, draft, authorityEvidenceRecord, canonicalPayload, metadataRecord,
 	)
 	if err != nil {
 		return sourceDeviceSyncArtifactDraft{}, err
@@ -318,6 +387,44 @@ func (custody *FileArtifactCustody) promoteSourceDeviceSyncDraft(
 	return transfer, nil
 }
 
+func (custody *FileArtifactCustody) promoteSourceDeviceSyncRollbackDraft(
+	ctx context.Context,
+	draft sourceDeviceSyncArtifactDraft,
+	validated serviceauthority.ValidatedMigrationRollbackTransfer,
+	activation serviceauthority.MigrationActivationEvidence,
+	snapshot serviceauthority.MigrationSnapshot,
+) (PreparedDeviceSyncTransfer, error) {
+	if draft.metadata.PrincipalID != validated.Snapshot.Scope.ScopeID ||
+		draft.metadata.MigrationID != validated.Snapshot.MigrationID ||
+		draft.metadata.SnapshotID != validated.Snapshot.SnapshotID {
+		return PreparedDeviceSyncTransfer{}, serviceauthority.ErrInvalid
+	}
+	state, err := openProtectedArtifact(
+		filepath.Join(draft.directory, serviceStateFileName), draft.serviceStateDescriptor,
+	)
+	if err != nil {
+		return PreparedDeviceSyncTransfer{}, err
+	}
+	inventory, err := openProtectedArtifact(
+		filepath.Join(draft.directory, blobInventoryFileName), draft.blobInventoryDescriptor,
+	)
+	if err != nil {
+		_ = state.Close()
+		return PreparedDeviceSyncTransfer{}, err
+	}
+	transfer, stageErr := custody.stagePreparedDeviceSyncRollbackTransfer(
+		ctx, validated, activation, snapshot, state, inventory,
+	)
+	closeErr := errors.Join(state.Close(), inventory.Close())
+	if stageErr != nil || closeErr != nil {
+		return PreparedDeviceSyncTransfer{}, errors.Join(stageErr, closeErr)
+	}
+	if err := custody.removeSourceDraft(draft); err != nil {
+		return PreparedDeviceSyncTransfer{}, err
+	}
+	return transfer, nil
+}
+
 func (custody *FileArtifactCustody) sourceDraftDirectory(
 	metadata sourceDeviceSyncDraftMetadata,
 ) string {
@@ -349,7 +456,7 @@ func (custody *FileArtifactCustody) removeSourceDraft(draft sourceDeviceSyncArti
 func verifySourceDraftDirectory(
 	ctx context.Context,
 	draft sourceDeviceSyncArtifactDraft,
-	preparationRecord []byte,
+	authorityEvidenceRecord []byte,
 	canonicalPayload []byte,
 	metadataRecord []byte,
 ) (bool, error) {
@@ -361,9 +468,9 @@ func verifySourceDraftDirectory(
 		return true, errors.New("existing Device Sync source draft directory is unsafe")
 	}
 	for name, expected := range map[string][]byte{
-		preparationFileName:     preparationRecord,
-		snapshotPayloadFileName: canonicalPayload,
-		metadataFileName:        metadataRecord,
+		authorityEvidenceFileName: authorityEvidenceRecord,
+		snapshotPayloadFileName:   canonicalPayload,
+		metadataFileName:          metadataRecord,
 	} {
 		actual, err := readProtectedRecord(filepath.Join(draft.directory, name), maximumEvidenceByteCount)
 		if err != nil || !bytes.Equal(actual, expected) {
@@ -397,11 +504,11 @@ func validateSourceDraftMetadata(metadata sourceDeviceSyncDraftMetadata) error {
 		metadata.ServiceStateArtifactID == uuid.Nil || metadata.BlobInventoryArtifactID == uuid.Nil ||
 		metadata.ServiceStateArtifactID == metadata.BlobInventoryArtifactID ||
 		len(metadata.CanonicalPayloadSHA256) != sha256.Size*2 ||
-		len(metadata.PreparationReferenceDigest) != sha256.Size*2 {
+		len(metadata.AuthorityEvidenceDigest) != sha256.Size*2 {
 		return serviceauthority.ErrInvalid
 	}
 	for _, digest := range []string{
-		metadata.CanonicalPayloadSHA256, metadata.PreparationReferenceDigest,
+		metadata.CanonicalPayloadSHA256, metadata.AuthorityEvidenceDigest,
 	} {
 		decoded, err := hex.DecodeString(digest)
 		if err != nil || hex.EncodeToString(decoded) != digest {

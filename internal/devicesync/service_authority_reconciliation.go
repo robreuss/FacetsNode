@@ -18,16 +18,18 @@ import (
 type ServiceAuthorityWriteState string
 
 const (
-	ServiceAuthorityStandby      ServiceAuthorityWriteState = "standby"
-	ServiceAuthorityWritable     ServiceAuthorityWriteState = "writable"
-	ServiceAuthorityExportFenced ServiceAuthorityWriteState = "export_fenced"
-	ServiceAuthorityRetired      ServiceAuthorityWriteState = "retired"
+	ServiceAuthorityStandby         ServiceAuthorityWriteState = "standby"
+	ServiceAuthorityWritable        ServiceAuthorityWriteState = "writable"
+	ServiceAuthorityExportFenced    ServiceAuthorityWriteState = "export_fenced"
+	ServiceAuthorityRollbackStandby ServiceAuthorityWriteState = "rollback_standby"
+	ServiceAuthorityRetired         ServiceAuthorityWriteState = "retired"
 )
 
 func (state ServiceAuthorityWriteState) Valid() bool {
 	return state == ServiceAuthorityStandby ||
 		state == ServiceAuthorityWritable ||
 		state == ServiceAuthorityExportFenced ||
+		state == ServiceAuthorityRollbackStandby ||
 		state == ServiceAuthorityRetired
 }
 

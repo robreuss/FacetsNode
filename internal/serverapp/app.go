@@ -233,6 +233,27 @@ func Main(service config.Service) {
 					"scope_count", len(cancelled),
 				)
 			}
+			rollbackCoordinator := migrationcoordinator.DeviceSyncRollbackCoordinator{
+				Store: relayStore, Custody: migrationCustody,
+				Bindings: bindings, Signer: deploymentSigner,
+			}
+			rolledBack, err := rollbackCoordinator.Recover(
+				startupContext,
+				time.Now(),
+			)
+			if err != nil {
+				logger.Error(
+					"Device Sync migration rollback recovery rejected",
+					"error", err,
+				)
+				os.Exit(1)
+			}
+			if len(rolledBack) != 0 {
+				logger.Info(
+					"Device Sync migration rollback recovery completed",
+					"scope_count", len(rolledBack),
+				)
+			}
 			retirementCoordinator := migrationcoordinator.DeviceSyncRetirementCoordinator{
 				Store: relayStore, Custody: migrationCustody,
 				Bindings: bindings, Signer: deploymentSigner,
