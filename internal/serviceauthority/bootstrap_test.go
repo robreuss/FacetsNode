@@ -97,6 +97,39 @@ func TestInitialEnrollmentRejectsPolicyNotAuthenticatedByOffer(t *testing.T) {
 	}
 }
 
+func TestInitialBindingPreservesExactServiceScopeAcrossKinds(t *testing.T) {
+	fixture := newBootstrapFixture(t)
+	fixture.scope = Scope{
+		Kind:    ScopeSharedSpace,
+		ScopeID: uuid.MustParse("65000000-0000-0000-0000-000000000001"),
+	}
+	fixture.anchor.Scope = fixture.scope
+	offer, err := fixture.deploymentSigner.SignDeploymentOffer(fixture.offerPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment := InitialEnrollment{
+		Anchor:          fixture.anchor,
+		DeploymentOffer: offer,
+		Manifest:        fixture.signedManifest(t, fixture.policy),
+		Version:         SchemaVersion,
+	}
+	binding, err := NewInitialBinding(
+		enrollment, fixture.deploymentSigner, fixture.scope, 1_100,
+	)
+	if err != nil || binding.Validate() != nil || binding.Scope() != fixture.scope ||
+		binding.RequireFreshClaimAt(1_100) != nil {
+		t.Fatalf("Shared Space initial binding=%+v err=%v", binding, err)
+	}
+	wrongScope := fixture.scope
+	wrongScope.Kind = ScopeDeviceSync
+	if _, err := NewInitialBinding(
+		enrollment, fixture.deploymentSigner, wrongScope, 1_100,
+	); err == nil {
+		t.Fatal("Shared Space enrollment accepted as Device Sync authority")
+	}
+}
+
 func TestBootstrapProofBindsOfferScopeRouteAndLiveDeploymentKey(t *testing.T) {
 	fixture := newBootstrapFixture(t)
 	offer, err := fixture.deploymentSigner.SignDeploymentOffer(fixture.offerPayload)
