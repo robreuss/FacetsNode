@@ -233,6 +233,27 @@ func Main(service config.Service) {
 					"scope_count", len(cancelled),
 				)
 			}
+			retirementCoordinator := migrationcoordinator.DeviceSyncRetirementCoordinator{
+				Store: relayStore, Custody: migrationCustody,
+				Bindings: bindings, Signer: deploymentSigner,
+			}
+			retired, err := retirementCoordinator.Recover(
+				startupContext,
+				time.Now(),
+			)
+			if err != nil {
+				logger.Error(
+					"Device Sync migration retirement recovery rejected",
+					"error", err,
+				)
+				os.Exit(1)
+			}
+			if len(retired) != 0 {
+				logger.Info(
+					"Device Sync migration retirement recovery completed",
+					"scope_count", len(retired),
+				)
+			}
 			if err := reconcileDeviceSyncServiceAuthority(
 				startupContext,
 				relayStore,

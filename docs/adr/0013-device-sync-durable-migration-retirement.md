@@ -35,9 +35,17 @@ changed evidence, or a non-exact activation predecessor fails closed.
 
 ## Orchestration boundary
 
-This checkpoint does not yet add a retirement acceptance journal, startup
-recovery, route, operator command, or two-host workflow. Those are required
-before retirement is production-reachable. The portable fixture and headless
-tests prove contract and local transition behavior only. PostgreSQL integration
-still requires a disposable `FACETS_SERVER_TEST_DATABASE_URL`; an unset gate is
-a skip rather than runtime evidence.
+The headless coordinator writes and syncs a private deployment-signed live
+acceptance before advancing BindingRegistry and then PostgreSQL. Startup scans
+pending journals before general authority readiness and completes exact retries
+at the signed acceptance instant. Completed retirement journals remain a repair
+seam while their revision is current, closing the race where a reverse export
+began before retirement but committed a non-writable database fence afterward;
+a later authority revision supersedes the historical journal.
+
+This checkpoint still adds no route, operator command, or two-host workflow.
+Those are required before retirement is production-reachable. The portable
+fixture and headless tests prove contract and local transition behavior only.
+PostgreSQL integration still requires a disposable
+`FACETS_SERVER_TEST_DATABASE_URL`; an unset gate is a skip rather than runtime
+evidence.

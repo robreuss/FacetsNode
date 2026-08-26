@@ -74,7 +74,7 @@ func (custody *FileArtifactCustody) stageDeviceSyncCancellationJournal(
 
 	custody.mu.Lock()
 	defer custody.mu.Unlock()
-	if err := ensurePrivateSyncedCancellationDirectory(custody.root, directory); err != nil {
+	if err := ensurePrivateSyncedOperationDirectory(custody.root, directory); err != nil {
 		return deviceSyncCancellationJournal{}, err
 	}
 	for _, candidate := range []struct {
@@ -403,7 +403,7 @@ func cancellationJournalPaths(base string) ([]string, error) {
 	return paths, nil
 }
 
-func ensurePrivateSyncedCancellationDirectory(root, destination string) error {
+func ensurePrivateSyncedOperationDirectory(root, destination string) error {
 	if err := ensurePrivateCustodyDirectory(root, destination); err != nil {
 		return err
 	}
