@@ -48,13 +48,17 @@ func (coordinator *DeviceSyncSourceCoordinator) PrepareRollback(
 		return DeviceSyncRollbackSourcePreparationResult{}, serviceauthority.ErrInvalid
 	}
 	nowMilliseconds := request.Now.UnixMilli()
-	activation, err := request.ActivationEvidence.ActivationManifest.Authorize(
+	activation, liveActivationErr := request.ActivationEvidence.ActivationManifest.Authorize(
 		request.Anchor, nowMilliseconds,
 	)
-	if err != nil || activation.Transition !=
+	activationIsLive := liveActivationErr == nil
+	if !activationIsLive {
+		activation, liveActivationErr =
+			request.ActivationEvidence.ActivationManifest.VerifiedPayload()
+	}
+	if liveActivationErr != nil || activation.Transition !=
 		serviceauthority.TransitionMigrationActivation || activation.Migration == nil ||
 		activation.Migration.RollbackUntilMilliseconds == nil ||
-		nowMilliseconds >= *activation.Migration.RollbackUntilMilliseconds ||
 		len(activation.PreparedDeployments) != 1 ||
 		activation.ActiveDeployment.DeploymentID != coordinator.Signer.DeploymentID() ||
 		activation.Migration.TargetDeploymentID != coordinator.Signer.DeploymentID() ||
@@ -94,6 +98,12 @@ func (coordinator *DeviceSyncSourceCoordinator) PrepareRollback(
 			tx postgres.DeviceSyncSnapshotReadTransaction,
 			_ postgres.DeviceSyncScopeEnforcement,
 		) ([]byte, error) {
+			// PostgreSQL skips this callback for an exact durable retry. Historical
+			// activation evidence may recover that retry, but can never create a
+			// fresh reverse export after the rollback window closes.
+			if !activationIsLive {
+				return nil, serviceauthority.ErrInvalid
+			}
 			scratch, err := coordinator.Custody.newSourceScratch()
 			if err != nil {
 				return nil, err
@@ -188,11 +198,40 @@ func (coordinator *DeviceSyncSourceCoordinator) PrepareRollback(
 		) != nil {
 		return DeviceSyncRollbackSourcePreparationResult{}, serviceauthority.ErrInvalid
 	}
-	draft, err := coordinator.Custody.openSourceDeviceSyncRollbackDraft(
+	draft, draftErr := coordinator.Custody.openSourceDeviceSyncRollbackDraft(
 		ctx, request.ActivationEvidence, payload, exportRecord.CanonicalSnapshotPayload,
 	)
-	if err != nil {
-		return DeviceSyncRollbackSourcePreparationResult{}, err
+	if draftErr != nil {
+		// Promotion intentionally removes the unsigned draft. Recover only an
+		// already-confirmed signature and exact final custody; missing or corrupt
+		// artifacts can never cause a new signature.
+		snapshot, recoveryErr := coordinator.Bindings.LoadConfirmedMigrationSnapshot(
+			activation.Scope, coordinator.Signer,
+		)
+		if recoveryErr != nil ||
+			!bytes.Equal(snapshot.Payload, exportRecord.CanonicalSnapshotPayload) {
+			return DeviceSyncRollbackSourcePreparationResult{}, draftErr
+		}
+		validated, validationErr := validateRollbackSourceSnapshotAt(
+			snapshot, request.ActivationEvidence, request.Anchor,
+			nowMilliseconds, activationIsLive,
+		)
+		if validationErr != nil {
+			return DeviceSyncRollbackSourcePreparationResult{}, validationErr
+		}
+		transfer, found, openErr :=
+			coordinator.Custody.openPreparedDeviceSyncRollbackTransfer(
+				ctx, validated, request.ActivationEvidence, snapshot,
+			)
+		if openErr != nil {
+			return DeviceSyncRollbackSourcePreparationResult{}, openErr
+		}
+		if !found {
+			return DeviceSyncRollbackSourcePreparationResult{}, draftErr
+		}
+		return DeviceSyncRollbackSourcePreparationResult{
+			ExportRecord: exportRecord, Snapshot: snapshot, Transfer: transfer,
+		}, nil
 	}
 	if err := coordinator.Bindings.StageMigrationWriteFence(
 		request.ActivationEvidence.ActivationManifest, payload,
@@ -206,8 +245,9 @@ func (coordinator *DeviceSyncSourceCoordinator) PrepareRollback(
 	if err != nil || !bytes.Equal(snapshot.Payload, exportRecord.CanonicalSnapshotPayload) {
 		return DeviceSyncRollbackSourcePreparationResult{}, serviceauthority.ErrInvalid
 	}
-	validated, err := snapshot.ValidateRollbackTransfer(
-		request.ActivationEvidence, request.Anchor, nowMilliseconds,
+	validated, err := validateRollbackSourceSnapshotAt(
+		snapshot, request.ActivationEvidence, request.Anchor,
+		nowMilliseconds, activationIsLive,
 	)
 	if err != nil {
 		return DeviceSyncRollbackSourcePreparationResult{}, err
@@ -230,6 +270,32 @@ func (coordinator *DeviceSyncSourceCoordinator) PrepareRollback(
 	return DeviceSyncRollbackSourcePreparationResult{
 		ExportRecord: exportRecord, Snapshot: snapshot, Transfer: transfer,
 	}, nil
+}
+
+func validateRollbackSourceSnapshotAt(
+	snapshot serviceauthority.MigrationSnapshot,
+	activation serviceauthority.MigrationActivationEvidence,
+	anchor serviceauthority.TrustAnchor,
+	nowMilliseconds int64,
+	activationIsLive bool,
+) (serviceauthority.ValidatedMigrationRollbackTransfer, error) {
+	if activationIsLive {
+		return snapshot.ValidateRollbackTransfer(
+			activation, anchor, nowMilliseconds,
+		)
+	}
+	payload, err := snapshot.VerifiedPayload(nil)
+	if err != nil || nowMilliseconds < payload.CapturedAtMilliseconds {
+		return serviceauthority.ValidatedMigrationRollbackTransfer{},
+			serviceauthority.ErrInvalid
+	}
+	// Historical validation is limited to a signature that BindingRegistry
+	// already confirmed. Reconstruct the exact capture instant at which every
+	// authority and snapshot constraint had to overlap; targets still validate
+	// the transfer at receipt time and therefore reject expired evidence.
+	return snapshot.ValidateRollbackTransfer(
+		activation, anchor, payload.CapturedAtMilliseconds,
+	)
 }
 
 func validateDeviceSyncRollbackSourceExportRecord(

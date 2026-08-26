@@ -3,6 +3,8 @@ package migrationcoordinator
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -232,10 +234,16 @@ func verifyExistingDeviceSyncRollbackTransfer(
 		if err != nil {
 			return err
 		}
-		_, copyErr := io.Copy(io.Discard, &custodyContextReader{ctx: ctx, reader: file})
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, &custodyContextReader{ctx: ctx, reader: file})
 		closeErr := file.Close()
 		if copyErr != nil || closeErr != nil {
 			return errors.Join(copyErr, closeErr)
+		}
+		if hex.EncodeToString(hash.Sum(nil)) != descriptor.TransferDigest {
+			return errors.New(
+				"existing rollback artifact custody digest conflicts with signed transfer",
+			)
 		}
 	}
 	return nil

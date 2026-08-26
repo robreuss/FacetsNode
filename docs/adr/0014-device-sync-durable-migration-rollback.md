@@ -74,14 +74,25 @@ this workflow remain a later checkpoint.
 
 ## Adversarial review
 
-The review found and corrected one high-severity implementation defect: the
+The review found and corrected two high-severity implementation defects. The
 control-domain foreign key previously cascaded a domain replacement into the
 permanent Device Sync principal, causing every nontrivial reverse import to
-fail. The live PostgreSQL gate now proves exact replacement without weakening
-permanent-principal protection. Injected failures separately prove restart
-repair on both the reactivated source and retired target sides of the
-BindingRegistry/database cutover. No critical or high-severity finding remains
-inside this headless rollback boundary.
+fail. Separately, final rollback custody rechecked file identity and byte count
+but not the signed SHA-256 digest, so a same-length local mutation could survive
+an exact recovery open. The live PostgreSQL gate now proves exact replacement
+without weakening permanent-principal protection, and final custody recovery
+rehashes every artifact against its signed descriptor. Injected failures
+separately prove restart repair on both the reactivated source and retired
+target sides of the BindingRegistry/database cutover. No critical or
+high-severity finding remains inside this headless rollback boundary.
+
+The same retry review corrected a reliability defect: successful reverse
+promotion removes its unsigned draft, but the source coordinator previously
+required that draft on every retry. An exact retry now reopens only the
+already-confirmed registry signature and exact final custody. It can do so
+after operational evidence expires without re-exporting or re-signing; a fresh
+expired reverse export, a backward clock, conflicting operation identity, or
+changed artifact still fails closed.
 
 One medium operational deferral remains for the attended workflow: a fresh
 reverse export commits the PostgreSQL write fence before the registry fence.

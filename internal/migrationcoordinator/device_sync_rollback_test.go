@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -301,16 +303,15 @@ func TestDeviceSyncRollbackSourceExportsAndFencesExactReverseState(t *testing.T)
 		Signer:          signerForDeployment(t, activationPayload.ActiveDeployment),
 		LogicalExporter: sourceLogicalExporter(state, inventory),
 	}
-	result, err := coordinator.PrepareRollback(
-		context.Background(), DeviceSyncRollbackSourcePreparationRequest{
-			ActivationEvidence: activation, Anchor: anchor,
-			ExportWriteFenceID:      uuid.MustParse("7e000000-0000-0000-0000-000000000001"),
-			SnapshotID:              uuid.MustParse("7e000000-0000-0000-0000-000000000002"),
-			ServiceStateArtifactID:  uuid.MustParse("7e000000-0000-0000-0000-000000000003"),
-			BlobInventoryArtifactID: uuid.MustParse("7e000000-0000-0000-0000-000000000004"),
-			Now:                     time.UnixMilli(3_600),
-		},
-	)
+	request := DeviceSyncRollbackSourcePreparationRequest{
+		ActivationEvidence: activation, Anchor: anchor,
+		ExportWriteFenceID:      uuid.MustParse("7e000000-0000-0000-0000-000000000001"),
+		SnapshotID:              uuid.MustParse("7e000000-0000-0000-0000-000000000002"),
+		ServiceStateArtifactID:  uuid.MustParse("7e000000-0000-0000-0000-000000000003"),
+		BlobInventoryArtifactID: uuid.MustParse("7e000000-0000-0000-0000-000000000004"),
+		Now:                     time.UnixMilli(3_600),
+	}
+	result, err := coordinator.PrepareRollback(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,6 +327,113 @@ func TestDeviceSyncRollbackSourceExportsAndFencesExactReverseState(t *testing.T)
 	identities, err := bindings.CurrentBindingIdentities(serviceauthority.ScopeDeviceSync)
 	if err != nil || len(identities) != 1 || !identities[0].WriteFenced {
 		t.Fatalf("reverse source did not stay fenced: %+v err=%v", identities, err)
+	}
+
+	// Promotion removed the unsigned draft. An exact retry after both the
+	// activation and snapshot expire must reuse the already-confirmed signature
+	// and final custody without materializing or signing again.
+	reopenedCustody, err := NewFileArtifactCustody(custody.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.Custody = reopenedCustody
+	request.Now = time.UnixMilli(10_001)
+	recovered, err := coordinator.PrepareRollback(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.calls != 2 || store.materializerCalls != 1 ||
+		!bytes.Equal(result.Snapshot.Payload, recovered.Snapshot.Payload) ||
+		result.Snapshot.Signature.Signature != recovered.Snapshot.Signature.Signature {
+		t.Fatalf(
+			"reverse exact retry calls=%d materializer=%d snapshot=%+v",
+			store.calls, store.materializerCalls, recovered.Snapshot,
+		)
+	}
+	assertSourceTransferBytes(t, recovered.Transfer, state, inventory)
+	backwardClock := request
+	backwardClock.Now = time.UnixMilli(3_500)
+	if _, err := coordinator.PrepareRollback(
+		context.Background(), backwardClock,
+	); err == nil {
+		t.Fatal("reverse recovery accepted a clock before the durable capture instant")
+	}
+	conflicting := request
+	conflicting.SnapshotID = uuid.New()
+	if _, err := coordinator.PrepareRollback(
+		context.Background(), conflicting,
+	); err == nil {
+		t.Fatal("conflicting reverse operation reused an existing export fence")
+	}
+	finalStatePath := filepath.Join(
+		reopenedCustody.root, "device-sync-rollback", prepared.Scope.ScopeID.String(),
+		result.ExportRecord.MigrationID.String(), result.ExportRecord.SnapshotID.String(),
+		serviceStateFileName,
+	)
+	tampered := append([]byte(nil), state...)
+	tampered[0] ^= 0xff
+	if err := os.WriteFile(finalStatePath, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.PrepareRollback(context.Background(), request); err == nil {
+		t.Fatal("corrupted final reverse custody was accepted on exact retry")
+	}
+}
+
+func TestDeviceSyncRollbackSourceCannotCreateExpiredReverseExport(t *testing.T) {
+	preparation, anchor := loadPreparedMigrationFixture(t)
+	prepared, err := preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || prepared.Migration == nil {
+		t.Fatal(err)
+	}
+	forwardSnapshot, forwardPayload := signSnapshotForArtifacts(
+		t, preparation, anchor, []byte("forward state"),
+		encodeBlobInventory(t, prepared.Scope.ScopeID, nil),
+	)
+	activation := buildActivationEvidence(
+		t, preparation, forwardSnapshot, forwardPayload, anchor,
+	)
+	activationPayload, err := activation.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := newTargetBindingRegistry(
+		t, activationPayload.ActiveDeployment.DeploymentID,
+	)
+	if err := bindings.ApplyMigrationPreparation(preparation, anchor, 2_200); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.ApplyMigrationActivation(activation, anchor, 3_200); err != nil {
+		t.Fatal(err)
+	}
+	store := &sourceExportStoreStub{}
+	custody, err := NewFileArtifactCustody(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator := DeviceSyncSourceCoordinator{
+		Exporter: store, Custody: custody, Bindings: bindings,
+		Signer: signerForDeployment(t, activationPayload.ActiveDeployment),
+		LogicalExporter: sourceLogicalExporter(
+			[]byte("late reverse state"),
+			encodeBlobInventory(t, prepared.Scope.ScopeID, nil),
+		),
+	}
+	_, err = coordinator.PrepareRollback(
+		context.Background(), DeviceSyncRollbackSourcePreparationRequest{
+			ActivationEvidence: activation, Anchor: anchor,
+			ExportWriteFenceID:      uuid.MustParse("7f000000-0000-0000-0000-000000000001"),
+			SnapshotID:              uuid.MustParse("7f000000-0000-0000-0000-000000000002"),
+			ServiceStateArtifactID:  uuid.MustParse("7f000000-0000-0000-0000-000000000003"),
+			BlobInventoryArtifactID: uuid.MustParse("7f000000-0000-0000-0000-000000000004"),
+			Now:                     time.UnixMilli(10_001),
+		},
+	)
+	if err == nil {
+		t.Fatal("expired activation created a fresh reverse export")
+	}
+	if store.record != nil || store.materializerCalls != 1 {
+		t.Fatal("expired reverse operation persisted export evidence")
 	}
 }
 
