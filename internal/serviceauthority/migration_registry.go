@@ -509,9 +509,63 @@ func (registry *BindingRegistry) ApplyMigrationRollback(
 	)
 }
 
-// ApplyServiceAuthoritySuccessor installs ordinary route/policy successors or
-// migration retirement. Preparation, activation, rollback, and recovery each
-// require their dedicated evidence path or remain unsupported.
+// ApplyMigrationRetirement installs the exact terminal successor of an
+// activated migration. The target clears any abandoned reverse-export fence;
+// the old source preserves its forward fence permanently. Complete activation
+// evidence is required so a bare signed retirement cannot bypass the
+// evidence-specific migration path.
+func (registry *BindingRegistry) ApplyMigrationRetirement(
+	evidence MigrationRetirementEvidence,
+	anchor TrustAnchor,
+	nowMilliseconds int64,
+) error {
+	if registry == nil || registry.expectedDeploymentID == uuid.Nil {
+		return ErrInvalid
+	}
+	evidenceDigest, err := evidence.ReferenceDigest()
+	if err != nil {
+		return ErrInvalid
+	}
+	if registry.acceptsExactManifestRetry(
+		evidence.RetirementManifest,
+		&evidenceDigest,
+	) {
+		return nil
+	}
+	next, err := evidence.ValidateHistoricalCatchUp(anchor, nowMilliseconds)
+	if err != nil || next.Migration == nil {
+		return ErrInvalid
+	}
+	activation, err := evidence.ActivationEvidence.ActivationManifest.VerifiedPayload()
+	if err != nil || activation.Migration == nil {
+		return ErrInvalid
+	}
+	activationEvidenceDigest, err := evidence.ActivationEvidence.ReferenceDigest()
+	if err != nil {
+		return ErrInvalid
+	}
+	return registry.installVerifiedSuccessor(
+		evidence.ActivationEvidence.ActivationManifest,
+		activation,
+		evidence.RetirementManifest,
+		next,
+		&activationEvidenceDigest,
+		&evidenceDigest,
+		func(binding CurrentBinding) (*MigrationWriteFence, error) {
+			switch registry.expectedDeploymentID {
+			case activation.Migration.SourceDeploymentID:
+				return binding.WriteFence, nil
+			case activation.Migration.TargetDeploymentID:
+				return nil, nil
+			default:
+				return nil, ErrInvalid
+			}
+		},
+	)
+}
+
+// ApplyServiceAuthoritySuccessor installs ordinary route/policy successors.
+// Every migration transition requires its dedicated evidence path.
 func (registry *BindingRegistry) ApplyServiceAuthoritySuccessor(
 	currentManifest Manifest,
 	successor Manifest,
@@ -526,7 +580,7 @@ func (registry *BindingRegistry) ApplyServiceAuthoritySuccessor(
 		return ErrInvalid
 	}
 	switch next.Transition {
-	case TransitionPolicyUpdate, TransitionRouteRotation, TransitionMigrationRetirement:
+	case TransitionPolicyUpdate, TransitionRouteRotation:
 	default:
 		return ErrInvalid
 	}
@@ -544,23 +598,6 @@ func (registry *BindingRegistry) ApplyServiceAuthoritySuccessor(
 	if _, err := successor.ValidateSuccessor(currentManifest); err != nil {
 		return ErrInvalid
 	}
-	fenceForNext := func(binding CurrentBinding) (*MigrationWriteFence, error) {
-		if next.Transition != TransitionMigrationRetirement || current.Migration == nil {
-			return binding.WriteFence, nil
-		}
-		switch registry.expectedDeploymentID {
-		case current.Migration.SourceDeploymentID:
-			// The retired source remains durably fenced even after the target is
-			// final. It cannot install a later manifest that no longer names it.
-			return binding.WriteFence, nil
-		case current.Migration.TargetDeploymentID:
-			// Once the rollback deadline has passed, retirement is the terminal
-			// evidence that makes an abandoned reverse fence safe to clear.
-			return nil, nil
-		default:
-			return nil, ErrInvalid
-		}
-	}
 	return registry.installVerifiedSuccessor(
 		currentManifest,
 		current,
@@ -568,7 +605,9 @@ func (registry *BindingRegistry) ApplyServiceAuthoritySuccessor(
 		next,
 		nil,
 		nil,
-		fenceForNext,
+		func(binding CurrentBinding) (*MigrationWriteFence, error) {
+			return binding.WriteFence, nil
+		},
 	)
 }
 

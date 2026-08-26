@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,11 +23,69 @@ type deviceSyncEnforcementMigrationFixture struct {
 	CancellationEvidence       serviceauthority.MigrationCancellationEvidence `json:"cancellationEvidence"`
 	CancellationEvidenceDigest string                                         `json:"cancellationEvidenceDigest"`
 	PreparationEvidenceDigest  string                                         `json:"preparationEvidenceDigest"`
+	RetirementEvidence         serviceauthority.MigrationRetirementEvidence   `json:"retirementEvidence"`
+	RetirementEvidenceDigest   string                                         `json:"retirementEvidenceDigest"`
 	RollbackEvidenceDigest     string                                         `json:"rollbackEvidenceDigest"`
 	RollbackEvidence           struct {
 		ActivationEvidence serviceauthority.MigrationActivationEvidence `json:"activationEvidence"`
 		RollbackManifest   serviceauthority.Manifest                    `json:"rollbackManifest"`
 	} `json:"rollbackEvidence"`
+}
+
+func TestDeviceSyncMigrationRetirementRequiresCompleteActivationEvidence(
+	t *testing.T,
+) {
+	fixture := loadDeviceSyncEnforcementMigrationFixture(t)
+	evidence := fixture.RetirementEvidence
+	retirement, err := evidence.RetirementManifest.VerifiedPayload()
+	if err != nil || retirement.Migration == nil {
+		t.Fatalf("retirement=%+v err=%v", retirement, err)
+	}
+	digest, err := evidence.ReferenceDigest()
+	if err != nil || digest != fixture.RetirementEvidenceDigest {
+		t.Fatalf("retirement digest=%s err=%v", digest, err)
+	}
+	if _, err := DeviceSyncScopeAuthorityFromManifest(
+		evidence.RetirementManifest, nil, retirement.ValidFromMilliseconds,
+	); !errors.Is(err, serviceauthority.ErrInvalid) {
+		t.Fatalf("bare retirement database authority error=%v", err)
+	}
+	authority, err := DeviceSyncScopeAuthorityFromManifest(
+		evidence.RetirementManifest, &digest, retirement.ValidFromMilliseconds,
+	)
+	if err != nil || authority.TransitionEvidenceDigest == nil ||
+		*authority.TransitionEvidenceDigest != fixture.RetirementEvidenceDigest {
+		t.Fatalf("retirement authority=%+v err=%v", authority, err)
+	}
+	activationDigest, err := evidence.ActivationEvidence.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationAuthority, err := DeviceSyncScopeAuthorityFromManifest(
+		evidence.ActivationEvidence.ActivationManifest,
+		&activationDigest,
+		retirement.ValidFromMilliseconds,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID := retirement.Migration.TargetDeploymentID
+	target := DeviceSyncScopeEnforcement{
+		PrincipalID: retirement.Scope.ScopeID, TenantID: retirement.Scope.ScopeID,
+		State: DeviceSyncScopeWritable, LocalDeploymentID: &targetID,
+		Authority: &activationAuthority,
+	}
+	if err := validateDeviceSyncRetirementTarget(
+		context.Background(), nil, target, evidence,
+	); err != nil {
+		t.Fatalf("writable exact target retirement rejected: %v", err)
+	}
+	target.ActiveMigrationImportID = new(uuid.UUID)
+	if err := validateDeviceSyncRetirementTarget(
+		context.Background(), nil, target, evidence,
+	); !errors.Is(err, ErrDeviceSyncMigrationImportConflict) {
+		t.Fatalf("target with active import retirement error=%v", err)
+	}
 }
 
 func TestDeviceSyncMigrationCancellationRequiresExactPreparedDatabaseSide(

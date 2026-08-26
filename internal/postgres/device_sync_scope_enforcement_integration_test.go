@@ -28,6 +28,8 @@ type postgresDeviceSyncEnforcementFixture struct {
 	CancellationEvidence       serviceauthority.MigrationCancellationEvidence `json:"cancellationEvidence"`
 	CancellationEvidenceDigest string                                         `json:"cancellationEvidenceDigest"`
 	PreparationEvidenceDigest  string                                         `json:"preparationEvidenceDigest"`
+	RetirementEvidence         serviceauthority.MigrationRetirementEvidence   `json:"retirementEvidence"`
+	RetirementEvidenceDigest   string                                         `json:"retirementEvidenceDigest"`
 	RollbackEvidence           struct {
 		ActivationEvidence serviceauthority.MigrationActivationEvidence `json:"activationEvidence"`
 	} `json:"rollbackEvidence"`
@@ -572,6 +574,25 @@ func TestPostgresDeviceSyncScopeAuthorityAndExportFenceAreAtomic(t *testing.T) {
 		fixture.AuthorityAnchor, 3_200,
 	); err == nil {
 		t.Fatal("retired source accepted conflicting activation evidence")
+	}
+	if err := store.ApplyDeviceSyncMigrationRetirement(
+		ctx, localSigner.DeploymentID(), fixture.RetirementEvidence,
+		fixture.AuthorityAnchor, 10_000,
+	); err != nil {
+		t.Fatalf("retire source migration authority: %v", err)
+	}
+	if err := store.ApplyDeviceSyncMigrationRetirement(
+		ctx, localSigner.DeploymentID(), fixture.RetirementEvidence,
+		fixture.AuthorityAnchor, 20_001,
+	); err != nil {
+		t.Fatalf("retry source migration retirement: %v", err)
+	}
+	state, err = store.GetDeviceSyncScopeEnforcement(ctx, principalID)
+	if err != nil || state.State != postgresstore.DeviceSyncScopeRetired ||
+		state.Authority == nil || state.Authority.TransitionEvidenceDigest == nil ||
+		*state.Authority.TransitionEvidenceDigest != fixture.RetirementEvidenceDigest ||
+		state.ActiveExportWriteFenceID != nil || state.ActiveMigrationImportID != nil {
+		t.Fatalf("terminal source retirement state=%+v err=%v", state, err)
 	}
 }
 

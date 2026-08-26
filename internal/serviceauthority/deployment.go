@@ -606,6 +606,7 @@ func validateCurrentBinding(
 	requiresEvidence := payload.Transition == TransitionMigrationPreparation ||
 		payload.Transition == TransitionMigrationCancellation ||
 		payload.Transition == TransitionMigrationActivation ||
+		payload.Transition == TransitionMigrationRetirement ||
 		payload.Transition == TransitionMigrationRollback
 	if requiresEvidence != (binding.TransitionEvidenceDigest != nil) ||
 		(binding.TransitionEvidenceDigest != nil && !validDigest(*binding.TransitionEvidenceDigest)) {

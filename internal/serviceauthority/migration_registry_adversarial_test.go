@@ -567,9 +567,20 @@ func TestRetirementClearsTargetReverseFenceAndPreservesSourceFence(t *testing.T)
 		fixture.AuthorityAnchor,
 	)
 	deadline := *activated.Migration.RollbackUntilMilliseconds
+	retirementEvidence := MigrationRetirementEvidence{
+		ActivationEvidence: activation,
+		RetirementManifest: retirement,
+	}
 	if err := target.ApplyServiceAuthoritySuccessor(
 		activation.ActivationManifest,
 		retirement,
+		fixture.AuthorityAnchor,
+		deadline,
+	); err == nil {
+		t.Fatal("bare retirement passed through the generic successor path")
+	}
+	if err := target.ApplyMigrationRetirement(
+		retirementEvidence,
 		fixture.AuthorityAnchor,
 		deadline,
 	); err != nil {
@@ -653,9 +664,8 @@ func TestRetirementClearsTargetReverseFenceAndPreservesSourceFence(t *testing.T)
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := source.ApplyServiceAuthoritySuccessor(
-		activation.ActivationManifest,
-		retirement,
+	if err := source.ApplyMigrationRetirement(
+		retirementEvidence,
 		fixture.AuthorityAnchor,
 		deadline,
 	); err != nil {

@@ -257,6 +257,7 @@ func DeviceSyncScopeAuthorityFromManifest(
 	requiresEvidence := payload.Transition == serviceauthority.TransitionMigrationPreparation ||
 		payload.Transition == serviceauthority.TransitionMigrationCancellation ||
 		payload.Transition == serviceauthority.TransitionMigrationActivation ||
+		payload.Transition == serviceauthority.TransitionMigrationRetirement ||
 		payload.Transition == serviceauthority.TransitionMigrationRollback
 	if requiresEvidence != (transitionEvidenceDigest != nil) ||
 		(transitionEvidenceDigest != nil &&
@@ -835,6 +836,173 @@ func deviceSyncCancellationTargetRecordMatches(
 		imported.ExportingDeploymentID == prepared.Migration.SourceDeploymentID &&
 		imported.ImportingDeploymentID == prepared.Migration.TargetDeploymentID &&
 		bytes.Equal(imported.CanonicalPreparationRecord, canonicalPreparation)
+}
+
+// ApplyDeviceSyncMigrationRetirement consumes the complete terminal evidence
+// after the rollback window closes. The active target remains writable and
+// clears any exact abandoned reverse-export fence; the old source remains
+// retired. Both roles retain immutable migration records as audit evidence.
+func (s *RelayStore) ApplyDeviceSyncMigrationRetirement(
+	ctx context.Context,
+	localDeploymentID uuid.UUID,
+	evidence serviceauthority.MigrationRetirementEvidence,
+	anchor serviceauthority.TrustAnchor,
+	nowMilliseconds int64,
+) error {
+	if ctx == nil || localDeploymentID == uuid.Nil || nowMilliseconds < 0 {
+		return serviceauthority.ErrInvalid
+	}
+	retirement, err := evidence.RetirementManifest.VerifiedPayload()
+	if err != nil || retirement.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		retirement.Transition != serviceauthority.TransitionMigrationRetirement ||
+		retirement.Migration == nil ||
+		(localDeploymentID != retirement.Migration.SourceDeploymentID &&
+			localDeploymentID != retirement.Migration.TargetDeploymentID) {
+		return serviceauthority.ErrInvalid
+	}
+	evidenceDigest, err := evidence.ReferenceDigest()
+	if err != nil || !validDeviceSyncDigest(evidenceDigest) {
+		return serviceauthority.ErrInvalid
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("begin Device Sync migration retirement: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	current, err := loadDeviceSyncScopeEnforcement(
+		ctx, tx, retirement.Scope.ScopeID, "FOR UPDATE",
+	)
+	if err != nil {
+		return err
+	}
+	targetSide := localDeploymentID == retirement.Migration.TargetDeploymentID
+	terminalState := DeviceSyncScopeRetired
+	if targetSide {
+		terminalState = DeviceSyncScopeWritable
+	}
+	if current.State == terminalState &&
+		current.LocalDeploymentID != nil &&
+		*current.LocalDeploymentID == localDeploymentID &&
+		deviceSyncAuthorityMatchesExactManifest(
+			current.Authority, evidence.RetirementManifest, evidenceDigest,
+		) && current.ActiveExportWriteFenceID == nil &&
+		current.ActiveMigrationImportID == nil {
+		return nil
+	}
+	validatedRetirement, err := evidence.ValidateHistoricalCatchUp(
+		anchor, nowMilliseconds,
+	)
+	if err != nil || validatedRetirement.Scope != retirement.Scope ||
+		validatedRetirement.Revision != retirement.Revision ||
+		validatedRetirement.ActiveDeployment.DeploymentID !=
+			retirement.Migration.TargetDeploymentID {
+		return serviceauthority.ErrInvalid
+	}
+	nextAuthority, err := DeviceSyncScopeAuthorityFromManifest(
+		evidence.RetirementManifest, &evidenceDigest, nowMilliseconds,
+	)
+	if err != nil {
+		return err
+	}
+	activationEvidenceDigest, err := evidence.ActivationEvidence.ReferenceDigest()
+	if err != nil || current.Authority == nil || current.LocalDeploymentID == nil ||
+		*current.LocalDeploymentID != localDeploymentID ||
+		!deviceSyncAuthorityMatchesExactManifest(
+			current.Authority,
+			evidence.ActivationEvidence.ActivationManifest,
+			activationEvidenceDigest,
+		) {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	if targetSide {
+		if err := validateDeviceSyncRetirementTarget(
+			ctx, tx, current, evidence,
+		); err != nil {
+			return err
+		}
+	} else if current.State != DeviceSyncScopeRetired ||
+		current.ActiveExportWriteFenceID != nil ||
+		current.ActiveMigrationImportID != nil {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE device_sync_scope_enforcement
+		SET state=$2, authority_validated_at_milliseconds=$3,
+			authority_revision=$4, authority_manifest_digest=$5,
+			authority_manifest_record=$6, active_deployment_id=$7,
+			transition_evidence_digest=$8,
+			active_export_write_fence_id=NULL,
+			active_migration_import_id=NULL, updated_at=now()
+		WHERE principal_id=$1 AND tenant_id=$1
+	`, retirement.Scope.ScopeID, terminalState,
+		nextAuthority.ValidatedAtMilliseconds, int64(nextAuthority.Revision),
+		nextAuthority.ManifestDigest, nextAuthority.ManifestRecord,
+		nextAuthority.ActiveDeploymentID,
+		nextAuthority.TransitionEvidenceDigest)
+	if err != nil {
+		return fmt.Errorf("persist Device Sync migration retirement: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("Device Sync migration retirement affected an unexpected row count")
+	}
+	stored, err := loadDeviceSyncScopeEnforcement(
+		ctx, tx, retirement.Scope.ScopeID, "FOR SHARE",
+	)
+	if err != nil || stored.State != terminalState ||
+		stored.LocalDeploymentID == nil ||
+		*stored.LocalDeploymentID != localDeploymentID ||
+		!deviceSyncScopeAuthorityEqual(stored.Authority, &nextAuthority) ||
+		stored.ActiveExportWriteFenceID != nil ||
+		stored.ActiveMigrationImportID != nil {
+		if err != nil {
+			return err
+		}
+		return errors.New("persisted Device Sync migration retirement is inconsistent")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Device Sync migration retirement: %w", err)
+	}
+	return nil
+}
+
+func validateDeviceSyncRetirementTarget(
+	ctx context.Context,
+	tx pgx.Tx,
+	current DeviceSyncScopeEnforcement,
+	evidence serviceauthority.MigrationRetirementEvidence,
+) error {
+	activation, err := evidence.ActivationEvidence.ActivationManifest.VerifiedPayload()
+	if err != nil || activation.Migration == nil ||
+		current.ActiveMigrationImportID != nil {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	if current.State == DeviceSyncScopeWritable &&
+		current.ActiveExportWriteFenceID == nil {
+		return nil
+	}
+	if current.State != DeviceSyncScopeExportFenced ||
+		current.ActiveExportWriteFenceID == nil {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	exported, found, err := loadDeviceSyncMigrationExport(
+		ctx, tx, current.PrincipalID, *current.ActiveExportWriteFenceID, "FOR SHARE",
+	)
+	if err != nil {
+		return err
+	}
+	activationManifestDigest, err :=
+		evidence.ActivationEvidence.ActivationManifest.ReferenceDigest()
+	if err != nil || !found || exported.PrincipalID != current.PrincipalID ||
+		exported.TenantID != current.TenantID ||
+		exported.ExportWriteFenceID != *current.ActiveExportWriteFenceID ||
+		exported.MigrationID != activation.Migration.MigrationID ||
+		exported.ExportingDeploymentID != activation.Migration.TargetDeploymentID ||
+		exported.ImportingDeploymentID != activation.Migration.SourceDeploymentID ||
+		exported.AuthorityRevision != activation.Revision ||
+		exported.AuthorityManifestDigest != activationManifestDigest {
+		return ErrDeviceSyncMigrationImportConflict
+	}
+	return nil
 }
 
 func validateDeviceSyncActivationTarget(
