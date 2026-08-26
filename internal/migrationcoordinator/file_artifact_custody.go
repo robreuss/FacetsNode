@@ -136,44 +136,8 @@ func (custody *FileArtifactCustody) stagePreparedDeviceSyncTransfer(
 		validated.Snapshot.Scope.ScopeID == uuid.Nil {
 		return PreparedDeviceSyncTransfer{}, serviceauthority.ErrInvalid
 	}
-	stateDescriptor, inventoryDescriptor, err := migrationArtifactDescriptors(validated.Snapshot)
-	if err != nil {
-		return PreparedDeviceSyncTransfer{}, err
-	}
-	inventoryDigest, err := migrationDigest(inventoryDescriptor.TransferDigest)
-	if err != nil {
-		return PreparedDeviceSyncTransfer{}, err
-	}
-	snapshotReferenceDigest, err := snapshot.ReferenceDigest()
-	if err != nil {
-		return PreparedDeviceSyncTransfer{}, serviceauthority.ErrInvalid
-	}
-	metadata := fileArtifactCustodyMetadata{
-		BlobInventoryArtifactID: inventoryDescriptor.ArtifactID,
-		MigrationID:             validated.Migration.MigrationID,
-		PrincipalID:             validated.Snapshot.Scope.ScopeID,
-		ServiceStateArtifactID:  stateDescriptor.ArtifactID,
-		SnapshotID:              validated.Snapshot.SnapshotID,
-		SnapshotReferenceDigest: snapshotReferenceDigest,
-		Version:                 artifactCustodyVersion,
-	}
-	if err := validateCustodyMetadata(metadata); err != nil {
-		return PreparedDeviceSyncTransfer{}, err
-	}
-	transfer := PreparedDeviceSyncTransfer{
-		directory: custody.transferDirectory(metadata), metadata: metadata,
-		serviceStateDescriptor: stateDescriptor, blobInventoryDescriptor: inventoryDescriptor,
-		blobInventoryDigest: inventoryDigest,
-	}
-	preparationRecord, err := json.Marshal(preparation)
-	if err != nil {
-		return PreparedDeviceSyncTransfer{}, err
-	}
-	snapshotRecord, err := json.Marshal(snapshot)
-	if err != nil {
-		return PreparedDeviceSyncTransfer{}, err
-	}
-	metadataRecord, err := json.Marshal(metadata)
+	transfer, preparationRecord, snapshotRecord, metadataRecord, err :=
+		custody.expectedPreparedDeviceSyncTransfer(validated, preparation, snapshot)
 	if err != nil {
 		return PreparedDeviceSyncTransfer{}, err
 	}
@@ -205,12 +169,14 @@ func (custody *FileArtifactCustody) stagePreparedDeviceSyncTransfer(
 		return PreparedDeviceSyncTransfer{}, err
 	}
 	if err := stageExactArtifact(
-		ctx, filepath.Join(stagingDirectory, serviceStateFileName), serviceState, stateDescriptor,
+		ctx, filepath.Join(stagingDirectory, serviceStateFileName), serviceState,
+		transfer.serviceStateDescriptor,
 	); err != nil {
 		return PreparedDeviceSyncTransfer{}, err
 	}
 	if err := stageExactArtifact(
-		ctx, filepath.Join(stagingDirectory, blobInventoryFileName), blobInventory, inventoryDescriptor,
+		ctx, filepath.Join(stagingDirectory, blobInventoryFileName), blobInventory,
+		transfer.blobInventoryDescriptor,
 	); err != nil {
 		return PreparedDeviceSyncTransfer{}, err
 	}
@@ -242,6 +208,96 @@ func (custody *FileArtifactCustody) stagePreparedDeviceSyncTransfer(
 		return PreparedDeviceSyncTransfer{}, err
 	}
 	return transfer, nil
+}
+
+// openPreparedDeviceSyncTransfer verifies exact already-committed custody
+// without requiring caller-provided streams. It is the restart/lost-response
+// recovery seam after a source draft has already been promoted.
+func (custody *FileArtifactCustody) openPreparedDeviceSyncTransfer(
+	ctx context.Context,
+	validated serviceauthority.ValidatedMigrationTransfer,
+	preparation serviceauthority.MigrationPreparation,
+	snapshot serviceauthority.MigrationSnapshot,
+) (PreparedDeviceSyncTransfer, bool, error) {
+	if custody == nil || ctx == nil {
+		return PreparedDeviceSyncTransfer{}, false, serviceauthority.ErrInvalid
+	}
+	transfer, preparationRecord, snapshotRecord, metadataRecord, err :=
+		custody.expectedPreparedDeviceSyncTransfer(validated, preparation, snapshot)
+	if err != nil {
+		return PreparedDeviceSyncTransfer{}, false, err
+	}
+	custody.mu.Lock()
+	defer custody.mu.Unlock()
+	info, err := os.Lstat(transfer.directory)
+	if os.IsNotExist(err) {
+		return PreparedDeviceSyncTransfer{}, false, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm()&0o077 != 0 {
+		return PreparedDeviceSyncTransfer{}, true, errors.New(
+			"existing migration artifact custody directory is unsafe",
+		)
+	}
+	if err := verifyExistingPreparedTransfer(
+		ctx, transfer, preparationRecord, snapshotRecord, metadataRecord,
+	); err != nil {
+		return PreparedDeviceSyncTransfer{}, true, err
+	}
+	return transfer, true, nil
+}
+
+func (custody *FileArtifactCustody) expectedPreparedDeviceSyncTransfer(
+	validated serviceauthority.ValidatedMigrationTransfer,
+	preparation serviceauthority.MigrationPreparation,
+	snapshot serviceauthority.MigrationSnapshot,
+) (PreparedDeviceSyncTransfer, []byte, []byte, []byte, error) {
+	if custody == nil || validated.Snapshot.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		validated.Snapshot.Scope.ScopeID == uuid.Nil {
+		return PreparedDeviceSyncTransfer{}, nil, nil, nil, serviceauthority.ErrInvalid
+	}
+	stateDescriptor, inventoryDescriptor, err := migrationArtifactDescriptors(validated.Snapshot)
+	if err != nil {
+		return PreparedDeviceSyncTransfer{}, nil, nil, nil, err
+	}
+	inventoryDigest, err := migrationDigest(inventoryDescriptor.TransferDigest)
+	if err != nil {
+		return PreparedDeviceSyncTransfer{}, nil, nil, nil, err
+	}
+	snapshotReferenceDigest, err := snapshot.ReferenceDigest()
+	if err != nil {
+		return PreparedDeviceSyncTransfer{}, nil, nil, nil, serviceauthority.ErrInvalid
+	}
+	metadata := fileArtifactCustodyMetadata{
+		BlobInventoryArtifactID: inventoryDescriptor.ArtifactID,
+		MigrationID:             validated.Migration.MigrationID,
+		PrincipalID:             validated.Snapshot.Scope.ScopeID,
+		ServiceStateArtifactID:  stateDescriptor.ArtifactID,
+		SnapshotID:              validated.Snapshot.SnapshotID,
+		SnapshotReferenceDigest: snapshotReferenceDigest,
+		Version:                 artifactCustodyVersion,
+	}
+	if err := validateCustodyMetadata(metadata); err != nil {
+		return PreparedDeviceSyncTransfer{}, nil, nil, nil, err
+	}
+	transfer := PreparedDeviceSyncTransfer{
+		directory: custody.transferDirectory(metadata), metadata: metadata,
+		serviceStateDescriptor: stateDescriptor, blobInventoryDescriptor: inventoryDescriptor,
+		blobInventoryDigest: inventoryDigest,
+	}
+	preparationRecord, err := json.Marshal(preparation)
+	if err != nil {
+		return PreparedDeviceSyncTransfer{}, nil, nil, nil, err
+	}
+	snapshotRecord, err := json.Marshal(snapshot)
+	if err != nil {
+		return PreparedDeviceSyncTransfer{}, nil, nil, nil, err
+	}
+	metadataRecord, err := json.Marshal(metadata)
+	if err != nil {
+		return PreparedDeviceSyncTransfer{}, nil, nil, nil, err
+	}
+	return transfer, preparationRecord, snapshotRecord, metadataRecord, nil
 }
 
 func (custody *FileArtifactCustody) loadLiveReadiness(
@@ -375,6 +431,13 @@ func (custody *FileArtifactCustody) transferDirectory(metadata fileArtifactCusto
 func migrationArtifactDescriptors(
 	snapshot serviceauthority.MigrationSnapshotPayload,
 ) (serviceauthority.MigrationArtifactDescriptor, serviceauthority.MigrationArtifactDescriptor, error) {
+	// This coordinator checkpoint has exact custody for only these two artifact
+	// kinds. Reject rather than silently declaring readiness while ignoring a
+	// future onion, TLS, or route-custody descriptor.
+	if len(snapshot.Artifacts) != 2 {
+		return serviceauthority.MigrationArtifactDescriptor{},
+			serviceauthority.MigrationArtifactDescriptor{}, serviceauthority.ErrInvalid
+	}
 	var state *serviceauthority.MigrationArtifactDescriptor
 	var inventory *serviceauthority.MigrationArtifactDescriptor
 	for index := range snapshot.Artifacts {
@@ -429,15 +492,25 @@ func stageExactArtifact(
 		return err
 	}
 	hash := sha256.New()
-	limited := &io.LimitedReader{R: &custodyContextReader{ctx: ctx, reader: source}, N: descriptor.ByteCount + 1}
+	contextSource := &custodyContextReader{ctx: ctx, reader: source}
+	limited := &io.LimitedReader{R: contextSource, N: descriptor.ByteCount}
 	written, copyErr := io.Copy(io.MultiWriter(file, hash), limited)
 	if copyErr != nil {
 		_ = file.Close()
 		return copyErr
 	}
+	extra, extraErr := io.CopyN(io.Discard, contextSource, 1)
+	if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+		_ = file.Close()
+		return extraErr
+	}
 	if written != descriptor.ByteCount || hex.EncodeToString(hash.Sum(nil)) != descriptor.TransferDigest {
 		_ = file.Close()
 		return errors.New("migration artifact differs from signed descriptor")
+	}
+	if extra != 0 {
+		_ = file.Close()
+		return errors.New("migration artifact exceeds signed descriptor byte count")
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()

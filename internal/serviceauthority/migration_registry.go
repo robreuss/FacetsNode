@@ -299,6 +299,33 @@ func (registry *BindingRegistry) SignStagedMigrationSnapshot(
 	)
 }
 
+// LoadConfirmedMigrationSnapshot returns only an already-persisted deployment
+// signature for the exact write fence. It never signs. Source recovery uses it
+// to distinguish a promoted/lost-response operation from an unsigned fence
+// whose artifact custody is missing.
+func (registry *BindingRegistry) LoadConfirmedMigrationSnapshot(
+	scope Scope,
+	signer *DeploymentSigner,
+) (MigrationSnapshot, error) {
+	if registry == nil || signer == nil || registry.expectedDeploymentID == uuid.Nil ||
+		signer.DeploymentID() != registry.expectedDeploymentID || scope.Validate() != nil {
+		return MigrationSnapshot{}, ErrInvalid
+	}
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	binding, exists := registry.bindings[scope]
+	if registry.poisoned || !exists || binding.WriteFence == nil ||
+		binding.WriteFence.Snapshot == nil ||
+		signer.PublicSigningKeyX963() != binding.WriteFence.ExportingPublicSigningKeyX963 ||
+		signer.SigningKeyFingerprint() !=
+			binding.WriteFence.ExportingSigningKeyFingerprint {
+		return MigrationSnapshot{}, ErrInvalid
+	}
+	snapshot := *binding.WriteFence.Snapshot
+	snapshot.Payload = append([]byte(nil), snapshot.Payload...)
+	return snapshot, nil
+}
+
 func (registry *BindingRegistry) SignStagedMigrationSnapshotAt(
 	scope Scope,
 	signer *DeploymentSigner,
@@ -310,8 +337,7 @@ func (registry *BindingRegistry) SignStagedMigrationSnapshotAt(
 	}
 	registry.mu.RLock()
 	binding, exists := registry.bindings[scope]
-	if registry.poisoned || !exists || binding.WriteFence == nil ||
-		binding.WriteFence.Snapshot != nil {
+	if registry.poisoned || !exists || binding.WriteFence == nil {
 		registry.mu.RUnlock()
 		return MigrationSnapshot{}, ErrInvalid
 	}
@@ -320,6 +346,15 @@ func (registry *BindingRegistry) SignStagedMigrationSnapshotAt(
 			binding.WriteFence.ExportingSigningKeyFingerprint {
 		registry.mu.RUnlock()
 		return MigrationSnapshot{}, ErrInvalid
+	}
+	if binding.WriteFence.Snapshot != nil {
+		// A crash or lost response after confirmation must return the one
+		// persisted signature, never produce another ECDSA signature over the
+		// same payload. The binding was independently revalidated on load.
+		existing := *binding.WriteFence.Snapshot
+		existing.Payload = append([]byte(nil), existing.Payload...)
+		registry.mu.RUnlock()
+		return existing, nil
 	}
 	payload := append([]byte(nil), binding.WriteFence.SnapshotPayload...)
 	registry.mu.RUnlock()

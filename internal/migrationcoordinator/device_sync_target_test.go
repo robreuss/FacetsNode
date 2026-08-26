@@ -265,6 +265,19 @@ func TestWalkBlobInventoryRejectsBlobLargerThanRelayContract(t *testing.T) {
 	}
 }
 
+func TestDeviceSyncArtifactCustodyRejectsUnhandledSignedArtifactKinds(t *testing.T) {
+	payload := serviceauthority.MigrationSnapshotPayload{
+		Artifacts: []serviceauthority.MigrationArtifactDescriptor{
+			{ArtifactID: uuid.MustParse("72000000-0000-0000-0000-000000000001"), ByteCount: 1, Kind: serviceauthority.ArtifactServiceStateSnapshot, TransferDigest: hex.EncodeToString(make([]byte, sha256.Size))},
+			{ArtifactID: uuid.MustParse("72000000-0000-0000-0000-000000000002"), ByteCount: 1, Kind: serviceauthority.ArtifactBlobInventory, TransferDigest: hex.EncodeToString(make([]byte, sha256.Size))},
+			{ArtifactID: uuid.MustParse("72000000-0000-0000-0000-000000000003"), ByteCount: 1, Kind: serviceauthority.ArtifactOnionServiceState, TransferDigest: hex.EncodeToString(make([]byte, sha256.Size))},
+		},
+	}
+	if _, _, err := migrationArtifactDescriptors(payload); err == nil {
+		t.Fatal("Device Sync custody silently ignored an unsupported signed artifact kind")
+	}
+}
+
 func signSnapshotForArtifacts(
 	t *testing.T,
 	preparation serviceauthority.MigrationPreparation,

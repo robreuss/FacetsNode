@@ -79,6 +79,9 @@ Tor transfer with direct HTTPS.
 
 The transferred blobs remain the existing opaque encrypted relay content. This
 checkpoint does not decrypt FEF content or change content-key authority.
+Snapshots containing onion-service, TLS-identity, route-configuration, or any
+other additional signed artifact are rejected rather than silently ignored.
+Those custody kinds require their own complete transfer and verification gate.
 
 ## Failure and retry
 

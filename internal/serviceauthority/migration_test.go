@@ -940,7 +940,7 @@ func TestNodeSignsOnlyPreviouslyStagedMigrationSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, _ := newMigrationRegistry(t, current.ActiveDeployment.DeploymentID)
+	registry, registryPath := newMigrationRegistry(t, current.ActiveDeployment.DeploymentID)
 	initial := preparation.CurrentManifest
 	if err := registry.Activate(current.Scope, CurrentBinding{
 		Revision: current.Revision, Digest: currentDigest,
@@ -967,6 +967,9 @@ func TestNodeSignsOnlyPreviouslyStagedMigrationSnapshots(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := registry.LoadConfirmedMigrationSnapshot(current.Scope, signer); err == nil {
+		t.Fatal("unsigned migration fence was exposed as a confirmed snapshot")
+	}
 	snapshot, err := registry.SignStagedMigrationSnapshotAt(current.Scope, signer, 3_000)
 	if err != nil {
 		t.Fatalf("staged snapshot signing failed: %v", err)
@@ -975,8 +978,23 @@ func TestNodeSignsOnlyPreviouslyStagedMigrationSnapshots(t *testing.T) {
 	if err != nil || !canonicalEqual(verified, payload) {
 		t.Fatalf("Node signed a different snapshot payload: verified=%+v err=%v", verified, err)
 	}
-	if _, err := registry.SignStagedMigrationSnapshotAt(current.Scope, signer, 3_000); err == nil {
-		t.Fatal("already signed fence produced a second conflicting snapshot")
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	registry, err = LoadBindingRegistry(registryPath, current.ActiveDeployment.DeploymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	loaded, err := registry.LoadConfirmedMigrationSnapshot(current.Scope, signer)
+	if err != nil || !bytes.Equal(loaded.Payload, snapshot.Payload) ||
+		loaded.Signature.Signature != snapshot.Signature.Signature {
+		t.Fatal("reloaded registry did not expose the exact confirmed snapshot")
+	}
+	retried, err := registry.SignStagedMigrationSnapshotAt(current.Scope, signer, 30_000)
+	if err != nil || !bytes.Equal(retried.Payload, snapshot.Payload) ||
+		retried.Signature.Signature != snapshot.Signature.Signature {
+		t.Fatal("already signed fence did not return the exact durable snapshot")
 	}
 }
 
