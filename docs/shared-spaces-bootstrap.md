@@ -377,6 +377,31 @@ the Shared Spaces executable does not register Device Sync product routes. The
 two relay services share protocol and persistence packages but have independent
 configuration, databases, blob namespaces, quotas, credentials, and lifecycle.
 
+## Swift-to-Go authority acceptance gate
+
+The ordinary Go and Swift suites validate their respective contracts without
+opening a listener. Run the explicit cross-language gate when either side of
+initial authority enrollment, deployment proof, request binding, or pinned
+Apple transport changes:
+
+```sh
+./scripts/run-swift-shared-spaces-authority-gate.sh
+```
+
+The gate starts a disposable in-memory FacetsNode handler over a freshly
+generated pinned-TLS endpoint. It passes Swift a mode-0600, short-lived
+deployment offer and disposable operator bearer outside both repositories.
+Swift creates every Shared Space, participant, relay, and Facets-authority
+identity; authenticates the deployment before releasing the bearer; provisions
+the Space; and performs one ordinary authority-bound status read. Go then
+verifies the exact activated scope, revision, manifest digest, deployment, and
+route reported by Swift. The descriptor and result are removed when the gate
+exits.
+
+This is wire and runtime evidence only. It does not replace the separately
+configured PostgreSQL integration suite or prove a deployed Caddy/Tor ingress,
+physical off-LAN client, or production credential-issuance workflow.
+
 ## Deferred gates
 
 This vertical slice intentionally does not yet implement:
