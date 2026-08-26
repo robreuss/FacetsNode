@@ -23,7 +23,8 @@ CREATE TABLE device_sync_principals (
     created_at_milliseconds bigint NOT NULL CHECK (created_at_milliseconds >= 0),
     stored_at timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY (tenant_id, control_domain_id)
-        REFERENCES relay_domains(tenant_id, domain_id) ON DELETE CASCADE,
+        REFERENCES relay_domains(tenant_id, domain_id)
+        DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (tenant_id, control_domain_id, initial_device_id)
         REFERENCES relay_members(tenant_id, domain_id, member_id)
         DEFERRABLE INITIALLY DEFERRED

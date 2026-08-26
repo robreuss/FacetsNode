@@ -41,6 +41,14 @@ outside the semantic artifact. The database records immutable reverse-import
 evidence and binds `rollback_standby` to that exact activation, snapshot,
 deployment direction, initial authority, and migration ID.
 
+The permanent Device Sync principal references its control relay domain with a
+deferred non-cascading constraint. Exact replacement may therefore delete and
+reinsert the authenticated control-domain row in one transaction without ever
+deleting the principal. A standalone domain deletion still fails unless the
+same transaction installs the authenticated replacement before commit.
+This is intentionally different from ordinary dependent relay rows, which may
+cascade away while the authenticated replacement is materialized.
+
 Deferred write-protection triggers permit semantic replacement only in the
 database-authored transaction that created the named reverse-import evidence.
 Later transactions cannot use `rollback_standby` as a mutation bypass.
@@ -64,9 +72,33 @@ progress, the new server is write-fenced and the old server is not yet
 writable. The UI and public operator/API surface for initiating and reporting
 this workflow remain a later checkpoint.
 
+## Adversarial review
+
+The review found and corrected one high-severity implementation defect: the
+control-domain foreign key previously cascaded a domain replacement into the
+permanent Device Sync principal, causing every nontrivial reverse import to
+fail. The live PostgreSQL gate now proves exact replacement without weakening
+permanent-principal protection. Injected failures separately prove restart
+repair on both the reactivated source and retired target sides of the
+BindingRegistry/database cutover. No critical or high-severity finding remains
+inside this headless rollback boundary.
+
+One medium operational deferral remains for the attended workflow: a fresh
+reverse export commits the PostgreSQL write fence before the registry fence.
+The coordinator supports an exact live retry, and every write remains blocked,
+but production startup does not yet autonomously resume that pre-terminal
+source-preparation stage. The attended operator backend must persist its
+operation identifiers and retry it before service readiness. Deployed
+two-host transfer, public status/cancellation behavior, custody fault injection,
+and client observation also remain outside this checkpoint.
+
 ## Verification boundary
 
 This checkpoint provides portable signature validation, database/custody
-primitives, headless coordinators, restart recovery, and focused tests. It does
+primitives, headless coordinators, restart recovery, focused tests, and a live
+PostgreSQL 17 reverse-import/rollback gate over representative Device Sync
+state. The live gate proves divergent state replacement, tamper rejection,
+non-writable standby behavior, exact expired retry, restored writes, immutable
+import evidence, and permanent-principal/control-domain preservation. It does
 not claim a deployed two-server rollback, production operator route, Facets UI,
 or physical-client acceptance.

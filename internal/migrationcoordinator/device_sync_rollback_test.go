@@ -177,6 +177,92 @@ func TestDeviceSyncRollbackCoordinatorRecoversCrossStoreCutover(
 	}
 }
 
+func TestDeviceSyncRollbackCoordinatorRecoversRetiredTargetCutover(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	state := []byte("reverse target retirement state")
+	preparation, anchor := loadPreparedMigrationFixture(t)
+	prepared, err := preparation.PreparationManifest.VerifiedPayload()
+	if err != nil || prepared.Migration == nil {
+		t.Fatal(err)
+	}
+	inventory := encodeBlobInventory(t, prepared.Scope.ScopeID, nil)
+	evidence, _ := buildRollbackEvidenceForArtifacts(
+		t, preparation, anchor, state, inventory,
+	)
+	activation, err := evidence.ActivationEvidence.ActivationManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validated, err := evidence.TargetSnapshot.ValidateRollbackTransfer(
+		evidence.ActivationEvidence, anchor, 4_000,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetBindings := newTargetBindingRegistry(
+		t, activation.ActiveDeployment.DeploymentID,
+	)
+	if err := targetBindings.ApplyMigrationPreparation(
+		preparation, anchor, 2_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetBindings.ApplyMigrationActivation(
+		evidence.ActivationEvidence, anchor, 3_200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetBindings.StageMigrationWriteFence(
+		evidence.ActivationEvidence.ActivationManifest,
+		validated.Snapshot, anchor, 3_600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetBindings.ConfirmMigrationWriteFenceSnapshotAt(
+		validated.Snapshot.Scope, evidence.TargetSnapshot, 3_600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	custody, err := NewFileArtifactCustody(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := custody.stagePreparedDeviceSyncRollbackTransfer(
+		ctx, validated, evidence.ActivationEvidence, evidence.TargetSnapshot,
+		bytes.NewReader(state), bytes.NewReader(inventory),
+	); err != nil {
+		t.Fatal(err)
+	}
+	store := &rollbackStoreStub{failOnce: true}
+	coordinator := &DeviceSyncRollbackCoordinator{
+		Store: store, Custody: custody, Bindings: targetBindings,
+		Signer: signerForDeployment(t, activation.ActiveDeployment),
+	}
+	if _, err := coordinator.Rollback(
+		ctx, evidence, anchor, time.UnixMilli(4_000),
+	); err == nil || store.applyCalls != 1 {
+		t.Fatalf("injected target rollback failure=%v calls=%d", err, store.applyCalls)
+	}
+	identities, err := targetBindings.CurrentBindingIdentities(
+		serviceauthority.ScopeDeviceSync,
+	)
+	if err != nil || len(identities) != 1 || identities[0].Revision != 4 ||
+		!identities[0].WriteFenced {
+		t.Fatalf("target rollback registry=%+v err=%v", identities, err)
+	}
+	results, err := coordinator.Recover(ctx, time.UnixMilli(9_500))
+	if err != nil || len(results) != 1 || store.applyCalls != 2 ||
+		results[0].State.State != postgres.DeviceSyncScopeRetired ||
+		!results[0].Binding.WriteFenced {
+		t.Fatalf(
+			"target rollback recovery=%+v calls=%d err=%v",
+			results, store.applyCalls, err,
+		)
+	}
+}
+
 func TestDeviceSyncRollbackSourceExportsAndFencesExactReverseState(t *testing.T) {
 	preparation, anchor := loadPreparedMigrationFixture(t)
 	prepared, err := preparation.PreparationManifest.VerifiedPayload()
