@@ -535,6 +535,13 @@ func TestDeviceSyncRollbackSourceOperationRecoversCommittedExportFence(t *testin
 		statuses[0].StateCommitmentDigest != nil {
 		t.Fatalf("pending rollback source status=%+v err=%v", statuses, err)
 	}
+	if _, err := operationCoordinator.OpenPrepared(
+		context.Background(), prepared.Scope.ScopeID,
+		prepared.Migration.MigrationID, request.SnapshotID,
+		time.UnixMilli(3_600),
+	); err == nil {
+		t.Fatal("accepted-only rollback source operation exposed a handoff")
+	}
 	statusOnlyCoordinator := DeviceSyncRollbackSourceOperationCoordinator{
 		Source: &DeviceSyncSourceCoordinator{
 			Custody: custody, Signer: source.Signer,
@@ -617,6 +624,52 @@ func TestDeviceSyncRollbackSourceOperationRecoversCommittedExportFence(t *testin
 		statuses[0].StateCommitmentDigest == nil {
 		t.Fatalf("prepared rollback source status=%+v err=%v", statuses, err)
 	}
+	handoffOnlyCoordinator := DeviceSyncRollbackSourceOperationCoordinator{
+		Source: &DeviceSyncSourceCoordinator{
+			Custody: reopenedCustody, Signer: source.Signer,
+		},
+	}
+	handoff, err := handoffOnlyCoordinator.OpenPrepared(
+		context.Background(), prepared.Scope.ScopeID,
+		prepared.Migration.MigrationID, request.SnapshotID,
+		time.UnixMilli(3_800),
+	)
+	if err != nil || handoff.Snapshot.Signature.Signature !=
+		recovered[0].Preparation.Snapshot.Signature.Signature ||
+		!canonicalEqualMigrationActivationEvidence(
+			handoff.ActivationEvidence, activation,
+		) {
+		t.Fatalf("prepared rollback source handoff=%+v err=%v", handoff, err)
+	}
+	handoffArtifacts, closeHandoffArtifacts, err := handoff.Transfer.OpenArtifacts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoffState, stateErr := io.ReadAll(handoffArtifacts.ServiceState)
+	handoffInventory, inventoryErr := io.ReadAll(handoffArtifacts.BlobInventory)
+	closeErr := closeHandoffArtifacts()
+	if stateErr != nil || inventoryErr != nil || closeErr != nil ||
+		!bytes.Equal(handoffState, state) ||
+		!bytes.Equal(handoffInventory, inventory) {
+		t.Fatalf(
+			"rollback handoff state=%q inventory=%q errors=%v",
+			handoffState, handoffInventory,
+			errors.Join(stateErr, inventoryErr, closeErr),
+		)
+	}
+	if _, err := handoffOnlyCoordinator.OpenPrepared(
+		context.Background(), uuid.New(), prepared.Migration.MigrationID,
+		request.SnapshotID, time.UnixMilli(3_800),
+	); err == nil {
+		t.Fatal("rollback source handoff accepted another principal")
+	}
+	if _, err := handoffOnlyCoordinator.OpenPrepared(
+		context.Background(), prepared.Scope.ScopeID,
+		prepared.Migration.MigrationID, request.SnapshotID,
+		time.UnixMilli(10_001),
+	); err == nil {
+		t.Fatal("expired rollback source handoff remained transferable")
+	}
 	second, err := operationCoordinator.Recover(
 		context.Background(), time.UnixMilli(3_800),
 	)
@@ -638,6 +691,37 @@ func TestDeviceSyncRollbackSourceOperationRecoversCommittedExportFence(t *testin
 			"completed rollback source exact retry=%+v materializer=%d err=%v",
 			exact, store.materializerCalls, err,
 		)
+	}
+	serviceStatePath := filepath.Join(
+		reopenedCustody.root, "device-sync-rollback",
+		prepared.Scope.ScopeID.String(), prepared.Migration.MigrationID.String(),
+		request.SnapshotID.String(), serviceStateFileName,
+	)
+	originalServiceState, err := os.ReadFile(serviceStatePath)
+	if err != nil || len(originalServiceState) == 0 {
+		t.Fatal(err)
+	}
+	tamperedServiceState := append([]byte(nil), originalServiceState...)
+	tamperedServiceState[0] ^= 0xff
+	if err := os.WriteFile(serviceStatePath, tamperedServiceState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handoffOnlyCoordinator.OpenPrepared(
+		context.Background(), prepared.Scope.ScopeID,
+		prepared.Migration.MigrationID, request.SnapshotID,
+		time.UnixMilli(3_800),
+	); err == nil {
+		t.Fatal("same-length changed rollback artifact was exposed for handoff")
+	}
+	if err := os.WriteFile(serviceStatePath, originalServiceState, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handoffOnlyCoordinator.OpenPrepared(
+		context.Background(), prepared.Scope.ScopeID,
+		prepared.Migration.MigrationID, request.SnapshotID,
+		time.UnixMilli(3_800),
+	); err != nil {
+		t.Fatalf("restored exact rollback artifact handoff: %v", err)
 	}
 	operationPath := filepath.Join(
 		reopenedCustody.root, rollbackSourceOperationRootName,

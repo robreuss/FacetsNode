@@ -247,6 +247,79 @@ func (custody *FileArtifactCustody) completeDeviceSyncRollbackSourceOperation(
 	return writeAtomicOperationRecord(operation.path, completedEncoded)
 }
 
+func (custody *FileArtifactCustody) openPreparedDeviceSyncRollbackSourceHandoff(
+	ctx context.Context,
+	operation deviceSyncRollbackSourceOperation,
+	now time.Time,
+) (DeviceSyncRollbackSourceHandoff, error) {
+	if custody == nil || ctx == nil || !operation.completed ||
+		operation.record.Prepared == nil || now.IsZero() || now.UnixMilli() < 0 {
+		return DeviceSyncRollbackSourceHandoff{}, serviceauthority.ErrInvalid
+	}
+	acceptance, err := operation.record.Acceptance.VerifiedPayload()
+	if err != nil || now.UnixMilli() < acceptance.AcceptedAtMilliseconds {
+		return DeviceSyncRollbackSourceHandoff{}, serviceauthority.ErrInvalid
+	}
+	prepared, err := operation.record.Prepared.VerifiedPayload()
+	if err != nil {
+		return DeviceSyncRollbackSourceHandoff{}, serviceauthority.ErrInvalid
+	}
+	snapshotPath := filepath.Join(
+		custody.root, "device-sync-rollback", acceptance.Scope.ScopeID.String(),
+		acceptance.MigrationID.String(), acceptance.SnapshotID.String(),
+		snapshotFileName,
+	)
+	snapshotRecord, err := readProtectedRecord(
+		snapshotPath, maximumEvidenceByteCount,
+	)
+	if err != nil {
+		return DeviceSyncRollbackSourceHandoff{}, err
+	}
+	var snapshot serviceauthority.MigrationSnapshot
+	decoder := json.NewDecoder(bytes.NewReader(snapshotRecord))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&snapshot); err != nil || ensureJSONEOF(decoder) != nil {
+		return DeviceSyncRollbackSourceHandoff{}, serviceauthority.ErrInvalid
+	}
+	canonicalSnapshot, err := json.Marshal(snapshot)
+	if err != nil || !bytes.Equal(canonicalSnapshot, snapshotRecord) {
+		return DeviceSyncRollbackSourceHandoff{}, serviceauthority.ErrInvalid
+	}
+	validated, err := snapshot.ValidateRollbackTransfer(
+		operation.request.ActivationEvidence,
+		operation.request.Anchor,
+		now.UnixMilli(),
+	)
+	if err != nil {
+		return DeviceSyncRollbackSourceHandoff{}, err
+	}
+	snapshotDigest, err := snapshot.ReferenceDigest()
+	if err != nil || validated.Snapshot.Scope != acceptance.Scope ||
+		validated.Migration.MigrationID != acceptance.MigrationID ||
+		validated.Snapshot.SnapshotID != acceptance.SnapshotID ||
+		validated.Snapshot.ExportWriteFenceID != acceptance.ExportWriteFenceID ||
+		validated.Snapshot.StateCommitmentDigest != prepared.StateCommitmentDigest ||
+		snapshotDigest != prepared.SnapshotReferenceDigest {
+		return DeviceSyncRollbackSourceHandoff{}, serviceauthority.ErrInvalid
+	}
+	transfer, found, err := custody.openPreparedDeviceSyncRollbackTransfer(
+		ctx, validated, operation.request.ActivationEvidence, snapshot,
+	)
+	if err != nil {
+		return DeviceSyncRollbackSourceHandoff{}, err
+	}
+	if !found {
+		return DeviceSyncRollbackSourceHandoff{}, errors.New(
+			"Device Sync rollback source handoff lacks exact artifact custody",
+		)
+	}
+	return DeviceSyncRollbackSourceHandoff{
+		ActivationEvidence: operation.request.ActivationEvidence,
+		Snapshot:           snapshot,
+		Transfer:           transfer,
+	}, nil
+}
+
 func writeAtomicOperationRecord(path string, encoded []byte) error {
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".operation-*")
 	if err != nil {

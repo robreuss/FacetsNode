@@ -17,6 +17,15 @@ type DeviceSyncRollbackSourceOperationResult struct {
 	Recovered   bool
 }
 
+// DeviceSyncRollbackSourceHandoff is the exact authenticated reverse transfer
+// a later transport adapter may serve. Transfer exposes protected readers, not
+// local paths; this value neither selects a route nor authorizes rollback.
+type DeviceSyncRollbackSourceHandoff struct {
+	ActivationEvidence serviceauthority.MigrationActivationEvidence
+	Snapshot           serviceauthority.MigrationSnapshot
+	Transfer           PreparedDeviceSyncTransfer
+}
+
 type DeviceSyncRollbackSourceOperationState string
 
 const (
@@ -105,6 +114,54 @@ func (coordinator *DeviceSyncRollbackSourceOperationCoordinator) Begin(
 		)
 	}
 	return coordinator.apply(ctx, operation, request.Now, false)
+}
+
+func (coordinator *DeviceSyncRollbackSourceOperationCoordinator) OpenPrepared(
+	ctx context.Context,
+	principalID uuid.UUID,
+	migrationID uuid.UUID,
+	snapshotID uuid.UUID,
+	now time.Time,
+) (DeviceSyncRollbackSourceHandoff, error) {
+	if err := coordinator.validateIdentity(ctx, now); err != nil ||
+		principalID == uuid.Nil || migrationID == uuid.Nil || snapshotID == uuid.Nil {
+		return DeviceSyncRollbackSourceHandoff{}, serviceauthority.ErrInvalid
+	}
+	operations, err := coordinator.Source.Custody.
+		listDeviceSyncRollbackSourceOperations(ctx)
+	if err != nil {
+		return DeviceSyncRollbackSourceHandoff{}, fmt.Errorf(
+			"list Device Sync rollback source handoff: %w", err,
+		)
+	}
+	for _, operation := range operations {
+		acceptance, err := operation.record.Acceptance.VerifiedPayload()
+		if err != nil {
+			return DeviceSyncRollbackSourceHandoff{}, err
+		}
+		if acceptance.Scope.ScopeID != principalID ||
+			acceptance.MigrationID != migrationID ||
+			acceptance.SnapshotID != snapshotID {
+			continue
+		}
+		if !operation.completed || !coordinator.owns(operation) ||
+			now.UnixMilli() < acceptance.AcceptedAtMilliseconds {
+			return DeviceSyncRollbackSourceHandoff{}, errors.New(
+				"Device Sync rollback source handoff is not prepared",
+			)
+		}
+		handoff, err := coordinator.Source.Custody.
+			openPreparedDeviceSyncRollbackSourceHandoff(ctx, operation, now)
+		if err != nil {
+			return DeviceSyncRollbackSourceHandoff{}, fmt.Errorf(
+				"open Device Sync rollback source handoff: %w", err,
+			)
+		}
+		return handoff, nil
+	}
+	return DeviceSyncRollbackSourceHandoff{}, errors.New(
+		"Device Sync rollback source handoff was not found",
+	)
 }
 
 func (coordinator *DeviceSyncRollbackSourceOperationCoordinator) Recover(

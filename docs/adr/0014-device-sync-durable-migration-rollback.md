@@ -121,8 +121,13 @@ but does not require PostgreSQL or the binding registry. `recover` additionally
 requires PostgreSQL and exclusive access to the deployment binding registry;
 it can resume only a previously signed accepted operation and cannot select
 new identifiers or initiate rollback. Ordinary startup remains fail-closed.
-Deployed two-host transfer, public operator routes, status/cancellation UX, and
-client observation remain outside this checkpoint.
+Completed operation custody also exposes a transport-neutral, read-only
+handoff primitive by exact principal, migration, and snapshot identity. It
+revalidates live activation, the signed snapshot and completion digests, and
+rehashes both artifacts before returning protected readers. It exposes no
+filesystem paths, route, listener, or expiry bypass. Deployed two-host
+transfer, public operator routes, status/cancellation UX, and client
+observation remain outside this checkpoint.
 
 ## Verification boundary
 
