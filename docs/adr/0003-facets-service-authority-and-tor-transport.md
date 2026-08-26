@@ -48,7 +48,7 @@ capability digests without content keys.
    returned grant against the active deployment key and accepted manifest.
 10. Initial Device Sync enrollment starts from a deployment-key-signed,
     short-lived route offer. The client proves live possession of that
-    deployment key before releasing its one-time operator bearer, then creates
+    deployment key before releasing its one-time account-admission bearer, then creates
     and signs revision 1 with its independent Facets principal authority.
     FacetsNode verifies the enrollment and durably stores only the public
     current-binding facts.

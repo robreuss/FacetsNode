@@ -2,9 +2,10 @@
 
 # Runs the opt-in Swift <-> Go Shared Spaces initial-authority gate against a
 # disposable pinned-TLS FacetsNode handler. The Go side publishes a short-lived
-# deployment offer and disposable operator bearer to a mode-0600 file. Swift
-# authenticates the physical deployment before releasing that bearer, creates
-# one fresh Shared Space, and proves an ordinary authority-bound status read.
+# deployment offer and disposable one-time provisioning admission to a
+# mode-0600 file. Swift authenticates the physical deployment before releasing
+# that bearer, creates one fresh Shared Space, and proves an ordinary
+# authority-bound status read.
 #
 # Optional environment:
 #   FACETS_SWIFT_REPOSITORY      Defaults to the sibling ../Facets checkout.

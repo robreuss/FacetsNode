@@ -1,3 +1,32 @@
+CREATE TABLE shared_space_provisioning_admissions (
+    admission_id uuid PRIMARY KEY,
+    retry_id uuid NOT NULL UNIQUE,
+    version smallint NOT NULL CHECK (version = 1),
+    authorization_digest text NOT NULL CHECK (
+        authorization_digest ~ '^[0-9a-f]{64}$'
+    ),
+    created_at_milliseconds bigint NOT NULL CHECK (created_at_milliseconds >= 0),
+    expires_at_milliseconds bigint NOT NULL,
+    claimed_at_milliseconds bigint,
+    claimed_space_id uuid,
+    claimed_request_digest text CHECK (
+        claimed_request_digest ~ '^[0-9a-f]{64}$'
+    ),
+    stored_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (
+        expires_at_milliseconds - created_at_milliseconds >= 300000 AND
+        expires_at_milliseconds - created_at_milliseconds <= 604800000
+    ),
+    CHECK (
+        (claimed_at_milliseconds IS NULL AND claimed_space_id IS NULL AND
+            claimed_request_digest IS NULL) OR
+        (claimed_at_milliseconds >= created_at_milliseconds AND
+            claimed_at_milliseconds < expires_at_milliseconds AND
+            claimed_space_id IS NOT NULL AND claimed_request_digest IS NOT NULL)
+    )
+);
+
 CREATE TABLE shared_spaces (
     space_id uuid PRIMARY KEY REFERENCES relay_tenants(tenant_id) ON DELETE CASCADE,
     provisioning_retry_id uuid NOT NULL UNIQUE,

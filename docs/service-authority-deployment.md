@@ -73,9 +73,11 @@ match the protected deployment key:
 }
 ```
 
-Every endpoint used by `issue-account-admission` must be an exact control
-route in this file. The resulting setup link and one-time bearer have the same
-expiry, and the link carries the signed offer rather than an unsigned address.
+Every endpoint used by `issue-account-admission` or
+`issue-shared-space-admission` must be an exact control route in this file. The
+resulting setup link and one-time bearer have the same expiry, and the link
+carries the signed offer rather than an unsigned address. Neither client setup
+package contains the deployment's global operator credential.
 
 The binding file is non-secret but authority-sensitive. It is an atomic
 deployment input with no group/world write permission and this schema:

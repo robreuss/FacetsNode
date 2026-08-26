@@ -23,10 +23,8 @@ import (
 )
 
 type swiftSharedSpacesLiveAccess struct {
-	DeploymentOffer            serviceauthority.DeploymentOffer `json:"deploymentOffer"`
-	Endpoint                   string                           `json:"endpoint"`
-	OperatorAuthorizationToken string                           `json:"operatorAuthorizationToken"`
-	ResultPath                 string                           `json:"resultPath"`
+	ProvisioningBootstrap sharedspaces.ProvisioningBootstrap `json:"provisioningBootstrap"`
+	ResultPath            string                             `json:"resultPath"`
 }
 
 type swiftSharedSpacesLiveResult struct {
@@ -37,7 +35,7 @@ type swiftSharedSpacesLiveResult struct {
 
 // TestLiveServeSwiftSharedSpacesAuthority is an opt-in cross-language gate.
 // It exposes an in-process FacetsNode handler over pinned TLS, gives Swift only
-// a short-lived deployment offer plus the disposable operator bearer, and
+// a short-lived deployment offer plus a one-time provisioning admission, and
 // waits for Swift to prove both initial authority activation and an ordinary
 // authority-bound request. PostgreSQL durability is covered by the separate
 // Shared Spaces store integration gate; this test owns wire/runtime parity.
@@ -73,7 +71,8 @@ func TestLiveServeSwiftSharedSpacesAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.SetServiceIdentity("facets-shared-spaces-server")
-	api.SetSharedSpacesStore(sharedspaces.NewMemoryStore(relayStore))
+	sharedStore := sharedspaces.NewMemoryStore(relayStore)
+	api.SetSharedSpacesStore(sharedStore)
 
 	deploymentID := uuid.New()
 	routeID := uuid.New()
@@ -126,7 +125,7 @@ func TestLiveServeSwiftSharedSpacesAuthority(t *testing.T) {
 				Version:               serviceauthority.SchemaVersion,
 			},
 			ExpiresAtMilliseconds: now.Add(10 * time.Minute).UnixMilli(),
-			IssuedAtMilliseconds:  now.Add(-time.Second).UnixMilli(),
+			IssuedAtMilliseconds:  now.UnixMilli(),
 			TransportPolicy:       policy,
 			Version:               serviceauthority.SchemaVersion,
 		},
@@ -134,12 +133,17 @@ func TestLiveServeSwiftSharedSpacesAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeSwiftLiveAccess(t, accessPath, swiftSharedSpacesLiveAccess{
-		DeploymentOffer:            offer,
-		Endpoint:                   server.URL,
-		OperatorAuthorizationToken: operatorToken,
-		ResultPath:                 resultPath,
-	})
+	issued, err := sharedspaces.IssueProvisioningBootstrap(
+		t.Context(), sharedStore, server.URL, offer, 10*time.Minute, now, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := swiftSharedSpacesLiveAccess{
+		ProvisioningBootstrap: issued.Bootstrap,
+		ResultPath:            resultPath,
+	}
+	writeSwiftLiveAccess(t, accessPath, access)
 
 	deadline := time.NewTimer(3 * time.Minute)
 	defer deadline.Stop()

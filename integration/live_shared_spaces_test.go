@@ -24,9 +24,10 @@ import (
 
 // TestLiveSharedSpacesVerticalSlice proves the first product authority
 // lifecycle against a running PostgreSQL-backed Shared Spaces service. It does
-// not seed authority or relay state directly: a Space and host are provisioned
-// through the operator API, a reader is invited and claims membership, opaque
-// content crosses the relay, and revocation removes that participant's access.
+// not seed authority or relay state directly: the operator issues a one-time
+// admission, the client uses it to provision a Space and host, a reader is
+// invited and claims membership, opaque content crosses the relay, and
+// revocation removes that participant's access.
 func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	baseURL := strings.TrimRight(os.Getenv("FACETS_SHARED_SPACES_TEST_BASE_URL"), "/")
 	operatorToken := os.Getenv("FACETS_SHARED_SPACES_TEST_OPERATOR_TOKEN")
@@ -60,9 +61,28 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 	provisioning.InitialSecureRosterAttestation = liveSharedSpaceInitialRosterAttestation(
 		t, provisioning, domainID, now,
 	)
+	admissionID := uuid.New()
+	admissionToken := encodedBytes(7)
+	issued := requestRelayJSON(
+		t, client, http.MethodPost,
+		baseURL+"/v1/shared-spaces/provisioning-admissions",
+		liveSharedSpaceProvisioningAdmissionCreateInput{
+			Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+			AdmissionCredential: liveSharedSpaceProvisioningAdmissionCredential{
+				AdmissionID: admissionID, AuthorizationToken: admissionToken,
+			},
+			ExpiresAtMilliseconds: now +
+				sharedspaces.MinimumProvisioningAdmissionLifetimeMilliseconds,
+		},
+		operatorToken,
+		uuid.Nil,
+	)
+	requireStatusAndClose(t, issued, http.StatusCreated)
+	claimURL := baseURL + "/v1/shared-spaces/provisioning-admissions/" +
+		admissionID.String() + "/claim"
 	created := requestRelayJSON(
-		t, client, http.MethodPost, baseURL+"/v1/shared-spaces",
-		provisioning, operatorToken, uuid.Nil,
+		t, client, http.MethodPost, claimURL,
+		provisioning, admissionToken, uuid.Nil,
 	)
 	requireStatus(t, created, http.StatusCreated)
 	var createdResult sharedspaces.SpaceProvisioningResult
@@ -75,8 +95,8 @@ func TestLiveSharedSpacesVerticalSlice(t *testing.T) {
 		t.Fatalf("unexpected Shared Space provisioning: %+v", createdResult)
 	}
 	requireStatusAndClose(t, requestRelayJSON(
-		t, client, http.MethodPost, baseURL+"/v1/shared-spaces",
-		provisioning, operatorToken, uuid.Nil,
+		t, client, http.MethodPost, claimURL,
+		provisioning, admissionToken, uuid.Nil,
 	), http.StatusOK)
 
 	participantID := uuid.New()
@@ -521,6 +541,18 @@ type liveSharedSpaceProvisioningInput struct {
 	InitialParticipantDeviceKeys   []sharedspaces.ParticipantDeviceKey   `json:"initialParticipantDeviceKeys"`
 	InitialSecureRosterAttestation *sharedspaces.SecureRosterAttestation `json:"initialSecureRosterAttestation,omitempty"`
 	TenantProvisioning             liveRelayTenantProvisioningRequest    `json:"tenantProvisioning"`
+}
+
+type liveSharedSpaceProvisioningAdmissionCredential struct {
+	AdmissionID        uuid.UUID `json:"admissionID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+type liveSharedSpaceProvisioningAdmissionCreateInput struct {
+	Version               int                                            `json:"version"`
+	RetryID               uuid.UUID                                      `json:"retryID"`
+	AdmissionCredential   liveSharedSpaceProvisioningAdmissionCredential `json:"admissionCredential"`
+	ExpiresAtMilliseconds int64                                          `json:"expiresAtMilliseconds"`
 }
 
 type liveSharedSpaceInvitationCredential struct {

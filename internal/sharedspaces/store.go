@@ -9,6 +9,8 @@ import (
 )
 
 type Store interface {
+	CreateProvisioningAdmission(context.Context, ProvisioningAdmission, int64) (ProvisioningAdmissionCreateResult, error)
+	ClaimProvisioningAdmission(context.Context, ProvisioningAdmissionCredential, ProvisioningAdmissionClaim, int64) (ProvisioningAdmissionClaimResult, error)
 	ProvisionSpace(context.Context, SpaceProvisioning, int64) (SpaceProvisioningResult, error)
 	CreateInvitation(context.Context, relay.AdministrationCredential, Invitation, int64) (InvitationCreateResult, error)
 	ClaimInvitation(context.Context, InvitationCredential, InvitationClaim, int64) (InvitationClaimResult, error)

@@ -47,6 +47,8 @@ type MemoryStore struct {
 	relay                           relay.Store
 	spaces                          map[uuid.UUID]*memorySpace
 	spaceRetries                    map[uuid.UUID]uuid.UUID
+	provisioningAdmissions          map[uuid.UUID]ProvisioningAdmission
+	provisioningAdmissionRetries    map[uuid.UUID]uuid.UUID
 	invitations                     map[uuid.UUID]memoryInvitation
 	invitationRetries               map[uuid.UUID]uuid.UUID
 	invitationCancellationRequests  map[uuid.UUID]InvitationCancellation
@@ -99,6 +101,125 @@ func NewMemoryStore(relayStore relay.Store, custodians ...*keycustody.ManagedCon
 		authorityEvents:                 make(map[uuid.UUID][]AuthorityEvent),
 		nextAuthoritySequences:          make(map[uuid.UUID]uint64),
 		managedContentKeys:              custodian,
+		provisioningAdmissions:          make(map[uuid.UUID]ProvisioningAdmission),
+		provisioningAdmissionRetries:    make(map[uuid.UUID]uuid.UUID),
+	}
+}
+
+func (s *MemoryStore) CreateProvisioningAdmission(
+	_ context.Context,
+	admission ProvisioningAdmission,
+	nowMilliseconds int64,
+) (ProvisioningAdmissionCreateResult, error) {
+	if admission.Validate() != nil || admission.ClaimedAtMilliseconds != nil ||
+		admission.CreatedAtMilliseconds != nowMilliseconds ||
+		nowMilliseconds >= admission.ExpiresAtMilliseconds {
+		return ProvisioningAdmissionCreateResult{}, NewProtocolError(
+			CodeInvalidProvisioningAdmission,
+			"Shared Space provisioning admission is not currently issuable",
+		)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existingID, ok := s.provisioningAdmissionRetries[admission.RetryID]; ok {
+		existing := s.provisioningAdmissions[existingID]
+		if existing.SameIssuance(admission) {
+			return ProvisioningAdmissionCreateResult{
+				Acceptance: relay.AcceptanceDuplicate, Admission: existing,
+			}, nil
+		}
+		return ProvisioningAdmissionCreateResult{}, NewProtocolError(
+			CodeProvisioningAdmissionCollision,
+			"Shared Space provisioning admission retry ID was reused",
+		)
+	}
+	if existing, ok := s.provisioningAdmissions[admission.AdmissionID]; ok {
+		if existing.SameIssuance(admission) {
+			return ProvisioningAdmissionCreateResult{
+				Acceptance: relay.AcceptanceDuplicate, Admission: existing,
+			}, nil
+		}
+		return ProvisioningAdmissionCreateResult{}, NewProtocolError(
+			CodeProvisioningAdmissionCollision,
+			"Shared Space provisioning admission ID was reused",
+		)
+	}
+	s.provisioningAdmissions[admission.AdmissionID] = admission
+	s.provisioningAdmissionRetries[admission.RetryID] = admission.AdmissionID
+	return ProvisioningAdmissionCreateResult{
+		Acceptance: relay.AcceptanceAccepted, Admission: admission,
+	}, nil
+}
+
+func (s *MemoryStore) ClaimProvisioningAdmission(
+	_ context.Context,
+	credential ProvisioningAdmissionCredential,
+	claim ProvisioningAdmissionClaim,
+	nowMilliseconds int64,
+) (ProvisioningAdmissionClaimResult, error) {
+	if claim.Validate() != nil {
+		return ProvisioningAdmissionClaimResult{}, NewProtocolError(
+			CodeInvalidProvisioningAdmission,
+			"Shared Space provisioning admission claim is not current",
+		)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	admission, ok := s.provisioningAdmissions[credential.AdmissionID]
+	if !ok {
+		return ProvisioningAdmissionClaimResult{}, NewProtocolError(
+			CodeProvisioningAdmissionNotFound,
+			"Shared Space provisioning admission was not found",
+		)
+	}
+	if err := admission.VerifyCredential(credential); err != nil {
+		return ProvisioningAdmissionClaimResult{}, err
+	}
+	if admission.ClaimedAtMilliseconds != nil {
+		if *admission.ClaimedSpaceID == claim.SpaceID &&
+			*admission.ClaimedRequestDigest == claim.RequestDigest {
+			return provisioningAdmissionClaimResult(
+				admission, relay.AcceptanceDuplicate,
+			), nil
+		}
+		return ProvisioningAdmissionClaimResult{}, NewProtocolError(
+			CodeProvisioningAdmissionClaimed,
+			"Shared Space provisioning admission was claimed by another request",
+		)
+	}
+	if claim.ClaimedAtMilliseconds != nowMilliseconds {
+		return ProvisioningAdmissionClaimResult{}, NewProtocolError(
+			CodeInvalidProvisioningAdmission,
+			"Shared Space provisioning admission claim is not current",
+		)
+	}
+	if err := admission.RequireActive(nowMilliseconds); err != nil {
+		return ProvisioningAdmissionClaimResult{}, err
+	}
+	claimedAt := claim.ClaimedAtMilliseconds
+	spaceID := claim.SpaceID
+	requestDigest := claim.RequestDigest
+	admission.ClaimedAtMilliseconds = &claimedAt
+	admission.ClaimedSpaceID = &spaceID
+	admission.ClaimedRequestDigest = &requestDigest
+	if err := admission.Validate(); err != nil {
+		return ProvisioningAdmissionClaimResult{}, err
+	}
+	s.provisioningAdmissions[admission.AdmissionID] = admission
+	return provisioningAdmissionClaimResult(
+		admission, relay.AcceptanceAccepted,
+	), nil
+}
+
+func provisioningAdmissionClaimResult(
+	admission ProvisioningAdmission,
+	acceptance relay.Acceptance,
+) ProvisioningAdmissionClaimResult {
+	return ProvisioningAdmissionClaimResult{
+		Acceptance: acceptance, AdmissionID: admission.AdmissionID,
+		SpaceID:               *admission.ClaimedSpaceID,
+		RequestDigest:         *admission.ClaimedRequestDigest,
+		ClaimedAtMilliseconds: *admission.ClaimedAtMilliseconds,
 	}
 }
 

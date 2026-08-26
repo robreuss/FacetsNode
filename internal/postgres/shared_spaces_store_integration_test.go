@@ -539,6 +539,94 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 }
 
+func TestPostgresSharedSpaceProvisioningAdmissionPersistsExactClaim(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_SERVER_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
+	pool := openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `TRUNCATE shared_space_provisioning_admissions`); err != nil {
+		t.Fatal(err)
+	}
+
+	const now = int64(50_000)
+	credential := sharedspaces.ProvisioningAdmissionCredential{
+		AdmissionID: uuid.New(),
+		Token:       base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x4a}, 32)),
+	}
+	authorizationDigest, err := sharedspaces.ProvisioningAdmissionAuthorizationDigest(
+		credential,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := sharedspaces.ProvisioningAdmission{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		AdmissionID:           credential.AdmissionID,
+		AuthorizationDigest:   authorizationDigest,
+		CreatedAtMilliseconds: now,
+		ExpiresAtMilliseconds: now +
+			sharedspaces.MinimumProvisioningAdmissionLifetimeMilliseconds,
+	}
+	store := postgresstore.NewSharedSpacesStore(pool)
+	created, err := store.CreateProvisioningAdmission(ctx, admission, now)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("create provisioning admission=%+v err=%v", created, err)
+	}
+	claimDigest := sha256.Sum256([]byte("exact Shared Space request"))
+	claim := sharedspaces.ProvisioningAdmissionClaim{
+		Version: sharedspaces.SchemaVersion, SpaceID: uuid.New(),
+		RequestDigest:         hex.EncodeToString(claimDigest[:]),
+		ClaimedAtMilliseconds: now + 100,
+	}
+	wrongCredential := credential
+	wrongCredential.Token = base64.RawURLEncoding.EncodeToString(
+		bytes.Repeat([]byte{0x4b}, 32),
+	)
+	if _, err := store.ClaimProvisioningAdmission(
+		ctx, wrongCredential, claim, claim.ClaimedAtMilliseconds,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeUnauthorized) {
+		t.Fatalf("wrong provisioning admission credential err=%v", err)
+	}
+	claimed, err := store.ClaimProvisioningAdmission(
+		ctx, credential, claim, claim.ClaimedAtMilliseconds,
+	)
+	if err != nil || claimed.Acceptance != relay.AcceptanceAccepted ||
+		claimed.SpaceID != claim.SpaceID ||
+		claimed.RequestDigest != claim.RequestDigest {
+		t.Fatalf("claim provisioning admission=%+v err=%v", claimed, err)
+	}
+
+	restarted := postgresstore.NewSharedSpacesStore(pool)
+	issuedRetry, err := restarted.CreateProvisioningAdmission(ctx, admission, now)
+	if err != nil || issuedRetry.Acceptance != relay.AcceptanceDuplicate ||
+		issuedRetry.Admission.ClaimedAtMilliseconds == nil {
+		t.Fatalf("claimed admission issuance retry=%+v err=%v", issuedRetry, err)
+	}
+	exactRetry, err := restarted.ClaimProvisioningAdmission(
+		ctx, credential, claim, admission.ExpiresAtMilliseconds+1,
+	)
+	if err != nil || exactRetry.Acceptance != relay.AcceptanceDuplicate ||
+		exactRetry.ClaimedAtMilliseconds != claim.ClaimedAtMilliseconds {
+		t.Fatalf("persisted exact admission retry=%+v err=%v", exactRetry, err)
+	}
+	changed := claim
+	changed.SpaceID = uuid.New()
+	changed.ClaimedAtMilliseconds = admission.ExpiresAtMilliseconds + 1
+	if _, err := restarted.ClaimProvisioningAdmission(
+		ctx, credential, changed, changed.ClaimedAtMilliseconds,
+	); !sharedspaces.ErrorHasCode(err, sharedspaces.CodeProvisioningAdmissionClaimed) {
+		t.Fatalf("changed persisted admission retry err=%v", err)
+	}
+}
+
 func TestPostgresSharedSpaceInitialServiceAuthorityIsExactAndImmutable(t *testing.T) {
 	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
 	if databaseURL == "" {

@@ -39,6 +39,17 @@ func Main(service config.Service) {
 		}
 		return
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "issue-shared-space-admission" {
+		if err := issueSharedSpaceAdmission(service, os.Args[2:]); err != nil {
+			_, _ = fmt.Fprintf(
+				os.Stderr,
+				"issue Shared Space provisioning admission: %v\n",
+				err,
+			)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "rollback-source" {
 		rootContext, stop := signal.NotifyContext(
 			context.Background(), syscall.SIGINT, syscall.SIGTERM,

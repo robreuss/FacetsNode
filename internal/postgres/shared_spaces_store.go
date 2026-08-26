@@ -58,6 +58,196 @@ func decodeSpaceProvisioning(payload []byte) (sharedspaces.SpaceProvisioning, er
 	return stored.Provisioning, nil
 }
 
+type sharedSpaceAdmissionRow interface {
+	Scan(dest ...any) error
+}
+
+func scanSharedSpaceProvisioningAdmission(
+	row sharedSpaceAdmissionRow,
+) (sharedspaces.ProvisioningAdmission, error) {
+	var admission sharedspaces.ProvisioningAdmission
+	err := row.Scan(
+		&admission.Version,
+		&admission.RetryID,
+		&admission.AdmissionID,
+		&admission.AuthorizationDigest,
+		&admission.CreatedAtMilliseconds,
+		&admission.ExpiresAtMilliseconds,
+		&admission.ClaimedAtMilliseconds,
+		&admission.ClaimedSpaceID,
+		&admission.ClaimedRequestDigest,
+	)
+	if err != nil {
+		return sharedspaces.ProvisioningAdmission{}, err
+	}
+	if err := admission.Validate(); err != nil {
+		return sharedspaces.ProvisioningAdmission{}, err
+	}
+	return admission, nil
+}
+
+const sharedSpaceProvisioningAdmissionColumns = `
+	version,retry_id,admission_id,authorization_digest,
+	created_at_milliseconds,expires_at_milliseconds,claimed_at_milliseconds,
+	claimed_space_id,claimed_request_digest
+`
+
+func (s *SharedSpacesStore) CreateProvisioningAdmission(
+	ctx context.Context,
+	admission sharedspaces.ProvisioningAdmission,
+	nowMilliseconds int64,
+) (sharedspaces.ProvisioningAdmissionCreateResult, error) {
+	if admission.Validate() != nil || admission.ClaimedAtMilliseconds != nil ||
+		admission.CreatedAtMilliseconds != nowMilliseconds ||
+		nowMilliseconds >= admission.ExpiresAtMilliseconds {
+		return sharedspaces.ProvisioningAdmissionCreateResult{},
+			sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidProvisioningAdmission,
+				"Shared Space provisioning admission is not currently issuable",
+			)
+	}
+	result, err := s.pool.Exec(ctx, `
+		INSERT INTO shared_space_provisioning_admissions (
+			admission_id,retry_id,version,authorization_digest,
+			created_at_milliseconds,expires_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6)
+		ON CONFLICT DO NOTHING
+	`, admission.AdmissionID, admission.RetryID, admission.Version,
+		admission.AuthorizationDigest, admission.CreatedAtMilliseconds,
+		admission.ExpiresAtMilliseconds)
+	if err != nil {
+		return sharedspaces.ProvisioningAdmissionCreateResult{},
+			fmt.Errorf("insert Shared Space provisioning admission: %w", err)
+	}
+	if result.RowsAffected() == 1 {
+		return sharedspaces.ProvisioningAdmissionCreateResult{
+			Acceptance: relay.AcceptanceAccepted, Admission: admission,
+		}, nil
+	}
+	existing, loadErr := scanSharedSpaceProvisioningAdmission(s.pool.QueryRow(ctx, `
+		SELECT `+sharedSpaceProvisioningAdmissionColumns+`
+		FROM shared_space_provisioning_admissions
+		WHERE admission_id=$1 OR retry_id=$2
+		ORDER BY CASE WHEN admission_id=$1 THEN 0 ELSE 1 END
+		LIMIT 1
+	`, admission.AdmissionID, admission.RetryID))
+	if loadErr == nil && existing.SameIssuance(admission) {
+		return sharedspaces.ProvisioningAdmissionCreateResult{
+			Acceptance: relay.AcceptanceDuplicate, Admission: existing,
+		}, nil
+	}
+	if loadErr != nil && loadErr != pgx.ErrNoRows {
+		return sharedspaces.ProvisioningAdmissionCreateResult{},
+			fmt.Errorf("load conflicting Shared Space provisioning admission: %w", loadErr)
+	}
+	return sharedspaces.ProvisioningAdmissionCreateResult{},
+		sharedspaces.NewProtocolError(
+			sharedspaces.CodeProvisioningAdmissionCollision,
+			"Shared Space provisioning admission ID or retry ID was reused",
+		)
+}
+
+func (s *SharedSpacesStore) ClaimProvisioningAdmission(
+	ctx context.Context,
+	credential sharedspaces.ProvisioningAdmissionCredential,
+	claim sharedspaces.ProvisioningAdmissionClaim,
+	nowMilliseconds int64,
+) (sharedspaces.ProvisioningAdmissionClaimResult, error) {
+	if claim.Validate() != nil {
+		return sharedspaces.ProvisioningAdmissionClaimResult{},
+			sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidProvisioningAdmission,
+				"Shared Space provisioning admission claim is invalid",
+			)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return sharedspaces.ProvisioningAdmissionClaimResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	admission, err := scanSharedSpaceProvisioningAdmission(tx.QueryRow(ctx, `
+		SELECT `+sharedSpaceProvisioningAdmissionColumns+`
+		FROM shared_space_provisioning_admissions
+		WHERE admission_id=$1
+		FOR UPDATE
+	`, credential.AdmissionID))
+	if err == pgx.ErrNoRows {
+		return sharedspaces.ProvisioningAdmissionClaimResult{},
+			sharedspaces.NewProtocolError(
+				sharedspaces.CodeProvisioningAdmissionNotFound,
+				"Shared Space provisioning admission was not found",
+			)
+	}
+	if err != nil {
+		return sharedspaces.ProvisioningAdmissionClaimResult{},
+			fmt.Errorf("load Shared Space provisioning admission: %w", err)
+	}
+	if err := admission.VerifyCredential(credential); err != nil {
+		return sharedspaces.ProvisioningAdmissionClaimResult{}, err
+	}
+	if admission.ClaimedAtMilliseconds != nil {
+		if *admission.ClaimedSpaceID == claim.SpaceID &&
+			*admission.ClaimedRequestDigest == claim.RequestDigest {
+			return sharedSpaceProvisioningAdmissionClaimResult(
+				admission, relay.AcceptanceDuplicate,
+			), nil
+		}
+		return sharedspaces.ProvisioningAdmissionClaimResult{},
+			sharedspaces.NewProtocolError(
+				sharedspaces.CodeProvisioningAdmissionClaimed,
+				"Shared Space provisioning admission was claimed by another request",
+			)
+	}
+	if claim.ClaimedAtMilliseconds != nowMilliseconds {
+		return sharedspaces.ProvisioningAdmissionClaimResult{},
+			sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidProvisioningAdmission,
+				"Shared Space provisioning admission claim is not current",
+			)
+	}
+	if err := admission.RequireActive(nowMilliseconds); err != nil {
+		return sharedspaces.ProvisioningAdmissionClaimResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE shared_space_provisioning_admissions
+		SET claimed_at_milliseconds=$2,claimed_space_id=$3,
+			claimed_request_digest=$4,updated_at=now()
+		WHERE admission_id=$1 AND claimed_at_milliseconds IS NULL
+	`, admission.AdmissionID, claim.ClaimedAtMilliseconds,
+		claim.SpaceID, claim.RequestDigest); err != nil {
+		return sharedspaces.ProvisioningAdmissionClaimResult{},
+			fmt.Errorf("claim Shared Space provisioning admission: %w", err)
+	}
+	claimedAt := claim.ClaimedAtMilliseconds
+	spaceID := claim.SpaceID
+	requestDigest := claim.RequestDigest
+	admission.ClaimedAtMilliseconds = &claimedAt
+	admission.ClaimedSpaceID = &spaceID
+	admission.ClaimedRequestDigest = &requestDigest
+	if err := admission.Validate(); err != nil {
+		return sharedspaces.ProvisioningAdmissionClaimResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return sharedspaces.ProvisioningAdmissionClaimResult{},
+			fmt.Errorf("commit Shared Space provisioning admission claim: %w", err)
+	}
+	return sharedSpaceProvisioningAdmissionClaimResult(
+		admission, relay.AcceptanceAccepted,
+	), nil
+}
+
+func sharedSpaceProvisioningAdmissionClaimResult(
+	admission sharedspaces.ProvisioningAdmission,
+	acceptance relay.Acceptance,
+) sharedspaces.ProvisioningAdmissionClaimResult {
+	return sharedspaces.ProvisioningAdmissionClaimResult{
+		Acceptance: acceptance, AdmissionID: admission.AdmissionID,
+		SpaceID:               *admission.ClaimedSpaceID,
+		RequestDigest:         *admission.ClaimedRequestDigest,
+		ClaimedAtMilliseconds: *admission.ClaimedAtMilliseconds,
+	}
+}
+
 func encodeSecureRosterAttestation(attestation *sharedspaces.SecureRosterAttestation) ([]byte, error) {
 	if attestation == nil {
 		return nil, nil

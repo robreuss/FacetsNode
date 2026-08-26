@@ -518,15 +518,21 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.sharedSpacesStore != nil {
 		if s.operatorProvisioningOn {
-			// The initial Shared Space scope cannot already possess the binding
-			// that this operator-authenticated admission commits. All later
-			// capability routes remain deployment-bound.
 			registerUnbound(
-				"POST /v1/shared-spaces",
+				"POST /v1/shared-spaces/provisioning-admissions",
 				traffic.SurfaceManagement,
-				s.handleProvisionSharedSpace,
+				s.handleCreateSharedSpaceProvisioningAdmission,
 			)
 		}
+		// The initial Shared Space scope cannot already possess the binding
+		// that this one-time admission commits. The client authenticates the
+		// deployment before releasing the admission bearer. All later
+		// capability routes remain deployment-bound.
+		registerUnbound(
+			"POST /v1/shared-spaces/provisioning-admissions/{admissionID}/claim",
+			traffic.SurfaceManagement,
+			s.handleClaimSharedSpaceProvisioningAdmission,
+		)
 		register(
 			"GET /v1/shared-spaces/{spaceID}/domains/{domainID}/status",
 			traffic.SurfaceManagement,
@@ -865,20 +871,27 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 			message = "The Shared Spaces request was rejected."
 			switch sharedSpacesProtocol.Code {
 			case sharedspaces.CodeInvalidSpace, sharedspaces.CodeInvalidInvitation,
+				sharedspaces.CodeInvalidProvisioningAdmission,
 				sharedspaces.CodeInvalidParticipant, sharedspaces.CodeInvalidParticipantPresentation,
 				sharedspaces.CodeInvalidAuthorityEvent, sharedspaces.CodeInvalidComputeBinding,
 				sharedspaces.CodeInvalidComputeCapability,
 				sharedspaces.CodeWrongScope:
 				status = http.StatusBadRequest
-			case sharedspaces.CodeUnauthorized, sharedspaces.CodeComputeCapabilityUnauthorized:
+			case sharedspaces.CodeUnauthorized,
+				sharedspaces.CodeProvisioningAdmissionNotFound,
+				sharedspaces.CodeComputeCapabilityUnauthorized:
 				status = http.StatusUnauthorized
 			case sharedspaces.CodeSpaceNotFound, sharedspaces.CodeInvitationNotFound,
 				sharedspaces.CodeParticipantNotFound, sharedspaces.CodeKeyGrantNotFound,
 				sharedspaces.CodeComputeBindingNotFound:
 				status = http.StatusNotFound
-			case sharedspaces.CodeInvitationCancelled, sharedspaces.CodeComputeCapabilityExpired:
+			case sharedspaces.CodeInvitationCancelled,
+				sharedspaces.CodeProvisioningAdmissionExpired,
+				sharedspaces.CodeComputeCapabilityExpired:
 				status = http.StatusGone
 			case sharedspaces.CodeSpaceCollision, sharedspaces.CodeInvitationCollision,
+				sharedspaces.CodeProvisioningAdmissionCollision,
+				sharedspaces.CodeProvisioningAdmissionClaimed,
 				sharedspaces.CodeInvitationClaimed, sharedspaces.CodeParticipantCollision,
 				sharedspaces.CodeInvitationCancellationCollision,
 				sharedspaces.CodeParticipantPresentationCollision,

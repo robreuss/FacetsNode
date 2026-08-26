@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -12,6 +15,22 @@ import (
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
+
+var sharedSpaceProvisioningClaimDigestDomain = []byte(
+	"Facets Shared Space provisioning claim v1\x00",
+)
+
+type sharedSpaceProvisioningAdmissionCredentialInput struct {
+	AdmissionID        uuid.UUID `json:"admissionID"`
+	AuthorizationToken string    `json:"authorizationToken"`
+}
+
+type sharedSpaceProvisioningAdmissionCreateInput struct {
+	Version               int                                             `json:"version"`
+	RetryID               uuid.UUID                                       `json:"retryID"`
+	AdmissionCredential   sharedSpaceProvisioningAdmissionCredentialInput `json:"admissionCredential"`
+	ExpiresAtMilliseconds int64                                           `json:"expiresAtMilliseconds"`
+}
 
 type sharedSpaceProvisioningInput struct {
 	Version                        int                                   `json:"version"`
@@ -58,9 +77,70 @@ type sharedSpaceInvitationClaimInput struct {
 	ClaimedAtMilliseconds int64                 `json:"claimedAtMilliseconds"`
 }
 
-func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) handleCreateSharedSpaceProvisioningAdmission(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
 	if err := s.authorizeOperator(request); err != nil {
 		s.writeError(writer, err)
+		return
+	}
+	var input sharedSpaceProvisioningAdmissionCreateInput
+	if err := readSharedSpacesJSON(writer, request, &input); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential := sharedspaces.ProvisioningAdmissionCredential{
+		AdmissionID: input.AdmissionCredential.AdmissionID,
+		Token:       input.AdmissionCredential.AuthorizationToken,
+	}
+	digest, err := sharedspaces.ProvisioningAdmissionAuthorizationDigest(
+		credential,
+	)
+	if err != nil || input.Version != sharedspaces.SchemaVersion {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidProvisioningAdmission,
+			"Shared Space provisioning admission input is invalid",
+		))
+		return
+	}
+	now := s.nowMilliseconds()
+	admission := sharedspaces.ProvisioningAdmission{
+		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
+		AdmissionID: credential.AdmissionID, AuthorizationDigest: digest,
+		CreatedAtMilliseconds: now,
+		ExpiresAtMilliseconds: input.ExpiresAtMilliseconds,
+	}
+	result, err := s.sharedSpacesStore.CreateProvisioningAdmission(
+		request.Context(), admission, now,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(
+		traffic.SurfaceManagement, string(result.Acceptance),
+	)
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func (s *Server) handleClaimSharedSpaceProvisioningAdmission(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	admissionID, err := parseUUID(request.PathValue("admissionID"))
+	if err != nil {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidProvisioningAdmission, err.Error(),
+		))
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeUnauthorized,
+			"Shared Space provisioning admission credential is missing",
+		))
 		return
 	}
 	var input sharedSpaceProvisioningInput
@@ -68,6 +148,113 @@ func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request 
 		s.writeError(writer, err)
 		return
 	}
+	now := s.nowMilliseconds()
+	if err := s.validateSharedSpaceProvisioningInput(input, now); err != nil {
+		if errors.Is(err, serviceauthority.ErrInvalid) {
+			writeServiceAuthorityError(writer, http.StatusConflict)
+		} else {
+			s.writeError(writer, err)
+		}
+		return
+	}
+	requestDigest, err := sharedSpaceProvisioningClaimDigest(input)
+	if err != nil {
+		s.writeError(writer, sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidProvisioningAdmission,
+			"Shared Space provisioning claim could not be canonicalized",
+		))
+		return
+	}
+	_, err = s.sharedSpacesStore.ClaimProvisioningAdmission(
+		request.Context(),
+		sharedspaces.ProvisioningAdmissionCredential{
+			AdmissionID: admissionID, Token: token,
+		},
+		sharedspaces.ProvisioningAdmissionClaim{
+			Version: sharedspaces.SchemaVersion, SpaceID: input.SpaceID,
+			RequestDigest: requestDigest, ClaimedAtMilliseconds: now,
+		},
+		now,
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.provisionSharedSpace(writer, request, input, now)
+}
+
+func sharedSpaceProvisioningClaimDigest(
+	input sharedSpaceProvisioningInput,
+) (string, error) {
+	canonical, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	_, _ = digest.Write(sharedSpaceProvisioningClaimDigestDomain)
+	_, _ = digest.Write(canonical)
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func (s *Server) validateSharedSpaceProvisioningInput(
+	input sharedSpaceProvisioningInput,
+	nowMilliseconds int64,
+) error {
+	if input.Version != sharedspaces.SchemaVersion {
+		return sharedspaces.NewProtocolError(
+			sharedspaces.CodeInvalidSpace,
+			"Shared Space provisioning version is invalid",
+		)
+	}
+	tenant, domain, err := relayTenantAndDomainProvisioning(
+		input.TenantProvisioning,
+	)
+	if err != nil {
+		return err
+	}
+	provisioning := sharedspaces.SpaceProvisioning{
+		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
+		SpaceID: input.SpaceID, SecurityMode: input.SecurityMode,
+		InteractionMode:                input.InteractionMode,
+		InitialParticipantID:           input.InitialParticipantID,
+		InitialParticipantKind:         input.InitialParticipantKind,
+		InitialParticipantSigningKey:   input.InitialParticipantSigningKey,
+		InitialParticipantDeviceKeys:   input.InitialParticipantDeviceKeys,
+		InitialSecureRosterAttestation: input.InitialSecureRosterAttestation,
+		Tenant:                         tenant, Domain: domain,
+		CreatedAtMilliseconds: tenant.CreatedAtMilliseconds,
+	}
+	if err := provisioning.Validate(); err != nil {
+		return err
+	}
+	if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
+		if input.ServiceAuthorityEnrollment == nil {
+			return serviceauthority.ErrInvalid
+		}
+		scope := serviceauthority.Scope{
+			Kind: serviceauthority.ScopeSharedSpace, ScopeID: input.SpaceID,
+		}
+		if _, err := sharedspaces.NewInitialServiceAuthorityBinding(
+			*input.ServiceAuthorityEnrollment, s.deploymentSigner,
+			scope, nowMilliseconds,
+		); err != nil {
+			return err
+		}
+		if _, ok := s.sharedSpacesStore.(sharedspaces.AuthorityBoundStore); !ok {
+			return serviceauthority.ErrInvalid
+		}
+	} else if input.ServiceAuthorityEnrollment != nil {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
+func (s *Server) provisionSharedSpace(
+	writer http.ResponseWriter,
+	request *http.Request,
+	input sharedSpaceProvisioningInput,
+	now int64,
+) {
 	if input.Version != sharedspaces.SchemaVersion {
 		s.writeError(writer, sharedspaces.NewProtocolError(
 			sharedspaces.CodeInvalidSpace, "Shared Space provisioning version is invalid",
@@ -91,7 +278,6 @@ func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request 
 		Tenant:                         tenant, Domain: domain,
 		CreatedAtMilliseconds: tenant.CreatedAtMilliseconds,
 	}
-	now := s.nowMilliseconds()
 	var authorityBinding *serviceauthority.CurrentBinding
 	var initialAuthority *sharedspaces.InitialServiceAuthorityBinding
 	var authorityStore sharedspaces.AuthorityBoundStore

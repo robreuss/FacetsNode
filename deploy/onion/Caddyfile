@@ -3,6 +3,8 @@
 	tls /etc/facets-server/tls/server.crt /etc/facets-server/tls/server.key
 
 	route {
+		@sharedSpaceOperatorProvisioning path /v1/shared-spaces/provisioning-admissions
+		respond @sharedSpaceOperatorProvisioning 404
 		@application path /v1/service-deployment/proof /v1/service-deployment/bootstrap-proof /v1/pairing/* /v1/relay/tenants/* /v1/device-sync/account-admissions/* /v1/device-sync/join-requests /v1/device-sync/join-requests/* /v1/device-sync/principals/* /v1/shared-spaces/*
 		reverse_proxy @application server:8080 {
 			header_up -Forwarded

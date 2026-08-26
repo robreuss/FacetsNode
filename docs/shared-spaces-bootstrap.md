@@ -12,8 +12,9 @@ key changes commit atomically in PostgreSQL.
 
 ## Authority boundaries
 
-- The service operator may provision a new Space and its initial host through
-  the loopback-only management listener.
+- The service operator issues a short-lived, one-time provisioning admission
+  through the private management boundary. The Facets client claims it through
+  public ingress only after authenticating the offered deployment.
 - When deployment authentication is configured, the client supplies a signed
   revision-1 service-authority enrollment for the exact Shared Space scope and
   offered local deployment. The operator credential cannot choose or replace
@@ -39,26 +40,52 @@ sent only in the `Authorization` header over TLS, and excluded from logs.
 
 ## Provision a Space
 
-`POST /v1/shared-spaces` is operator-authorized and is deliberately unavailable
-through public ingress. It is the one generic-middleware-unbound bootstrap
-request because the new logical scope cannot already have its own binding. It
-still requires the operator credential, and a deployment-authenticated service
-requires the exact client-signed initial authority enrollment. The request
-atomically creates:
+The operator creates a setup package on the private management side:
+
+```sh
+/facets-shared-spaces-server issue-shared-space-admission
+```
+
+The command writes one JSON object containing a 15-minute provisioning
+bootstrap and a `facets://shared-spaces/bootstrap#...` setup URL. The package
+contains the signed deployment offer and one admission credential; it contains
+no global operator bearer, Space content key, or participant private key. The
+configured endpoint must be an exact control route in the signed deployment
+route policy. `--endpoint` and `--lifetime` provide explicit overrides; the
+lifetime must be between five minutes and seven days.
+
+Facets authenticates the offered deployment on the selected physical route,
+then claims the admission at:
+
+`POST /v1/shared-spaces/provisioning-admissions/{admissionID}/claim`
+
+The claim is deliberately unbound in generic middleware because the new
+logical scope cannot already possess the binding it creates. The deployment
+proof request contains no admission bearer. Only after proof succeeds does the
+client send the one-time bearer and its exact client-signed initial authority
+enrollment. A successful claim creates:
 
 - the Shared Space authority record;
 - its initial person or nonhuman host participant;
 - the relay tenant and relay domain;
 - the host relay member and subscription.
 
-The request is versioned and includes a client-generated retry identifier. Its
+The claim is versioned and includes a client-generated retry identifier. Its
 initial authority record is stored as immutable standby state in the same
 PostgreSQL transaction as the Space and relay authority. FacetsNode then makes
 the matching deployment binding public and marks the record active. A failure
 between those steps withholds success; an exact retry repairs the boundary,
 including after the finite setup offer expires. Exact retries return the prior
-result; a changed enrollment, an unbound retry, or a retry identifier reused
-with different input is rejected.
+result. The admission is durably bound to a domain-separated digest of the
+exact request and Space ID before provisioning, so a process stop between
+admission claim and Space commit remains safely retryable. A changed request,
+another Space, an unbound retry, or a reused retry identifier is rejected.
+
+The operator-only issuance endpoint is
+`POST /v1/shared-spaces/provisioning-admissions`. Public direct and onion Caddy
+ingress explicitly deny that exact path before allowing the Shared Spaces
+application wildcard. The obsolete global-operator provisioning route does not
+exist.
 
 The service supports three immutable protocol modes. Native product creation
 will expose the content-blind Private and Secure profiles; managed mode is
@@ -368,9 +395,10 @@ Worker selection, Pool admission, metering, and billing remain later slices.
 ## Public ingress
 
 The HTTPS ingress allows `/v1/shared-spaces/*` participant and Space-authority
-operations. The exact provisioning path `/v1/shared-spaces` does not match that
-allowlist and remains loopback/operator-only. Health, metrics, profiling,
-operator issuance, and bulk management endpoints are likewise private.
+operations, including one-time provisioning-admission claims. It denies the
+exact operator issuance path `/v1/shared-spaces/provisioning-admissions` before
+the wildcard proxy. Health, metrics, profiling, operator issuance, and bulk
+management endpoints are likewise private.
 
 The Device Sync executable does not register Shared Spaces product routes, and
 the Shared Spaces executable does not register Device Sync product routes. The
@@ -390,7 +418,8 @@ Apple transport changes:
 
 The gate starts a disposable in-memory FacetsNode handler over a freshly
 generated pinned-TLS endpoint. It passes Swift a mode-0600, short-lived
-deployment offer and disposable operator bearer outside both repositories.
+deployment offer and disposable one-time provisioning admission outside both
+repositories.
 Swift creates every Shared Space, participant, relay, and Facets-authority
 identity; authenticates the deployment before releasing the bearer; provisions
 the Space; and performs one ordinary authority-bound status read. Go then

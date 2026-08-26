@@ -23,6 +23,7 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 		"/v1/device-sync/join-requests",
 		"/v1/device-sync/join-requests/11111111-1111-4111-8111-111111111111/bootstrap",
 		"/v1/device-sync/principals/11111111-1111-4111-8111-111111111111/status",
+		"/v1/shared-spaces/provisioning-admissions/11111111-1111-4111-8111-111111111111/claim",
 		"/v1/shared-spaces/11111111-1111-4111-8111-111111111111/domains/22222222-2222-4222-8222-222222222222/status",
 		"/v1/shared-spaces/11111111-1111-4111-8111-111111111111/domains/22222222-2222-4222-8222-222222222222/invitations/33333333-3333-4333-8333-333333333333/claim",
 	} {
@@ -49,6 +50,38 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 	}
 	if !strings.Contains(string(contents), "\troute {\n") {
 		t.Fatal("public allowlist and fallback must retain declaration order")
+	}
+	privateMatcher := "@sharedSpaceOperatorProvisioning path /v1/shared-spaces/provisioning-admissions"
+	privateResponse := "respond @sharedSpaceOperatorProvisioning 404"
+	privateIndex := strings.Index(string(contents), privateMatcher)
+	responseIndex := strings.Index(string(contents), privateResponse)
+	proxyIndex := strings.Index(string(contents), "reverse_proxy @application")
+	if privateIndex < 0 || responseIndex < privateIndex ||
+		proxyIndex < responseIndex {
+		t.Fatal("Shared Space admission issuance must be denied before the public wildcard proxy")
+	}
+}
+
+func TestOnionIngressDeniesSharedSpaceAdmissionIssuanceBeforeWildcard(t *testing.T) {
+	contents, err := os.ReadFile("onion/Caddyfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(contents)
+	privateMatcher := "@sharedSpaceOperatorProvisioning path /v1/shared-spaces/provisioning-admissions"
+	privateResponse := "respond @sharedSpaceOperatorProvisioning 404"
+	privateIndex := strings.Index(text, privateMatcher)
+	responseIndex := strings.Index(text, privateResponse)
+	proxyIndex := strings.Index(text, "reverse_proxy @application")
+	if privateIndex < 0 || responseIndex < privateIndex ||
+		proxyIndex < responseIndex {
+		t.Fatal("onion ingress exposes Shared Space admission issuance through the public wildcard")
+	}
+	patterns := caddyPathMatcherPatterns(t, text, "@application")
+	claimPath := "/v1/shared-spaces/provisioning-admissions/" +
+		"11111111-1111-4111-8111-111111111111/claim"
+	if !matchesAnyCaddyPathPattern(claimPath, patterns) {
+		t.Fatal("onion ingress does not route Shared Space admission claims")
 	}
 }
 

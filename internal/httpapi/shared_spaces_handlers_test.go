@@ -68,9 +68,12 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	provisioning.InitialSecureRosterAttestation = sharedSpaceInitialRosterAttestation(
 		t, provisioning, domainID, nowMilliseconds,
 	)
+	provisioningClaimPath, admissionToken := createSharedSpaceProvisioningAdmissionHTTP(
+		t, handler, operatorToken, nowMilliseconds,
+	)
 	created := performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces",
-		provisioning, operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, provisioningClaimPath,
+		provisioning, admissionToken, uuid.Nil,
 	)
 	requireStatus(t, created, http.StatusCreated)
 	var createdResult sharedspaces.SpaceProvisioningResult
@@ -85,8 +88,8 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 		t.Fatalf("created=%+v", createdResult)
 	}
 	retry := performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces",
-		provisioning, operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, provisioningClaimPath,
+		provisioning, admissionToken, uuid.Nil,
 	)
 	requireStatus(t, retry, http.StatusOK)
 	_ = retry.Body.Close()
@@ -824,7 +827,8 @@ func TestSharedSpaceProvisioningActivatesClientSignedInitialAuthority(t *testing
 	operatorToken := relayTestToken(0x19)
 	relayStore := relay.NewMemoryStore()
 	server := newRelayTestServer(t, relayStore, operatorToken)
-	server.SetSharedSpacesStore(sharedspaces.NewMemoryStore(relayStore))
+	sharedStore := sharedspaces.NewMemoryStore(relayStore)
+	server.SetSharedSpacesStore(sharedStore)
 	server.now = func() time.Time { return time.UnixMilli(now) }
 	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
 	routeID := uuid.MustParse("62000000-0000-0000-0000-000000000001")
@@ -866,12 +870,33 @@ func TestSharedSpaceProvisioningActivatesClientSignedInitialAuthority(t *testing
 		t, provisioning, domain.AdministrationCredential.DomainID, now,
 	)
 	handler := server.Handler()
+	admissionCredential := sharedspaces.ProvisioningAdmissionCredential{
+		AdmissionID: uuid.New(), Token: relayTestToken(0x59),
+	}
+	admissionInput := sharedSpaceProvisioningAdmissionCreateInput{
+		Version: sharedspaces.SchemaVersion, RetryID: uuid.New(),
+		AdmissionCredential: sharedSpaceProvisioningAdmissionCredentialInput{
+			AdmissionID:        admissionCredential.AdmissionID,
+			AuthorizationToken: admissionCredential.Token,
+		},
+		ExpiresAtMilliseconds: now +
+			sharedspaces.MinimumProvisioningAdmissionLifetimeMilliseconds,
+	}
+	admissionResponse := performRelayJSON(
+		t, handler, http.MethodPost,
+		"/v1/shared-spaces/provisioning-admissions",
+		admissionInput, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, admissionResponse, http.StatusCreated)
+	_ = admissionResponse.Body.Close()
+	claimPath := "/v1/shared-spaces/provisioning-admissions/" +
+		admissionCredential.AdmissionID.String() + "/claim"
 
 	missing := provisioning
 	missing.ServiceAuthorityEnrollment = nil
 	response := performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces",
-		missing, operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, claimPath,
+		missing, admissionCredential.Token, uuid.Nil,
 	)
 	requireStatus(t, response, http.StatusConflict)
 	_ = response.Body.Close()
@@ -884,15 +909,15 @@ func TestSharedSpaceProvisioningActivatesClientSignedInitialAuthority(t *testing
 	)
 	wrongScope.ServiceAuthorityEnrollment = &wrongEnrollment
 	response = performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces",
-		wrongScope, operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, claimPath,
+		wrongScope, admissionCredential.Token, uuid.Nil,
 	)
 	requireStatus(t, response, http.StatusConflict)
 	_ = response.Body.Close()
 
 	response = performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces",
-		provisioning, operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, claimPath,
+		provisioning, admissionCredential.Token, uuid.Nil,
 	)
 	requireStatus(t, response, http.StatusCreated)
 	_ = response.Body.Close()
@@ -939,8 +964,8 @@ func TestSharedSpaceProvisioningActivatesClientSignedInitialAuthority(t *testing
 	// not reinterpret an enrollment as a fresh authority claim.
 	now = 2_100
 	response = performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces",
-		provisioning, operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, claimPath,
+		provisioning, admissionCredential.Token, uuid.Nil,
 	)
 	requireStatus(t, response, http.StatusOK)
 	_ = response.Body.Close()
@@ -951,8 +976,8 @@ func TestSharedSpaceProvisioningActivatesClientSignedInitialAuthority(t *testing
 	)
 	substituted.ServiceAuthorityEnrollment = &substitutedEnrollment
 	response = performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces",
-		substituted, operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, claimPath,
+		substituted, admissionCredential.Token, uuid.Nil,
 	)
 	requireStatus(t, response, http.StatusConflict)
 	_ = response.Body.Close()
@@ -989,9 +1014,12 @@ func TestSharedSpacesAPIEnrollsAdditionalSecureParticipantDevice(t *testing.T) {
 	provisioning.InitialSecureRosterAttestation = sharedSpaceInitialRosterAttestation(
 		t, provisioning, domainID, nowMilliseconds,
 	)
+	provisioningClaimPath, admissionToken := createSharedSpaceProvisioningAdmissionHTTP(
+		t, handler, operatorToken, nowMilliseconds,
+	)
 	created := performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces", provisioning,
-		operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, provisioningClaimPath, provisioning,
+		admissionToken, uuid.Nil,
 	)
 	requireStatus(t, created, http.StatusCreated)
 	_ = created.Body.Close()
@@ -1141,9 +1169,12 @@ func TestSharedSpacesAPIManagedBootstrapDistributesAndRotatesServiceKey(t *testi
 		},
 		TenantProvisioning: newRelayTenantProvisioningRequest(domain, relayTestToken(0x42)),
 	}
+	provisioningClaimPath, admissionToken := createSharedSpaceProvisioningAdmissionHTTP(
+		t, handler, operatorToken, nowMilliseconds,
+	)
 	created := performRelayJSON(
-		t, handler, http.MethodPost, "/v1/shared-spaces",
-		provisioning, operatorToken, uuid.Nil,
+		t, handler, http.MethodPost, provisioningClaimPath,
+		provisioning, admissionToken, uuid.Nil,
 	)
 	requireStatus(t, created, http.StatusCreated)
 	_ = created.Body.Close()
@@ -1766,6 +1797,36 @@ func sharedSpaceComputePoolAuthority(poolID uuid.UUID) computepool.AuthorityRefe
 	}
 }
 
+func createSharedSpaceProvisioningAdmissionHTTP(
+	t *testing.T,
+	handler http.Handler,
+	operatorToken string,
+	nowMilliseconds int64,
+) (string, string) {
+	t.Helper()
+	admissionID := uuid.New()
+	authorizationToken := relayTestToken(0x59)
+	response := performRelayJSON(
+		t, handler, http.MethodPost,
+		"/v1/shared-spaces/provisioning-admissions",
+		sharedSpaceProvisioningAdmissionCreateInput{
+			Version: sharedspaces.SchemaVersion,
+			RetryID: uuid.New(),
+			AdmissionCredential: sharedSpaceProvisioningAdmissionCredentialInput{
+				AdmissionID: admissionID, AuthorizationToken: authorizationToken,
+			},
+			ExpiresAtMilliseconds: nowMilliseconds +
+				sharedspaces.MinimumProvisioningAdmissionLifetimeMilliseconds,
+		},
+		operatorToken,
+		uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusCreated)
+	_ = response.Body.Close()
+	return "/v1/shared-spaces/provisioning-admissions/" +
+		admissionID.String() + "/claim", authorizationToken
+}
+
 func TestProductAuthorityRoutesAreIsolatedByServiceConfiguration(t *testing.T) {
 	operatorToken := relayTestToken(0x71)
 
@@ -1784,6 +1845,12 @@ func TestProductAuthorityRoutesAreIsolatedByServiceConfiguration(t *testing.T) {
 	sharedRelay := relay.NewMemoryStore()
 	sharedServer := newRelayTestServer(t, sharedRelay, operatorToken)
 	sharedServer.SetSharedSpacesStore(sharedspaces.NewMemoryStore(sharedRelay))
+	directProvisioningOnShared := performRelayJSON(
+		t, sharedServer.Handler(), http.MethodPost, "/v1/shared-spaces",
+		map[string]any{}, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, directProvisioningOnShared, http.StatusNotFound)
+	_ = directProvisioningOnShared.Body.Close()
 	deviceOnShared := performRelayJSON(
 		t, sharedServer.Handler(), http.MethodPost, "/v1/device-sync/accounts",
 		map[string]any{}, operatorToken, uuid.Nil,
