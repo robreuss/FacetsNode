@@ -29,6 +29,11 @@ runtime identity (UID 65532). Keep each directory mode 0700 and each file mode
 writable.
 Mounting the directory, rather than the individual file, is required because
 binding activation uses an fsynced temporary file and atomic rename.
+Device Sync also creates an owner-only `migration-custody` directory beside the
+binding file. Prepared migration artifacts and deployment-signed pending or
+completed activation journals live there, so the authority-state directory must
+remain on durable storage and be included in backups. Startup validates and
+recovers any pending activation journal before it evaluates service readiness.
 The persistent authority registry currently requires Unix `flock` semantics;
 native Windows hosting fails closed until a `LockFileEx` adapter is implemented.
 Run the service in its Linux container on Windows hosts.

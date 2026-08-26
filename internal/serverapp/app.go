@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/httpapi"
 	"github.com/robreuss/FacetsNode/internal/keycustody"
+	"github.com/robreuss/FacetsNode/internal/migrationcoordinator"
 	"github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
@@ -169,6 +171,47 @@ func Main(service config.Service) {
 			scopeKind = serviceauthority.ScopeSharedSpace
 		}
 		if service == config.DeviceSync {
+			authorityStateDirectory, err := filepath.Abs(filepath.Dir(
+				configuration.ServiceAuthorityBindingsFile,
+			))
+			if err != nil {
+				logger.Error(
+					"Device Sync migration custody path rejected",
+					"error", err,
+				)
+				os.Exit(1)
+			}
+			migrationCustody, err := migrationcoordinator.NewFileArtifactCustody(
+				filepath.Join(authorityStateDirectory, "migration-custody"),
+			)
+			if err != nil {
+				logger.Error(
+					"Device Sync migration custody rejected",
+					"error", err,
+				)
+				os.Exit(1)
+			}
+			activationCoordinator := migrationcoordinator.DeviceSyncActivationCoordinator{
+				Store: relayStore, Custody: migrationCustody,
+				Bindings: bindings, Signer: deploymentSigner,
+			}
+			recovered, err := activationCoordinator.Recover(
+				startupContext,
+				time.Now(),
+			)
+			if err != nil {
+				logger.Error(
+					"Device Sync migration activation recovery rejected",
+					"error", err,
+				)
+				os.Exit(1)
+			}
+			if len(recovered) != 0 {
+				logger.Info(
+					"Device Sync migration activation recovery completed",
+					"scope_count", len(recovered),
+				)
+			}
 			if err := reconcileDeviceSyncServiceAuthority(
 				startupContext,
 				relayStore,

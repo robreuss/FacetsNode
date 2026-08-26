@@ -63,11 +63,16 @@ closed.
 
 ## Claim boundary
 
-This remains headless orchestration. Server construction does not yet discover
-the custody root and invoke `Recover` before the general authority-readiness
-gate; that production startup wiring is still required. It also does not expose
-a cutover route, coordinate two hosts, retire a live listener, move onion or TLS
-custody, implement rollback/cancellation, or prove a deployed migration.
+This remains headless orchestration. Device Sync server construction opens a
+`migration-custody` directory beside the persistent BindingRegistry and invokes
+`Recover` before the general authority-readiness gate. A recovered target must
+then pass the ordinary exact writable registry/database comparison before any
+listener starts. A recovered source becomes durably retired and the ordinary
+readiness gate still refuses to start it as a serving deployment.
+
+No cutover route invokes this coordinator yet. It also does not coordinate two
+hosts, stop an already-running old listener, move onion or TLS custody,
+implement rollback/cancellation, or prove a deployed migration.
 PostgreSQL integration executes only when a disposable
 `FACETS_SERVER_TEST_DATABASE_URL` is configured; an unset live gate is a skip,
 not runtime evidence.
