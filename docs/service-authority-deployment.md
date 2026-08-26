@@ -201,16 +201,17 @@ Once enabled:
 - `/livez`, `/readyz`, and `/metrics` remain available to the private
   management plane without a client service scope.
 
-This registry now provides durable Device Sync initial binding activation,
-portable attended-migration evidence validation, successor persistence, and a
-fail-closed two-phase write-fence/signing boundary. It does not yet provide
-public migration routes, service-state/blob copy orchestration, onion-state
-handoff, operator cutover, or deployed rollback. Shared Spaces initial
-authority enrollment and temporary admission-to-scope binding remain later
-enablement gates. Compute Pool is a development skeleton, requires deployment
-authentication, and does not yet expose onion ingress. Recovery remains
-fail-closed and must use this same registry rather than introduce another
-authority source.
+This registry now provides durable Device Sync and Shared Spaces initial
+binding activation, portable attended-migration evidence validation, successor
+persistence, and a fail-closed two-phase write-fence/signing boundary. Shared
+Space creation remains a private operator-authorized request, but it carries a
+client-signed initial enrollment and cannot expose ordinary Space capabilities
+until the exact deployment binding has been committed. It does not yet provide
+public migration routes, Shared Spaces service-state/blob copy orchestration,
+onion-state handoff, operator cutover, or deployed Shared Spaces rollback.
+Compute Pool is a development skeleton, requires deployment authentication,
+and does not yet expose onion ingress. Recovery remains fail-closed and must
+use this same registry rather than introduce another authority source.
 
 The transfer grant is signed by the active deployment key, not the longer-lived
 Facets authority key. FacetsNode issues it only after the existing bearer has

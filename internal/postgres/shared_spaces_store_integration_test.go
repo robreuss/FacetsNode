@@ -539,6 +539,126 @@ func TestPostgresSharedSpaceAuthorityAndRelayCommitAtomically(t *testing.T) {
 	}
 }
 
+func TestPostgresSharedSpaceInitialServiceAuthorityIsExactAndImmutable(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_SERVER_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
+	pool := openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	if err := postgresstore.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `TRUNCATE relay_tenants CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+
+	const now = int64(1_100)
+	provisioning, _ := postgresSharedSpaceProvisioning(t, now)
+	fixture := loadPostgresDeviceSyncRollbackFixture(t)
+	current, err := fixture.RollbackEvidence.ActivationEvidence.
+		Preparation.CurrentManifest.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := serviceauthority.Scope{
+		Kind: serviceauthority.ScopeSharedSpace, ScopeID: provisioning.SpaceID,
+	}
+	anchor := fixture.AuthorityAnchor
+	anchor.Scope = scope
+	manifestPayload := serviceauthority.ManifestPayload{
+		ActiveDeployment:      current.ActiveDeployment,
+		IssuedAtMilliseconds:  1_000,
+		PreparedDeployments:   []serviceauthority.DeploymentDescriptor{},
+		Revision:              1,
+		Scope:                 scope,
+		Transition:            serviceauthority.TransitionInitialActivation,
+		TransportPolicy:       current.TransportPolicy,
+		ValidFromMilliseconds: 1_000,
+		Version:               serviceauthority.SchemaVersion,
+	}
+	manifest := signPostgresDeviceSyncAuthorityManifest(
+		t, manifestPayload,
+		postgresDeviceSyncAuthorityPrivateKey(t, anchor), anchor,
+	)
+	signer := postgresFixtureDeploymentSigner(t, current.ActiveDeployment)
+	offer, err := signer.SignDeploymentOffer(serviceauthority.DeploymentOfferPayload{
+		Deployment: current.ActiveDeployment, ExpiresAtMilliseconds: 2_000,
+		IssuedAtMilliseconds: 900, TransportPolicy: current.TransportPolicy,
+		Version: serviceauthority.SchemaVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment := serviceauthority.InitialEnrollment{
+		Anchor: anchor, DeploymentOffer: offer, Manifest: manifest,
+		Version: serviceauthority.SchemaVersion,
+	}
+	binding, err := sharedspaces.NewInitialServiceAuthorityBinding(
+		enrollment, signer, scope, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := postgresstore.NewSharedSpacesStore(pool)
+	created, err := store.ProvisionSpaceWithAuthority(
+		ctx, provisioning, binding, now,
+	)
+	if err != nil || created.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("authority-bound provision=%+v err=%v", created, err)
+	}
+	var state, digest string
+	if err := pool.QueryRow(ctx, `
+		SELECT service_authority_state,authority_manifest_digest
+		FROM shared_spaces WHERE space_id=$1
+	`, provisioning.SpaceID).Scan(&state, &digest); err != nil {
+		t.Fatal(err)
+	}
+	if state != "standby" || digest != binding.ManifestDigest() {
+		t.Fatalf("stored authority state=%q digest=%q", state, digest)
+	}
+
+	// Reconstructing the exact sealed binding after offer expiry is allowed
+	// only because the committed Space identity is compared before freshness.
+	retryBinding, err := sharedspaces.NewInitialServiceAuthorityBinding(
+		enrollment, signer, scope, 2_100,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := store.ProvisionSpaceWithAuthority(
+		ctx, provisioning, retryBinding, 2_100,
+	)
+	if err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("expired exact retry=%+v err=%v", retry, err)
+	}
+	if err := store.ActivateBoundSharedSpaceScope(
+		ctx, provisioning.SpaceID, binding.LocalDeploymentID(),
+		binding.Revision(), binding.ManifestDigest(), now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT service_authority_state FROM shared_spaces WHERE space_id=$1
+	`, provisioning.SpaceID).Scan(&state); err != nil || state != "active" {
+		t.Fatalf("active authority state=%q err=%v", state, err)
+	}
+	if _, err := store.ProvisionSpace(ctx, provisioning, 2_100); !sharedspaces.ErrorHasCode(
+		err, sharedspaces.CodeSpaceCollision,
+	) {
+		t.Fatalf("unbound retry replaced authority: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE shared_spaces SET initial_authority_manifest_digest=$2
+		WHERE space_id=$1
+	`, provisioning.SpaceID, hex.EncodeToString(bytes.Repeat([]byte{0x55}, 32))); err == nil {
+		t.Fatal("initial Shared Space authority was mutable")
+	}
+}
+
 func TestPostgresManagedSharedSpaceKeyCustodyIsAtomicWithAuthority(t *testing.T) {
 	databaseURL := os.Getenv("FACETS_SERVER_TEST_DATABASE_URL")
 	if databaseURL == "" {

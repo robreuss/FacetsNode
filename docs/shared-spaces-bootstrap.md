@@ -14,6 +14,10 @@ key changes commit atomically in PostgreSQL.
 
 - The service operator may provision a new Space and its initial host through
   the loopback-only management listener.
+- When deployment authentication is configured, the client supplies a signed
+  revision-1 service-authority enrollment for the exact Shared Space scope and
+  offered local deployment. The operator credential cannot choose or replace
+  that Facets authority.
 - A Space administration credential authorizes status, invitation creation,
   and participant revocation for exactly one Space and relay domain.
 - An invitation credential is single-purpose, bounded to one invitation, and
@@ -36,16 +40,25 @@ sent only in the `Authorization` header over TLS, and excluded from logs.
 ## Provision a Space
 
 `POST /v1/shared-spaces` is operator-authorized and is deliberately unavailable
-through public ingress. The request atomically creates:
+through public ingress. It is the one generic-middleware-unbound bootstrap
+request because the new logical scope cannot already have its own binding. It
+still requires the operator credential, and a deployment-authenticated service
+requires the exact client-signed initial authority enrollment. The request
+atomically creates:
 
 - the Shared Space authority record;
 - its initial person or nonhuman host participant;
 - the relay tenant and relay domain;
 - the host relay member and subscription.
 
-The request is versioned and includes a client-generated retry identifier.
-Exact retries return the prior result; a retry identifier reused with different
-input is rejected.
+The request is versioned and includes a client-generated retry identifier. Its
+initial authority record is stored as immutable standby state in the same
+PostgreSQL transaction as the Space and relay authority. FacetsNode then makes
+the matching deployment binding public and marks the record active. A failure
+between those steps withholds success; an exact retry repairs the boundary,
+including after the finite setup offer expires. Exact retries return the prior
+result; a changed enrollment, an unbound retry, or a retry identifier reused
+with different input is rejected.
 
 The service supports three immutable protocol modes. Native product creation
 will expose the content-blind Private and Secure profiles; managed mode is

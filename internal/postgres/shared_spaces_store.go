@@ -14,6 +14,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/keycustody"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 )
 
@@ -309,6 +310,33 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	provisioning sharedspaces.SpaceProvisioning,
 	nowMilliseconds int64,
 ) (sharedspaces.SpaceProvisioningResult, error) {
+	return s.provisionSpace(ctx, provisioning, nil, nowMilliseconds)
+}
+
+func (s *SharedSpacesStore) ProvisionSpaceWithAuthority(
+	ctx context.Context,
+	provisioning sharedspaces.SpaceProvisioning,
+	initialAuthority *sharedspaces.InitialServiceAuthorityBinding,
+	nowMilliseconds int64,
+) (sharedspaces.SpaceProvisioningResult, error) {
+	expectedScope := serviceauthority.Scope{
+		Kind: serviceauthority.ScopeSharedSpace, ScopeID: provisioning.SpaceID,
+	}
+	if initialAuthority == nil || initialAuthority.Validate() != nil ||
+		initialAuthority.Scope() != expectedScope {
+		return sharedspaces.SpaceProvisioningResult{}, serviceauthority.ErrInvalid
+	}
+	return s.provisionSpace(
+		ctx, provisioning, initialAuthority, nowMilliseconds,
+	)
+}
+
+func (s *SharedSpacesStore) provisionSpace(
+	ctx context.Context,
+	provisioning sharedspaces.SpaceProvisioning,
+	initialAuthority *sharedspaces.InitialServiceAuthorityBinding,
+	nowMilliseconds int64,
+) (sharedspaces.SpaceProvisioningResult, error) {
 	if err := provisioning.Validate(); err != nil {
 		return sharedspaces.SpaceProvisioningResult{}, err
 	}
@@ -338,20 +366,37 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	var existingSpaceID uuid.UUID
 	var existingPayload []byte
 	var existingKeyEpoch uint64
+	var existingAuthorityState string
+	var existingInitialDeploymentID *uuid.UUID
+	var existingInitialValidatedAt *int64
+	var existingInitialDigest *string
+	var existingInitialRecord []byte
 	err = tx.QueryRow(ctx, `
-		SELECT space_id,provisioning_payload,current_key_epoch
+		SELECT space_id,provisioning_payload,current_key_epoch,
+			service_authority_state,initial_deployment_id,
+			initial_authority_validated_at_milliseconds,
+			initial_authority_manifest_digest,initial_authority_manifest_record
 		FROM shared_spaces
 		WHERE space_id=$1 OR provisioning_retry_id=$2
 		FOR UPDATE
 	`, provisioning.SpaceID, provisioning.RetryID).Scan(
 		&existingSpaceID, &existingPayload, &existingKeyEpoch,
+		&existingAuthorityState, &existingInitialDeploymentID,
+		&existingInitialValidatedAt, &existingInitialDigest,
+		&existingInitialRecord,
 	)
 	if err == nil {
 		existing, decodeErr := decodeSpaceProvisioning(existingPayload)
 		if decodeErr != nil {
 			return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("decode Shared Space provisioning: %w", decodeErr)
 		}
-		if existingSpaceID != provisioning.SpaceID || !reflect.DeepEqual(existing, provisioning) {
+		if existingSpaceID != provisioning.SpaceID ||
+			!reflect.DeepEqual(existing, provisioning) ||
+			!storedSharedSpaceInitialAuthorityEqual(
+				initialAuthority, existingAuthorityState,
+				existingInitialDeploymentID, existingInitialValidatedAt,
+				existingInitialDigest, existingInitialRecord,
+			) {
 			return sharedspaces.SpaceProvisioningResult{}, sharedspaces.NewProtocolError(
 				sharedspaces.CodeSpaceCollision, "Shared Space ID or retry ID was reused",
 			)
@@ -362,6 +407,14 @@ func (s *SharedSpacesStore) ProvisionSpace(
 	}
 	if err != pgx.ErrNoRows {
 		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("load Shared Space provisioning: %w", err)
+	}
+	if initialAuthority != nil {
+		if err := initialAuthority.RequireFreshClaimAt(nowMilliseconds); err != nil {
+			return sharedspaces.SpaceProvisioningResult{}, sharedspaces.NewProtocolError(
+				sharedspaces.CodeInvalidSpace,
+				"initial service authority enrollment is not current",
+			)
+		}
 	}
 	var managedWrappedKey []byte
 	if provisioning.SecurityMode == sharedspaces.SecurityModeManaged {
@@ -391,20 +444,49 @@ func (s *SharedSpacesStore) ProvisionSpace(
 		DeviceKeys:            provisioning.InitialParticipantDeviceKeys,
 		CreatedAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO shared_spaces (
-			space_id,provisioning_retry_id,version,security_mode,interaction_mode,domain_id,
-			initial_participant_id,initial_subscription_id,initial_participant_kind,
-			provisioning_payload,secure_roster_attestation,created_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-	`, provisioning.SpaceID, provisioning.RetryID, provisioning.Version,
-		string(provisioning.SecurityMode), string(provisioning.InteractionMode),
-		provisioning.Domain.Registration.DomainID,
-		provisioning.InitialParticipantID, initial.SubscriptionID,
-		string(provisioning.InitialParticipantKind), payload,
-		rosterAttestationPayload,
-		provisioning.CreatedAtMilliseconds); err != nil {
-		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("insert Shared Space: %w", err)
+	var insertErr error
+	if initialAuthority == nil {
+		_, insertErr = tx.Exec(ctx, `
+			INSERT INTO shared_spaces (
+				space_id,provisioning_retry_id,version,security_mode,interaction_mode,domain_id,
+				initial_participant_id,initial_subscription_id,initial_participant_kind,
+				provisioning_payload,secure_roster_attestation,created_at_milliseconds
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		`, provisioning.SpaceID, provisioning.RetryID, provisioning.Version,
+			string(provisioning.SecurityMode), string(provisioning.InteractionMode),
+			provisioning.Domain.Registration.DomainID,
+			provisioning.InitialParticipantID, initial.SubscriptionID,
+			string(provisioning.InitialParticipantKind), payload,
+			rosterAttestationPayload,
+			provisioning.CreatedAtMilliseconds)
+	} else {
+		_, insertErr = tx.Exec(ctx, `
+			INSERT INTO shared_spaces (
+				space_id,provisioning_retry_id,version,security_mode,interaction_mode,domain_id,
+				initial_participant_id,initial_subscription_id,initial_participant_kind,
+				provisioning_payload,secure_roster_attestation,
+				service_authority_state,initial_deployment_id,
+				initial_authority_validated_at_milliseconds,
+				initial_authority_manifest_digest,initial_authority_manifest_record,
+				authority_revision,authority_manifest_digest,
+				authority_manifest_record,active_deployment_id,
+				created_at_milliseconds
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+				'standby',$12,$13,$14,$15,$16,$14,$15,$12,$17)
+		`, provisioning.SpaceID, provisioning.RetryID, provisioning.Version,
+			string(provisioning.SecurityMode), string(provisioning.InteractionMode),
+			provisioning.Domain.Registration.DomainID,
+			provisioning.InitialParticipantID, initial.SubscriptionID,
+			string(provisioning.InitialParticipantKind), payload,
+			rosterAttestationPayload,
+			initialAuthority.LocalDeploymentID(),
+			initialAuthority.ValidatedAtMilliseconds(),
+			initialAuthority.ManifestDigest(), initialAuthority.ManifestRecord(),
+			int64(initialAuthority.Revision()),
+			provisioning.CreatedAtMilliseconds)
+	}
+	if insertErr != nil {
+		return sharedspaces.SpaceProvisioningResult{}, fmt.Errorf("insert Shared Space: %w", insertErr)
 	}
 	if err := insertSharedSpaceSecureRosterAttestation(
 		ctx, tx, provisioning.InitialSecureRosterAttestation,
@@ -444,6 +526,88 @@ func (s *SharedSpacesStore) ProvisionSpace(
 		CurrentKeyEpoch:    sharedspaces.InitialKeyEpoch,
 		InitialParticipant: initial, Relay: relayResult,
 	}, nil
+}
+
+func storedSharedSpaceInitialAuthorityEqual(
+	binding *sharedspaces.InitialServiceAuthorityBinding,
+	state string,
+	initialDeploymentID *uuid.UUID,
+	validatedAtMilliseconds *int64,
+	manifestDigest *string,
+	manifestRecord []byte,
+) bool {
+	if binding == nil {
+		return state == "unbound" && initialDeploymentID == nil &&
+			validatedAtMilliseconds == nil && manifestDigest == nil &&
+			len(manifestRecord) == 0
+	}
+	return (state == "standby" || state == "active") &&
+		initialDeploymentID != nil &&
+		*initialDeploymentID == binding.LocalDeploymentID() &&
+		validatedAtMilliseconds != nil &&
+		manifestDigest != nil && *manifestDigest == binding.ManifestDigest() &&
+		reflect.DeepEqual(manifestRecord, binding.ManifestRecord())
+}
+
+func (s *SharedSpacesStore) ActivateBoundSharedSpaceScope(
+	ctx context.Context,
+	spaceID uuid.UUID,
+	localDeploymentID uuid.UUID,
+	expectedAuthorityRevision uint64,
+	expectedAuthorityManifestDigest string,
+	nowMilliseconds int64,
+) error {
+	if spaceID == uuid.Nil || localDeploymentID == uuid.Nil ||
+		expectedAuthorityRevision != 1 ||
+		!sharedspaces.ValidServiceAuthorityDigest(expectedAuthorityManifestDigest) ||
+		nowMilliseconds < 0 {
+		return serviceauthority.ErrInvalid
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin Shared Space authority activation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var state, digest string
+	var deploymentID uuid.UUID
+	var revision uint64
+	err = tx.QueryRow(ctx, `
+		SELECT service_authority_state,initial_deployment_id,
+			authority_revision,authority_manifest_digest
+		FROM shared_spaces WHERE space_id=$1 FOR UPDATE
+	`, spaceID).Scan(&state, &deploymentID, &revision, &digest)
+	if err == pgx.ErrNoRows {
+		return sharedspaces.ErrInitialServiceAuthorityConflict
+	}
+	if err != nil {
+		return fmt.Errorf("load Shared Space authority activation: %w", err)
+	}
+	if (state != "standby" && state != "active") ||
+		deploymentID != localDeploymentID ||
+		revision != expectedAuthorityRevision ||
+		digest != expectedAuthorityManifestDigest {
+		return sharedspaces.ErrInitialServiceAuthorityConflict
+	}
+	if state == "active" {
+		return nil
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE shared_spaces SET service_authority_state='active'
+		WHERE space_id=$1 AND service_authority_state='standby'
+			AND initial_deployment_id=$2 AND authority_revision=$3
+			AND authority_manifest_digest=$4
+	`, spaceID, localDeploymentID, int64(expectedAuthorityRevision),
+		expectedAuthorityManifestDigest)
+	if err != nil {
+		return fmt.Errorf("activate Shared Space authority: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return sharedspaces.ErrInitialServiceAuthorityConflict
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Shared Space authority activation: %w", err)
+	}
+	return nil
 }
 
 func postgresSharedSpaceProvisioningResult(

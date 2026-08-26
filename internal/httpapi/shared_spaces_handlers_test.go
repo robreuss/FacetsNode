@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strconv"
 	"testing"
@@ -816,6 +817,145 @@ func TestSharedSpacesAPIProvisionsInvitesClaimsAndRevokesParticipant(t *testing.
 	)
 	requireStatus(t, invalidAuthorityEvents, http.StatusBadRequest)
 	_ = invalidAuthorityEvents.Body.Close()
+}
+
+func TestSharedSpaceProvisioningActivatesClientSignedInitialAuthority(t *testing.T) {
+	now := int64(1_100)
+	operatorToken := relayTestToken(0x19)
+	relayStore := relay.NewMemoryStore()
+	server := newRelayTestServer(t, relayStore, operatorToken)
+	server.SetSharedSpacesStore(sharedspaces.NewMemoryStore(relayStore))
+	server.now = func() time.Time { return time.UnixMilli(now) }
+	deploymentID := uuid.MustParse("63000000-0000-0000-0000-000000000001")
+	routeID := uuid.MustParse("62000000-0000-0000-0000-000000000001")
+	seed := make([]byte, 32)
+	seed[31] = 2
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := serviceauthority.NewBindingRegistry()
+	server.SetServiceAuthorityDeployment(
+		signer, bindings, serviceauthority.ScopeSharedSpace,
+	)
+
+	domain := newRelayDomainProvisioningRequest(now, 0x29, 0x39)
+	spaceID := domain.AdministrationCredential.TenantID
+	scope := serviceauthority.Scope{
+		Kind: serviceauthority.ScopeSharedSpace, ScopeID: spaceID,
+	}
+	enrollment := testInitialServiceAuthorityEnrollment(t, signer, scope, routeID)
+	provisioning := sharedSpaceProvisioningInput{
+		Version:                      sharedspaces.SchemaVersion,
+		RetryID:                      uuid.New(),
+		SpaceID:                      spaceID,
+		SecurityMode:                 sharedspaces.SecurityModeSecure,
+		InteractionMode:              sharedspaces.InteractionModeCollaborative,
+		InitialParticipantID:         domain.MemberCredential.MemberID,
+		InitialParticipantKind:       sharedspaces.ParticipantPerson,
+		InitialParticipantSigningKey: sharedSpaceParticipantSigningKey(t, domain.MemberCredential.MemberID),
+		InitialParticipantDeviceKeys: []sharedspaces.ParticipantDeviceKey{
+			sharedSpaceParticipantDeviceKey(t, spaceID, domain.MemberCredential.MemberID, now),
+		},
+		ServiceAuthorityEnrollment: &enrollment,
+		TenantProvisioning: newRelayTenantProvisioningRequest(
+			domain, relayTestToken(0x49),
+		),
+	}
+	provisioning.InitialSecureRosterAttestation = sharedSpaceInitialRosterAttestation(
+		t, provisioning, domain.AdministrationCredential.DomainID, now,
+	)
+	handler := server.Handler()
+
+	missing := provisioning
+	missing.ServiceAuthorityEnrollment = nil
+	response := performRelayJSON(
+		t, handler, http.MethodPost, "/v1/shared-spaces",
+		missing, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusConflict)
+	_ = response.Body.Close()
+
+	wrongScope := provisioning
+	wrongEnrollment := testInitialServiceAuthorityEnrollment(
+		t, signer, serviceauthority.Scope{
+			Kind: serviceauthority.ScopeDeviceSync, ScopeID: spaceID,
+		}, routeID,
+	)
+	wrongScope.ServiceAuthorityEnrollment = &wrongEnrollment
+	response = performRelayJSON(
+		t, handler, http.MethodPost, "/v1/shared-spaces",
+		wrongScope, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusConflict)
+	_ = response.Body.Close()
+
+	response = performRelayJSON(
+		t, handler, http.MethodPost, "/v1/shared-spaces",
+		provisioning, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusCreated)
+	_ = response.Body.Close()
+	digest, err := enrollment.Manifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.Authorize(serviceauthority.RequestBinding{
+		Scope: scope, AuthorityRevision: 1, AuthorityDigest: digest,
+		DeploymentID: deploymentID, RouteID: routeID,
+		TrafficClass: serviceauthority.TrafficControl,
+	}); err != nil {
+		t.Fatalf("initial Shared Space authority was not activated: %v", err)
+	}
+
+	statusPath := "/v1/shared-spaces/" + spaceID.String() + "/domains/" +
+		domain.AdministrationCredential.DomainID.String() + "/status"
+	unboundStatus := httptest.NewRequest(http.MethodGet, statusPath, nil)
+	unboundStatus.Header.Set(
+		"Authorization",
+		"Bearer "+domain.AdministrationCredential.AuthorizationToken,
+	)
+	unboundRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(unboundRecorder, unboundStatus)
+	if unboundRecorder.Code != http.StatusConflict {
+		t.Fatalf("unbound Shared Space status=%d; want 409", unboundRecorder.Code)
+	}
+	boundStatus := httptest.NewRequest(http.MethodGet, statusPath, nil)
+	boundStatus.Header.Set(
+		"Authorization",
+		"Bearer "+domain.AdministrationCredential.AuthorizationToken,
+	)
+	setAuthorityHeaders(
+		boundStatus.Header, scope, 1, digest, deploymentID, routeID,
+		serviceauthority.TrafficControl,
+	)
+	boundRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(boundRecorder, boundStatus)
+	if boundRecorder.Code != http.StatusOK {
+		t.Fatalf("bound Shared Space status=%d body=%s", boundRecorder.Code, boundRecorder.Body.String())
+	}
+
+	// The offer is expired, but an exact retry must remain repairable and must
+	// not reinterpret an enrollment as a fresh authority claim.
+	now = 2_100
+	response = performRelayJSON(
+		t, handler, http.MethodPost, "/v1/shared-spaces",
+		provisioning, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusOK)
+	_ = response.Body.Close()
+
+	substituted := provisioning
+	substitutedEnrollment := testInitialServiceAuthorityEnrollment(
+		t, signer, scope, routeID,
+	)
+	substituted.ServiceAuthorityEnrollment = &substitutedEnrollment
+	response = performRelayJSON(
+		t, handler, http.MethodPost, "/v1/shared-spaces",
+		substituted, operatorToken, uuid.Nil,
+	)
+	requireStatus(t, response, http.StatusConflict)
+	_ = response.Body.Close()
 }
 
 func TestSharedSpacesAPIEnrollsAdditionalSecureParticipantDevice(t *testing.T) {

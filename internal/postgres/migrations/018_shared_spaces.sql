@@ -8,6 +8,30 @@ CREATE TABLE shared_spaces (
     initial_subscription_id uuid NOT NULL,
     initial_participant_kind text NOT NULL CHECK (initial_participant_kind IN ('person', 'nonhuman')),
     provisioning_payload jsonb NOT NULL,
+    service_authority_state text NOT NULL DEFAULT 'unbound'
+        CHECK (service_authority_state IN ('unbound', 'standby', 'active')),
+    initial_deployment_id uuid,
+    initial_authority_validated_at_milliseconds bigint CHECK (
+        initial_authority_validated_at_milliseconds >= 0
+    ),
+    initial_authority_manifest_digest text CHECK (
+        initial_authority_manifest_digest ~ '^[0-9a-f]{64}$'
+    ),
+    initial_authority_manifest_record bytea CHECK (
+        initial_authority_manifest_record IS NULL OR
+        (octet_length(initial_authority_manifest_record) > 0 AND
+            octet_length(initial_authority_manifest_record) <= 1048576)
+    ),
+    authority_revision bigint CHECK (authority_revision > 0),
+    authority_manifest_digest text CHECK (
+        authority_manifest_digest ~ '^[0-9a-f]{64}$'
+    ),
+    authority_manifest_record bytea CHECK (
+        authority_manifest_record IS NULL OR
+        (octet_length(authority_manifest_record) > 0 AND
+            octet_length(authority_manifest_record) <= 1048576)
+    ),
+    active_deployment_id uuid,
     created_at_milliseconds bigint NOT NULL CHECK (created_at_milliseconds >= 0),
     stored_at timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY (space_id, domain_id)
@@ -17,8 +41,60 @@ CREATE TABLE shared_spaces (
         DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (space_id, domain_id, initial_participant_id)
         REFERENCES relay_members(tenant_id, domain_id, member_id)
-        DEFERRABLE INITIALLY DEFERRED
+        DEFERRABLE INITIALLY DEFERRED,
+    CHECK (
+        (service_authority_state = 'unbound' AND
+            initial_deployment_id IS NULL AND
+            initial_authority_validated_at_milliseconds IS NULL AND
+            initial_authority_manifest_digest IS NULL AND
+            initial_authority_manifest_record IS NULL AND
+            authority_revision IS NULL AND
+            authority_manifest_digest IS NULL AND
+            authority_manifest_record IS NULL AND
+            active_deployment_id IS NULL) OR
+        (service_authority_state = 'standby' AND
+            initial_deployment_id IS NOT NULL AND
+            initial_authority_validated_at_milliseconds IS NOT NULL AND
+            initial_authority_manifest_digest IS NOT NULL AND
+            initial_authority_manifest_record IS NOT NULL AND
+            authority_revision = 1 AND
+            authority_manifest_digest = initial_authority_manifest_digest AND
+            authority_manifest_record = initial_authority_manifest_record AND
+            active_deployment_id = initial_deployment_id) OR
+        (service_authority_state = 'active' AND
+            initial_deployment_id IS NOT NULL AND
+            initial_authority_validated_at_milliseconds IS NOT NULL AND
+            initial_authority_manifest_digest IS NOT NULL AND
+            initial_authority_manifest_record IS NOT NULL AND
+            authority_revision IS NOT NULL AND
+            authority_manifest_digest IS NOT NULL AND
+            authority_manifest_record IS NOT NULL AND
+            active_deployment_id IS NOT NULL)
+    )
 );
+
+CREATE FUNCTION preserve_shared_space_initial_authority()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.initial_deployment_id IS DISTINCT FROM NEW.initial_deployment_id OR
+        OLD.initial_authority_validated_at_milliseconds IS DISTINCT FROM
+            NEW.initial_authority_validated_at_milliseconds OR
+        OLD.initial_authority_manifest_digest IS DISTINCT FROM
+            NEW.initial_authority_manifest_digest OR
+        OLD.initial_authority_manifest_record IS DISTINCT FROM
+            NEW.initial_authority_manifest_record THEN
+        RAISE EXCEPTION 'Shared Space initial service authority is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER shared_space_initial_authority_is_immutable
+BEFORE UPDATE ON shared_spaces
+FOR EACH ROW
+EXECUTE FUNCTION preserve_shared_space_initial_authority();
 
 CREATE TABLE shared_space_participants (
     space_id uuid NOT NULL REFERENCES shared_spaces(space_id) ON DELETE CASCADE,

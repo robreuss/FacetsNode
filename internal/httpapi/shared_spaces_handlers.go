@@ -1,12 +1,14 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/google/uuid"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
@@ -22,6 +24,7 @@ type sharedSpaceProvisioningInput struct {
 	InitialParticipantSigningKey   sharedspaces.ParticipantSigningKey    `json:"initialParticipantSigningKey"`
 	InitialParticipantDeviceKeys   []sharedspaces.ParticipantDeviceKey   `json:"initialParticipantDeviceKeys"`
 	InitialSecureRosterAttestation *sharedspaces.SecureRosterAttestation `json:"initialSecureRosterAttestation,omitempty"`
+	ServiceAuthorityEnrollment     *serviceauthority.InitialEnrollment   `json:"serviceAuthorityEnrollment,omitempty"`
 	TenantProvisioning             relayTenantProvisioningInput          `json:"tenantProvisioning"`
 }
 
@@ -76,14 +79,6 @@ func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request 
 		s.writeError(writer, err)
 		return
 	}
-	if err := s.requestBodyScopeMatchesBinding(
-		request,
-		input.SpaceID,
-		tenant.TenantID,
-	); err != nil {
-		writeServiceAuthorityError(writer, http.StatusConflict)
-		return
-	}
 	provisioning := sharedspaces.SpaceProvisioning{
 		Version: sharedspaces.SchemaVersion, RetryID: input.RetryID,
 		SpaceID: input.SpaceID, SecurityMode: input.SecurityMode,
@@ -96,15 +91,96 @@ func (s *Server) handleProvisionSharedSpace(writer http.ResponseWriter, request 
 		Tenant:                         tenant, Domain: domain,
 		CreatedAtMilliseconds: tenant.CreatedAtMilliseconds,
 	}
-	result, err := s.sharedSpacesStore.ProvisionSpace(
-		request.Context(), provisioning, s.nowMilliseconds(),
-	)
+	now := s.nowMilliseconds()
+	var authorityBinding *serviceauthority.CurrentBinding
+	var initialAuthority *sharedspaces.InitialServiceAuthorityBinding
+	var authorityStore sharedspaces.AuthorityBoundStore
+	if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
+		if input.ServiceAuthorityEnrollment == nil {
+			writeServiceAuthorityError(writer, http.StatusConflict)
+			return
+		}
+		scope := serviceauthority.Scope{
+			Kind: serviceauthority.ScopeSharedSpace, ScopeID: input.SpaceID,
+		}
+		var bindingErr error
+		initialAuthority, bindingErr = sharedspaces.NewInitialServiceAuthorityBinding(
+			*input.ServiceAuthorityEnrollment, s.deploymentSigner, scope, now,
+		)
+		var storeSupportsAuthority bool
+		authorityStore, storeSupportsAuthority =
+			s.sharedSpacesStore.(sharedspaces.AuthorityBoundStore)
+		if bindingErr != nil || !storeSupportsAuthority {
+			writeServiceAuthorityError(writer, http.StatusConflict)
+			return
+		}
+		manifest := initialAuthority.Manifest()
+		authorityBinding = &serviceauthority.CurrentBinding{
+			Revision:     initialAuthority.Revision(),
+			Digest:       initialAuthority.ManifestDigest(),
+			DeploymentID: initialAuthority.LocalDeploymentID(),
+			Manifest:     &manifest,
+		}
+	} else if input.ServiceAuthorityEnrollment != nil {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+		return
+	}
+	var result sharedspaces.SpaceProvisioningResult
+	if initialAuthority == nil {
+		result, err = s.sharedSpacesStore.ProvisionSpace(
+			request.Context(), provisioning, now,
+		)
+	} else {
+		result, err = authorityStore.ProvisionSpaceWithAuthority(
+			request.Context(), provisioning, initialAuthority, now,
+		)
+	}
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
+	if authorityBinding != nil {
+		scope := serviceauthority.Scope{
+			Kind: serviceauthority.ScopeSharedSpace, ScopeID: input.SpaceID,
+		}
+		if err := s.serviceAuthorityBindings.Activate(scope, *authorityBinding); err != nil {
+			writeSharedSpaceBindingActivationError(writer, err)
+			return
+		}
+		if err := authorityStore.ActivateBoundSharedSpaceScope(
+			request.Context(), input.SpaceID,
+			initialAuthority.LocalDeploymentID(), initialAuthority.Revision(),
+			initialAuthority.ManifestDigest(), now,
+		); err != nil {
+			if errors.Is(err, sharedspaces.ErrInitialServiceAuthorityConflict) ||
+				errors.Is(err, serviceauthority.ErrInvalid) {
+				writeServiceAuthorityError(writer, http.StatusConflict)
+			} else {
+				writeSharedSpaceAuthorityUnavailable(writer)
+			}
+			return
+		}
+	}
 	s.metrics.ObserveAcceptance(traffic.SurfaceManagement, string(result.Acceptance))
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
+func writeSharedSpaceBindingActivationError(writer http.ResponseWriter, err error) {
+	if errors.Is(err, serviceauthority.ErrBindingUnavailable) {
+		writeSharedSpaceAuthorityUnavailable(writer)
+	} else if errors.Is(err, serviceauthority.ErrBindingConflict) ||
+		errors.Is(err, serviceauthority.ErrInvalid) {
+		writeServiceAuthorityError(writer, http.StatusConflict)
+	} else {
+		writeSharedSpaceAuthorityUnavailable(writer)
+	}
+}
+
+func writeSharedSpaceAuthorityUnavailable(writer http.ResponseWriter) {
+	writeJSON(writer, http.StatusServiceUnavailable, map[string]string{
+		"code":    "shared_space_authority_unavailable",
+		"message": "Shared Space authority custody is temporarily unavailable.",
+	})
 }
 
 func (s *Server) handleGetSharedSpaceStatus(writer http.ResponseWriter, request *http.Request) {

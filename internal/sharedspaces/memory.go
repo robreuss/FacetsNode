@@ -11,6 +11,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/keycustody"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 type memorySpace struct {
@@ -25,6 +26,8 @@ type memorySpace struct {
 	computeBindings         map[uuid.UUID]SpaceComputeBinding
 	keyEpoch                uint64
 	activeCheckpointEpoch   uint64
+	initialAuthority        *InitialServiceAuthorityBinding
+	authorityActive         bool
 }
 
 type participantDeviceGrantTarget struct {
@@ -104,6 +107,33 @@ func (s *MemoryStore) ProvisionSpace(
 	provisioning SpaceProvisioning,
 	nowMilliseconds int64,
 ) (SpaceProvisioningResult, error) {
+	return s.provisionSpace(ctx, provisioning, nil, nowMilliseconds)
+}
+
+func (s *MemoryStore) ProvisionSpaceWithAuthority(
+	ctx context.Context,
+	provisioning SpaceProvisioning,
+	initialAuthority *InitialServiceAuthorityBinding,
+	nowMilliseconds int64,
+) (SpaceProvisioningResult, error) {
+	expectedScope := serviceauthority.Scope{
+		Kind: serviceauthority.ScopeSharedSpace, ScopeID: provisioning.SpaceID,
+	}
+	if initialAuthority == nil || initialAuthority.Validate() != nil ||
+		initialAuthority.Scope() != expectedScope {
+		return SpaceProvisioningResult{}, serviceauthority.ErrInvalid
+	}
+	return s.provisionSpace(
+		ctx, provisioning, initialAuthority, nowMilliseconds,
+	)
+}
+
+func (s *MemoryStore) provisionSpace(
+	ctx context.Context,
+	provisioning SpaceProvisioning,
+	initialAuthority *InitialServiceAuthorityBinding,
+	nowMilliseconds int64,
+) (SpaceProvisioningResult, error) {
 	if err := provisioning.Validate(); err != nil {
 		return SpaceProvisioningResult{}, err
 	}
@@ -114,16 +144,30 @@ func (s *MemoryStore) ProvisionSpace(
 	defer s.mu.Unlock()
 	if spaceID, found := s.spaceRetries[provisioning.RetryID]; found {
 		existing := s.spaces[spaceID]
-		if existing != nil && reflect.DeepEqual(existing.provisioning, provisioning) {
+		if existing != nil && reflect.DeepEqual(existing.provisioning, provisioning) &&
+			serviceauthority.InitialBindingsEqual(
+				existing.initialAuthority, initialAuthority,
+			) {
 			return spaceProvisioningResult(existing, relay.AcceptanceDuplicate), nil
 		}
 		return SpaceProvisioningResult{}, NewProtocolError(CodeSpaceCollision, "Shared Space retry ID was reused")
 	}
 	if existing := s.spaces[provisioning.SpaceID]; existing != nil {
-		if reflect.DeepEqual(existing.provisioning, provisioning) {
+		if reflect.DeepEqual(existing.provisioning, provisioning) &&
+			serviceauthority.InitialBindingsEqual(
+				existing.initialAuthority, initialAuthority,
+			) {
 			return spaceProvisioningResult(existing, relay.AcceptanceDuplicate), nil
 		}
 		return SpaceProvisioningResult{}, NewProtocolError(CodeSpaceCollision, "Shared Space ID was reused")
+	}
+	if initialAuthority != nil {
+		if err := initialAuthority.RequireFreshClaimAt(nowMilliseconds); err != nil {
+			return SpaceProvisioningResult{}, NewProtocolError(
+				CodeInvalidSpace,
+				"initial service authority enrollment is not current",
+			)
+		}
 	}
 	var managedWrappedKey []byte
 	if provisioning.SecurityMode == SecurityModeManaged {
@@ -157,6 +201,7 @@ func (s *MemoryStore) ProvisionSpace(
 		managedContentKeys: make(map[uint64][]byte),
 		computeBindings:    make(map[uuid.UUID]SpaceComputeBinding),
 		keyEpoch:           InitialKeyEpoch,
+		initialAuthority:   initialAuthority,
 	}
 	if provisioning.InitialSecureRosterAttestation != nil {
 		attestation := *provisioning.InitialSecureRosterAttestation
@@ -178,6 +223,35 @@ func (s *MemoryStore) ProvisionSpace(
 		OccurredAtMilliseconds: provisioning.CreatedAtMilliseconds,
 	})
 	return spaceProvisioningResult(space, relay.AcceptanceAccepted), nil
+}
+
+func (s *MemoryStore) ActivateBoundSharedSpaceScope(
+	_ context.Context,
+	spaceID uuid.UUID,
+	localDeploymentID uuid.UUID,
+	expectedAuthorityRevision uint64,
+	expectedAuthorityManifestDigest string,
+	nowMilliseconds int64,
+) error {
+	if spaceID == uuid.Nil || localDeploymentID == uuid.Nil ||
+		expectedAuthorityRevision != 1 ||
+		!ValidServiceAuthorityDigest(expectedAuthorityManifestDigest) || nowMilliseconds < 0 {
+		return serviceauthority.ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	space := s.spaces[spaceID]
+	if space == nil || space.initialAuthority == nil ||
+		space.initialAuthority.LocalDeploymentID() != localDeploymentID ||
+		space.initialAuthority.Revision() != expectedAuthorityRevision ||
+		space.initialAuthority.ManifestDigest() != expectedAuthorityManifestDigest {
+		return ErrInitialServiceAuthorityConflict
+	}
+	if space.authorityActive {
+		return nil
+	}
+	space.authorityActive = true
+	return nil
 }
 
 func spaceProvisioningResult(space *memorySpace, acceptance relay.Acceptance) SpaceProvisioningResult {

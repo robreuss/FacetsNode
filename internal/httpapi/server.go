@@ -518,10 +518,12 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.sharedSpacesStore != nil {
 		if s.operatorProvisioningOn {
-			register(
+			// The initial Shared Space scope cannot already possess the binding
+			// that this operator-authenticated admission commits. All later
+			// capability routes remain deployment-bound.
+			registerUnbound(
 				"POST /v1/shared-spaces",
 				traffic.SurfaceManagement,
-				mutation,
 				s.handleProvisionSharedSpace,
 			)
 		}
