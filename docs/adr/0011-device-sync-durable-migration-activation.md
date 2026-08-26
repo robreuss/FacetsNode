@@ -72,7 +72,8 @@ readiness gate still refuses to start it as a serving deployment.
 
 No cutover route invokes this coordinator yet. It also does not coordinate two
 hosts, stop an already-running old listener, move onion or TLS custody,
-implement rollback/cancellation, or prove a deployed migration.
+implement retirement/rollback, or prove a deployed migration. Exact
+cancellation and its independent restart journal are described by ADR 0012.
 PostgreSQL integration executes only when a disposable
 `FACETS_SERVER_TEST_DATABASE_URL` is configured; an unset live gate is a skip,
 not runtime evidence.

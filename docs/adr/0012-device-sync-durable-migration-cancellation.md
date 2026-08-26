@@ -43,15 +43,28 @@ closed.
 ## Orchestration boundary
 
 This checkpoint deliberately does not expose cancellation through HTTP or an
-operator command. BindingRegistry already applies the same exact cancellation,
-but the two stores do not yet share a deployment-signed pending journal or
-startup recovery path. A production coordinator must persist live acceptance
-before changing either store, then advance BindingRegistry before PostgreSQL so
-any crash remains non-writable rather than reopening a stale source.
+operator command. The headless coordinator persists a deployment-signed live
+acceptance before changing either store, then advances BindingRegistry before
+PostgreSQL so a crash leaves the source database fenced, or the target database
+standby, rather than creating a stale writer. Startup validates all pending
+cancellation journals and completes their exact idempotent registry/database
+steps before general authority readiness.
+
+Completed cancellation journals remain part of startup reconciliation while
+their exact cancellation revision is still the current registry authority. This
+closes the target race where an import began before registry cancellation but
+committed a non-writable standby afterward. If such a row appears, startup
+reapplies the exact cancellation and retires it. A later registry revision
+supersedes the completed journal, so historical cancellation cannot overwrite a
+new authorized migration.
 
 Cancellation before target import may have no target PostgreSQL row to unwind;
-the future coordinator must distinguish that legitimate absence from database
-failure using its exact operation journal and registry state. Artifact and blob
-reclamation remains a separate retention operation. The live PostgreSQL test is
-skipped unless `FACETS_SERVER_TEST_DATABASE_URL` names a disposable database,
-and this ADR makes no runtime or deployment claim.
+the coordinator accepts that absence only on the authenticated target role and
+still verifies the exact terminal registry identity. A missing source row or a
+non-exact existing target row is an error. Artifact and blob reclamation remains
+a separate retention operation. General startup readiness currently keeps a
+cancelled target or source from serving as the active deployment; multi-tenant
+terminal-scope availability requires a separate readiness-policy checkpoint.
+The live PostgreSQL test is skipped unless
+`FACETS_SERVER_TEST_DATABASE_URL` names a disposable database, and this ADR
+makes no deployed migration claim.

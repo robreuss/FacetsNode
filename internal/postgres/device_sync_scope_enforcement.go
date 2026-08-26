@@ -29,6 +29,10 @@ var ErrDeviceSyncMigrationImportConflict = errors.New(
 	"Device Sync migration import conflicts with durable state",
 )
 
+var ErrDeviceSyncScopeEnforcementNotFound = errors.New(
+	"Device Sync scope enforcement row was not found",
+)
+
 type DeviceSyncScopeEnforcementState string
 
 const (
@@ -1795,9 +1799,7 @@ func loadDeviceSyncScopeEnforcement(
 		&current.ActiveExportWriteFenceID, &current.ActiveMigrationImportID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return DeviceSyncScopeEnforcement{}, errors.New(
-			"Device Sync scope enforcement row was not found",
-		)
+		return DeviceSyncScopeEnforcement{}, ErrDeviceSyncScopeEnforcementNotFound
 	}
 	if err != nil {
 		return DeviceSyncScopeEnforcement{}, fmt.Errorf(

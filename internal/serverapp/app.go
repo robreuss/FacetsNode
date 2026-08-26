@@ -212,6 +212,27 @@ func Main(service config.Service) {
 					"scope_count", len(recovered),
 				)
 			}
+			cancellationCoordinator := migrationcoordinator.DeviceSyncCancellationCoordinator{
+				Store: relayStore, Custody: migrationCustody,
+				Bindings: bindings, Signer: deploymentSigner,
+			}
+			cancelled, err := cancellationCoordinator.Recover(
+				startupContext,
+				time.Now(),
+			)
+			if err != nil {
+				logger.Error(
+					"Device Sync migration cancellation recovery rejected",
+					"error", err,
+				)
+				os.Exit(1)
+			}
+			if len(cancelled) != 0 {
+				logger.Info(
+					"Device Sync migration cancellation recovery completed",
+					"scope_count", len(cancelled),
+				)
+			}
 			if err := reconcileDeviceSyncServiceAuthority(
 				startupContext,
 				relayStore,
