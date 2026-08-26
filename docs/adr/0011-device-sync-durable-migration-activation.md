@@ -41,19 +41,33 @@ recoverable after short-lived readiness or terminal evidence expires. Changed
 evidence, another deployment role, a different imported snapshot, or a
 different source export fails closed.
 
-The eventual local migration coordinator must persist the exact activation
-evidence, advance BindingRegistry first, and then invoke this database
-primitive. That order cannot make two deployments writable: a database failure
-after registry advancement leaves the target database standby or the source
-database fenced. Automatic restart reconciliation of that split state remains
-the next checkpoint and must revalidate the retained complete evidence; a bare
-registry identity is insufficient evidence for repair.
+The headless local migration coordinator persists the exact activation evidence
+and its live acceptance instant beside the already authenticated transfer,
+advances BindingRegistry, and then invokes this database primitive. That order
+cannot make two deployments writable: a database failure after registry
+advancement leaves the target database standby or the source database fenced.
+
+The owner-only journal is deployment-signed, written, and directory-synced
+before either durable authority store changes. Its acceptance record binds the
+local deployment, scope, migration, snapshot, exact activation-evidence digest,
+and original live acceptance instant. A pending record is retained across
+failure; `Recover` revalidates that signature, the complete evidence, its
+canonical digest, the underlying transfer, and every private path before
+repeating the two exact idempotent transitions. This permits recovery after
+short-lived snapshot, readiness, or activation expiry without treating a bare
+registry identity or a caller-supplied timestamp as sufficient evidence. Once
+registry and database identities and write states agree, the journal is
+atomically renamed to a completed audit record and no longer participates in
+startup recovery. Clock rollback before the signed acceptance instant fails
+closed.
 
 ## Claim boundary
 
-This is a headless persistence primitive. It does not expose a cutover route,
-coordinate two hosts, transfer artifacts, retire a live listener, move onion or
-TLS custody, implement rollback/cancellation, or prove a deployed migration.
+This remains headless orchestration. Server construction does not yet discover
+the custody root and invoke `Recover` before the general authority-readiness
+gate; that production startup wiring is still required. It also does not expose
+a cutover route, coordinate two hosts, retire a live listener, move onion or TLS
+custody, implement rollback/cancellation, or prove a deployed migration.
 PostgreSQL integration executes only when a disposable
 `FACETS_SERVER_TEST_DATABASE_URL` is configured; an unset live gate is a skip,
 not runtime evidence.

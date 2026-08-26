@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -21,14 +22,16 @@ import (
 )
 
 const (
-	artifactCustodyVersion   = 1
-	maximumEvidenceByteCount = 8 * 1024 * 1024
-	serviceStateFileName     = "service-state.bin"
-	blobInventoryFileName    = "blob-inventory.bin"
-	preparationFileName      = "preparation.json"
-	snapshotFileName         = "snapshot.json"
-	metadataFileName         = "metadata.json"
-	readinessFileName        = "readiness.json"
+	artifactCustodyVersion      = 1
+	maximumEvidenceByteCount    = 8 * 1024 * 1024
+	serviceStateFileName        = "service-state.bin"
+	blobInventoryFileName       = "blob-inventory.bin"
+	preparationFileName         = "preparation.json"
+	snapshotFileName            = "snapshot.json"
+	metadataFileName            = "metadata.json"
+	readinessFileName           = "readiness.json"
+	activationFileName          = "activation.json"
+	completedActivationFileName = "activation-completed.json"
 )
 
 type fileArtifactCustodyMetadata struct {
@@ -39,6 +42,19 @@ type fileArtifactCustodyMetadata struct {
 	SnapshotID              uuid.UUID `json:"snapshotID"`
 	SnapshotReferenceDigest string    `json:"snapshotReferenceDigest"`
 	Version                 int       `json:"version"`
+}
+
+type deviceSyncActivationJournalRecord struct {
+	Acceptance serviceauthority.MigrationActivationAcceptance `json:"acceptance"`
+	Evidence   serviceauthority.MigrationActivationEvidence   `json:"evidence"`
+	Version    int                                            `json:"version"`
+}
+
+type deviceSyncActivationJournal struct {
+	anchor    serviceauthority.TrustAnchor
+	completed bool
+	record    deviceSyncActivationJournalRecord
+	transfer  PreparedDeviceSyncTransfer
 }
 
 // FileArtifactCustody owns exact authenticated migration artifact bytes. Each
@@ -416,6 +432,416 @@ func (custody *FileArtifactCustody) storeReadiness(
 		return serviceauthority.MigrationReadiness{}, err
 	}
 	return readiness, nil
+}
+
+// stageDeviceSyncActivationJournal durably records the exact activation
+// evidence and the instant at which it was still live before either the
+// registry or database is advanced. The protected record is the restart seam
+// that prevents a cross-store crash from becoming unrecoverable after the
+// short-lived terminal Manifest expires.
+func (custody *FileArtifactCustody) stageDeviceSyncActivationJournal(
+	ctx context.Context,
+	signer *serviceauthority.DeploymentSigner,
+	evidence serviceauthority.MigrationActivationEvidence,
+	anchor serviceauthority.TrustAnchor,
+	acceptedAtMilliseconds int64,
+) (deviceSyncActivationJournal, error) {
+	if custody == nil || ctx == nil || signer == nil ||
+		acceptedAtMilliseconds < 0 {
+		return deviceSyncActivationJournal{}, serviceauthority.ErrInvalid
+	}
+	localDeploymentID := signer.DeploymentID()
+	activation, err := evidence.ActivationManifest.VerifiedPayload()
+	if err != nil || activation.Migration == nil ||
+		(localDeploymentID != activation.Migration.SourceDeploymentID &&
+			localDeploymentID != activation.Migration.TargetDeploymentID) {
+		return deviceSyncActivationJournal{}, serviceauthority.ErrInvalid
+	}
+	// Locate an exact preexisting pending/completed journal using evidence
+	// validated at the signed activation instant. This allows an exact retry to
+	// recover after terminal expiry without permitting a new late acceptance.
+	if _, err := evidence.Validate(anchor, activation.ValidFromMilliseconds); err != nil {
+		return deviceSyncActivationJournal{}, serviceauthority.ErrInvalid
+	}
+	validated, err := evidence.Snapshot.ValidatePreparedTransfer(
+		evidence.Preparation, anchor, activation.ValidFromMilliseconds,
+	)
+	if err != nil {
+		return deviceSyncActivationJournal{}, err
+	}
+	evidenceDigest, err := evidence.ReferenceDigest()
+	if err != nil {
+		return deviceSyncActivationJournal{}, err
+	}
+	transfer, found, err := custody.openPreparedDeviceSyncTransfer(
+		ctx, validated, evidence.Preparation, evidence.Snapshot,
+	)
+	if err != nil {
+		return deviceSyncActivationJournal{}, err
+	}
+	if !found {
+		return deviceSyncActivationJournal{}, errors.New(
+			"Device Sync activation lacks exact local migration artifact custody",
+		)
+	}
+	custody.mu.Lock()
+	defer custody.mu.Unlock()
+	path := filepath.Join(transfer.directory, activationFileName)
+	for _, candidate := range []struct {
+		path      string
+		completed bool
+	}{
+		{path: path},
+		{path: filepath.Join(transfer.directory, completedActivationFileName), completed: true},
+	} {
+		if existingBytes, readErr := readProtectedRecord(
+			candidate.path, maximumEvidenceByteCount,
+		); readErr == nil {
+			existing, anchor, validationErr := decodeDeviceSyncActivationJournalRecord(
+				existingBytes,
+			)
+			acceptance, acceptanceErr := existing.Acceptance.VerifiedPayload()
+			if validationErr != nil || acceptanceErr != nil ||
+				acceptance.LocalDeploymentID != localDeploymentID ||
+				acceptance.ActivationEvidenceDigest != evidenceDigest ||
+				acceptedAtMilliseconds < acceptance.AcceptedAtMilliseconds ||
+				existing.Acceptance.Signature.PublicSigningKeyX963 !=
+					signer.PublicSigningKeyX963() ||
+				existing.Acceptance.Signature.SigningKeyFingerprint !=
+					signer.SigningKeyFingerprint() {
+				return deviceSyncActivationJournal{}, errors.New(
+					"stored Device Sync activation journal conflicts with requested evidence",
+				)
+			}
+			return deviceSyncActivationJournal{
+				anchor: anchor, completed: candidate.completed,
+				record: existing, transfer: transfer,
+			}, nil
+		} else if !os.IsNotExist(readErr) {
+			return deviceSyncActivationJournal{}, readErr
+		}
+	}
+	record, _, err := buildDeviceSyncActivationJournalRecord(
+		signer, evidence, anchor, acceptedAtMilliseconds,
+	)
+	if err != nil {
+		return deviceSyncActivationJournal{}, err
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil || len(encoded) == 0 || len(encoded) > maximumEvidenceByteCount {
+		return deviceSyncActivationJournal{}, serviceauthority.ErrInvalid
+	}
+	temporary, err := os.CreateTemp(transfer.directory, ".activation-*")
+	if err != nil {
+		return deviceSyncActivationJournal{}, err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return deviceSyncActivationJournal{}, err
+	}
+	if _, err := io.Copy(temporary, bytes.NewReader(encoded)); err != nil {
+		_ = temporary.Close()
+		return deviceSyncActivationJournal{}, err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return deviceSyncActivationJournal{}, err
+	}
+	if err := temporary.Close(); err != nil {
+		return deviceSyncActivationJournal{}, err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return deviceSyncActivationJournal{}, err
+	}
+	if err := syncCustodyDirectory(transfer.directory); err != nil {
+		return deviceSyncActivationJournal{}, err
+	}
+	return deviceSyncActivationJournal{
+		anchor: anchor, record: record, transfer: transfer,
+	}, nil
+}
+
+func (custody *FileArtifactCustody) completeDeviceSyncActivationJournal(
+	journal deviceSyncActivationJournal,
+) error {
+	if custody == nil || journal.transfer.directory == "" ||
+		len(journal.record.Acceptance.Payload) == 0 {
+		return serviceauthority.ErrInvalid
+	}
+	if journal.completed {
+		return nil
+	}
+	custody.mu.Lock()
+	defer custody.mu.Unlock()
+	pending := filepath.Join(journal.transfer.directory, activationFileName)
+	completed := filepath.Join(journal.transfer.directory, completedActivationFileName)
+	if encoded, err := readProtectedRecord(completed, maximumEvidenceByteCount); err == nil {
+		record, _, validationErr := decodeDeviceSyncActivationJournalRecord(encoded)
+		if validationErr != nil || !sameMigrationActivationAcceptance(
+			record.Acceptance, journal.record.Acceptance,
+		) {
+			return errors.New("completed Device Sync activation journal conflicts with cutover")
+		}
+		if _, err := os.Lstat(pending); err == nil {
+			if err := os.Remove(pending); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		return syncCustodyDirectory(journal.transfer.directory)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	encoded, err := readProtectedRecord(pending, maximumEvidenceByteCount)
+	if err != nil {
+		return err
+	}
+	record, _, err := decodeDeviceSyncActivationJournalRecord(encoded)
+	if err != nil || !sameMigrationActivationAcceptance(
+		record.Acceptance, journal.record.Acceptance,
+	) {
+		return errors.New("pending Device Sync activation journal conflicts with cutover")
+	}
+	if err := os.Rename(pending, completed); err != nil {
+		return err
+	}
+	return syncCustodyDirectory(journal.transfer.directory)
+}
+
+// listDeviceSyncActivationJournals validates every persisted activation
+// record and its underlying exact transfer before returning deterministic
+// recovery work. Unknown, unsafe, or malformed custody paths fail the whole
+// scan rather than being silently ignored.
+func (custody *FileArtifactCustody) listDeviceSyncActivationJournals(
+	ctx context.Context,
+) ([]deviceSyncActivationJournal, error) {
+	if custody == nil || ctx == nil {
+		return nil, serviceauthority.ErrInvalid
+	}
+	custody.mu.Lock()
+	defer custody.mu.Unlock()
+	base := filepath.Join(custody.root, "device-sync")
+	if _, err := os.Lstat(base); os.IsNotExist(err) {
+		return []deviceSyncActivationJournal{}, nil
+	} else if err != nil || rejectUnsafeCustodyDirectory(base) != nil {
+		return nil, errors.New("Device Sync activation custody root is unsafe")
+	}
+	paths, err := activationJournalPaths(base)
+	if err != nil {
+		return nil, err
+	}
+	journals := make([]deviceSyncActivationJournal, 0, len(paths))
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		encoded, err := readProtectedRecord(path, maximumEvidenceByteCount)
+		if err != nil {
+			return nil, err
+		}
+		record, anchor, err := decodeDeviceSyncActivationJournalRecord(encoded)
+		if err != nil {
+			return nil, err
+		}
+		acceptance, err := record.Acceptance.VerifiedPayload()
+		if err != nil {
+			return nil, err
+		}
+		validated, err := record.Evidence.Snapshot.ValidatePreparedTransfer(
+			record.Evidence.Preparation,
+			anchor,
+			acceptance.AcceptedAtMilliseconds,
+		)
+		if err != nil {
+			return nil, serviceauthority.ErrInvalid
+		}
+		transfer, preparationRecord, snapshotRecord, metadataRecord, err :=
+			custody.expectedPreparedDeviceSyncTransfer(
+				validated, record.Evidence.Preparation, record.Evidence.Snapshot,
+			)
+		if err != nil || filepath.Dir(path) != transfer.directory {
+			return nil, errors.New("Device Sync activation journal path conflicts with evidence")
+		}
+		if err := verifyExistingPreparedTransfer(
+			ctx, transfer, preparationRecord, snapshotRecord, metadataRecord,
+		); err != nil {
+			return nil, err
+		}
+		journals = append(journals, deviceSyncActivationJournal{
+			anchor: anchor, record: record, transfer: transfer,
+		})
+	}
+	sort.Slice(journals, func(left, right int) bool {
+		leftPayload, _ := journals[left].record.Evidence.ActivationManifest.VerifiedPayload()
+		rightPayload, _ := journals[right].record.Evidence.ActivationManifest.VerifiedPayload()
+		if leftPayload.Scope.ScopeID != rightPayload.Scope.ScopeID {
+			return bytes.Compare(leftPayload.Scope.ScopeID[:], rightPayload.Scope.ScopeID[:]) < 0
+		}
+		return bytes.Compare(
+			leftPayload.Migration.MigrationID[:],
+			rightPayload.Migration.MigrationID[:],
+		) < 0
+	})
+	return journals, nil
+}
+
+func buildDeviceSyncActivationJournalRecord(
+	signer *serviceauthority.DeploymentSigner,
+	evidence serviceauthority.MigrationActivationEvidence,
+	anchor serviceauthority.TrustAnchor,
+	acceptedAtMilliseconds int64,
+) (deviceSyncActivationJournalRecord, serviceauthority.ValidatedMigrationTransfer, error) {
+	if signer == nil {
+		return deviceSyncActivationJournalRecord{},
+			serviceauthority.ValidatedMigrationTransfer{}, serviceauthority.ErrInvalid
+	}
+	localDeploymentID := signer.DeploymentID()
+	activation, err := evidence.ValidateHistoricalCatchUp(anchor, acceptedAtMilliseconds)
+	if err != nil || activation.Migration == nil ||
+		activation.Scope.Kind != serviceauthority.ScopeDeviceSync ||
+		(localDeploymentID != activation.Migration.SourceDeploymentID &&
+			localDeploymentID != activation.Migration.TargetDeploymentID) {
+		return deviceSyncActivationJournalRecord{},
+			serviceauthority.ValidatedMigrationTransfer{}, serviceauthority.ErrInvalid
+	}
+	validated, err := evidence.Snapshot.ValidatePreparedTransfer(
+		evidence.Preparation, anchor, acceptedAtMilliseconds,
+	)
+	if err != nil {
+		return deviceSyncActivationJournalRecord{},
+			serviceauthority.ValidatedMigrationTransfer{}, err
+	}
+	digest, err := evidence.ReferenceDigest()
+	if err != nil {
+		return deviceSyncActivationJournalRecord{},
+			serviceauthority.ValidatedMigrationTransfer{}, err
+	}
+	snapshotDigest, err := evidence.Snapshot.ReferenceDigest()
+	if err != nil {
+		return deviceSyncActivationJournalRecord{},
+			serviceauthority.ValidatedMigrationTransfer{}, err
+	}
+	acceptance, err := signer.SignMigrationActivationAcceptance(
+		serviceauthority.MigrationActivationAcceptancePayload{
+			AcceptedAtMilliseconds:   acceptedAtMilliseconds,
+			ActivationEvidenceDigest: digest,
+			LocalDeploymentID:        localDeploymentID,
+			MigrationID:              activation.Migration.MigrationID,
+			Scope:                    activation.Scope,
+			SnapshotReferenceDigest:  snapshotDigest,
+			Version:                  serviceauthority.SchemaVersion,
+		},
+	)
+	if err != nil {
+		return deviceSyncActivationJournalRecord{},
+			serviceauthority.ValidatedMigrationTransfer{}, err
+	}
+	return deviceSyncActivationJournalRecord{
+		Acceptance: acceptance,
+		Evidence:   evidence,
+		Version:    artifactCustodyVersion,
+	}, validated, nil
+}
+
+func decodeDeviceSyncActivationJournalRecord(
+	encoded []byte,
+) (deviceSyncActivationJournalRecord, serviceauthority.TrustAnchor, error) {
+	var record deviceSyncActivationJournalRecord
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil || ensureJSONEOF(decoder) != nil {
+		return record, serviceauthority.TrustAnchor{}, serviceauthority.ErrInvalid
+	}
+	canonical, err := json.Marshal(record)
+	if err != nil || !bytes.Equal(canonical, encoded) ||
+		record.Version != artifactCustodyVersion {
+		return record, serviceauthority.TrustAnchor{}, serviceauthority.ErrInvalid
+	}
+	current, err := record.Evidence.Preparation.CurrentManifest.VerifiedPayload()
+	if err != nil {
+		return record, serviceauthority.TrustAnchor{}, serviceauthority.ErrInvalid
+	}
+	signature := record.Evidence.Preparation.CurrentManifest.Signature
+	anchor := serviceauthority.TrustAnchor{
+		PublicSigningKeyX963:  signature.PublicSigningKeyX963,
+		Scope:                 current.Scope,
+		SignerID:              signature.SignerID,
+		SigningKeyFingerprint: signature.SigningKeyFingerprint,
+		Version:               serviceauthority.SchemaVersion,
+	}
+	acceptance, err := record.Acceptance.VerifiedPayload()
+	if err != nil {
+		return record, serviceauthority.TrustAnchor{}, serviceauthority.ErrInvalid
+	}
+	activation, err := record.Evidence.ValidateHistoricalCatchUp(
+		anchor, acceptance.AcceptedAtMilliseconds,
+	)
+	evidenceDigest, digestErr := record.Evidence.ReferenceDigest()
+	snapshotDigest, snapshotDigestErr := record.Evidence.Snapshot.ReferenceDigest()
+	if err != nil || digestErr != nil || snapshotDigestErr != nil ||
+		activation.Migration == nil || acceptance.Scope != activation.Scope ||
+		acceptance.MigrationID != activation.Migration.MigrationID ||
+		acceptance.ActivationEvidenceDigest != evidenceDigest ||
+		acceptance.SnapshotReferenceDigest != snapshotDigest ||
+		(acceptance.LocalDeploymentID != activation.Migration.SourceDeploymentID &&
+			acceptance.LocalDeploymentID != activation.Migration.TargetDeploymentID) {
+		return record, serviceauthority.TrustAnchor{}, serviceauthority.ErrInvalid
+	}
+	return record, anchor, nil
+}
+
+func sameMigrationActivationAcceptance(
+	left serviceauthority.MigrationActivationAcceptance,
+	right serviceauthority.MigrationActivationAcceptance,
+) bool {
+	return bytes.Equal(left.Payload, right.Payload) && left.Signature == right.Signature
+}
+
+func activationJournalPaths(base string) ([]string, error) {
+	principals, err := os.ReadDir(base)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0)
+	for _, principal := range principals {
+		principalPath := filepath.Join(base, principal.Name())
+		if _, err := uuid.Parse(principal.Name()); err != nil || principal.Type()&os.ModeSymlink != 0 ||
+			!principal.IsDir() || rejectUnsafeCustodyDirectory(principalPath) != nil {
+			return nil, errors.New("Device Sync activation custody contains an unsafe principal path")
+		}
+		migrations, err := os.ReadDir(principalPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, migration := range migrations {
+			migrationPath := filepath.Join(principalPath, migration.Name())
+			if _, err := uuid.Parse(migration.Name()); err != nil || migration.Type()&os.ModeSymlink != 0 ||
+				!migration.IsDir() || rejectUnsafeCustodyDirectory(migrationPath) != nil {
+				return nil, errors.New("Device Sync activation custody contains an unsafe migration path")
+			}
+			snapshots, err := os.ReadDir(migrationPath)
+			if err != nil {
+				return nil, err
+			}
+			for _, snapshot := range snapshots {
+				snapshotPath := filepath.Join(migrationPath, snapshot.Name())
+				if _, err := uuid.Parse(snapshot.Name()); err != nil || snapshot.Type()&os.ModeSymlink != 0 ||
+					!snapshot.IsDir() || rejectUnsafeCustodyDirectory(snapshotPath) != nil {
+					return nil, errors.New("Device Sync activation custody contains an unsafe snapshot path")
+				}
+				activationPath := filepath.Join(snapshotPath, activationFileName)
+				if _, err := os.Lstat(activationPath); err == nil {
+					paths = append(paths, activationPath)
+				} else if !os.IsNotExist(err) {
+					return nil, err
+				}
+			}
+		}
+	}
+	return paths, nil
 }
 
 func (custody *FileArtifactCustody) transferDirectory(metadata fileArtifactCustodyMetadata) string {
