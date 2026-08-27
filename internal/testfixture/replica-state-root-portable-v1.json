@@ -1,0 +1,104 @@
+{
+  "format": "facets.replica-state-root-fixture.v1",
+  "warning": "Portable client contract. FacetsNode stores the containing message and blobs opaquely and does not decode this state.",
+  "root": {
+    "version": 1,
+    "domainID": "11111111-2222-3333-4444-555555555555",
+    "keyEpoch": 7,
+    "capturedCoreRevision": 41,
+    "coveredClock": {
+      "counters": {
+        "device-a": 12,
+        "device-b": 9
+      }
+    },
+    "predecessorMessageIDs": [
+      "10000000-0000-0000-0000-000000000001",
+      "20000000-0000-0000-0000-000000000002"
+    ],
+    "pieces": [
+      {
+        "pieceID": "3fKR45enFwmi8GEIfiX-wbOqPFWUnTHhWPxq0PViIgA",
+        "byteCount": 4096,
+        "dependencyPieceIDs": [],
+        "requiredBlobReferences": [
+          {
+            "blobID": "DC0vaVRaly_hdCzOTK_YfxAhK2qU5KZyJPQZfDFcNMY",
+            "byteCount": 1024
+          },
+          {
+            "blobID": "vkm-3CxAYqRBbInuykl5xnbLqOEnEIGGwgr61jbHGFQ",
+            "byteCount": 128
+          }
+        ],
+        "itemCount": 100
+      },
+      {
+        "pieceID": "8x_1iuYWxEHjAsW_TVPTFTxta_P2g16O65g4A6CWoWc",
+        "byteCount": 2048,
+        "dependencyPieceIDs": [
+          "3fKR45enFwmi8GEIfiX-wbOqPFWUnTHhWPxq0PViIgA"
+        ],
+        "requiredBlobReferences": [
+          {
+            "blobID": "qjb9iL-dcR55tg9aZAKt1WDu0E1xcmkuWGD1mdoNkpg",
+            "byteCount": 256
+          }
+        ],
+        "itemCount": 50
+      }
+    ],
+    "capturedAtMilliseconds": 1787875200000
+  },
+  "expectedRootDigest": "0aDHkYXzYLaO7YkjpzfwkP5aJp2v_Ad4N44VwkjhZdA",
+  "successorRoot": {
+    "version": 1,
+    "domainID": "11111111-2222-3333-4444-555555555555",
+    "keyEpoch": 7,
+    "capturedCoreRevision": 42,
+    "predecessorRootDigest": "0aDHkYXzYLaO7YkjpzfwkP5aJp2v_Ad4N44VwkjhZdA",
+    "coveredClock": {
+      "counters": {
+        "device-a": 13,
+        "device-b": 9
+      }
+    },
+    "predecessorMessageIDs": [
+      "30000000-0000-0000-0000-000000000003"
+    ],
+    "pieces": [
+      {
+        "pieceID": "3fKR45enFwmi8GEIfiX-wbOqPFWUnTHhWPxq0PViIgA",
+        "byteCount": 4096,
+        "dependencyPieceIDs": [],
+        "requiredBlobReferences": [
+          {
+            "blobID": "DC0vaVRaly_hdCzOTK_YfxAhK2qU5KZyJPQZfDFcNMY",
+            "byteCount": 1024
+          },
+          {
+            "blobID": "vkm-3CxAYqRBbInuykl5xnbLqOEnEIGGwgr61jbHGFQ",
+            "byteCount": 128
+          }
+        ],
+        "itemCount": 100
+      },
+      {
+        "pieceID": "b_CxO9i2h4yCpjK_EH0jKbroC_ydlvUkXByT_x7gO6I",
+        "byteCount": 512,
+        "dependencyPieceIDs": [
+          "3fKR45enFwmi8GEIfiX-wbOqPFWUnTHhWPxq0PViIgA"
+        ],
+        "requiredBlobReferences": [
+          {
+            "blobID": "kjPB1bqXkl3D3T4G0Q7OdQvnYUFrXf1B3feUxfSLBLo",
+            "byteCount": 2048
+          }
+        ],
+        "itemCount": 1
+      }
+    ],
+    "capturedAtMilliseconds": 1787875260000
+  },
+  "expectedSuccessorRootDigest": "aCB30muMRv5gtBAZAM0jFburSRJR2JGorDbLdgEeoKQ"
+}

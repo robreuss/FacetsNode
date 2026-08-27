@@ -104,6 +104,19 @@ interrupted delivery, duplicate delivery, and restart recovery idempotent.
 Disposable wake hints may reduce perceived latency but reliable cursor polling
 remains the delivery guarantee.
 
+The version-1 content-addressed replica-state contract refines the client
+checkpoint payload without changing the server envelope. One signed checkpoint
+root binds a complete graph of independently reusable FEF state pieces and
+their required resource/media blobs. Successor roots hash-link to their exact
+predecessor and may reuse unchanged pieces. FacetsNode does not decode this
+root; it retains the containing message and encrypted blob IDs through the
+ordinary checkpoint candidate. See ADR 0016 and the byte-identical fixture:
+
+```text
+FacetsNode/internal/testfixture/replica-state-root-portable-v1.json
+Facets/Packages/FacetsDeveloperKit/Tests/FacetsFEFTests/Fixtures/replica-state-root-portable-v1.json
+```
+
 Blobs are content-addressed and may be uploaded or resumed separately from the
 envelope that references them. Receivers verify digest and size before marking
 the associated canonical application complete. A corrected bundle reuses a
