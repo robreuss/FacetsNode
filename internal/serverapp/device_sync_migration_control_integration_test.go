@@ -57,7 +57,7 @@ func TestLiveDeviceSyncAttendedMigrationAndRollback(t *testing.T) {
 	sourceSigner := liveMigrationDeploymentSigner(t, current.ActiveDeployment)
 	targetSigner := liveMigrationDeploymentSigner(t, prepared.PreparedDeployments[0])
 	source := newLiveMigrationControlRuntime(
-		t, ctx, sourceDatabaseURL, sourceSigner, "source",
+		t, ctx, sourceDatabaseURL, sourceSigner, current.ActiveDeployment, "source",
 	)
 	defer func() {
 		if err := source.close(); err != nil {
@@ -65,7 +65,7 @@ func TestLiveDeviceSyncAttendedMigrationAndRollback(t *testing.T) {
 		}
 	}()
 	target := newLiveMigrationControlRuntime(
-		t, ctx, targetDatabaseURL, targetSigner, "target",
+		t, ctx, targetDatabaseURL, targetSigner, prepared.PreparedDeployments[0], "target",
 	)
 	defer func() {
 		if err := target.close(); err != nil {
@@ -298,6 +298,7 @@ func newLiveMigrationControlRuntime(
 	ctx context.Context,
 	databaseURL string,
 	signer *serviceauthority.DeploymentSigner,
+	descriptor serviceauthority.DeploymentDescriptor,
 	label string,
 ) *deviceSyncMigrationControlRuntime {
 	t.Helper()
@@ -333,6 +334,21 @@ func newLiveMigrationControlRuntime(
 		t.Fatal(err)
 	}
 	root := t.TempDir()
+	if retainedRoot := os.Getenv("FACETS_SERVER_TEST_MIGRATION_ARTIFACT_ROOT"); retainedRoot != "" {
+		if !filepath.IsAbs(retainedRoot) {
+			pool.Close()
+			t.Fatal("FACETS_SERVER_TEST_MIGRATION_ARTIFACT_ROOT must be absolute")
+		}
+		root = filepath.Join(filepath.Clean(retainedRoot), label)
+		if _, err := os.Lstat(root); err == nil || !os.IsNotExist(err) {
+			pool.Close()
+			t.Fatalf("retained migration acceptance root already exists: %s", root)
+		}
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			pool.Close()
+			t.Fatal(err)
+		}
+	}
 	blobs, err := relay.NewFileBlobContentStore(filepath.Join(root, "blobs"))
 	if err != nil {
 		pool.Close()
@@ -364,9 +380,47 @@ func newLiveMigrationControlRuntime(
 		pool.Close()
 		t.Fatal(err)
 	}
+	writeLiveMigrationDeploymentFiles(t, root, signer, descriptor)
 	return &deviceSyncMigrationControlRuntime{
 		pool: pool, store: store, blobs: blobs, custody: custody,
 		bindings: bindings, signer: signer,
+	}
+}
+
+func writeLiveMigrationDeploymentFiles(
+	t *testing.T,
+	root string,
+	signer *serviceauthority.DeploymentSigner,
+	descriptor serviceauthority.DeploymentDescriptor,
+) {
+	t.Helper()
+	seed := liveMigrationDeploymentSeed(t, descriptor)
+	keyRecord := base64.RawURLEncoding.EncodeToString(seed) + "\n"
+	if err := os.WriteFile(
+		filepath.Join(root, "deployment-signing-key"), []byte(keyRecord), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if signer.DeploymentID() != descriptor.DeploymentID || len(descriptor.Routes) == 0 {
+		t.Fatal("migration deployment descriptor does not match signer")
+	}
+	routeID := descriptor.Routes[0].RouteID
+	template := serviceauthority.DeploymentOfferTemplate{
+		Deployment: descriptor,
+		TransportPolicy: serviceauthority.TransportPolicy{
+			BulkRouteIDs: []uuid.UUID{routeID}, ControlRouteIDs: []uuid.UUID{routeID},
+			MessageRouteIDs: []uuid.UUID{routeID}, Version: serviceauthority.SchemaVersion,
+		},
+		Version: serviceauthority.SchemaVersion,
+	}
+	record, err := json.Marshal(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "deployment-routes.json"), record, 0o600,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -696,6 +750,19 @@ func liveMigrationDeploymentSigner(
 	descriptor serviceauthority.DeploymentDescriptor,
 ) *serviceauthority.DeploymentSigner {
 	t.Helper()
+	seed := liveMigrationDeploymentSeed(t, descriptor)
+	signer, err := serviceauthority.NewDeploymentSigner(descriptor.DeploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
+func liveMigrationDeploymentSeed(
+	t *testing.T,
+	descriptor serviceauthority.DeploymentDescriptor,
+) []byte {
+	t.Helper()
 	for candidate := 1; candidate <= 255; candidate++ {
 		scalar := make([]byte, 32)
 		scalar[31] = byte(candidate)
@@ -704,7 +771,7 @@ func liveMigrationDeploymentSigner(
 		)
 		if err == nil && signer.PublicSigningKeyX963() == descriptor.PublicSigningKeyX963 &&
 			signer.SigningKeyFingerprint() == descriptor.SigningKeyFingerprint {
-			return signer
+			return scalar
 		}
 	}
 	t.Fatal("portable fixture deployment signer was not found")
