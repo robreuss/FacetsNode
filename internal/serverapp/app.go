@@ -65,6 +65,21 @@ func Main(service config.Service) {
 		}
 		return
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "migration" {
+		rootContext, stop := signal.NotifyContext(
+			context.Background(), syscall.SIGINT, syscall.SIGTERM,
+		)
+		defer stop()
+		if err := runDeviceSyncMigrationControl(
+			rootContext, service, os.Args[2:], os.Stdout, time.Now,
+		); err != nil {
+			_, _ = fmt.Fprintf(
+				os.Stderr, "Device Sync migration control: %v\n", err,
+			)
+			os.Exit(1)
+		}
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", service)
 	configuration, err := config.Load(service)
 	if err != nil {
