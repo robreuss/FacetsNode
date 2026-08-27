@@ -81,8 +81,8 @@ type deviceSyncMigrationControlResponse struct {
 	BlobCount         int64                                                  `json:"blobCount,omitempty"`
 	Bundle            *migrationcoordinator.DeviceSyncPortableBundleMetadata `json:"bundle,omitempty"`
 	DeploymentID      uuid.UUID                                              `json:"deploymentID"`
-	MigrationID       uuid.UUID                                              `json:"migrationID,omitempty"`
-	PrincipalID       uuid.UUID                                              `json:"principalID,omitempty"`
+	MigrationID       *uuid.UUID                                             `json:"migrationID,omitempty"`
+	PrincipalID       *uuid.UUID                                             `json:"principalID,omitempty"`
 	Readiness         *serviceauthority.MigrationReadiness                   `json:"readiness,omitempty"`
 	Snapshot          *serviceauthority.MigrationSnapshot                    `json:"snapshot,omitempty"`
 	State             postgres.DeviceSyncScopeEnforcementState               `json:"state,omitempty"`
@@ -234,8 +234,8 @@ func (runtime *deviceSyncMigrationControlRuntime) issueTargetOffer(
 	return deviceSyncMigrationControlResponse{
 		Action:       "target-offer",
 		DeploymentID: runtime.signer.DeploymentID(),
-		MigrationID:  control.MigrationID,
-		PrincipalID:  control.Scope.ScopeID,
+		MigrationID:  optionalControlUUID(control.MigrationID),
+		PrincipalID:  optionalControlUUID(control.Scope.ScopeID),
 		TargetOffer:  &targetOffer,
 		Version:      deviceSyncMigrationControlVersion,
 	}, nil
@@ -440,8 +440,8 @@ func (runtime *deviceSyncMigrationControlRuntime) prepareSource(
 		Action:       "source-prepare",
 		Bundle:       &bundle,
 		DeploymentID: runtime.signer.DeploymentID(),
-		MigrationID:  result.ExportRecord.MigrationID,
-		PrincipalID:  result.ExportRecord.PrincipalID,
+		MigrationID:  optionalControlUUID(result.ExportRecord.MigrationID),
+		PrincipalID:  optionalControlUUID(result.ExportRecord.PrincipalID),
 		Snapshot:     &result.Snapshot,
 		State:        postgres.DeviceSyncScopeExportFenced,
 		Version:      deviceSyncMigrationControlVersion,
@@ -483,8 +483,8 @@ func (runtime *deviceSyncMigrationControlRuntime) prepareTarget(
 		BlobCount:     result.Transfer.BlobCount,
 		Bundle:        &bundle,
 		DeploymentID:  runtime.signer.DeploymentID(),
-		MigrationID:   result.ImportRecord.MigrationID,
-		PrincipalID:   result.ImportRecord.PrincipalID,
+		MigrationID:   optionalControlUUID(result.ImportRecord.MigrationID),
+		PrincipalID:   optionalControlUUID(result.ImportRecord.PrincipalID),
 		Readiness:     &result.Readiness,
 		State:         postgres.DeviceSyncScopeStandby,
 		Version:       deviceSyncMigrationControlVersion,
@@ -510,8 +510,13 @@ func (runtime *deviceSyncMigrationControlRuntime) activate(
 	if err != nil {
 		return deviceSyncMigrationControlResponse{}, err
 	}
+	activated, err := control.Evidence.ActivationManifest.VerifiedPayload()
+	if err != nil || activated.Migration == nil {
+		return deviceSyncMigrationControlResponse{}, serviceauthority.ErrInvalid
+	}
 	return deviceSyncMigrationTerminalResponse(
-		"activate", runtime.signer.DeploymentID(), result.Binding, result.State,
+		"activate", runtime.signer.DeploymentID(),
+		optionalControlUUID(activated.Migration.MigrationID), result.Binding, result.State,
 	), nil
 }
 
@@ -568,8 +573,8 @@ func (runtime *deviceSyncMigrationControlRuntime) prepareRollbackSource(
 		Action:       "rollback-source-prepare",
 		Bundle:       &bundle,
 		DeploymentID: runtime.signer.DeploymentID(),
-		MigrationID:  result.Preparation.ExportRecord.MigrationID,
-		PrincipalID:  result.Preparation.ExportRecord.PrincipalID,
+		MigrationID:  optionalControlUUID(result.Preparation.ExportRecord.MigrationID),
+		PrincipalID:  optionalControlUUID(result.Preparation.ExportRecord.PrincipalID),
 		Snapshot:     &result.Preparation.Snapshot,
 		State:        postgres.DeviceSyncScopeExportFenced,
 		Version:      deviceSyncMigrationControlVersion,
@@ -611,8 +616,8 @@ func (runtime *deviceSyncMigrationControlRuntime) prepareRollbackTarget(
 		BlobCount:     result.Transfer.BlobCount,
 		Bundle:        &bundle,
 		DeploymentID:  runtime.signer.DeploymentID(),
-		MigrationID:   result.ImportRecord.MigrationID,
-		PrincipalID:   result.ImportRecord.PrincipalID,
+		MigrationID:   optionalControlUUID(result.ImportRecord.MigrationID),
+		PrincipalID:   optionalControlUUID(result.ImportRecord.PrincipalID),
 		Readiness:     &result.Readiness,
 		State:         postgres.DeviceSyncScopeRollbackStandby,
 		Version:       deviceSyncMigrationControlVersion,
@@ -638,8 +643,13 @@ func (runtime *deviceSyncMigrationControlRuntime) rollback(
 	if err != nil {
 		return deviceSyncMigrationControlResponse{}, err
 	}
+	rolledBack, err := control.Evidence.RollbackManifest.VerifiedPayload()
+	if err != nil || rolledBack.Migration == nil {
+		return deviceSyncMigrationControlResponse{}, serviceauthority.ErrInvalid
+	}
 	return deviceSyncMigrationTerminalResponse(
-		"rollback-apply", runtime.signer.DeploymentID(), result.Binding, result.State,
+		"rollback-apply", runtime.signer.DeploymentID(),
+		optionalControlUUID(rolledBack.Migration.MigrationID), result.Binding, result.State,
 	), nil
 }
 
@@ -721,7 +731,7 @@ func (runtime *deviceSyncMigrationControlRuntime) settleRollback(
 		if identity.Scope == next.Scope && identity.Revision == next.Revision &&
 			identity.Digest == successorDigest && !identity.WriteFenced {
 			return deviceSyncMigrationTerminalResponse(
-				"rollback-settle", runtime.signer.DeploymentID(), identity, state,
+				"rollback-settle", runtime.signer.DeploymentID(), nil, identity, state,
 			), nil
 		}
 	}
@@ -762,6 +772,7 @@ func initialDeviceSyncAuthorityFromState(
 func deviceSyncMigrationTerminalResponse(
 	action string,
 	localDeploymentID uuid.UUID,
+	migrationID *uuid.UUID,
 	binding serviceauthority.BindingIdentity,
 	state postgres.DeviceSyncScopeEnforcement,
 ) deviceSyncMigrationControlResponse {
@@ -770,11 +781,20 @@ func deviceSyncMigrationTerminalResponse(
 		AuthorityDigest:   binding.Digest,
 		AuthorityRevision: binding.Revision,
 		DeploymentID:      localDeploymentID,
-		PrincipalID:       binding.Scope.ScopeID,
+		MigrationID:       migrationID,
+		PrincipalID:       optionalControlUUID(binding.Scope.ScopeID),
 		State:             state.State,
 		Version:           deviceSyncMigrationControlVersion,
 		WriteFenced:       binding.WriteFenced,
 	}
+}
+
+func optionalControlUUID(value uuid.UUID) *uuid.UUID {
+	if value == uuid.Nil {
+		return nil
+	}
+	copy := value
+	return &copy
 }
 
 func readPrivateControlJSON(path string, destination any) error {

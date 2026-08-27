@@ -199,8 +199,8 @@ func TestDeviceSyncMigrationTargetOfferBindsProtectedDeploymentAndClientCustodyK
 	response, err := runtime.issueTargetOffer(control, now)
 	if err != nil || response.TargetOffer == nil ||
 		response.DeploymentID != deploymentID ||
-		response.MigrationID != control.MigrationID ||
-		response.PrincipalID != control.Scope.ScopeID {
+		response.MigrationID == nil || *response.MigrationID != control.MigrationID ||
+		response.PrincipalID == nil || *response.PrincipalID != control.Scope.ScopeID {
 		t.Fatalf("target-offer response=%+v err=%v", response, err)
 	}
 	payload, err := response.TargetOffer.VerifiedPayload(pointerToMillisecondsForControlTest(now))
@@ -216,4 +216,19 @@ func TestDeviceSyncMigrationTargetOfferBindsProtectedDeploymentAndClientCustodyK
 func pointerToMillisecondsForControlTest(value time.Time) *int64 {
 	milliseconds := value.UnixMilli()
 	return &milliseconds
+}
+
+func TestDeviceSyncMigrationControlOmitsAbsentUUIDFacts(t *testing.T) {
+	response := deviceSyncMigrationControlResponse{
+		Action: "rollback-settle", DeploymentID: uuid.New(),
+		Version: deviceSyncMigrationControlVersion,
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(`"migrationID"`)) ||
+		bytes.Contains(encoded, []byte(`"principalID"`)) {
+		t.Fatalf("absent UUID response facts were serialized: %s", encoded)
+	}
 }
