@@ -204,6 +204,17 @@ func TestDeviceSyncForwardBundleRejectsBlobTamperingAndSymlinks(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	unsafeParent := t.TempDir()
+	if err := os.Chmod(unsafeParent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteDeviceSyncForwardBundle(
+		ctx, filepath.Join(unsafeParent, "unsafe.facets-migration"),
+		preparation, result.Snapshot, anchor, initial, result.Transfer,
+		sourceBlobs, request.Now,
+	); err == nil {
+		t.Fatal("portable bundle was staged in a writable parent directory")
+	}
 	blobPath := filepath.Join(
 		bundlePath,
 		deviceSyncPortableBlobRoot,

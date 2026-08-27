@@ -176,9 +176,10 @@ func writeDeviceSyncPortableBundle(
 	}
 	parent := filepath.Dir(outputDirectory)
 	parentInfo, err := os.Lstat(parent)
-	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
+	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 ||
+		parentInfo.Mode().Perm()&0o022 != 0 {
 		return DeviceSyncPortableBundleMetadata{}, errors.New(
-			"Device Sync migration bundle parent is not a safe directory",
+			"Device Sync migration bundle parent is not an owner-controlled directory",
 		)
 	}
 	staging, err := os.MkdirTemp(parent, ".facets-device-sync-bundle-*")

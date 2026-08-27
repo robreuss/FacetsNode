@@ -187,7 +187,8 @@ facets-device-sync-server migration rollback-settle <private-request.json>
 
 Input JSON is produced by the attended Facets client/controller, not composed
 by an end user. Every input file must be mode 0600 (or stricter), regular,
-nonsymlinked, and at most 8 MiB. Response JSON contains the exact deployment,
+nonsymlinked, at most 8 MiB, and held in a directory with no group/world write
+permission. Response JSON contains the exact deployment,
 principal, migration, snapshot/readiness, authority, fence, and bundle facts
 needed by the next client-authorized stage.
 

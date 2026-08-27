@@ -84,6 +84,15 @@ func TestDeviceSyncMigrationControlReadsOnlyPrivateBoundedJSON(t *testing.T) {
 	if err := readPrivateControlJSON(path, &value); err == nil {
 		t.Fatal("unknown migration control field accepted")
 	}
+	if err := os.WriteFile(path, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := readPrivateControlJSON(path, &value); err == nil {
+		t.Fatal("migration control input in a writable parent directory was accepted")
+	}
 }
 
 func TestInitialDeviceSyncAuthorityEvidenceIsRecoveredExactlyFromScopeState(t *testing.T) {

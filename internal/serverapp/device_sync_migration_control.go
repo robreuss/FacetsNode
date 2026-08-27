@@ -805,6 +805,9 @@ func readPrivateControlJSON(path string, destination any) error {
 	if err != nil {
 		return err
 	}
+	if err := validatePrivateControlDirectory(filepath.Dir(resolved)); err != nil {
+		return err
+	}
 	info, err := os.Lstat(resolved)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
 		info.Mode().Perm()&0o077 != 0 || info.Size() <= 0 ||
@@ -816,6 +819,12 @@ func readPrivateControlJSON(path string, destination any) error {
 		return err
 	}
 	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() ||
+		openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() <= 0 ||
+		openedInfo.Size() > 8*1024*1024 || !os.SameFile(info, openedInfo) {
+		return errors.New("Device Sync migration control input changed while opening")
+	}
 	decoder := json.NewDecoder(io.LimitReader(file, 8*1024*1024+1))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
@@ -823,6 +832,25 @@ func readPrivateControlJSON(path string, destination any) error {
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
+func validatePrivateControlDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Mode().Perm()&0o022 != 0 {
+		return errors.New("Device Sync migration control directory is not owner-controlled")
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directory.Close() }()
+	openedInfo, err := directory.Stat()
+	if err != nil || !openedInfo.IsDir() || openedInfo.Mode().Perm()&0o022 != 0 ||
+		!os.SameFile(info, openedInfo) {
+		return errors.New("Device Sync migration control directory changed while opening")
 	}
 	return nil
 }
