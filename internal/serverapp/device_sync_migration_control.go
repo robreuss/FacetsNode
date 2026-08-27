@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/google/uuid"
@@ -65,6 +66,13 @@ type deviceSyncMigrationRollbackRequest struct {
 	Version  int                                        `json:"version"`
 }
 
+type deviceSyncMigrationRollbackSettlementRequest struct {
+	Anchor          serviceauthority.TrustAnchor `json:"anchor"`
+	CurrentManifest serviceauthority.Manifest    `json:"currentManifest"`
+	Successor       serviceauthority.Manifest    `json:"successor"`
+	Version         int                          `json:"version"`
+}
+
 type deviceSyncMigrationControlResponse struct {
 	Action            string                                                 `json:"action"`
 	AuthorityDigest   string                                                 `json:"authorityDigest,omitempty"`
@@ -116,6 +124,7 @@ func runDeviceSyncMigrationControl(
 		"rollback-source-prepare": 3,
 		"rollback-target-prepare": 2,
 		"rollback-apply":          2,
+		"rollback-settle":         2,
 	}
 	if expectedArgumentCount[action] == 0 ||
 		len(arguments) != expectedArgumentCount[action] {
@@ -173,6 +182,12 @@ func runDeviceSyncMigrationControl(
 			return fmt.Errorf("read rollback request: %w", err)
 		}
 		response, err = runtime.rollback(ctx, request, instant)
+	case "rollback-settle":
+		var request deviceSyncMigrationRollbackSettlementRequest
+		if err := readPrivateControlJSON(arguments[1], &request); err != nil {
+			return fmt.Errorf("read rollback settlement request: %w", err)
+		}
+		response, err = runtime.settleRollback(ctx, request, instant)
 	}
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
@@ -628,6 +643,93 @@ func (runtime *deviceSyncMigrationControlRuntime) rollback(
 	), nil
 }
 
+// settleRollback installs the ordinary, non-expiring authority successor that
+// follows a successful bounded rollback. The restored source must complete
+// this step before the rollback Manifest expires; the retired replacement is
+// not named by the successor and therefore cannot install it.
+func (runtime *deviceSyncMigrationControlRuntime) settleRollback(
+	ctx context.Context,
+	control deviceSyncMigrationRollbackSettlementRequest,
+	now time.Time,
+) (deviceSyncMigrationControlResponse, error) {
+	if control.Version != deviceSyncMigrationControlVersion {
+		return deviceSyncMigrationControlResponse{}, serviceauthority.ErrInvalid
+	}
+	current, err := control.CurrentManifest.VerifiedPayload()
+	if err != nil || current.Transition != serviceauthority.TransitionMigrationRollback ||
+		current.Migration == nil ||
+		current.ActiveDeployment.DeploymentID != runtime.signer.DeploymentID() {
+		return deviceSyncMigrationControlResponse{}, serviceauthority.ErrInvalid
+	}
+	next, err := control.Successor.VerifiedPayload()
+	if err != nil || next.Transition != serviceauthority.TransitionPolicyUpdate ||
+		next.Migration != nil || next.ActiveDeployment.DeploymentID != runtime.signer.DeploymentID() ||
+		!reflect.DeepEqual(next.ActiveDeployment, current.ActiveDeployment) ||
+		!reflect.DeepEqual(next.TransportPolicy, current.TransportPolicy) {
+		return deviceSyncMigrationControlResponse{}, serviceauthority.ErrInvalid
+	}
+	successorDigest, err := control.Successor.ReferenceDigest()
+	if err != nil {
+		return deviceSyncMigrationControlResponse{}, err
+	}
+	identities, err := runtime.bindings.CurrentBindingIdentities(
+		serviceauthority.ScopeDeviceSync,
+	)
+	if err != nil {
+		return deviceSyncMigrationControlResponse{}, err
+	}
+	exactRetry := false
+	for _, identity := range identities {
+		if identity.Scope != next.Scope {
+			continue
+		}
+		exactRetry = identity.Revision == next.Revision &&
+			identity.Digest == successorDigest &&
+			identity.DeploymentID == runtime.signer.DeploymentID() &&
+			identity.TransitionEvidenceDigest == nil && !identity.WriteFenced
+		break
+	}
+	if !exactRetry {
+		if _, err := control.CurrentManifest.Authorize(
+			control.Anchor, now.UnixMilli(),
+		); err != nil {
+			return deviceSyncMigrationControlResponse{}, err
+		}
+	}
+	if err := runtime.bindings.ApplyServiceAuthoritySuccessor(
+		control.CurrentManifest, control.Successor, control.Anchor, now.UnixMilli(),
+	); err != nil {
+		return deviceSyncMigrationControlResponse{}, err
+	}
+	if err := runtime.store.AdvanceDeviceSyncWritableAuthority(
+		ctx, next.Scope.ScopeID, runtime.signer.DeploymentID(),
+		control.Successor, nil, now.UnixMilli(),
+	); err != nil {
+		return deviceSyncMigrationControlResponse{}, err
+	}
+	state, err := runtime.store.GetDeviceSyncScopeEnforcement(ctx, next.Scope.ScopeID)
+	if err != nil {
+		return deviceSyncMigrationControlResponse{}, err
+	}
+	identities, err = runtime.bindings.CurrentBindingIdentities(
+		serviceauthority.ScopeDeviceSync,
+	)
+	if err != nil {
+		return deviceSyncMigrationControlResponse{}, err
+	}
+	for _, identity := range identities {
+		if identity.Scope == next.Scope && identity.Revision == next.Revision &&
+			identity.Digest == successorDigest && !identity.WriteFenced {
+			return deviceSyncMigrationTerminalResponse(
+				"rollback-settle", runtime.signer.DeploymentID(), identity, state,
+			), nil
+		}
+	}
+	return deviceSyncMigrationControlResponse{}, errors.New(
+		"Device Sync rollback settlement registry identity is unavailable",
+	)
+}
+
 func initialDeviceSyncAuthorityFromState(
 	state postgres.DeviceSyncScopeEnforcement,
 ) (postgres.DeviceSyncInitialAuthorityEvidence, error) {
@@ -727,6 +829,7 @@ func deviceSyncMigrationUsageError() error {
 			"activate <private-request.json> | " +
 			"rollback-source-prepare <private-request.json> <new-bundle-directory> | " +
 			"rollback-target-prepare <bundle-directory> | " +
-			"rollback-apply <private-request.json>",
+			"rollback-apply <private-request.json> | " +
+			"rollback-settle <private-request.json>",
 	)
 }

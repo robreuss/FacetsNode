@@ -240,11 +240,6 @@ func TestLiveDeviceSyncAttendedMigrationAndRollback(t *testing.T) {
 		}
 	}
 
-	finalState, finalInventory := exportLiveMigrationState(t, ctx, source.pool, principalID)
-	if !bytes.Equal(finalState, targetStateBeforeRollback) ||
-		!bytes.Equal(finalInventory, targetInventoryBeforeRollback) {
-		t.Fatal("completed rollback changed the authenticated reverse-transfer state")
-	}
 	for _, messageID := range []uuid.UUID{firstMessageID, secondMessageID} {
 		var count int
 		if err := source.pool.QueryRow(ctx, `
@@ -262,9 +257,43 @@ func TestLiveDeviceSyncAttendedMigrationAndRollback(t *testing.T) {
 			Anchor: fixture.AuthorityAnchor, Evidence: rollbackEvidence,
 			Version: deviceSyncMigrationControlVersion,
 		},
-		time.UnixMilli(20_000),
+		time.UnixMilli(4_000),
 	); err != nil || response.AuthorityRevision != 4 || response.WriteFenced {
 		t.Fatalf("completed rollback retry=%+v err=%v", response, err)
+	}
+	settlement := liveMigrationRollbackSettlement(
+		t, fixture, rollbackEvidence.RollbackManifest, 4_100,
+	)
+	settlementRequest := deviceSyncMigrationRollbackSettlementRequest{
+		Anchor:          fixture.AuthorityAnchor,
+		CurrentManifest: rollbackEvidence.RollbackManifest,
+		Successor:       settlement,
+		Version:         deviceSyncMigrationControlVersion,
+	}
+	if response, err := target.settleRollback(
+		ctx, settlementRequest, time.UnixMilli(4_100),
+	); err == nil {
+		t.Fatalf("retired replacement accepted source settlement: %+v", response)
+	}
+	settled, err := source.settleRollback(
+		ctx, settlementRequest, time.UnixMilli(4_100),
+	)
+	if err != nil || settled.AuthorityRevision != 5 || settled.WriteFenced ||
+		settled.State != postgres.DeviceSyncScopeWritable {
+		t.Fatalf("rollback settlement=%+v err=%v", settled, err)
+	}
+	// The exact completed settlement can repair a lost database response after
+	// the bounded rollback Manifest itself expires.
+	settled, err = source.settleRollback(
+		ctx, settlementRequest, time.UnixMilli(20_000),
+	)
+	if err != nil || settled.AuthorityRevision != 5 || settled.WriteFenced {
+		t.Fatalf("expired settlement retry=%+v err=%v", settled, err)
+	}
+	finalState, finalInventory := exportLiveMigrationState(t, ctx, source.pool, principalID)
+	if !bytes.Equal(finalState, targetStateBeforeRollback) ||
+		!bytes.Equal(finalInventory, targetInventoryBeforeRollback) {
+		t.Fatal("completed rollback settlement changed the authenticated reverse-transfer state")
 	}
 }
 
@@ -743,6 +772,40 @@ func liveMigrationRollback(
 		t.Fatalf("rollback evidence: %v", err)
 	}
 	return evidence
+}
+
+func liveMigrationRollbackSettlement(
+	t *testing.T,
+	fixture liveMigrationControlFixture,
+	rollback serviceauthority.Manifest,
+	now int64,
+) serviceauthority.Manifest {
+	t.Helper()
+	current, err := rollback.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorDigest, err := rollback.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Revision++
+	current.PredecessorManifestDigest = &predecessorDigest
+	current.IssuedAtMilliseconds = now
+	current.ValidFromMilliseconds = now
+	current.ValidUntilMilliseconds = nil
+	current.Transition = serviceauthority.TransitionPolicyUpdate
+	current.Migration = nil
+	current.MigrationPrerequisiteEvidenceDigest = nil
+	current.PreparedDeployments = []serviceauthority.DeploymentDescriptor{}
+	settlement := liveSignAuthorityManifest(
+		t, current, liveAuthorityPrivateKey(t, fixture.AuthorityAnchor),
+		fixture.AuthorityAnchor,
+	)
+	if _, err := settlement.ValidateSuccessor(rollback); err != nil {
+		t.Fatalf("rollback settlement successor: %v", err)
+	}
+	return settlement
 }
 
 func liveMigrationDeploymentSigner(
