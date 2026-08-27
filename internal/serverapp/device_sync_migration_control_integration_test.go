@@ -270,6 +270,7 @@ func TestLiveDeviceSyncAttendedMigrationAndRollback(t *testing.T) {
 		Successor:       settlement,
 		Version:         deviceSyncMigrationControlVersion,
 	}
+	writeRetainedMigrationControlRequest(t, "source", settlementRequest)
 	if response, err := target.settleRollback(
 		ctx, settlementRequest, time.UnixMilli(4_100),
 	); err == nil {
@@ -294,6 +295,28 @@ func TestLiveDeviceSyncAttendedMigrationAndRollback(t *testing.T) {
 	if !bytes.Equal(finalState, targetStateBeforeRollback) ||
 		!bytes.Equal(finalInventory, targetInventoryBeforeRollback) {
 		t.Fatal("completed rollback settlement changed the authenticated reverse-transfer state")
+	}
+}
+
+func writeRetainedMigrationControlRequest(
+	t *testing.T,
+	deploymentLabel string,
+	request any,
+) {
+	t.Helper()
+	root := os.Getenv("FACETS_SERVER_TEST_MIGRATION_ARTIFACT_ROOT")
+	if root == "" {
+		return
+	}
+	record, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(
+		filepath.Clean(root), deploymentLabel, "rollback-settlement-request.json",
+	)
+	if err := os.WriteFile(path, record, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

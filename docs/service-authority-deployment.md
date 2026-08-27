@@ -168,6 +168,53 @@ as mutations rather than inferred from their HTTP method. The same conservative
 classification applies to bulk-grant issuance and participant-facing Shared
 Space reads that authenticate through the mutating relay fetch seam.
 
+## Private Device Sync attended migration command
+
+Stop the Device Sync data-plane container before invoking any stage. The
+command requires the same environment, key, route-policy, binding, PostgreSQL,
+custody, and blob mounts as the stopped service and opens no listener:
+
+```text
+facets-device-sync-server migration target-offer <private-request.json>
+facets-device-sync-server migration source-prepare <private-request.json> <new-bundle-directory>
+facets-device-sync-server migration target-prepare <bundle-directory>
+facets-device-sync-server migration activate <private-request.json>
+facets-device-sync-server migration rollback-source-prepare <private-request.json> <new-bundle-directory>
+facets-device-sync-server migration rollback-target-prepare <bundle-directory>
+facets-device-sync-server migration rollback-apply <private-request.json>
+facets-device-sync-server migration rollback-settle <private-request.json>
+```
+
+Input JSON is produced by the attended Facets client/controller, not composed
+by an end user. Every input file must be mode 0600 (or stricter), regular,
+nonsymlinked, and at most 8 MiB. Response JSON contains the exact deployment,
+principal, migration, snapshot/readiness, authority, fence, and bundle facts
+needed by the next client-authorized stage.
+
+The bundle is a new mode-0700 directory. Move the complete directory through an
+explicit authenticated carrier and restore mode 0700 at the receiver. A
+development SSH example is:
+
+```sh
+scp -rp /private/source/device-sync-forward-bundle \
+  operator@replacement:/private/incoming/
+ssh operator@replacement \
+  'chmod -R go-rwx /private/incoming/device-sync-forward-bundle'
+```
+
+SCP is not authority: the receiving command verifies the target offer, signed
+Facets authority chain, deployment-signed snapshot, exact state and inventory
+digests, and every ciphertext blob before it signs readiness. Do not copy only
+individual files, modify the bundle, expose it through a public web root, or
+reuse it for another migration.
+
+`rollback-settle` is mandatory after a successful rollback. The rollback
+Manifest is intentionally bounded by the rollback deadline. Settlement applies
+an already Facets-signed, non-migration `policy_update` that preserves the exact
+restored deployment and transport policy. It must first be accepted before the
+deadline; an exact completed retry may repair response loss later. The retired
+replacement cannot install the settlement.
+
 This proves only an in-process bound-HTTP drain. It does not fence background
 tasks, unbound endpoints, direct store callers, or another FacetsNode process,
 and it cannot make a service-database commit atomic with registry-file fence
@@ -205,12 +252,14 @@ Once enabled:
 
 This registry now provides durable Device Sync and Shared Spaces initial
 binding activation, portable attended-migration evidence validation, successor
-persistence, and a fail-closed two-phase write-fence/signing boundary. Shared
+persistence, a fail-closed two-phase write-fence/signing boundary, and a
+private offline Device Sync forward/rollback transfer workflow. Shared
 Space creation remains a private operator-authorized request, but it carries a
 client-signed initial enrollment and cannot expose ordinary Space capabilities
 until the exact deployment binding has been committed. It does not yet provide
 public migration routes, Shared Spaces service-state/blob copy orchestration,
-onion-state handoff, operator cutover, or deployed Shared Spaces rollback.
+onion-state handoff, public operator cutover, Facets migration UI, or deployed
+Shared Spaces rollback.
 Compute Pool is a development skeleton, requires deployment authentication,
 and does not yet expose onion ingress. Recovery remains fail-closed and must
 use this same registry rather than introduce another authority source.

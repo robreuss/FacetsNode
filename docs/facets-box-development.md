@@ -141,6 +141,33 @@ This proves the server migration and same-host recovery path. It does not prove
 the Facets physical-device enrollment or multi-device synchronization flows;
 those remain client acceptance work.
 
+### Attended authority migration and rollback acceptance
+
+On 2026-08-27, an isolated Device Sync acceptance project on VM 190 exercised
+the private attended migration control plane from source through rollback and
+settlement. It used two independent PostgreSQL 17 containers, distinct
+deployment signing identities, binding registries, migration custody roots,
+and blob roots. The gate proved:
+
+- exact forward export/import and target readiness;
+- source retirement and target write activation;
+- a target-only relay message and ciphertext blob after cutover;
+- exact reverse export/import including both messages and both blobs;
+- source write restoration and replacement retirement;
+- rejection when the retired replacement attempted rollback settlement;
+- the non-expiring settlement successor and its exact retry after the bounded
+  rollback Manifest expired; and
+- byte-identical canonical semantic state and inventory across reverse import.
+
+The accepted image reported its exact Git revision and source-tree labels. The
+settled original deployment started from the retained PostgreSQL/blob/authority
+state and returned HTTP 200 from `/readyz`; the retired replacement process
+failed closed before listening. The acceptance containers were isolated from
+the canonical `facets-device-sync` Compose project. This remains a same-host
+two-deployment proof. A real two-host transfer, abrupt host loss, packet-level
+observation, Tor/onion carrier, client Move Server UI, and physical-client
+continuity are not yet verified.
+
 ## Checkpoint and isolated restore
 
 Run a checkpoint from the active release with the revision carried by the
