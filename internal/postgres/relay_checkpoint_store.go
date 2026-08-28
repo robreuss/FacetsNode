@@ -68,6 +68,15 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 	if err != pgx.ErrNoRows {
 		return relay.CheckpointStageResponse{}, err
 	}
+	var activeKeyEpoch, activeCovered int64
+	err = tx.QueryRow(ctx, `SELECT key_epoch,covered_through_sequence FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' ORDER BY activation_ordinal DESC LIMIT 1`, credential.TenantID, credential.DomainID).Scan(&activeKeyEpoch, &activeCovered)
+	if err == nil {
+		if activeKeyEpoch < 0 || activeCovered < 0 || candidate.KeyEpoch < uint64(activeKeyEpoch) || covered < uint64(activeCovered) {
+			return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "checkpoint candidate regresses the active checkpoint frontier")
+		}
+	} else if err != pgx.ErrNoRows {
+		return relay.CheckpointStageResponse{}, err
+	}
 	if err := expirePostgresFence(ctx, tx, credential.TenantID, credential.DomainID, nowMilliseconds); err != nil {
 		return relay.CheckpointStageResponse{}, err
 	}
@@ -156,10 +165,10 @@ func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.Ad
 		return relay.CheckpointActivationResponse{}, err
 	}
 	var state string
-	var covered, created int64
+	var covered, created, keyEpoch int64
 	var fenceID uuid.UUID
 	var publisherSubscriptionID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT state,covered_through_sequence,created_at_milliseconds,fence_id,publisher_subscription_id FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3 FOR UPDATE`, credential.TenantID, credential.DomainID, request.CheckpointID).Scan(&state, &covered, &created, &fenceID, &publisherSubscriptionID)
+	err = tx.QueryRow(ctx, `SELECT state,covered_through_sequence,created_at_milliseconds,key_epoch,fence_id,publisher_subscription_id FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3 FOR UPDATE`, credential.TenantID, credential.DomainID, request.CheckpointID).Scan(&state, &covered, &created, &keyEpoch, &fenceID, &publisherSubscriptionID)
 	if err == pgx.ErrNoRows {
 		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeCheckpointNotFound, "checkpoint was not found")
 	}
@@ -173,7 +182,7 @@ func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.Ad
 	if err != nil {
 		return relay.CheckpointActivationResponse{}, err
 	}
-	if state != "staged" || request.ActivatedAtMilliseconds < created {
+	if state != "staged" || request.ActivatedAtMilliseconds < created || request.ActivatedAtMilliseconds > nowMilliseconds {
 		if found && (fence.state.Status == relay.CheckpointFenceExpired || fence.state.Status == relay.CheckpointFenceAborted) {
 			return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpointFence, "checkpoint fence is no longer activatable")
 		}
@@ -208,9 +217,13 @@ func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.Ad
 	}
 	startSequence := covered
 	var previousID uuid.UUID
+	var previousKeyEpoch, previousCovered int64
 	var previousArgument any
-	err = tx.QueryRow(ctx, `SELECT checkpoint_id FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' ORDER BY activation_ordinal DESC LIMIT 1`, credential.TenantID, credential.DomainID).Scan(&previousID)
+	err = tx.QueryRow(ctx, `SELECT checkpoint_id,key_epoch,covered_through_sequence FROM relay_checkpoints WHERE tenant_id=$1 AND domain_id=$2 AND state='activated' ORDER BY activation_ordinal DESC LIMIT 1`, credential.TenantID, credential.DomainID).Scan(&previousID, &previousKeyEpoch, &previousCovered)
 	if err == nil {
+		if keyEpoch < previousKeyEpoch || covered < previousCovered {
+			return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "checkpoint candidate regresses the active checkpoint frontier")
+		}
 		previousArgument = previousID
 	} else if err != pgx.ErrNoRows {
 		return relay.CheckpointActivationResponse{}, err

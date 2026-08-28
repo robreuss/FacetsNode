@@ -183,22 +183,68 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		t.Fatalf("stage retry=%+v err=%v", retried, err)
 	}
 
-	activationRequest := relay.CheckpointActivationRequest{RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, ActivatedAtMilliseconds: 1_250}
+	activationRequest := relay.CheckpointActivationRequest{RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, ActivatedAtMilliseconds: 1_251}
+	if _, err := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_250); !relay.ErrorHasCode(err, relay.CodeCheckpointCollision) {
+		t.Fatalf("future activation err=%v", err)
+	}
 	third := first
 	third.MessageID = uuid.New()
 	third.CreatedAtMilliseconds = 1_251
-	activatedResponse, activateErr := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_250)
+	activatedResponse, activateErr := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_251)
 	if activateErr != nil || activatedResponse.StartCursor != relay.EncodeCursor(2) {
 		t.Fatalf("activation=%+v err=%v", activatedResponse, activateErr)
 	}
-	if fetched, err := store.Fetch(ctx, recipient, 2, 10, 1_250); err != nil || len(fetched.Messages) != 1 || fetched.Messages[0].Envelope.MessageID != retainedSuffix.MessageID {
+	if fetched, err := store.Fetch(ctx, recipient, 2, 10, 1_251); err != nil || len(fetched.Messages) != 1 || fetched.Messages[0].Envelope.MessageID != retainedSuffix.MessageID {
 		t.Fatalf("postgres activated suffix fetch=%+v err=%v", fetched, err)
 	}
 	if _, err := store.Publish(ctx, publisher, third, 1_251); err != nil {
 		t.Fatalf("concurrent publish: %v", err)
 	}
-	if retry, err := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_250); err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
+	if retry, err := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_249); err != nil || retry.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("activation retry=%+v err=%v", retry, err)
+	}
+
+	regressionFenceRequest := relay.CheckpointFenceRequest{RetryID: uuid.New(), FenceID: uuid.New(), RequestedAtMilliseconds: 1_260}
+	regressionFence, err := store.CreateCheckpointFence(ctx, publisher, regressionFenceRequest, 1_260)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regressed := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: regressionFence.FenceID, TenantID: tenantID, DomainID: domainID,
+		PublisherSubscriptionID: publisher.MemberID, KeyEpoch: 1,
+		CoveredThroughCursor:  regressionFence.BoundaryCursor,
+		CreatedAtMilliseconds: 1_260,
+	}
+	if _, err := pool.Exec(ctx, `UPDATE relay_checkpoints SET key_epoch=2 WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3`, tenantID, domainID, candidate.CheckpointID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StageCheckpoint(ctx, publisher, regressed, 1_260); !relay.ErrorHasCode(err, relay.CodeInvalidCheckpoint) {
+		t.Fatalf("key epoch regression err=%v", err)
+	}
+	activeCovered, err := relay.DecodeCursor(activatedResponse.StartCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regressionBoundary, err := relay.DecodeCursor(regressionFence.BoundaryCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE relay_checkpoints SET key_epoch=1,covered_through_sequence=$4 WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3`, tenantID, domainID, candidate.CheckpointID, int64(regressionBoundary+1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StageCheckpoint(ctx, publisher, regressed, 1_260); !relay.ErrorHasCode(err, relay.CodeInvalidCheckpoint) {
+		t.Fatalf("covered cursor regression err=%v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE relay_checkpoints SET covered_through_sequence=$4 WHERE tenant_id=$1 AND domain_id=$2 AND checkpoint_id=$3`, tenantID, domainID, candidate.CheckpointID, int64(activeCovered)); err != nil {
+		t.Fatal(err)
+	}
+	abortRegressionFence := relay.CheckpointFenceAbortRequest{
+		RetryID: uuid.New(), FenceID: regressionFence.FenceID,
+		AbortedAtMilliseconds: 1_261,
+	}
+	if _, err := store.AbortCheckpointFence(ctx, publisher, abortRegressionFence, 1_261); err != nil {
+		t.Fatal(err)
 	}
 
 	// A rebootstrap-required recipient deliberately discards its local cursor.

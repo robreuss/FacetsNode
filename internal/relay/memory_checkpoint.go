@@ -63,6 +63,12 @@ func (s *MemoryStore) StageCheckpoint(_ context.Context, credential Credential, 
 		}
 		return CheckpointStageResponse{}, protocolError(CodeCheckpointCollision, "checkpoint retry ID was reused")
 	}
+	if len(domain.activatedCheckpoints) > 0 {
+		active := domain.checkpoints[domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1]]
+		if memoryCheckpointRegresses(candidate, coveredThrough, active) {
+			return CheckpointStageResponse{}, protocolError(CodeInvalidCheckpoint, "checkpoint candidate regresses the active checkpoint frontier")
+		}
+	}
 	refreshMemoryFence(domain, nowMilliseconds)
 	fence := domain.checkpointFences[candidate.FenceID]
 	if fence == nil || fence.state.Status != CheckpointFenceActive || nowMilliseconds >= fence.state.ExpiresAtMilliseconds ||
@@ -113,11 +119,19 @@ func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential Administr
 	}
 	refreshMemoryFence(domain, nowMilliseconds)
 	fence := domain.checkpointFences[checkpoint.candidate.FenceID]
-	if checkpoint.state != "staged" || request.ActivatedAtMilliseconds < checkpoint.candidate.CreatedAtMilliseconds {
+	if checkpoint.state != "staged" ||
+		request.ActivatedAtMilliseconds < checkpoint.candidate.CreatedAtMilliseconds ||
+		request.ActivatedAtMilliseconds > nowMilliseconds {
 		if fence != nil && (fence.state.Status == CheckpointFenceExpired || fence.state.Status == CheckpointFenceAborted) {
 			return CheckpointActivationResponse{}, protocolError(CodeInvalidCheckpointFence, "checkpoint fence is no longer activatable")
 		}
 		return CheckpointActivationResponse{}, protocolError(CodeCheckpointCollision, "checkpoint was already activated or activation time is invalid")
+	}
+	if len(domain.activatedCheckpoints) > 0 {
+		active := domain.checkpoints[domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1]]
+		if memoryCheckpointRegresses(checkpoint.candidate, checkpoint.coveredThrough, active) {
+			return CheckpointActivationResponse{}, protocolError(CodeInvalidCheckpoint, "checkpoint candidate regresses the active checkpoint frontier")
+		}
 	}
 	if fence == nil || fence.state.Status != CheckpointFenceActive || !memoryFenceSuffixMatches(domain, fence, checkpoint.candidate.RetainedMessageIDs) {
 		return CheckpointActivationResponse{}, protocolError(CodeInvalidCheckpointFence, "checkpoint fence is no longer activatable")
@@ -179,6 +193,11 @@ func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential Administr
 	result := CheckpointActivationResponse{Acceptance: AcceptanceAccepted, RetryID: request.RetryID, CheckpointID: request.CheckpointID, ActivatedAtMilliseconds: request.ActivatedAtMilliseconds, StartCursor: EncodeCursor(checkpoint.startSequence)}
 	domain.checkpointActivations[request.RetryID] = memoryCheckpointActivation{checkpointID: request.CheckpointID, request: request, result: result}
 	return result, nil
+}
+
+func memoryCheckpointRegresses(candidate CheckpointCandidate, coveredThrough uint64, active *memoryCheckpoint) bool {
+	return active != nil &&
+		(candidate.KeyEpoch < active.candidate.KeyEpoch || coveredThrough < active.coveredThrough)
 }
 
 func memoryFenceSuffixMatches(domain *memoryDomain, fence *memoryCheckpointFence, retained []uuid.UUID) bool {

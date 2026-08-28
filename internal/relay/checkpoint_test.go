@@ -164,7 +164,7 @@ func TestMemoryCheckpointFenceBlocksOnlyNewForeignWritesAndExpiresByServerTime(t
 	}
 }
 
-func TestMemoryCheckpointActivationUsesServerTimeNotClientClock(t *testing.T) {
+func TestMemoryCheckpointActivationRejectsFutureTimeAndPreservesExactRetry(t *testing.T) {
 	ctx := context.Background()
 	store, admin, holder, _, template, _ := checkpointMemoryFixture(t)
 	fence, suffix := acquireMemoryFenceAndPublishSuffix(t, store, holder, template, 1_400)
@@ -172,9 +172,62 @@ func TestMemoryCheckpointActivationUsesServerTimeNotClientClock(t *testing.T) {
 	if _, err := store.StageCheckpoint(ctx, holder, candidate, 1_402); err != nil {
 		t.Fatal(err)
 	}
-	clientAhead := relay.CheckpointActivationRequest{RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, ActivatedAtMilliseconds: fence.ExpiresAtMilliseconds + 1}
-	if result, err := store.ActivateCheckpoint(ctx, admin, clientAhead, 1_403); err != nil || result.StartCursor != fence.BoundaryCursor {
-		t.Fatalf("client-ahead activation=%+v err=%v", result, err)
+	clientAhead := relay.CheckpointActivationRequest{RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, ActivatedAtMilliseconds: 1_404}
+	if _, err := store.ActivateCheckpoint(ctx, admin, clientAhead, 1_403); !relay.ErrorHasCode(err, relay.CodeCheckpointCollision) {
+		t.Fatalf("future activation err=%v", err)
+	}
+	activated, err := store.ActivateCheckpoint(ctx, admin, clientAhead, 1_404)
+	if err != nil || activated.StartCursor != fence.BoundaryCursor {
+		t.Fatalf("activation=%+v err=%v", activated, err)
+	}
+	if duplicate, err := store.ActivateCheckpoint(ctx, admin, clientAhead, 1_403); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("exact activation retry=%+v err=%v", duplicate, err)
+	}
+}
+
+func TestMemoryCheckpointRejectsActiveFrontierRegression(t *testing.T) {
+	ctx := context.Background()
+	store, admin, holder, _, template, _ := checkpointMemoryFixture(t)
+	activate := func(acquiredAt int64, keyEpoch uint64) relay.CheckpointCandidate {
+		t.Helper()
+		fence, suffix := acquireMemoryFenceAndPublishSuffix(t, store, holder, template, acquiredAt)
+		candidate := relay.CheckpointCandidate{
+			Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+			FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID,
+			PublisherSubscriptionID: holder.MemberID, KeyEpoch: keyEpoch,
+			CoveredThroughCursor:  fence.BoundaryCursor,
+			RetainedMessageIDs:    []uuid.UUID{suffix.MessageID},
+			CreatedAtMilliseconds: acquiredAt + 2,
+		}
+		if _, err := store.StageCheckpoint(ctx, holder, candidate, acquiredAt+2); err != nil {
+			t.Fatal(err)
+		}
+		request := relay.CheckpointActivationRequest{
+			RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+			ActivatedAtMilliseconds: acquiredAt + 3,
+		}
+		if _, err := store.ActivateCheckpoint(ctx, admin, request, acquiredAt+3); err != nil {
+			t.Fatal(err)
+		}
+		return candidate
+	}
+	active := activate(1_400, 2)
+	activate(1_500, 3)
+	if duplicate, err := store.StageCheckpoint(ctx, holder, active, 1_500); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("active candidate exact retry=%+v err=%v", duplicate, err)
+	}
+
+	fence, suffix := acquireMemoryFenceAndPublishSuffix(t, store, holder, template, 1_600)
+	regressed := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID,
+		PublisherSubscriptionID: holder.MemberID, KeyEpoch: 1,
+		CoveredThroughCursor:  fence.BoundaryCursor,
+		RetainedMessageIDs:    []uuid.UUID{suffix.MessageID},
+		CreatedAtMilliseconds: 1_602,
+	}
+	if _, err := store.StageCheckpoint(ctx, holder, regressed, 1_602); !relay.ErrorHasCode(err, relay.CodeInvalidCheckpoint) {
+		t.Fatalf("regressed checkpoint err=%v", err)
 	}
 }
 
