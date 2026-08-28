@@ -521,6 +521,7 @@ func populatePostgresDeviceSyncMigrationRepresentativeState(
 	rebootstrap := relay.SubscriptionRebootstrapRequest{
 		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
 		RootMessageID: retainedEnvelope.MessageID, RequestedAtMilliseconds: 1_290,
+		LeaseDurationMilliseconds: relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
 	}
 	if requested, err := store.RequestSubscriptionRebootstrap(
 		ctx, publisher, rebootstrap, 1_290,

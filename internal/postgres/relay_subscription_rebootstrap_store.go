@@ -48,6 +48,10 @@ func requestSubscriptionRebootstrapTx(
 	if err := request.Validate(); err != nil {
 		return relay.SubscriptionRebootstrapResponse{}, err
 	}
+	leaseExpiresAt, err := request.LeaseExpiresAt(nowMilliseconds)
+	if err != nil {
+		return relay.SubscriptionRebootstrapResponse{}, err
+	}
 	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
 		return relay.SubscriptionRebootstrapResponse{}, err
 	}
@@ -70,22 +74,27 @@ func requestSubscriptionRebootstrapTx(
 	}
 
 	var storedSubscriptionID, storedCheckpointID, storedRootMessageID uuid.UUID
-	var storedRequestedAt, storedStart, storedUpdatedAt int64
+	var storedRequestedAt, storedLeaseDuration, storedLeaseExpiresAt int64
+	var storedStart, storedUpdatedAt int64
 	err = tx.QueryRow(ctx, `
 		SELECT subscription_id, checkpoint_id, root_message_id,
-		       requested_at_milliseconds, result_start_sequence, result_updated_at_milliseconds
+		       requested_at_milliseconds, lease_duration_milliseconds,
+		       lease_expires_at_milliseconds, result_start_sequence,
+		       result_updated_at_milliseconds
 		FROM relay_subscription_rebootstrap_requests
 		WHERE tenant_id=$1 AND domain_id=$2 AND retry_id=$3
 		FOR UPDATE
 	`, credential.TenantID, credential.DomainID, request.RetryID).Scan(
 		&storedSubscriptionID, &storedCheckpointID, &storedRootMessageID,
-		&storedRequestedAt, &storedStart, &storedUpdatedAt,
+		&storedRequestedAt, &storedLeaseDuration, &storedLeaseExpiresAt,
+		&storedStart, &storedUpdatedAt,
 	)
 	if err == nil {
 		if storedSubscriptionID != subscriptionID ||
 			storedCheckpointID != request.CheckpointID ||
 			storedRootMessageID != request.RootMessageID ||
-			storedRequestedAt != request.RequestedAtMilliseconds {
+			storedRequestedAt != request.RequestedAtMilliseconds ||
+			storedLeaseDuration != request.LeaseDurationMilliseconds {
 			return relay.SubscriptionRebootstrapResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "subscription rebootstrap retry ID was reused")
 		}
 		subscription, _, found, loadErr := loadSubscription(ctx, tx, credential.TenantID, credential.DomainID, subscriptionID, "")
@@ -102,7 +111,8 @@ func requestSubscriptionRebootstrapTx(
 		return relay.SubscriptionRebootstrapResponse{
 			Acceptance: relay.AcceptanceDuplicate, RetryID: request.RetryID,
 			CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
-			Subscription: subscription,
+			LeaseExpiresAtMilliseconds: storedLeaseExpiresAt,
+			Subscription:               subscription,
 		}, nil
 	}
 	if err != pgx.ErrNoRows {
@@ -122,53 +132,49 @@ func requestSubscriptionRebootstrapTx(
 
 	var startSequence *int64
 	if status == relay.SubscriptionRebootstrapRequired {
-		if err := tx.QueryRow(ctx, `SELECT start_sequence FROM relay_subscriptions WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3`, credential.TenantID, credential.DomainID, subscriptionID).Scan(&startSequence); err != nil {
-			return relay.SubscriptionRebootstrapResponse{}, fmt.Errorf("load current rebootstrap cursor: %w", err)
+		var active bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM relay_subscription_rebootstrap_requests r
+				WHERE r.tenant_id=$1 AND r.domain_id=$2 AND r.subscription_id=$3
+				  AND r.lease_expires_at_milliseconds>$4
+				  AND NOT EXISTS (
+				      SELECT 1 FROM relay_subscription_rebootstrap_cancellations c
+				      WHERE c.tenant_id=r.tenant_id AND c.domain_id=r.domain_id
+				        AND c.request_retry_id=r.retry_id)
+				  AND NOT EXISTS (
+				      SELECT 1 FROM relay_subscription_rebootstrap_completions completion
+				      WHERE completion.tenant_id=r.tenant_id AND completion.domain_id=r.domain_id
+				        AND completion.request_retry_id=r.retry_id)
+			)
+		`, credential.TenantID, credential.DomainID, subscriptionID, nowMilliseconds).Scan(&active); err != nil {
+			return relay.SubscriptionRebootstrapResponse{}, fmt.Errorf("verify active subscription rebootstrap: %w", err)
 		}
-		if startSequence == nil || *startSequence != *checkpointStart {
-			return relay.SubscriptionRebootstrapResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "subscription recovery is already bound to another checkpoint")
+		if active {
+			return relay.SubscriptionRebootstrapResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "subscription recovery already has an active lease")
 		}
-		var boundCheckpointID, boundRootMessageID uuid.UUID
-		bindErr := tx.QueryRow(ctx, `
-			SELECT checkpoint_id, root_message_id
-			FROM relay_subscription_rebootstrap_requests
-			WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3
-			ORDER BY requested_at_milliseconds, retry_id
-			LIMIT 1
-		`, credential.TenantID, credential.DomainID, subscriptionID).Scan(
-			&boundCheckpointID, &boundRootMessageID,
-		)
-		if bindErr != nil && bindErr != pgx.ErrNoRows {
-			return relay.SubscriptionRebootstrapResponse{}, bindErr
-		}
-		if bindErr == nil && (boundCheckpointID != request.CheckpointID || boundRootMessageID != request.RootMessageID) {
-			return relay.SubscriptionRebootstrapResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "subscription recovery is already bound to another checkpoint/root")
-		}
-		if bindErr == pgx.ErrNoRows && !checkpointIsLatest {
-			return relay.SubscriptionRebootstrapResponse{}, relay.NewProtocolError(relay.CodeCheckpointUnavailable, "authorized recovery checkpoint is not the latest activated checkpoint")
-		}
-	} else {
-		if !checkpointIsLatest {
-			return relay.SubscriptionRebootstrapResponse{}, relay.NewProtocolError(relay.CodeCheckpointUnavailable, "authorized recovery checkpoint is not the latest activated checkpoint")
-		}
-		startSequence = checkpointStart
-		if _, err := tx.Exec(ctx, `
+	}
+	if !checkpointIsLatest {
+		return relay.SubscriptionRebootstrapResponse{}, relay.NewProtocolError(relay.CodeCheckpointUnavailable, "authorized recovery checkpoint is not the latest activated checkpoint")
+	}
+	startSequence = checkpointStart
+	if _, err := tx.Exec(ctx, `
 			DELETE FROM relay_acknowledgments a
 			USING relay_messages m
 			WHERE a.tenant_id=$1 AND a.domain_id=$2
 			  AND a.subscription_id=$3
 			  AND m.tenant_id=a.tenant_id AND m.domain_id=a.domain_id
 			  AND m.message_id=a.message_id AND m.domain_sequence>$4
-		`, credential.TenantID, credential.DomainID, subscriptionID, *startSequence); err != nil {
-			return relay.SubscriptionRebootstrapResponse{}, fmt.Errorf("reset rebootstrap acknowledgments: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
+	`, credential.TenantID, credential.DomainID, subscriptionID, *startSequence); err != nil {
+		return relay.SubscriptionRebootstrapResponse{}, fmt.Errorf("reset rebootstrap acknowledgments: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 			UPDATE relay_subscriptions
 			SET status=$4,start_sequence=$5,updated_at_milliseconds=$6,updated_at=now()
 			WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3
-		`, credential.TenantID, credential.DomainID, subscriptionID, relay.SubscriptionRebootstrapRequired, startSequence, nowMilliseconds); err != nil {
-			return relay.SubscriptionRebootstrapResponse{}, fmt.Errorf("begin subscription rebootstrap: %w", err)
-		}
+	`, credential.TenantID, credential.DomainID, subscriptionID, relay.SubscriptionRebootstrapRequired, startSequence, nowMilliseconds); err != nil {
+		return relay.SubscriptionRebootstrapResponse{}, fmt.Errorf("begin subscription rebootstrap: %w", err)
 	}
 	if startSequence == nil {
 		return relay.SubscriptionRebootstrapResponse{}, relay.NewProtocolError(relay.CodeCheckpointUnavailable, "no checkpoint cursor is available for recovery")
@@ -176,10 +182,12 @@ func requestSubscriptionRebootstrapTx(
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO relay_subscription_rebootstrap_requests (
 			tenant_id,domain_id,retry_id,subscription_id,checkpoint_id,root_message_id,
-			requested_at_milliseconds,result_start_sequence,result_updated_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			requested_at_milliseconds,lease_duration_milliseconds,
+			lease_expires_at_milliseconds,result_start_sequence,result_updated_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 	`, credential.TenantID, credential.DomainID, request.RetryID, subscriptionID,
 		request.CheckpointID, request.RootMessageID, request.RequestedAtMilliseconds,
+		request.LeaseDurationMilliseconds, leaseExpiresAt,
 		*startSequence, nowMilliseconds); err != nil {
 		return relay.SubscriptionRebootstrapResponse{}, fmt.Errorf("record subscription rebootstrap request: %w", err)
 	}
@@ -196,6 +204,189 @@ func requestSubscriptionRebootstrapTx(
 	return relay.SubscriptionRebootstrapResponse{
 		Acceptance: relay.AcceptanceAccepted, RetryID: request.RetryID,
 		CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
+		LeaseExpiresAtMilliseconds: leaseExpiresAt,
+		Subscription:               subscription,
+	}, nil
+}
+
+// CancelSubscriptionRebootstrap releases only the bounded recovery lease. The
+// subscription remains fenced in rebootstrap_required until a later exact
+// recovery request completes successfully.
+func (s *RelayStore) CancelSubscriptionRebootstrap(
+	ctx context.Context,
+	credential relay.Credential,
+	cancellation relay.SubscriptionRebootstrapCancellation,
+	nowMilliseconds int64,
+) (relay.SubscriptionRebootstrapCancellationResponse, error) {
+	if err := cancellation.Validate(); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, fmt.Errorf("begin subscription rebootstrap cancellation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	response, err := cancelSubscriptionRebootstrapTx(
+		ctx, tx, credential, cancellation, nowMilliseconds,
+	)
+	if err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, fmt.Errorf("commit subscription rebootstrap cancellation: %w", err)
+	}
+	return response, nil
+}
+
+func cancelSubscriptionRebootstrapTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	credential relay.Credential,
+	cancellation relay.SubscriptionRebootstrapCancellation,
+	nowMilliseconds int64,
+) (relay.SubscriptionRebootstrapCancellationResponse, error) {
+	if err := cancellation.Validate(); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	if _, _, _, _, _, _, err := loadRelayDomain(ctx, tx, credential.TenantID, credential.DomainID, "FOR UPDATE"); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	member, found, err := loadRelayMember(
+		ctx, tx, credential.TenantID, credential.DomainID,
+		credential.MemberID, "FOR SHARE",
+	)
+	if err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	if !found {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, relay.NewProtocolError(relay.CodeMemberNotFound, "member was not found")
+	}
+	if err := member.Authorize(credential, relay.CapabilityFetchMessage, nowMilliseconds); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	subscriptionID, _, err := loadReadableMemberSubscription(
+		ctx, tx, credential.TenantID, credential.DomainID,
+		credential.MemberID, "FOR UPDATE",
+	)
+	if err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+
+	var storedSubscriptionID, storedRequestRetryID uuid.UUID
+	var storedCheckpointID, storedRootMessageID uuid.UUID
+	var storedCancelledAt, storedUpdatedAt int64
+	err = tx.QueryRow(ctx, `
+		SELECT subscription_id,request_retry_id,checkpoint_id,root_message_id,
+		       cancelled_at_milliseconds,result_updated_at_milliseconds
+		FROM relay_subscription_rebootstrap_cancellations
+		WHERE tenant_id=$1 AND domain_id=$2 AND retry_id=$3
+		FOR UPDATE
+	`, credential.TenantID, credential.DomainID, cancellation.RetryID).Scan(
+		&storedSubscriptionID, &storedRequestRetryID, &storedCheckpointID,
+		&storedRootMessageID, &storedCancelledAt, &storedUpdatedAt,
+	)
+	if err == nil {
+		if storedSubscriptionID != subscriptionID ||
+			storedRequestRetryID != cancellation.RequestRetryID ||
+			storedCheckpointID != cancellation.CheckpointID ||
+			storedRootMessageID != cancellation.RootMessageID ||
+			storedCancelledAt != cancellation.CancelledAtMilliseconds {
+			return relay.SubscriptionRebootstrapCancellationResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "subscription rebootstrap cancellation retry ID was reused")
+		}
+		subscription, _, found, loadErr := loadSubscription(
+			ctx, tx, credential.TenantID, credential.DomainID,
+			subscriptionID, "",
+		)
+		if loadErr != nil {
+			return relay.SubscriptionRebootstrapCancellationResponse{}, loadErr
+		}
+		if !found {
+			return relay.SubscriptionRebootstrapCancellationResponse{}, relay.NewProtocolError(relay.CodeSubscriptionNotFound, "subscription was not found")
+		}
+		subscription.UpdatedAtMilliseconds = storedUpdatedAt
+		return relay.SubscriptionRebootstrapCancellationResponse{
+			Acceptance: relay.AcceptanceDuplicate, RetryID: cancellation.RetryID,
+			RequestRetryID: cancellation.RequestRetryID,
+			CheckpointID:   cancellation.CheckpointID, RootMessageID: cancellation.RootMessageID,
+			Subscription: subscription,
+		}, nil
+	}
+	if err != pgx.ErrNoRows {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+
+	var requestSubscriptionID, requestCheckpointID, requestRootMessageID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT subscription_id,checkpoint_id,root_message_id
+		FROM relay_subscription_rebootstrap_requests
+		WHERE tenant_id=$1 AND domain_id=$2 AND retry_id=$3
+		FOR SHARE
+	`, credential.TenantID, credential.DomainID, cancellation.RequestRetryID).Scan(
+		&requestSubscriptionID, &requestCheckpointID, &requestRootMessageID,
+	)
+	if err == pgx.ErrNoRows || requestSubscriptionID != subscriptionID ||
+		requestCheckpointID != cancellation.CheckpointID ||
+		requestRootMessageID != cancellation.RootMessageID {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "subscription rebootstrap cancellation does not match its request")
+	}
+	if err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	var alreadyFinal bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM relay_subscription_rebootstrap_cancellations
+			WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3
+			  AND request_retry_id=$4
+			UNION ALL
+			SELECT 1 FROM relay_subscription_rebootstrap_completions
+			WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3
+			  AND request_retry_id=$4
+		)
+	`, credential.TenantID, credential.DomainID, subscriptionID,
+		cancellation.RequestRetryID).Scan(&alreadyFinal); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	if alreadyFinal {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "subscription rebootstrap is already finalized")
+	}
+	subscription, _, found, err := loadSubscription(
+		ctx, tx, credential.TenantID, credential.DomainID,
+		subscriptionID, "",
+	)
+	if err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	if !found {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, relay.NewProtocolError(relay.CodeSubscriptionNotFound, "subscription was not found")
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO relay_subscription_rebootstrap_cancellations (
+			tenant_id,domain_id,retry_id,subscription_id,request_retry_id,
+			checkpoint_id,root_message_id,cancelled_at_milliseconds,
+			result_updated_at_milliseconds
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+	`, credential.TenantID, credential.DomainID, cancellation.RetryID,
+		subscriptionID, cancellation.RequestRetryID,
+		cancellation.CheckpointID, cancellation.RootMessageID,
+		cancellation.CancelledAtMilliseconds,
+		subscription.UpdatedAtMilliseconds); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, fmt.Errorf("record subscription rebootstrap cancellation: %w", err)
+	}
+	if err := insertRelayAudit(
+		ctx, tx, credential.TenantID, credential.DomainID,
+		&credential.MemberID, nil, "subscription_rebootstrap_cancelled",
+		nowMilliseconds,
+	); err != nil {
+		return relay.SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	return relay.SubscriptionRebootstrapCancellationResponse{
+		Acceptance: relay.AcceptanceAccepted, RetryID: cancellation.RetryID,
+		RequestRetryID: cancellation.RequestRetryID,
+		CheckpointID:   cancellation.CheckpointID, RootMessageID: cancellation.RootMessageID,
 		Subscription: subscription,
 	}, nil
 }
@@ -317,15 +508,16 @@ func completeSubscriptionRebootstrapTx(
 		return relay.SubscriptionRebootstrapCompletionResponse{}, relay.NewProtocolError(relay.CodeRebootstrapIncomplete, "checkpoint tail has not been restored")
 	}
 	var requestSubscriptionID, requestCheckpointID, requestRootMessageID uuid.UUID
-	var requestStartSequence int64
+	var requestStartSequence, requestLeaseExpiresAt int64
 	err = tx.QueryRow(ctx, `
-		SELECT subscription_id, checkpoint_id, root_message_id, result_start_sequence
+		SELECT subscription_id, checkpoint_id, root_message_id,
+		       result_start_sequence, lease_expires_at_milliseconds
 		FROM relay_subscription_rebootstrap_requests
 		WHERE tenant_id=$1 AND domain_id=$2 AND retry_id=$3
 		FOR SHARE
 	`, credential.TenantID, credential.DomainID, completion.RequestRetryID).Scan(
 		&requestSubscriptionID, &requestCheckpointID, &requestRootMessageID,
-		&requestStartSequence,
+		&requestStartSequence, &requestLeaseExpiresAt,
 	)
 	if err == pgx.ErrNoRows {
 		return relay.SubscriptionRebootstrapCompletionResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "rebootstrap completion has no matching request")
@@ -338,6 +530,20 @@ func completeSubscriptionRebootstrapTx(
 		requestRootMessageID != completion.RootMessageID ||
 		requestStartSequence != *startSequence {
 		return relay.SubscriptionRebootstrapCompletionResponse{}, relay.NewProtocolError(relay.CodeSubscriptionCollision, "rebootstrap completion does not match its authorized checkpoint/root")
+	}
+	var cancelled bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM relay_subscription_rebootstrap_cancellations
+			WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3
+			  AND request_retry_id=$4
+		)
+	`, credential.TenantID, credential.DomainID, subscriptionID,
+		completion.RequestRetryID).Scan(&cancelled); err != nil {
+		return relay.SubscriptionRebootstrapCompletionResponse{}, err
+	}
+	if nowMilliseconds >= requestLeaseExpiresAt || cancelled {
+		return relay.SubscriptionRebootstrapCompletionResponse{}, relay.NewProtocolError(relay.CodeRebootstrapExpired, "subscription rebootstrap lease expired or was cancelled")
 	}
 
 	var missing bool

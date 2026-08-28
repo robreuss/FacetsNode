@@ -1307,8 +1307,8 @@ func TestMemoryStoreSharesDeliveryAndAcknowledgmentFactsAcrossSubscriptionAgents
 	if err != nil || statusRetry.Acceptance != relay.AcceptanceDuplicate || statusRetry.Subscription != changed.Subscription {
 		t.Fatalf("status retry=%+v err=%v", statusRetry, err)
 	}
-	if fetched, err := store.Fetch(ctx, agentB, 0, 10, 1_500); err != nil || len(fetched.Messages) != 1 || fetched.Messages[0].Envelope.MessageID != fixture.Envelope.MessageID {
-		t.Fatalf("rebootstrap fetch=%+v err=%v", fetched, err)
+	if _, err := store.Fetch(ctx, agentB, 0, 10, 1_500); !relay.ErrorHasCode(err, relay.CodeRebootstrapExpired) {
+		t.Fatalf("unleased rebootstrap fetch err=%v", err)
 	}
 }
 

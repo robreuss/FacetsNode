@@ -256,6 +256,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	rebootstrapRequest := relay.SubscriptionRebootstrapRequest{
 		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
 		RootMessageID: retainedSuffix.MessageID, RequestedAtMilliseconds: 1_252,
+		LeaseDurationMilliseconds: relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
 	}
 	if _, err := store.Acknowledge(ctx, recipient, retainedSuffix.MessageID, relay.AcknowledgmentAccepted, 1_251); err != nil {
 		t.Fatalf("pre-rebootstrap accepted acknowledgment err=%v", err)
@@ -374,6 +375,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	publisherRequest := relay.SubscriptionRebootstrapRequest{
 		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
 		RootMessageID: retainedSuffix.MessageID, RequestedAtMilliseconds: 1_257,
+		LeaseDurationMilliseconds: relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
 	}
 	if requested, err := store.RequestSubscriptionRebootstrap(ctx, publisher, publisherRequest, 1_257); err != nil || requested.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("publisher rebootstrap request=%+v err=%v", requested, err)

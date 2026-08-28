@@ -463,6 +463,44 @@ func (s *Server) handleCompleteRelaySubscriptionRebootstrap(writer http.Response
 	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
 }
 
+func (s *Server) handleCancelRelaySubscriptionRebootstrap(writer http.ResponseWriter, request *http.Request) {
+	tenantID, domainID, err := relayScopeFromPath(request)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if !relay.CompleteSpaceRebootstrapEnabled {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeCheckpointUnavailable,
+			"complete Space rebootstrap is not enabled",
+		))
+		return
+	}
+	var input relay.SubscriptionRebootstrapCancellation
+	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	if input.CancelledAtMilliseconds > s.nowMilliseconds() {
+		s.writeError(writer, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription rebootstrap cancellation is in the future"))
+		return
+	}
+	result, err := s.relayStore.CancelSubscriptionRebootstrap(
+		request.Context(), credential, input, s.nowMilliseconds(),
+	)
+	if err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	s.metrics.ObserveAcceptance(traffic.SurfaceRelayMessage, string(result.Acceptance))
+	writeJSON(writer, relayAcceptanceStatus(result.Acceptance), result)
+}
+
 func (s *Server) handleRelayDomainStatus(writer http.ResponseWriter, request *http.Request) {
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {

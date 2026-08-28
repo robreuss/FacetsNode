@@ -368,6 +368,7 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	request := relay.SubscriptionRebootstrapRequest{
 		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
 		RootMessageID: retained.MessageID, RequestedAtMilliseconds: 1_600,
+		LeaseDurationMilliseconds: relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
 	}
 	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentAccepted, 1_599); err != nil {
 		t.Fatalf("pre-rebootstrap accepted acknowledgment err=%v", err)
@@ -390,6 +391,27 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	if duplicate, err := store.RequestSubscriptionRebootstrap(ctx, recipient, request, 1_600); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != rebootstrap.Subscription {
 		t.Fatalf("rebootstrap retry=%+v err=%v", duplicate, err)
 	}
+	if rebootstrap.LeaseExpiresAtMilliseconds != 1_600+relay.DefaultSubscriptionRebootstrapLeaseMilliseconds {
+		t.Fatalf("rebootstrap lease expiry=%d", rebootstrap.LeaseExpiresAtMilliseconds)
+	}
+	cancellation := relay.SubscriptionRebootstrapCancellation{
+		RetryID: uuid.New(), RequestRetryID: request.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: retained.MessageID,
+		CancelledAtMilliseconds: 1_600,
+	}
+	if cancelled, err := store.CancelSubscriptionRebootstrap(ctx, recipient, cancellation, 1_600); err != nil || cancelled.Acceptance != relay.AcceptanceAccepted || cancelled.Subscription.Status != relay.SubscriptionRebootstrapRequired {
+		t.Fatalf("cancel rebootstrap=%+v err=%v", cancelled, err)
+	}
+	if _, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_600); !relay.ErrorHasCode(err, relay.CodeRebootstrapExpired) {
+		t.Fatalf("cancelled rebootstrap fetch err=%v", err)
+	}
+	renewedRequest := request
+	renewedRequest.RetryID = uuid.New()
+	renewedRequest.RequestedAtMilliseconds = 1_601
+	if renewed, err := store.RequestSubscriptionRebootstrap(ctx, recipient, renewedRequest, 1_601); err != nil || renewed.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("renew rebootstrap=%+v err=%v", renewed, err)
+	}
+	request = renewedRequest
 	recoveryFence, recoverySuffix := acquireMemoryFenceAndPublishSuffix(
 		t, store, publisher, retained, 1_601,
 	)
@@ -461,6 +483,7 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	publisherRequest := relay.SubscriptionRebootstrapRequest{
 		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
 		RootMessageID: retained.MessageID, RequestedAtMilliseconds: 1_611,
+		LeaseDurationMilliseconds: relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
 	}
 	if requested, err := store.RequestSubscriptionRebootstrap(ctx, publisher, publisherRequest, 1_611); err != nil || requested.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("publisher rebootstrap request=%+v err=%v", requested, err)
@@ -494,6 +517,53 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	recoveredPublish.CreatedAtMilliseconds = 1_616
 	if _, err := store.Publish(ctx, recipient, recoveredPublish, 1_616); err != nil {
 		t.Fatalf("rebootstrap publish after completion err=%v", err)
+	}
+}
+
+func TestMemorySubscriptionRebootstrapLeaseExpiresAndCanBeRenewed(t *testing.T) {
+	ctx := context.Background()
+	store, admin, publisher, recipient, first, _ := checkpointMemoryFixture(t)
+	fence, retained := acquireMemoryFenceAndPublishSuffix(t, store, publisher, first, 1_400)
+	candidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: admin.TenantID, DomainID: admin.DomainID,
+		PublisherSubscriptionID: publisher.MemberID, KeyEpoch: 1,
+		CoveredThroughCursor:  fence.BoundaryCursor,
+		RetainedMessageIDs:    []uuid.UUID{retained.MessageID},
+		CreatedAtMilliseconds: 1_402,
+	}
+	if _, err := store.StageCheckpoint(ctx, publisher, candidate, 1_402); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActivateCheckpoint(ctx, admin, relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		ActivatedAtMilliseconds: 1_500,
+	}, 1_500); err != nil {
+		t.Fatal(err)
+	}
+	request := relay.SubscriptionRebootstrapRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		RootMessageID: retained.MessageID, RequestedAtMilliseconds: 1_600,
+		LeaseDurationMilliseconds: relay.MinimumSubscriptionRebootstrapLeaseMilliseconds,
+	}
+	accepted, err := store.RequestSubscriptionRebootstrap(ctx, recipient, request, 1_600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := accepted.LeaseExpiresAtMilliseconds
+	if _, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, expiresAt-1); err != nil {
+		t.Fatalf("fetch immediately before lease expiry err=%v", err)
+	}
+	if _, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, expiresAt); !relay.ErrorHasCode(err, relay.CodeRebootstrapExpired) {
+		t.Fatalf("fetch at lease expiry err=%v", err)
+	}
+	renewed := request
+	renewed.RetryID = uuid.New()
+	renewed.RequestedAtMilliseconds = expiresAt
+	result, err := store.RequestSubscriptionRebootstrap(ctx, recipient, renewed, expiresAt)
+	if err != nil || result.Acceptance != relay.AcceptanceAccepted ||
+		result.LeaseExpiresAtMilliseconds != expiresAt+relay.MinimumSubscriptionRebootstrapLeaseMilliseconds {
+		t.Fatalf("renewed rebootstrap=%+v err=%v", result, err)
 	}
 }
 

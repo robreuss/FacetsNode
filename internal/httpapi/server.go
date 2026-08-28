@@ -268,6 +268,12 @@ func (s *Server) Handler() http.Handler {
 			s.handleRequestRelaySubscriptionRebootstrap,
 		)
 		register(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscription-rebootstrap/cancellation",
+			traffic.SurfaceRelayMessage,
+			mutation,
+			s.handleCancelRelaySubscriptionRebootstrap,
+		)
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscription-rebootstrap/completion",
 			traffic.SurfaceRelayMessage,
 			mutation,
@@ -929,6 +935,8 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 					relay.CodeAdmissionExpired, relay.CodeAdmissionRevoked,
 					relay.CodeMissingCapability:
 					status = http.StatusForbidden
+				case relay.CodeRebootstrapExpired:
+					status = http.StatusGone
 				case relay.CodeSubscriptionNotFound, relay.CodeMessageNotFound, relay.CodeBlobNotFound, relay.CodeBlobUploadNotFound,
 					relay.CodeCheckpointNotFound, relay.CodeCheckpointFenceNotFound:
 					status = http.StatusNotFound

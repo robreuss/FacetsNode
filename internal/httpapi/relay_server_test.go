@@ -1146,7 +1146,8 @@ func TestRelayMemberRebootstrapRoutesRejectUnavailableAuthority(t *testing.T) {
 
 	request := relay.SubscriptionRebootstrapRequest{
 		RetryID: uuid.New(), CheckpointID: uuid.New(), RootMessageID: uuid.New(),
-		RequestedAtMilliseconds: nowMilliseconds,
+		RequestedAtMilliseconds:   nowMilliseconds,
+		LeaseDurationMilliseconds: relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
 	}
 	response := performRelayJSON(
 		t, handler, http.MethodPost, domainRoot+"/subscription-rebootstrap",
@@ -1264,8 +1265,9 @@ func TestRelayMemberRebootstrapRoutesBindAndCompleteExactActivatedRoot(t *testin
 
 	request := relay.SubscriptionRebootstrapRequest{
 		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
-		RootMessageID:           rootEnvelope.MessageID,
-		RequestedAtMilliseconds: nowMilliseconds,
+		RootMessageID:             rootEnvelope.MessageID,
+		RequestedAtMilliseconds:   nowMilliseconds,
+		LeaseDurationMilliseconds: relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
 	}
 	wrongRoot := request
 	wrongRoot.RetryID = uuid.New()
@@ -1291,9 +1293,53 @@ func TestRelayMemberRebootstrapRoutesBindAndCompleteExactActivatedRoot(t *testin
 	_ = requested.Body.Close()
 	if requestedResult.CheckpointID != candidate.CheckpointID ||
 		requestedResult.RootMessageID != rootEnvelope.MessageID ||
-		requestedResult.Subscription.Status != relay.SubscriptionRebootstrapRequired {
+		requestedResult.Subscription.Status != relay.SubscriptionRebootstrapRequired ||
+		requestedResult.LeaseExpiresAtMilliseconds != nowMilliseconds+relay.DefaultSubscriptionRebootstrapLeaseMilliseconds {
 		t.Fatalf("unexpected rebootstrap response: %+v", requestedResult)
 	}
+	cancellation := relay.SubscriptionRebootstrapCancellation{
+		RetryID: uuid.New(), RequestRetryID: request.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: rootEnvelope.MessageID,
+		CancelledAtMilliseconds: nowMilliseconds,
+	}
+	cancelled := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/cancellation", cancellation,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, cancelled, http.StatusCreated)
+	_ = cancelled.Body.Close()
+	cancelledRetry := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/cancellation", cancellation,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, cancelledRetry, http.StatusOK)
+	_ = cancelledRetry.Body.Close()
+	cancelledCompletion := relay.SubscriptionRebootstrapCompletion{
+		RetryID: uuid.New(), RequestRetryID: request.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: rootEnvelope.MessageID,
+		CompletedThroughCursor:  relay.EncodeCursor(1),
+		CompletedAtMilliseconds: nowMilliseconds,
+	}
+	cancelledCompletionResponse := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/completion", cancelledCompletion,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, cancelledCompletionResponse, http.StatusGone)
+	_ = cancelledCompletionResponse.Body.Close()
+
+	nowMilliseconds++
+	request.RetryID = uuid.New()
+	request.RequestedAtMilliseconds = nowMilliseconds
+	renewed := performRelayJSON(
+		t, handler, http.MethodPost, domainRoot+"/subscription-rebootstrap",
+		request, authority.MemberCredential.AuthorizationToken,
+		authority.Member.MemberID,
+	)
+	requireStatus(t, renewed, http.StatusCreated)
+	_ = renewed.Body.Close()
 
 	completion := relay.SubscriptionRebootstrapCompletion{
 		RetryID: uuid.New(), RequestRetryID: request.RetryID,
@@ -1380,10 +1426,10 @@ func TestRelayMemberRebootstrapRoutesBindAndCompleteExactActivatedRoot(t *testin
 		map[string]string{"stage": "accepted"},
 		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
 	)
-	requireStatus(t, staleAcknowledgment, http.StatusConflict)
+	requireStatus(t, staleAcknowledgment, http.StatusGone)
 	body, err = io.ReadAll(staleAcknowledgment.Body)
 	_ = staleAcknowledgment.Body.Close()
-	if err != nil || !bytes.Contains(body, []byte(`"code":"invalid_acknowledgment"`)) {
+	if err != nil || !bytes.Contains(body, []byte(`"code":"rebootstrap_expired"`)) {
 		t.Fatalf("unexpected stale-recovery acknowledgment response: %s err=%v", body, err)
 	}
 }

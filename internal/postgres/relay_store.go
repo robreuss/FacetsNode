@@ -1150,11 +1150,26 @@ func (s *RelayStore) Fetch(
 				  AND s.status='rebootstrap_required'
 				  AND r.result_start_sequence=s.start_sequence
 				  AND r.result_updated_at_milliseconds=s.updated_at_milliseconds
+				  AND r.lease_expires_at_milliseconds>$4
+				  AND NOT EXISTS (
+				      SELECT 1 FROM relay_subscription_rebootstrap_cancellations c
+				      WHERE c.tenant_id=r.tenant_id AND c.domain_id=r.domain_id
+				        AND c.request_retry_id=r.retry_id)
+				  AND NOT EXISTS (
+				      SELECT 1 FROM relay_subscription_rebootstrap_completions completion
+				      WHERE completion.tenant_id=r.tenant_id AND completion.domain_id=r.domain_id
+				        AND completion.request_retry_id=r.retry_id)
 			)
-		`, credential.TenantID, credential.DomainID, subscriptionID).Scan(
+		`, credential.TenantID, credential.DomainID, subscriptionID, nowMilliseconds).Scan(
 			&authorizedRebootstrap,
 		); err != nil {
 			return relay.FetchResult{}, fmt.Errorf("verify bound subscription rebootstrap: %w", err)
+		}
+		if !authorizedRebootstrap {
+			return relay.FetchResult{}, relay.NewProtocolError(
+				relay.CodeRebootstrapExpired,
+				"subscription rebootstrap lease expired or was cancelled",
+			)
 		}
 	}
 	var activeFenceBoundary int64
@@ -1359,6 +1374,41 @@ func (s *RelayStore) Acknowledge(
 	if err != nil {
 		return relay.AcknowledgmentResult{}, err
 	}
+	var authorizedRebootstrap bool
+	if subscriptionStatus == relay.SubscriptionRebootstrapRequired {
+		if err := transaction.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM relay_subscription_rebootstrap_requests r
+				JOIN relay_subscriptions s
+				  ON s.tenant_id=r.tenant_id AND s.domain_id=r.domain_id
+				 AND s.subscription_id=r.subscription_id
+				WHERE r.tenant_id=$1 AND r.domain_id=$2
+				  AND r.subscription_id=$3
+				  AND s.status='rebootstrap_required'
+				  AND r.result_start_sequence=s.start_sequence
+				  AND r.result_updated_at_milliseconds=s.updated_at_milliseconds
+				  AND r.lease_expires_at_milliseconds>$4
+				  AND NOT EXISTS (
+				      SELECT 1 FROM relay_subscription_rebootstrap_cancellations c
+				      WHERE c.tenant_id=r.tenant_id AND c.domain_id=r.domain_id
+				        AND c.request_retry_id=r.retry_id)
+				  AND NOT EXISTS (
+				      SELECT 1 FROM relay_subscription_rebootstrap_completions completion
+				      WHERE completion.tenant_id=r.tenant_id AND completion.domain_id=r.domain_id
+				        AND completion.request_retry_id=r.retry_id)
+			)
+		`, credential.TenantID, credential.DomainID, subscriptionID,
+			nowMilliseconds).Scan(&authorizedRebootstrap); err != nil {
+			return relay.AcknowledgmentResult{}, fmt.Errorf("verify bound subscription rebootstrap: %w", err)
+		}
+		if !authorizedRebootstrap {
+			return relay.AcknowledgmentResult{}, relay.NewProtocolError(
+				relay.CodeRebootstrapExpired,
+				"subscription rebootstrap lease expired or was cancelled",
+			)
+		}
+	}
 	message, found, err := loadRelayMessage(
 		ctx,
 		transaction,
@@ -1381,30 +1431,17 @@ func (s *RelayStore) Acknowledge(
 		return relay.AcknowledgmentResult{}, fmt.Errorf("load message publisher subscription: %w", err)
 	}
 	if publisherSubscriptionID == subscriptionID {
-		var ownMessageIsInAuthorizedRecovery bool
-		if subscriptionStatus == relay.SubscriptionRebootstrapRequired {
-			err = transaction.QueryRow(ctx, `
-				SELECT EXISTS (
-					SELECT 1
-					FROM relay_subscriptions s
-					WHERE s.tenant_id=$1 AND s.domain_id=$2
-					  AND s.subscription_id=$3
-					  AND s.status='rebootstrap_required'
-					  AND s.start_sequence IS NOT NULL
-					  AND s.start_sequence < $4
-					  AND EXISTS (
-					      SELECT 1
-					      FROM relay_subscription_rebootstrap_requests r
-					      WHERE r.tenant_id=s.tenant_id AND r.domain_id=s.domain_id
-					        AND r.subscription_id=s.subscription_id
-					        AND r.result_start_sequence=s.start_sequence)
-				)
-			`, credential.TenantID, credential.DomainID, subscriptionID, int64(message.Sequence)).Scan(
-				&ownMessageIsInAuthorizedRecovery,
-			)
-			if err != nil {
-				return relay.AcknowledgmentResult{}, fmt.Errorf("verify publisher recovery acknowledgment: %w", err)
+		ownMessageIsInAuthorizedRecovery := authorizedRebootstrap
+		if ownMessageIsInAuthorizedRecovery {
+			var startSequence *int64
+			if err := transaction.QueryRow(ctx, `
+				SELECT start_sequence FROM relay_subscriptions
+				WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3
+			`, credential.TenantID, credential.DomainID, subscriptionID).Scan(&startSequence); err != nil {
+				return relay.AcknowledgmentResult{}, fmt.Errorf("load publisher recovery cursor: %w", err)
 			}
+			ownMessageIsInAuthorizedRecovery = startSequence != nil &&
+				*startSequence < int64(message.Sequence)
 		}
 		if !ownMessageIsInAuthorizedRecovery {
 			return relay.AcknowledgmentResult{}, relay.NewProtocolError(

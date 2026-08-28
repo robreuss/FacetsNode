@@ -53,6 +53,12 @@ type Store interface {
 		SubscriptionRebootstrapRequest,
 		int64,
 	) (SubscriptionRebootstrapResponse, error)
+	CancelSubscriptionRebootstrap(
+		context.Context,
+		Credential,
+		SubscriptionRebootstrapCancellation,
+		int64,
+	) (SubscriptionRebootstrapCancellationResponse, error)
 	CompleteSubscriptionRebootstrap(
 		context.Context,
 		Credential,

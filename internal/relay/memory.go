@@ -31,41 +31,42 @@ type memoryFenceMessageTombstone struct {
 }
 
 type memoryDomain struct {
-	provisioningRetryID     uuid.UUID
-	registration            DomainRegistration
-	subscriptions           map[uuid.UUID]Subscription
-	subscriptionCreates     map[uuid.UUID]SubscriptionCreateRequest
-	subscriptionChanges     map[uuid.UUID]memorySubscriptionChange
-	rebootstrapRequests     map[uuid.UUID]memorySubscriptionRebootstrapRequest
-	rebootstrapCompletions  map[uuid.UUID]memorySubscriptionRebootstrapCompletion
-	memberSubscriptions     map[uuid.UUID]uuid.UUID
-	admissionSubscriptions  map[uuid.UUID]uuid.UUID
-	members                 map[uuid.UUID]MemberRegistration
-	admissions              map[uuid.UUID]MemberAdmission
-	messages                []*memoryMessage
-	messageByID             map[uuid.UUID]*memoryMessage
-	blobs                   map[string]BlobMetadata
-	rotations               map[uuid.UUID]memoryCredentialRotation
-	capabilityChanges       map[uuid.UUID]memoryMemberCapabilityChange
-	nextSequence            uint64
-	messageBytes            int64
-	blobBytes               int64
-	checkpoints             map[uuid.UUID]*memoryCheckpoint
-	checkpointStageRetries  map[uuid.UUID]uuid.UUID
-	checkpointActivations   map[uuid.UUID]memoryCheckpointActivation
-	checkpointCollections   map[uuid.UUID]memoryCheckpointCollection
-	activatedCheckpoints    []uuid.UUID
-	checkpointOrdinal       uint64
-	checkpointFences        map[uuid.UUID]*memoryCheckpointFence
-	checkpointFenceRetries  map[uuid.UUID]uuid.UUID
-	checkpointFenceAborts   map[uuid.UUID]memoryFenceAbort
-	fenceMessageTombstones  map[uuid.UUID]memoryFenceMessageTombstone
-	blobFenceIDs            map[string]uuid.UUID
-	blobUploads             map[uuid.UUID]*memoryBlobUpload
-	blobUploadCreates       map[uuid.UUID]uuid.UUID
-	blobUploadFinalizations map[uuid.UUID]memoryBlobUploadFinalization
-	reservedBlobCount       int64
-	reservedBlobBytes       int64
+	provisioningRetryID      uuid.UUID
+	registration             DomainRegistration
+	subscriptions            map[uuid.UUID]Subscription
+	subscriptionCreates      map[uuid.UUID]SubscriptionCreateRequest
+	subscriptionChanges      map[uuid.UUID]memorySubscriptionChange
+	rebootstrapRequests      map[uuid.UUID]memorySubscriptionRebootstrapRequest
+	rebootstrapCancellations map[uuid.UUID]memorySubscriptionRebootstrapCancellation
+	rebootstrapCompletions   map[uuid.UUID]memorySubscriptionRebootstrapCompletion
+	memberSubscriptions      map[uuid.UUID]uuid.UUID
+	admissionSubscriptions   map[uuid.UUID]uuid.UUID
+	members                  map[uuid.UUID]MemberRegistration
+	admissions               map[uuid.UUID]MemberAdmission
+	messages                 []*memoryMessage
+	messageByID              map[uuid.UUID]*memoryMessage
+	blobs                    map[string]BlobMetadata
+	rotations                map[uuid.UUID]memoryCredentialRotation
+	capabilityChanges        map[uuid.UUID]memoryMemberCapabilityChange
+	nextSequence             uint64
+	messageBytes             int64
+	blobBytes                int64
+	checkpoints              map[uuid.UUID]*memoryCheckpoint
+	checkpointStageRetries   map[uuid.UUID]uuid.UUID
+	checkpointActivations    map[uuid.UUID]memoryCheckpointActivation
+	checkpointCollections    map[uuid.UUID]memoryCheckpointCollection
+	activatedCheckpoints     []uuid.UUID
+	checkpointOrdinal        uint64
+	checkpointFences         map[uuid.UUID]*memoryCheckpointFence
+	checkpointFenceRetries   map[uuid.UUID]uuid.UUID
+	checkpointFenceAborts    map[uuid.UUID]memoryFenceAbort
+	fenceMessageTombstones   map[uuid.UUID]memoryFenceMessageTombstone
+	blobFenceIDs             map[string]uuid.UUID
+	blobUploads              map[uuid.UUID]*memoryBlobUpload
+	blobUploadCreates        map[uuid.UUID]uuid.UUID
+	blobUploadFinalizations  map[uuid.UUID]memoryBlobUploadFinalization
+	reservedBlobCount        int64
+	reservedBlobBytes        int64
 }
 
 type memorySubscriptionChange struct {
@@ -75,8 +76,15 @@ type memorySubscriptionChange struct {
 }
 
 type memorySubscriptionRebootstrapRequest struct {
+	subscriptionID        uuid.UUID
+	request               SubscriptionRebootstrapRequest
+	expiresAtMilliseconds int64
+	result                Subscription
+}
+
+type memorySubscriptionRebootstrapCancellation struct {
 	subscriptionID uuid.UUID
-	request        SubscriptionRebootstrapRequest
+	request        SubscriptionRebootstrapCancellation
 	result         Subscription
 }
 
@@ -284,10 +292,11 @@ func (s *MemoryStore) createDomainLocked(
 		subscriptions: map[uuid.UUID]Subscription{
 			provisioning.Subscription.SubscriptionID: provisioning.Subscription,
 		},
-		subscriptionCreates:    make(map[uuid.UUID]SubscriptionCreateRequest),
-		subscriptionChanges:    make(map[uuid.UUID]memorySubscriptionChange),
-		rebootstrapRequests:    make(map[uuid.UUID]memorySubscriptionRebootstrapRequest),
-		rebootstrapCompletions: make(map[uuid.UUID]memorySubscriptionRebootstrapCompletion),
+		subscriptionCreates:      make(map[uuid.UUID]SubscriptionCreateRequest),
+		subscriptionChanges:      make(map[uuid.UUID]memorySubscriptionChange),
+		rebootstrapRequests:      make(map[uuid.UUID]memorySubscriptionRebootstrapRequest),
+		rebootstrapCancellations: make(map[uuid.UUID]memorySubscriptionRebootstrapCancellation),
+		rebootstrapCompletions:   make(map[uuid.UUID]memorySubscriptionRebootstrapCompletion),
 		memberSubscriptions: map[uuid.UUID]uuid.UUID{
 			initialMember.MemberID: provisioning.Subscription.SubscriptionID,
 		},
@@ -1238,6 +1247,10 @@ func (s *MemoryStore) RequestSubscriptionRebootstrap(
 	if err := request.Validate(); err != nil {
 		return SubscriptionRebootstrapResponse{}, err
 	}
+	leaseExpiresAt, err := request.LeaseExpiresAt(nowMilliseconds)
+	if err != nil {
+		return SubscriptionRebootstrapResponse{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	domain, err := s.authorizedMember(credential, CapabilityFetchMessage, nowMilliseconds)
@@ -1253,7 +1266,8 @@ func (s *MemoryStore) RequestSubscriptionRebootstrap(
 			return SubscriptionRebootstrapResponse{
 				Acceptance: AcceptanceDuplicate, RetryID: request.RetryID,
 				CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
-				Subscription: existing.result,
+				LeaseExpiresAtMilliseconds: existing.expiresAtMilliseconds,
+				Subscription:               existing.result,
 			}, nil
 		}
 		return SubscriptionRebootstrapResponse{}, protocolError(CodeSubscriptionCollision, "subscription rebootstrap retry ID was reused")
@@ -1267,49 +1281,122 @@ func (s *MemoryStore) RequestSubscriptionRebootstrap(
 		return SubscriptionRebootstrapResponse{}, protocolError(CodeCheckpointUnavailable, "authorized recovery checkpoint/root is unavailable")
 	}
 	if subscription.Status == SubscriptionRebootstrapRequired {
-		if subscription.StartCursor == nil {
-			return SubscriptionRebootstrapResponse{}, protocolError(CodeInvalidSubscription, "rebootstrap subscription has no checkpoint cursor")
+		if memorySubscriptionHasActiveRebootstrap(
+			domain, subscription.SubscriptionID, nowMilliseconds,
+		) {
+			return SubscriptionRebootstrapResponse{}, protocolError(CodeSubscriptionCollision, "subscription recovery already has an active lease")
 		}
-		startSequence, err := DecodeCursor(*subscription.StartCursor)
-		selectionMatches, selectionExists := rebootstrapSelectionMatches(
-			domain, subscription.SubscriptionID, request,
-		)
 		checkpointIsLatest := len(domain.activatedCheckpoints) > 0 &&
 			domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1] == request.CheckpointID
-		if err != nil || startSequence != checkpoint.startSequence ||
-			!selectionMatches || (!selectionExists && !checkpointIsLatest) {
-			return SubscriptionRebootstrapResponse{}, protocolError(CodeSubscriptionCollision, "subscription recovery is already bound to another checkpoint/root")
+		if !checkpointIsLatest {
+			return SubscriptionRebootstrapResponse{}, protocolError(CodeCheckpointUnavailable, "authorized recovery checkpoint is not the latest activated checkpoint")
 		}
-		domain.rebootstrapRequests[request.RetryID] = memorySubscriptionRebootstrapRequest{
-			subscriptionID: subscription.SubscriptionID, request: request, result: subscription,
+		startCursor := EncodeCursor(checkpoint.startSequence)
+		for _, message := range domain.messages {
+			if message.message.Sequence > checkpoint.startSequence {
+				delete(message.acknowledgments, subscription.SubscriptionID)
+			}
 		}
-		return SubscriptionRebootstrapResponse{
-			Acceptance: AcceptanceAccepted, RetryID: request.RetryID,
-			CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
-			Subscription: subscription,
-		}, nil
+		subscription.StartCursor = &startCursor
+		subscription.UpdatedAtMilliseconds = nowMilliseconds
+		domain.subscriptions[subscription.SubscriptionID] = subscription
 	}
-	if len(domain.activatedCheckpoints) == 0 ||
-		domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1] != request.CheckpointID {
+	if subscription.Status != SubscriptionRebootstrapRequired &&
+		(len(domain.activatedCheckpoints) == 0 ||
+			domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1] != request.CheckpointID) {
 		return SubscriptionRebootstrapResponse{}, protocolError(CodeCheckpointUnavailable, "authorized recovery checkpoint is not the latest activated checkpoint")
 	}
-	startCursor := EncodeCursor(checkpoint.startSequence)
-	for _, message := range domain.messages {
-		if message.message.Sequence > checkpoint.startSequence {
-			delete(message.acknowledgments, subscription.SubscriptionID)
+	if subscription.Status != SubscriptionRebootstrapRequired {
+		startCursor := EncodeCursor(checkpoint.startSequence)
+		for _, message := range domain.messages {
+			if message.message.Sequence > checkpoint.startSequence {
+				delete(message.acknowledgments, subscription.SubscriptionID)
+			}
 		}
+		subscription.Status = SubscriptionRebootstrapRequired
+		subscription.StartCursor = &startCursor
+		subscription.UpdatedAtMilliseconds = nowMilliseconds
+		domain.subscriptions[subscription.SubscriptionID] = subscription
 	}
-	subscription.Status = SubscriptionRebootstrapRequired
-	subscription.StartCursor = &startCursor
-	subscription.UpdatedAtMilliseconds = nowMilliseconds
-	domain.subscriptions[subscription.SubscriptionID] = subscription
 	domain.rebootstrapRequests[request.RetryID] = memorySubscriptionRebootstrapRequest{
-		subscriptionID: subscription.SubscriptionID, request: request, result: subscription,
+		subscriptionID: subscription.SubscriptionID, request: request,
+		expiresAtMilliseconds: leaseExpiresAt, result: subscription,
 	}
 	return SubscriptionRebootstrapResponse{
 		Acceptance: AcceptanceAccepted, RetryID: request.RetryID,
 		CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
-		Subscription: subscription,
+		LeaseExpiresAtMilliseconds: leaseExpiresAt,
+		Subscription:               subscription,
+	}, nil
+}
+
+func (s *MemoryStore) CancelSubscriptionRebootstrap(
+	_ context.Context,
+	credential Credential,
+	cancellation SubscriptionRebootstrapCancellation,
+	nowMilliseconds int64,
+) (SubscriptionRebootstrapCancellationResponse, error) {
+	if err := cancellation.Validate(); err != nil {
+		return SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedMember(
+		credential, CapabilityFetchMessage, nowMilliseconds,
+	)
+	if err != nil {
+		return SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	subscription, err := readableMemberSubscription(domain, credential.MemberID)
+	if err != nil {
+		return SubscriptionRebootstrapCancellationResponse{}, err
+	}
+	if existing, ok := domain.rebootstrapCancellations[cancellation.RetryID]; ok {
+		if existing.subscriptionID == subscription.SubscriptionID &&
+			existing.request == cancellation {
+			return SubscriptionRebootstrapCancellationResponse{
+				Acceptance: AcceptanceDuplicate, RetryID: cancellation.RetryID,
+				RequestRetryID: cancellation.RequestRetryID,
+				CheckpointID:   cancellation.CheckpointID,
+				RootMessageID:  cancellation.RootMessageID,
+				Subscription:   existing.result,
+			}, nil
+		}
+		return SubscriptionRebootstrapCancellationResponse{}, protocolError(
+			CodeSubscriptionCollision,
+			"subscription rebootstrap cancellation retry ID was reused",
+		)
+	}
+	recovery, ok := domain.rebootstrapRequests[cancellation.RequestRetryID]
+	if !ok || recovery.subscriptionID != subscription.SubscriptionID ||
+		recovery.request.CheckpointID != cancellation.CheckpointID ||
+		recovery.request.RootMessageID != cancellation.RootMessageID {
+		return SubscriptionRebootstrapCancellationResponse{}, protocolError(
+			CodeSubscriptionCollision,
+			"subscription rebootstrap cancellation does not match its request",
+		)
+	}
+	for _, completion := range domain.rebootstrapCompletions {
+		if completion.subscriptionID == subscription.SubscriptionID &&
+			completion.request.RequestRetryID == cancellation.RequestRetryID {
+			return SubscriptionRebootstrapCancellationResponse{}, protocolError(
+				CodeSubscriptionCollision,
+				"completed subscription rebootstrap cannot be cancelled",
+			)
+		}
+	}
+	domain.rebootstrapCancellations[cancellation.RetryID] =
+		memorySubscriptionRebootstrapCancellation{
+			subscriptionID: subscription.SubscriptionID,
+			request:        cancellation,
+			result:         subscription,
+		}
+	return SubscriptionRebootstrapCancellationResponse{
+		Acceptance: AcceptanceAccepted, RetryID: cancellation.RetryID,
+		RequestRetryID: cancellation.RequestRetryID,
+		CheckpointID:   cancellation.CheckpointID,
+		RootMessageID:  cancellation.RootMessageID,
+		Subscription:   subscription,
 	}, nil
 }
 
@@ -1362,6 +1449,14 @@ func (s *MemoryStore) CompleteSubscriptionRebootstrap(
 		recoveryRequest.request.RootMessageID != completion.RootMessageID {
 		return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeSubscriptionCollision, "rebootstrap completion does not match its authorized checkpoint/root")
 	}
+	if !memoryRebootstrapRequestIsActive(
+		domain, completion.RequestRetryID, recoveryRequest, nowMilliseconds,
+	) {
+		return SubscriptionRebootstrapCompletionResponse{}, protocolError(
+			CodeRebootstrapExpired,
+			"subscription rebootstrap lease expired or was cancelled",
+		)
+	}
 	startSequence, err := DecodeCursor(*subscription.StartCursor)
 	if err != nil {
 		return SubscriptionRebootstrapCompletionResponse{}, err
@@ -1410,22 +1505,44 @@ func checkpointRetainsMessage(checkpoint *memoryCheckpoint, messageID uuid.UUID)
 	return false
 }
 
-func rebootstrapSelectionMatches(
+func memorySubscriptionHasActiveRebootstrap(
 	domain *memoryDomain,
 	subscriptionID uuid.UUID,
-	request SubscriptionRebootstrapRequest,
-) (matches bool, exists bool) {
-	for _, existing := range domain.rebootstrapRequests {
-		if existing.subscriptionID != subscriptionID {
-			continue
-		}
-		exists = true
-		if existing.request.CheckpointID != request.CheckpointID ||
-			existing.request.RootMessageID != request.RootMessageID {
-			return false, true
+	nowMilliseconds int64,
+) bool {
+	for retryID, request := range domain.rebootstrapRequests {
+		if request.subscriptionID == subscriptionID &&
+			memoryRebootstrapRequestIsActive(
+				domain, retryID, request, nowMilliseconds,
+			) {
+			return true
 		}
 	}
-	return true, exists
+	return false
+}
+
+func memoryRebootstrapRequestIsActive(
+	domain *memoryDomain,
+	retryID uuid.UUID,
+	request memorySubscriptionRebootstrapRequest,
+	nowMilliseconds int64,
+) bool {
+	if nowMilliseconds < 0 || nowMilliseconds >= request.expiresAtMilliseconds {
+		return false
+	}
+	for _, cancellation := range domain.rebootstrapCancellations {
+		if cancellation.subscriptionID == request.subscriptionID &&
+			cancellation.request.RequestRetryID == retryID {
+			return false
+		}
+	}
+	for _, completion := range domain.rebootstrapCompletions {
+		if completion.subscriptionID == request.subscriptionID &&
+			completion.request.RequestRetryID == retryID {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *MemoryStore) RevokeTenantMemberships(
@@ -1701,6 +1818,15 @@ func (s *MemoryStore) Fetch(
 	if err != nil {
 		return FetchResult{}, err
 	}
+	if subscription.Status == SubscriptionRebootstrapRequired &&
+		!memorySubscriptionHasActiveRebootstrap(
+			domain, subscription.SubscriptionID, nowMilliseconds,
+		) {
+		return FetchResult{}, protocolError(
+			CodeRebootstrapExpired,
+			"subscription rebootstrap lease expired or was cancelled",
+		)
+	}
 	if subscription.StartCursor != nil {
 		start, cursorErr := DecodeCursor(*subscription.StartCursor)
 		if cursorErr != nil {
@@ -1727,12 +1853,16 @@ func (s *MemoryStore) Fetch(
 		if stored.message.Sequence <= afterSequence {
 			continue
 		}
-		if memorySubscriptionHasAuthorizedRecovery(domain, subscription) &&
+		if memorySubscriptionHasAuthorizedRecovery(
+			domain, subscription, nowMilliseconds,
+		) &&
 			stored.acknowledgments[subscription.SubscriptionID] == AcknowledgmentApplied {
 			continue
 		}
 		if stored.publisherSubscription == subscription.SubscriptionID &&
-			!memoryOwnMessageIsInAuthorizedRecovery(domain, subscription, stored) {
+			!memoryOwnMessageIsInAuthorizedRecovery(
+				domain, subscription, stored, nowMilliseconds,
+			) {
 			continue
 		}
 		if stored.checkpointFenceID != nil {
@@ -1818,12 +1948,23 @@ func (s *MemoryStore) Acknowledge(
 	if err != nil {
 		return AcknowledgmentResult{}, err
 	}
+	if subscription.Status == SubscriptionRebootstrapRequired &&
+		!memorySubscriptionHasActiveRebootstrap(
+			domain, subscription.SubscriptionID, nowMilliseconds,
+		) {
+		return AcknowledgmentResult{}, protocolError(
+			CodeRebootstrapExpired,
+			"subscription rebootstrap lease expired or was cancelled",
+		)
+	}
 	message, ok := domain.messageByID[messageID]
 	if !ok {
 		return AcknowledgmentResult{}, protocolError(CodeMessageNotFound, "message was not found")
 	}
 	if message.publisherSubscription == subscription.SubscriptionID &&
-		!memoryOwnMessageIsInAuthorizedRecovery(domain, subscription, message) {
+		!memoryOwnMessageIsInAuthorizedRecovery(
+			domain, subscription, message, nowMilliseconds,
+		) {
 		return AcknowledgmentResult{}, protocolError(
 			CodeInvalidAcknowledgment,
 			"publisher cannot acknowledge its message",
@@ -1853,8 +1994,11 @@ func memoryOwnMessageIsInAuthorizedRecovery(
 	domain *memoryDomain,
 	subscription Subscription,
 	message *memoryMessage,
+	nowMilliseconds int64,
 ) bool {
-	if !memorySubscriptionHasAuthorizedRecovery(domain, subscription) {
+	if !memorySubscriptionHasAuthorizedRecovery(
+		domain, subscription, nowMilliseconds,
+	) {
 		return false
 	}
 	startSequence, err := DecodeCursor(*subscription.StartCursor)
@@ -1864,12 +2008,16 @@ func memoryOwnMessageIsInAuthorizedRecovery(
 func memorySubscriptionHasAuthorizedRecovery(
 	domain *memoryDomain,
 	subscription Subscription,
+	nowMilliseconds int64,
 ) bool {
 	if subscription.Status != SubscriptionRebootstrapRequired || subscription.StartCursor == nil {
 		return false
 	}
-	for _, request := range domain.rebootstrapRequests {
+	for retryID, request := range domain.rebootstrapRequests {
 		if request.subscriptionID == subscription.SubscriptionID &&
+			memoryRebootstrapRequestIsActive(
+				domain, retryID, request, nowMilliseconds,
+			) &&
 			request.result.Status == SubscriptionRebootstrapRequired &&
 			request.result.StartCursor != nil &&
 			*request.result.StartCursor == *subscription.StartCursor &&

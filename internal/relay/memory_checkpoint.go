@@ -136,7 +136,7 @@ func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential Administr
 	if fence == nil || fence.state.Status != CheckpointFenceActive || !memoryFenceSuffixMatches(domain, fence, checkpoint.candidate.RetainedMessageIDs) {
 		return CheckpointActivationResponse{}, protocolError(CodeInvalidCheckpointFence, "checkpoint fence is no longer activatable")
 	}
-	if memoryHasBoundRebootstrap(domain) {
+	if memoryHasBoundRebootstrap(domain, nowMilliseconds) {
 		return CheckpointActivationResponse{}, protocolError(CodeCheckpointNotEligible, "checkpoint activation is blocked by an active client-authorized recovery")
 	}
 	retainedMessages := make(map[uuid.UUID]struct{})
@@ -198,10 +198,16 @@ func (s *MemoryStore) ActivateCheckpoint(_ context.Context, credential Administr
 	return result, nil
 }
 
-func memoryHasBoundRebootstrap(domain *memoryDomain) bool {
-	for _, request := range domain.rebootstrapRequests {
+func memoryHasBoundRebootstrap(
+	domain *memoryDomain,
+	nowMilliseconds int64,
+) bool {
+	for retryID, request := range domain.rebootstrapRequests {
 		subscription, ok := domain.subscriptions[request.subscriptionID]
-		if ok && subscription.Status == SubscriptionRebootstrapRequired {
+		if ok && subscription.Status == SubscriptionRebootstrapRequired &&
+			memoryRebootstrapRequestIsActive(
+				domain, retryID, request, nowMilliseconds,
+			) {
 			return true
 		}
 	}

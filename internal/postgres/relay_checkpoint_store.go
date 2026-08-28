@@ -226,8 +226,19 @@ func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.Ad
 			 AND subscription.subscription_id=recovery.subscription_id
 			WHERE recovery.tenant_id=$1 AND recovery.domain_id=$2
 			  AND subscription.status='rebootstrap_required'
+			  AND recovery.lease_expires_at_milliseconds>$3
+			  AND NOT EXISTS (
+			      SELECT 1 FROM relay_subscription_rebootstrap_cancellations cancellation
+			      WHERE cancellation.tenant_id=recovery.tenant_id
+			        AND cancellation.domain_id=recovery.domain_id
+			        AND cancellation.request_retry_id=recovery.retry_id)
+			  AND NOT EXISTS (
+			      SELECT 1 FROM relay_subscription_rebootstrap_completions completion
+			      WHERE completion.tenant_id=recovery.tenant_id
+			        AND completion.domain_id=recovery.domain_id
+			        AND completion.request_retry_id=recovery.retry_id)
 		)
-	`, credential.TenantID, credential.DomainID).Scan(&recoveryActive); err != nil {
+	`, credential.TenantID, credential.DomainID, nowMilliseconds).Scan(&recoveryActive); err != nil {
 		return relay.CheckpointActivationResponse{}, err
 	}
 	if recoveryActive {

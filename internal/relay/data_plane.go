@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"math"
 
 	"github.com/google/uuid"
 )
@@ -145,30 +146,83 @@ type SubscriptionStatusChangeResponse struct {
 // pair and requires durable tail application before restoring publication.
 const CompleteSpaceRebootstrapEnabled = true
 
+const (
+	MinimumSubscriptionRebootstrapLeaseMilliseconds int64 = 5 * 60 * 1000
+	DefaultSubscriptionRebootstrapLeaseMilliseconds int64 = 24 * 60 * 60 * 1000
+	MaximumSubscriptionRebootstrapLeaseMilliseconds int64 = 24 * 60 * 60 * 1000
+)
+
 // SubscriptionRebootstrapRequest lets an enrolled member name the exact
 // activated checkpoint/root pair already authorized by its client. The relay
 // validates the opaque identities and selects only the corresponding cursor;
 // it never receives the root digest or inspects the checkpoint payload.
 type SubscriptionRebootstrapRequest struct {
-	RetryID                 uuid.UUID `json:"retryID"`
-	CheckpointID            uuid.UUID `json:"checkpointID"`
-	RootMessageID           uuid.UUID `json:"rootMessageID"`
-	RequestedAtMilliseconds int64     `json:"requestedAtMilliseconds"`
+	RetryID                   uuid.UUID `json:"retryID"`
+	CheckpointID              uuid.UUID `json:"checkpointID"`
+	RootMessageID             uuid.UUID `json:"rootMessageID"`
+	RequestedAtMilliseconds   int64     `json:"requestedAtMilliseconds"`
+	LeaseDurationMilliseconds int64     `json:"leaseDurationMilliseconds"`
 }
 
 func (r SubscriptionRebootstrapRequest) Validate() error {
-	if r.RetryID == uuid.Nil || r.CheckpointID == uuid.Nil || r.RootMessageID == uuid.Nil || r.RequestedAtMilliseconds < 0 {
+	if r.RetryID == uuid.Nil || r.CheckpointID == uuid.Nil || r.RootMessageID == uuid.Nil ||
+		r.RequestedAtMilliseconds < 0 ||
+		r.LeaseDurationMilliseconds < MinimumSubscriptionRebootstrapLeaseMilliseconds ||
+		r.LeaseDurationMilliseconds > MaximumSubscriptionRebootstrapLeaseMilliseconds {
 		return protocolError(CodeInvalidSubscription, "subscription rebootstrap request is invalid")
 	}
 	return nil
 }
 
+func (r SubscriptionRebootstrapRequest) LeaseExpiresAt(
+	nowMilliseconds int64,
+) (int64, error) {
+	if err := r.Validate(); err != nil {
+		return 0, err
+	}
+	if nowMilliseconds < 0 ||
+		nowMilliseconds > math.MaxInt64-r.LeaseDurationMilliseconds {
+		return 0, protocolError(CodeInvalidSubscription, "subscription rebootstrap lease is invalid")
+	}
+	return nowMilliseconds + r.LeaseDurationMilliseconds, nil
+}
+
 type SubscriptionRebootstrapResponse struct {
-	Acceptance    Acceptance   `json:"acceptance"`
-	RetryID       uuid.UUID    `json:"retryID"`
-	CheckpointID  uuid.UUID    `json:"checkpointID"`
-	RootMessageID uuid.UUID    `json:"rootMessageID"`
-	Subscription  Subscription `json:"subscription"`
+	Acceptance                 Acceptance   `json:"acceptance"`
+	RetryID                    uuid.UUID    `json:"retryID"`
+	CheckpointID               uuid.UUID    `json:"checkpointID"`
+	RootMessageID              uuid.UUID    `json:"rootMessageID"`
+	LeaseExpiresAtMilliseconds int64        `json:"leaseExpiresAtMilliseconds"`
+	Subscription               Subscription `json:"subscription"`
+}
+
+// SubscriptionRebootstrapCancellation releases the checkpoint-rollover lease
+// without making the discarded replica writable again. A later recovery must
+// bind a new request to the then-current activated checkpoint/root.
+type SubscriptionRebootstrapCancellation struct {
+	RetryID                 uuid.UUID `json:"retryID"`
+	RequestRetryID          uuid.UUID `json:"requestRetryID"`
+	CheckpointID            uuid.UUID `json:"checkpointID"`
+	RootMessageID           uuid.UUID `json:"rootMessageID"`
+	CancelledAtMilliseconds int64     `json:"cancelledAtMilliseconds"`
+}
+
+func (r SubscriptionRebootstrapCancellation) Validate() error {
+	if r.RetryID == uuid.Nil || r.RequestRetryID == uuid.Nil ||
+		r.CheckpointID == uuid.Nil || r.RootMessageID == uuid.Nil ||
+		r.CancelledAtMilliseconds < 0 {
+		return protocolError(CodeInvalidSubscription, "subscription rebootstrap cancellation is invalid")
+	}
+	return nil
+}
+
+type SubscriptionRebootstrapCancellationResponse struct {
+	Acceptance     Acceptance   `json:"acceptance"`
+	RetryID        uuid.UUID    `json:"retryID"`
+	RequestRetryID uuid.UUID    `json:"requestRetryID"`
+	CheckpointID   uuid.UUID    `json:"checkpointID"`
+	RootMessageID  uuid.UUID    `json:"rootMessageID"`
+	Subscription   Subscription `json:"subscription"`
 }
 
 // SubscriptionRebootstrapCompletion is accepted only after the member has

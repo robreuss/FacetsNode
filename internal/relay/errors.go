@@ -28,6 +28,7 @@ const (
 	CodeCheckpointNotEligible       ErrorCode = "checkpoint_not_eligible"
 	CodeCheckpointUnavailable       ErrorCode = "checkpoint_unavailable"
 	CodeRebootstrapIncomplete       ErrorCode = "rebootstrap_incomplete"
+	CodeRebootstrapExpired          ErrorCode = "rebootstrap_expired"
 	CodeCollectionPlanStale         ErrorCode = "collection_plan_stale"
 	CodeInvalidCredentialRotation   ErrorCode = "invalid_credential_rotation"
 	CodeUnauthorized                ErrorCode = "unauthorized"
