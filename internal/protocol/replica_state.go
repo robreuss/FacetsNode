@@ -61,6 +61,33 @@ var replicaStateCanonicalCoreExclusions = []string{
 	"facets.workspace-designs",
 }
 
+var replicaStateCompleteSpaceScopes = []string{
+	"facets.annotations",
+	"facets.canonical-objects",
+	"facets.category-definitions",
+	"facets.category-memberships",
+	"facets.document-library",
+	"facets.extension-schemas",
+	"facets.extensions",
+	"facets.lenses",
+	"facets.media",
+	"facets.ordered-compositions",
+	"facets.portable-analytics",
+	"facets.relationships",
+	"facets.workspace-designs",
+}
+
+var replicaStateCompleteSpaceSidecarKinds = []string{
+	"facets.category-definitions",
+	"facets.category-memberships",
+	"facets.document-library",
+	"facets.extension-schemas",
+	"facets.lenses",
+	"facets.ordered-compositions",
+	"facets.portable-analytics",
+	"facets.workspace-designs",
+}
+
 type ReplicaStateModelTypeCoverage struct {
 	ModelTypeRaw int    `json:"modelTypeRaw"`
 	ItemCount    uint64 `json:"itemCount"`
@@ -130,10 +157,16 @@ func (coverage ReplicaStateCoverage) Validate() error {
 			return ErrInvalidReplicaState
 		}
 	case ReplicaStateCompleteSpaceCoverageProfile:
-		// Reserved until every durable sidecar and its exact validation rule is
-		// part of a newer portable contract. Version 2 cannot make a complete
-		// Space claim.
-		return ErrInvalidReplicaState
+		if !reflect.DeepEqual(coverage.CoveredSemanticScopes, replicaStateCompleteSpaceScopes) ||
+			len(coverage.Sidecars) != len(replicaStateCompleteSpaceSidecarKinds) ||
+			len(coverage.ExcludedDurableScopes) != 0 {
+			return ErrInvalidReplicaState
+		}
+		for index, sidecar := range coverage.Sidecars {
+			if sidecar.Kind != replicaStateCompleteSpaceSidecarKinds[index] || sidecar.ByteCount <= 0 {
+				return ErrInvalidReplicaState
+			}
+		}
 	default:
 		return ErrInvalidReplicaState
 	}
@@ -281,6 +314,14 @@ func (root ReplicaStateRoot) Validate() error {
 	coverageItemCount, validCoverageCount := root.Coverage.canonicalItemCount()
 	if !validCoverageCount || coverageItemCount != pieceItemCount {
 		return ErrInvalidReplicaState
+	}
+	if root.Coverage.Profile == ReplicaStateCompleteSpaceCoverageProfile {
+		for _, sidecar := range root.Coverage.Sidecars {
+			byteCount, exists := blobByteCounts[sidecar.Digest]
+			if !exists || byteCount != sidecar.ByteCount {
+				return ErrInvalidReplicaState
+			}
+		}
 	}
 	for _, piece := range root.Pieces {
 		for _, dependency := range piece.DependencyPieceIDs {

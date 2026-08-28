@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -20,6 +21,12 @@ type portableReplicaStateFixture struct {
 	ExpectedRootDigest          string           `json:"expectedRootDigest"`
 	SuccessorRoot               ReplicaStateRoot `json:"successorRoot"`
 	ExpectedSuccessorRootDigest string           `json:"expectedSuccessorRootDigest"`
+}
+
+type portableCompleteSpaceCoverageFixture struct {
+	Format   string               `json:"format"`
+	Warning  string               `json:"warning"`
+	Coverage ReplicaStateCoverage `json:"coverage"`
 }
 
 func TestPortableReplicaStateRoots(t *testing.T) {
@@ -256,11 +263,11 @@ func TestReplicaStateCoverageIsExplicitCanonicalAndNonSubstitutable(t *testing.T
 		t.Fatal("noncanonical model-type coverage accepted")
 	}
 
-	reservedCompleteClaim := fixture.Root
-	reservedCompleteClaim.Coverage.Profile = ReplicaStateCompleteSpaceCoverageProfile
-	reservedCompleteClaim.Coverage.ExcludedDurableScopes = []string{}
-	if err := reservedCompleteClaim.Validate(); err == nil {
-		t.Fatal("reserved complete-space coverage accepted")
+	incompleteCompleteClaim := fixture.Root
+	incompleteCompleteClaim.Coverage.Profile = ReplicaStateCompleteSpaceCoverageProfile
+	incompleteCompleteClaim.Coverage.ExcludedDurableScopes = []string{}
+	if err := incompleteCompleteClaim.Validate(); err == nil {
+		t.Fatal("incomplete complete-space coverage accepted")
 	}
 
 	digest, err := fixture.Root.ReferenceDigest()
@@ -285,6 +292,67 @@ func TestReplicaStateCoverageIsExplicitCanonicalAndNonSubstitutable(t *testing.T
 	}
 }
 
+func TestReplicaStateCompleteSpaceInventoryIsPortableAndContentAddressed(t *testing.T) {
+	fixture := loadPortableCompleteSpaceCoverageFixture(t)
+	if err := fixture.Coverage.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fixture.Coverage.CoveredSemanticScopes, replicaStateCompleteSpaceScopes) {
+		t.Fatal("complete-space semantic scope mismatch")
+	}
+	if len(fixture.Coverage.Sidecars) != len(replicaStateCompleteSpaceSidecarKinds) {
+		t.Fatal("complete-space sidecar count mismatch")
+	}
+	references := make([]ReplicaStateBlobReference, 0, len(fixture.Coverage.Sidecars))
+	for index, sidecar := range fixture.Coverage.Sidecars {
+		if sidecar.Kind != replicaStateCompleteSpaceSidecarKinds[index] {
+			t.Fatalf("sidecar kind %d=%s", index, sidecar.Kind)
+		}
+		references = append(references, ReplicaStateBlobReference{
+			BlobID: sidecar.Digest, ByteCount: sidecar.ByteCount,
+		})
+	}
+	sort.Slice(references, func(i, j int) bool { return references[i].BlobID < references[j].BlobID })
+	root := ReplicaStateRoot{
+		Version:              ReplicaStateVersion,
+		DomainID:             "portable-complete-space",
+		KeyEpoch:             1,
+		CapturedCoreRevision: 7,
+		CoveredClock:         ReplicaStateCausalClock{Counters: map[string]uint64{"fixture-device": 1}},
+		Coverage:             fixture.Coverage,
+		Pieces: []ReplicaStatePieceDescriptor{{
+			PieceID:                "0G_PuACy792gbilqXy7FJbgb8EGYDlLasljwluqgA5s",
+			ByteCount:              512,
+			RequiredBlobReferences: references,
+			ItemCount:              5,
+		}},
+		CapturedAtMilliseconds: 1,
+	}
+	if err := root.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	missing := root
+	missing.Pieces = slices.Clone(root.Pieces)
+	missing.Pieces[0].RequiredBlobReferences = slices.Clone(references[:len(references)-1])
+	if err := missing.Validate(); err == nil {
+		t.Fatal("complete-space root accepted a missing sidecar blob")
+	}
+
+	reordered := fixture.Coverage
+	reordered.Sidecars = slices.Clone(fixture.Coverage.Sidecars)
+	slices.Reverse(reordered.Sidecars)
+	if err := reordered.Validate(); err == nil {
+		t.Fatal("complete-space coverage accepted reordered sidecars")
+	}
+
+	excluded := fixture.Coverage
+	excluded.ExcludedDurableScopes = []string{"facets.document-library"}
+	if err := excluded.Validate(); err == nil {
+		t.Fatal("complete-space coverage accepted a durable exclusion")
+	}
+}
+
 func loadPortableReplicaStateFixture(t *testing.T) portableReplicaStateFixture {
 	t.Helper()
 	path := filepath.Join("..", "testfixture", "replica-state-root-portable-v2.json")
@@ -293,6 +361,20 @@ func loadPortableReplicaStateFixture(t *testing.T) portableReplicaStateFixture {
 		t.Fatal(err)
 	}
 	var fixture portableReplicaStateFixture
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func loadPortableCompleteSpaceCoverageFixture(t *testing.T) portableCompleteSpaceCoverageFixture {
+	t.Helper()
+	path := filepath.Join("..", "testfixture", "replica-complete-space-coverage-portable-v1.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture portableCompleteSpaceCoverageFixture
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}

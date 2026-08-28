@@ -1,0 +1,84 @@
+{
+  "format": "Facets replica complete-space coverage portable fixture v1",
+  "warning": "This fixture proves portable inventory validation only. It does not authorize package replacement.",
+  "coverage": {
+    "version": 1,
+    "profile": "facets.replica-state.complete-space.v1",
+    "canonicalModelTypes": [
+      {
+        "modelTypeRaw": 4,
+        "itemCount": 3
+      },
+      {
+        "modelTypeRaw": 35,
+        "itemCount": 2
+      }
+    ],
+    "coveredSemanticScopes": [
+      "facets.annotations",
+      "facets.canonical-objects",
+      "facets.category-definitions",
+      "facets.category-memberships",
+      "facets.document-library",
+      "facets.extension-schemas",
+      "facets.extensions",
+      "facets.lenses",
+      "facets.media",
+      "facets.ordered-compositions",
+      "facets.portable-analytics",
+      "facets.relationships",
+      "facets.workspace-designs"
+    ],
+    "sidecars": [
+      {
+        "kind": "facets.category-definitions",
+        "digest": "mFfT6PQUI3F3vg1SBQsN4Y8ES_nSa-3WZWfbJ4H5DHQ",
+        "byteCount": 101,
+        "itemCount": 4
+      },
+      {
+        "kind": "facets.category-memberships",
+        "digest": "gXnl_mdA3L_O2aU3Nd5YJB17xVw8XfvA8HSLLPn0hlU",
+        "byteCount": 102,
+        "itemCount": 12
+      },
+      {
+        "kind": "facets.document-library",
+        "digest": "pYiqyH1Cit8yGq5VADM7_tdiWVwABahiuRmuXJlDmKY",
+        "byteCount": 103,
+        "itemCount": 2
+      },
+      {
+        "kind": "facets.extension-schemas",
+        "digest": "9iS1MOPxAZOgv6TOjumP87f3LsMEhcG6mTwOH-hijE8",
+        "byteCount": 104,
+        "itemCount": 1
+      },
+      {
+        "kind": "facets.lenses",
+        "digest": "neBEVdW7X1_y9L6wbBIpcNeAH_ANeYd6CDlKzsS58TY",
+        "byteCount": 105,
+        "itemCount": 2
+      },
+      {
+        "kind": "facets.ordered-compositions",
+        "digest": "vb-NMnM1hVJ11GCwI_DHkHsRD8skTpQgPO-NKSuOmaE",
+        "byteCount": 106,
+        "itemCount": 2
+      },
+      {
+        "kind": "facets.portable-analytics",
+        "digest": "zqEQCsfMnY3z-t1cC5Ale_-2dZlVHqd0bgYBCJ9Nk2A",
+        "byteCount": 107,
+        "itemCount": 5
+      },
+      {
+        "kind": "facets.workspace-designs",
+        "digest": "Irg1OF3JZxHOYKTZ8mncCM9-xepjZop4TuE2-QaekVw",
+        "byteCount": 108,
+        "itemCount": 3
+      }
+    ],
+    "excludedDurableScopes": []
+  }
+}

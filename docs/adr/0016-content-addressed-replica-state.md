@@ -67,6 +67,32 @@ The Go types and fixture tests prove cross-language encoding and digest parity.
 They are not called by FacetsNode request handling and do not authorize the
 server to decode client state.
 
+Complete-Space coverage has a separate byte-identical inventory fixture:
+
+```text
+Facets/Packages/FacetsDeveloperKit/Tests/FacetsFEFTests/Fixtures/replica-complete-space-coverage-portable-v1.json
+FacetsNode/internal/testfixture/replica-complete-space-coverage-portable-v1.json
+```
+
+Its exact-file SHA-256 is:
+
+```text
+b1577db9c246a2558756f3087258825a176099fb0685fb7d289b6ae989fcd74a
+```
+
+The complete inventory requires canonical objects (including Text, Document,
+and Annotation), relationships, extensions, media, and exact content-addressed
+sidecars for category definitions and memberships, the active and archived
+Document library, extension schemas, Lenses, ordered compositions and snapshot
+sets, portable analytics, and Workspace designs. Device-private settings,
+credentials, queues, caches, Document undo history, and local Assistant
+conversation state are outside the portable semantic Space.
+
+This contract is not a release gate by itself. Production capture still emits
+`canonical-core.v1`; the client replacement predicate and public FacetsNode
+rebootstrap routes remain disabled until every sidecar is typed, validated, and
+applied atomically into a demonstrably empty staging package.
+
 ## Digest encoding
 
 `referenceDigest` is unpadded base64url SHA-256 over the domain separator
