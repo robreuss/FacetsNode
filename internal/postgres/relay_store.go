@@ -1151,7 +1151,23 @@ func (s *RelayStore) Fetch(
 		FROM relay_messages
 		WHERE tenant_id = $1 AND domain_id = $2
 		  AND domain_sequence > $3 AND domain_sequence <= $4
-		  AND publisher_subscription_id <> $5
+		  AND (
+		      publisher_subscription_id <> $5
+		      OR EXISTS (
+		          SELECT 1
+		          FROM relay_subscription_rebootstrap_requests r
+		          JOIN relay_subscriptions s
+		            ON s.tenant_id=r.tenant_id AND s.domain_id=r.domain_id
+		           AND s.subscription_id=r.subscription_id
+		          WHERE r.tenant_id=relay_messages.tenant_id
+		            AND r.domain_id=relay_messages.domain_id
+		            AND r.subscription_id=$5
+		            AND s.status='rebootstrap_required'
+		            AND s.start_sequence=$3
+		            AND r.result_start_sequence=s.start_sequence
+		            AND r.result_updated_at_milliseconds=s.updated_at_milliseconds
+		      )
+		  )
 		  AND (checkpoint_fence_id IS NULL OR EXISTS (
 		      SELECT 1 FROM relay_checkpoint_fences f
 		      WHERE f.tenant_id=relay_messages.tenant_id AND f.domain_id=relay_messages.domain_id

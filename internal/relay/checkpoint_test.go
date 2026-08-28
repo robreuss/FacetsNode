@@ -446,6 +446,35 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	if duplicate, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_610); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != completed.Subscription {
 		t.Fatalf("rebootstrap completion retry=%+v err=%v", duplicate, err)
 	}
+	// A publisher restoring its own discarded replica must receive the exact
+	// checkpoint bytes it previously published. Ordinary active delivery still
+	// suppresses same-subscription echoes.
+	publisherRequest := relay.SubscriptionRebootstrapRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		RootMessageID: retained.MessageID, RequestedAtMilliseconds: 1_611,
+	}
+	if requested, err := store.RequestSubscriptionRebootstrap(ctx, publisher, publisherRequest, 1_611); err != nil || requested.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("publisher rebootstrap request=%+v err=%v", requested, err)
+	}
+	publisherFetch, err := store.Fetch(ctx, publisher, relay.MaximumSequence, 10, 1_612)
+	if err != nil || len(publisherFetch.Messages) != 1 || publisherFetch.Messages[0].Envelope.MessageID != retained.MessageID {
+		t.Fatalf("publisher rebootstrap fetch=%+v err=%v", publisherFetch, err)
+	}
+	if _, err := store.Acknowledge(ctx, publisher, retained.MessageID, relay.AcknowledgmentAccepted, 1_613); err != nil {
+		t.Fatalf("publisher rebootstrap accepted receipt err=%v", err)
+	}
+	if _, err := store.Acknowledge(ctx, publisher, retained.MessageID, relay.AcknowledgmentApplied, 1_614); err != nil {
+		t.Fatalf("publisher rebootstrap applied receipt err=%v", err)
+	}
+	publisherCompletion := relay.SubscriptionRebootstrapCompletion{
+		RetryID: uuid.New(), RequestRetryID: publisherRequest.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: retained.MessageID,
+		CompletedThroughCursor:  relay.EncodeCursor(publisherFetch.NextSequence),
+		CompletedAtMilliseconds: 1_615,
+	}
+	if completed, err := store.CompleteSubscriptionRebootstrap(ctx, publisher, publisherCompletion, 1_615); err != nil || completed.Subscription.Status != relay.SubscriptionActive {
+		t.Fatalf("publisher rebootstrap completion=%+v err=%v", completed, err)
+	}
 	eligible, err := store.DryRunCheckpointCollection(ctx, admin, relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID})
 	if err != nil || !eligible.Eligible {
 		t.Fatalf("eligible=%+v err=%v first=%s", eligible, err, first.MessageID)
@@ -453,8 +482,8 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	recoveredPublish := retained
 	recoveredPublish.MessageID = uuid.New()
 	recoveredPublish.PublisherMemberID = recipient.MemberID
-	recoveredPublish.CreatedAtMilliseconds = 1_611
-	if _, err := store.Publish(ctx, recipient, recoveredPublish, 1_611); err != nil {
+	recoveredPublish.CreatedAtMilliseconds = 1_616
+	if _, err := store.Publish(ctx, recipient, recoveredPublish, 1_616); err != nil {
 		t.Fatalf("rebootstrap publish after completion err=%v", err)
 	}
 }
@@ -554,7 +583,7 @@ func checkpointMemoryFixture(t *testing.T) (*relay.MemoryStore, relay.Administra
 	publisher := relay.Credential{TenantID: tenantID, DomainID: domainID, MemberID: uuid.New(), Token: token(91)}
 	publisherDigest, _ := relay.AuthorizationDigest(publisher)
 	store := relay.NewMemoryStore()
-	_, err = store.CreateDomain(ctx, relay.DomainRegistration{Version: 1, TenantID: tenantID, DomainID: domainID, AdministrationDigest: adminDigest, CreatedAtMilliseconds: 1_000, MaximumMessageCount: 100, MaximumMessageByteCount: 1_000_000, MaximumBlobCount: 100, MaximumBlobByteCount: 1_000_000}, relay.MemberRegistration{Version: 1, TenantID: tenantID, DomainID: domainID, MemberID: publisher.MemberID, AuthorizationDigest: publisherDigest, Capabilities: []relay.Capability{relay.CapabilityPublishBlob, relay.CapabilityPublishCheckpoint, relay.CapabilityPublishMessage}, CreatedAtMilliseconds: 1_000})
+	_, err = store.CreateDomain(ctx, relay.DomainRegistration{Version: 1, TenantID: tenantID, DomainID: domainID, AdministrationDigest: adminDigest, CreatedAtMilliseconds: 1_000, MaximumMessageCount: 100, MaximumMessageByteCount: 1_000_000, MaximumBlobCount: 100, MaximumBlobByteCount: 1_000_000}, relay.MemberRegistration{Version: 1, TenantID: tenantID, DomainID: domainID, MemberID: publisher.MemberID, AuthorizationDigest: publisherDigest, Capabilities: []relay.Capability{relay.CapabilityPublishBlob, relay.CapabilityPublishCheckpoint, relay.CapabilityAcknowledgeMessage, relay.CapabilityFetchMessage, relay.CapabilityPublishMessage}, CreatedAtMilliseconds: 1_000})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1719,8 +1719,11 @@ func (s *MemoryStore) Fetch(
 		}
 	}
 	for _, stored := range domain.messages {
-		if stored.message.Sequence <= afterSequence ||
-			stored.publisherSubscription == subscription.SubscriptionID {
+		if stored.message.Sequence <= afterSequence {
+			continue
+		}
+		if stored.publisherSubscription == subscription.SubscriptionID &&
+			!memoryOwnMessageIsInAuthorizedRecovery(domain, subscription, stored) {
 			continue
 		}
 		if stored.checkpointFenceID != nil {

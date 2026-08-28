@@ -56,6 +56,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		MemberID: publisher.MemberID, AuthorizationDigest: publisherDigest,
 		Capabilities: []relay.Capability{
 			relay.CapabilityPublishBlob, relay.CapabilityPublishCheckpoint,
+			relay.CapabilityAcknowledgeMessage, relay.CapabilityFetchMessage,
 			relay.CapabilityPublishMessage,
 		},
 		CreatedAtMilliseconds: 1_000,
@@ -357,6 +358,39 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	}
 	if duplicate, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_256); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != completed.Subscription {
 		t.Fatalf("rebootstrap completion retry=%+v err=%v", duplicate, err)
+	}
+	// Recovery is also valid when the discarded replica belongs to the
+	// checkpoint publisher. Its own retained ciphertext must be visible only
+	// for this exact, server-bound rebootstrap interval.
+	publisherRequest := relay.SubscriptionRebootstrapRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		RootMessageID: retainedSuffix.MessageID, RequestedAtMilliseconds: 1_257,
+	}
+	if requested, err := store.RequestSubscriptionRebootstrap(ctx, publisher, publisherRequest, 1_257); err != nil || requested.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("publisher rebootstrap request=%+v err=%v", requested, err)
+	}
+	publisherFetch, err := store.Fetch(ctx, publisher, relay.MaximumSequence, 10, 1_258)
+	if err != nil || len(publisherFetch.Messages) != 2 ||
+		publisherFetch.Messages[0].Envelope.MessageID != retainedSuffix.MessageID ||
+		publisherFetch.Messages[1].Envelope.MessageID != third.MessageID {
+		t.Fatalf("publisher rebootstrap fetch=%+v err=%v", publisherFetch, err)
+	}
+	for _, message := range publisherFetch.Messages {
+		if _, err := store.Acknowledge(ctx, publisher, message.Envelope.MessageID, relay.AcknowledgmentAccepted, 1_259); err != nil {
+			t.Fatalf("publisher rebootstrap accepted acknowledgment err=%v", err)
+		}
+		if _, err := store.Acknowledge(ctx, publisher, message.Envelope.MessageID, relay.AcknowledgmentApplied, 1_260); err != nil {
+			t.Fatalf("publisher rebootstrap applied acknowledgment err=%v", err)
+		}
+	}
+	publisherCompletion := relay.SubscriptionRebootstrapCompletion{
+		RetryID: uuid.New(), RequestRetryID: publisherRequest.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: retainedSuffix.MessageID,
+		CompletedThroughCursor:  relay.EncodeCursor(publisherFetch.NextSequence),
+		CompletedAtMilliseconds: 1_261,
+	}
+	if completed, err := store.CompleteSubscriptionRebootstrap(ctx, publisher, publisherCompletion, 1_261); err != nil || completed.Subscription.Status != relay.SubscriptionActive {
+		t.Fatalf("publisher rebootstrap completion=%+v err=%v", completed, err)
 	}
 
 	plan, err := store.DryRunCheckpointCollection(ctx, admin, relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID})
