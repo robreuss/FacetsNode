@@ -999,6 +999,42 @@ func latestActivatedCheckpointStart(ctx context.Context, q relayQuerier, tenantI
 	return sequence, nil
 }
 
+func activatedCheckpointRecoverySelection(
+	ctx context.Context,
+	q relayQuerier,
+	tenantID, domainID, checkpointID, rootMessageID uuid.UUID,
+) (*int64, bool, error) {
+	var sequence *int64
+	var isLatest bool
+	err := q.QueryRow(ctx, `
+		SELECT c.start_sequence,
+		       c.activation_ordinal = (
+		           SELECT max(latest.activation_ordinal)
+		           FROM relay_checkpoints latest
+		           WHERE latest.tenant_id=c.tenant_id
+		             AND latest.domain_id=c.domain_id
+		             AND latest.state='activated'
+		       )
+		FROM relay_checkpoints c
+		WHERE c.tenant_id=$1 AND c.domain_id=$2 AND c.checkpoint_id=$3
+		  AND c.state='activated'
+		  AND EXISTS (
+		      SELECT 1 FROM relay_checkpoint_retained_messages retained
+		      WHERE retained.tenant_id=c.tenant_id
+		        AND retained.domain_id=c.domain_id
+		        AND retained.checkpoint_id=c.checkpoint_id
+		        AND retained.message_id=$4
+		  )
+	`, tenantID, domainID, checkpointID, rootMessageID).Scan(&sequence, &isLatest)
+	if err == pgx.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("load activated recovery checkpoint/root: %w", err)
+	}
+	return sequence, isLatest, nil
+}
+
 func loadSubscriptionStatus(ctx context.Context, q relayQuerier, tenantID, domainID, subscriptionID uuid.UUID, lock string) (relay.SubscriptionStatus, error) {
 	var status relay.SubscriptionStatus
 	err := q.QueryRow(ctx, `SELECT status FROM relay_subscriptions WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3 `+lock, tenantID, domainID, subscriptionID).Scan(&status)

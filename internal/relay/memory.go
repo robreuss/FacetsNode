@@ -1250,31 +1250,62 @@ func (s *MemoryStore) RequestSubscriptionRebootstrap(
 	}
 	if existing, ok := domain.rebootstrapRequests[request.RetryID]; ok {
 		if existing.subscriptionID == subscription.SubscriptionID && existing.request == request {
-			return SubscriptionRebootstrapResponse{Acceptance: AcceptanceDuplicate, RetryID: request.RetryID, Subscription: existing.result}, nil
+			return SubscriptionRebootstrapResponse{
+				Acceptance: AcceptanceDuplicate, RetryID: request.RetryID,
+				CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
+				Subscription: existing.result,
+			}, nil
 		}
 		return SubscriptionRebootstrapResponse{}, protocolError(CodeSubscriptionCollision, "subscription rebootstrap retry ID was reused")
 	}
 	if subscription.Status == SubscriptionRevoked {
 		return SubscriptionRebootstrapResponse{}, protocolError(CodeSubscriptionNotFound, "revoked subscription cannot rebootstrap")
 	}
+	checkpoint := domain.checkpoints[request.CheckpointID]
+	if checkpoint == nil || checkpoint.state != "activated" ||
+		!checkpointRetainsMessage(checkpoint, request.RootMessageID) {
+		return SubscriptionRebootstrapResponse{}, protocolError(CodeCheckpointUnavailable, "authorized recovery checkpoint/root is unavailable")
+	}
 	if subscription.Status == SubscriptionRebootstrapRequired {
+		if subscription.StartCursor == nil {
+			return SubscriptionRebootstrapResponse{}, protocolError(CodeInvalidSubscription, "rebootstrap subscription has no checkpoint cursor")
+		}
+		startSequence, err := DecodeCursor(*subscription.StartCursor)
+		selectionMatches, selectionExists := rebootstrapSelectionMatches(
+			domain, subscription.SubscriptionID, request,
+		)
+		checkpointIsLatest := len(domain.activatedCheckpoints) > 0 &&
+			domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1] == request.CheckpointID
+		if err != nil || startSequence != checkpoint.startSequence ||
+			!selectionMatches || (!selectionExists && !checkpointIsLatest) {
+			return SubscriptionRebootstrapResponse{}, protocolError(CodeSubscriptionCollision, "subscription recovery is already bound to another checkpoint/root")
+		}
 		domain.rebootstrapRequests[request.RetryID] = memorySubscriptionRebootstrapRequest{
 			subscriptionID: subscription.SubscriptionID, request: request, result: subscription,
 		}
-		return SubscriptionRebootstrapResponse{Acceptance: AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription}, nil
+		return SubscriptionRebootstrapResponse{
+			Acceptance: AcceptanceAccepted, RetryID: request.RetryID,
+			CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
+			Subscription: subscription,
+		}, nil
 	}
-	startCursor := latestCheckpointStartCursor(domain)
-	if startCursor == nil {
-		return SubscriptionRebootstrapResponse{}, protocolError(CodeCheckpointUnavailable, "no activated checkpoint is available for replica recovery")
+	if len(domain.activatedCheckpoints) == 0 ||
+		domain.activatedCheckpoints[len(domain.activatedCheckpoints)-1] != request.CheckpointID {
+		return SubscriptionRebootstrapResponse{}, protocolError(CodeCheckpointUnavailable, "authorized recovery checkpoint is not the latest activated checkpoint")
 	}
+	startCursor := EncodeCursor(checkpoint.startSequence)
 	subscription.Status = SubscriptionRebootstrapRequired
-	subscription.StartCursor = startCursor
+	subscription.StartCursor = &startCursor
 	subscription.UpdatedAtMilliseconds = nowMilliseconds
 	domain.subscriptions[subscription.SubscriptionID] = subscription
 	domain.rebootstrapRequests[request.RetryID] = memorySubscriptionRebootstrapRequest{
 		subscriptionID: subscription.SubscriptionID, request: request, result: subscription,
 	}
-	return SubscriptionRebootstrapResponse{Acceptance: AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription}, nil
+	return SubscriptionRebootstrapResponse{
+		Acceptance: AcceptanceAccepted, RetryID: request.RetryID,
+		CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
+		Subscription: subscription,
+	}, nil
 }
 
 // CompleteSubscriptionRebootstrap restores publication only after every
@@ -1307,12 +1338,23 @@ func (s *MemoryStore) CompleteSubscriptionRebootstrap(
 	}
 	if existing, ok := domain.rebootstrapCompletions[completion.RetryID]; ok {
 		if existing.subscriptionID == subscription.SubscriptionID && existing.request == completion {
-			return SubscriptionRebootstrapCompletionResponse{Acceptance: AcceptanceDuplicate, RetryID: completion.RetryID, Subscription: existing.result}, nil
+			return SubscriptionRebootstrapCompletionResponse{
+				Acceptance: AcceptanceDuplicate, RetryID: completion.RetryID,
+				RequestRetryID: completion.RequestRetryID,
+				CheckpointID:   completion.CheckpointID, RootMessageID: completion.RootMessageID,
+				Subscription: existing.result,
+			}, nil
 		}
 		return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeSubscriptionCollision, "subscription rebootstrap completion retry ID was reused")
 	}
 	if subscription.Status != SubscriptionRebootstrapRequired || subscription.StartCursor == nil {
 		return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeInvalidSubscription, "subscription is not awaiting rebootstrap completion")
+	}
+	recoveryRequest, ok := domain.rebootstrapRequests[completion.RequestRetryID]
+	if !ok || recoveryRequest.subscriptionID != subscription.SubscriptionID ||
+		recoveryRequest.request.CheckpointID != completion.CheckpointID ||
+		recoveryRequest.request.RootMessageID != completion.RootMessageID {
+		return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeSubscriptionCollision, "rebootstrap completion does not match its authorized checkpoint/root")
 	}
 	startSequence, err := DecodeCursor(*subscription.StartCursor)
 	if err != nil {
@@ -1346,7 +1388,39 @@ func (s *MemoryStore) CompleteSubscriptionRebootstrap(
 		request:               completion,
 		result:                subscription,
 	}
-	return SubscriptionRebootstrapCompletionResponse{Acceptance: AcceptanceAccepted, RetryID: completion.RetryID, Subscription: subscription}, nil
+	return SubscriptionRebootstrapCompletionResponse{
+		Acceptance: AcceptanceAccepted, RetryID: completion.RetryID,
+		RequestRetryID: completion.RequestRetryID,
+		CheckpointID:   completion.CheckpointID, RootMessageID: completion.RootMessageID,
+		Subscription: subscription,
+	}, nil
+}
+
+func checkpointRetainsMessage(checkpoint *memoryCheckpoint, messageID uuid.UUID) bool {
+	for _, retainedID := range checkpoint.candidate.RetainedMessageIDs {
+		if retainedID == messageID {
+			return true
+		}
+	}
+	return false
+}
+
+func rebootstrapSelectionMatches(
+	domain *memoryDomain,
+	subscriptionID uuid.UUID,
+	request SubscriptionRebootstrapRequest,
+) (matches bool, exists bool) {
+	for _, existing := range domain.rebootstrapRequests {
+		if existing.subscriptionID != subscriptionID {
+			continue
+		}
+		exists = true
+		if existing.request.CheckpointID != request.CheckpointID ||
+			existing.request.RootMessageID != request.RootMessageID {
+			return false, true
+		}
+	}
+	return true, exists
 }
 
 func (s *MemoryStore) RevokeTenantMemberships(

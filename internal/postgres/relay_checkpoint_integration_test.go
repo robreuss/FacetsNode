@@ -252,13 +252,65 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	// checkpoint tail, even when it asks with a stale cursor beyond the tail.
 	// It remains unable to publish until an explicit, later rebootstrap
 	// completion moves it back to active.
-	rebootstrapRequest := relay.SubscriptionRebootstrapRequest{RetryID: uuid.New(), RequestedAtMilliseconds: 1_252}
+	rebootstrapRequest := relay.SubscriptionRebootstrapRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		RootMessageID: retainedSuffix.MessageID, RequestedAtMilliseconds: 1_252,
+	}
+	wrongRecoveryRoot := rebootstrapRequest
+	wrongRecoveryRoot.RetryID = uuid.New()
+	wrongRecoveryRoot.RootMessageID = uuid.New()
+	if _, err := store.RequestSubscriptionRebootstrap(ctx, recipient, wrongRecoveryRoot, 1_252); !relay.ErrorHasCode(err, relay.CodeCheckpointUnavailable) {
+		t.Fatalf("unretained recovery root err=%v", err)
+	}
 	rebootstrap, err := store.RequestSubscriptionRebootstrap(ctx, recipient, rebootstrapRequest, 1_252)
-	if err != nil || rebootstrap.Acceptance != relay.AcceptanceAccepted || rebootstrap.Subscription.StartCursor == nil || *rebootstrap.Subscription.StartCursor != activatedResponse.StartCursor {
+	if err != nil || rebootstrap.Acceptance != relay.AcceptanceAccepted ||
+		rebootstrap.CheckpointID != candidate.CheckpointID ||
+		rebootstrap.RootMessageID != retainedSuffix.MessageID ||
+		rebootstrap.Subscription.StartCursor == nil || *rebootstrap.Subscription.StartCursor != activatedResponse.StartCursor {
 		t.Fatalf("rebootstrap request=%+v err=%v", rebootstrap, err)
 	}
 	if duplicate, err := store.RequestSubscriptionRebootstrap(ctx, recipient, rebootstrapRequest, 1_252); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || !reflect.DeepEqual(duplicate.Subscription, rebootstrap.Subscription) {
 		t.Fatalf("rebootstrap request retry=%+v err=%v", duplicate, err)
+	}
+	recoveryFenceRequest := relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(),
+		RequestedAtMilliseconds: 1_262,
+	}
+	recoveryFence, err := store.CreateCheckpointFence(
+		ctx, publisher, recoveryFenceRequest, 1_262,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoverySuffix := retainedSuffix
+	recoverySuffix.MessageID = uuid.New()
+	recoverySuffix.CreatedAtMilliseconds = 1_263
+	if _, err := store.Publish(ctx, publisher, recoverySuffix, 1_263); err != nil {
+		t.Fatal(err)
+	}
+	recoveryCandidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: recoveryFence.FenceID, TenantID: tenantID, DomainID: domainID,
+		PublisherSubscriptionID: publisher.MemberID, KeyEpoch: 1,
+		CoveredThroughCursor:  recoveryFence.BoundaryCursor,
+		RetainedMessageIDs:    []uuid.UUID{recoverySuffix.MessageID},
+		CreatedAtMilliseconds: 1_264,
+	}
+	if _, err := store.StageCheckpoint(ctx, publisher, recoveryCandidate, 1_264); err != nil {
+		t.Fatal(err)
+	}
+	blockedRecoveryActivation := relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: recoveryCandidate.CheckpointID,
+		ActivatedAtMilliseconds: 1_265,
+	}
+	if _, err := store.ActivateCheckpoint(ctx, admin, blockedRecoveryActivation, 1_265); !relay.ErrorHasCode(err, relay.CodeCheckpointNotEligible) {
+		t.Fatalf("postgres checkpoint activation during bound recovery err=%v", err)
+	}
+	if _, err := store.AbortCheckpointFence(ctx, publisher, relay.CheckpointFenceAbortRequest{
+		RetryID: uuid.New(), FenceID: recoveryFence.FenceID,
+		AbortedAtMilliseconds: 1_266,
+	}, 1_266); err != nil {
+		t.Fatal(err)
 	}
 	rebootstrapFetch, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_252)
 	if err != nil || len(rebootstrapFetch.Messages) != 2 ||
@@ -278,7 +330,18 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 			t.Fatalf("rebootstrap accepted acknowledgment=%+v err=%v", acknowledgment, err)
 		}
 	}
-	completion := relay.SubscriptionRebootstrapCompletion{RetryID: uuid.New(), CompletedThroughCursor: relay.EncodeCursor(rebootstrapFetch.NextSequence), CompletedAtMilliseconds: 1_253}
+	completion := relay.SubscriptionRebootstrapCompletion{
+		RetryID: uuid.New(), RequestRetryID: rebootstrapRequest.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: retainedSuffix.MessageID,
+		CompletedThroughCursor:  relay.EncodeCursor(rebootstrapFetch.NextSequence),
+		CompletedAtMilliseconds: 1_253,
+	}
+	substitutedCompletion := completion
+	substitutedCompletion.RetryID = uuid.New()
+	substitutedCompletion.CheckpointID = uuid.New()
+	if _, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, substitutedCompletion, 1_253); !relay.ErrorHasCode(err, relay.CodeSubscriptionCollision) {
+		t.Fatalf("substituted recovery completion err=%v", err)
+	}
 	if _, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_253); !relay.ErrorHasCode(err, relay.CodeRebootstrapIncomplete) {
 		t.Fatalf("incomplete rebootstrap completion err=%v", err)
 	}

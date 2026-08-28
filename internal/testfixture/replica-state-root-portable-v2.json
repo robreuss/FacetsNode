@@ -77,13 +77,14 @@
     ],
     "capturedAtMilliseconds": 1787875200000
   },
-  "expectedRootDigest": "5f4E9Y-MaQ9_Pb0oSo6wO8K_bW0Ma-pLZejWbxHcxDk",
+  "expectedRootDigest": "idK-exS4oJ81Yeae_4DBQ58BNI0i790AJMAX-pFU2mk",
   "successorRoot": {
     "version": 2,
     "domainID": "11111111-2222-3333-4444-555555555555",
     "keyEpoch": 7,
     "capturedCoreRevision": 42,
-    "predecessorRootDigest": "5f4E9Y-MaQ9_Pb0oSo6wO8K_bW0Ma-pLZejWbxHcxDk",
+    "checkpointID": "40000000-0000-4000-8000-000000000004",
+    "predecessorRootDigest": "idK-exS4oJ81Yeae_4DBQ58BNI0i790AJMAX-pFU2mk",
     "coveredClock": {
       "counters": {
         "device-a": 13,
@@ -154,5 +155,5 @@
     ],
     "capturedAtMilliseconds": 1787875260000
   },
-  "expectedSuccessorRootDigest": "FsQlsllOZ8dBXERPVxKXOZq0uAVsJmVGZA_PrM4An38"
+  "expectedSuccessorRootDigest": "mhpkWi6qlCsQKk0kfkokpL2a8Rr7AyAhK5fKuNLPEdE"
 }

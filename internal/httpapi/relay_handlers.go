@@ -402,6 +402,13 @@ func (s *Server) handleRequestRelaySubscriptionRebootstrap(writer http.ResponseW
 		s.writeError(writer, err)
 		return
 	}
+	if !relay.CompleteSpaceRebootstrapEnabled {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeCheckpointUnavailable,
+			"complete Space rebootstrap is not enabled",
+		))
+		return
+	}
 	var input relay.SubscriptionRebootstrapRequest
 	if err := readRelayJSON(writer, request, &input, maximumRequestByteCount); err != nil {
 		s.writeError(writer, err)
@@ -429,6 +436,13 @@ func (s *Server) handleCompleteRelaySubscriptionRebootstrap(writer http.Response
 	credential, err := relayCredentialFromRequest(request, tenantID, domainID)
 	if err != nil {
 		s.writeError(writer, err)
+		return
+	}
+	if !relay.CompleteSpaceRebootstrapEnabled {
+		s.writeError(writer, relay.NewProtocolError(
+			relay.CodeCheckpointUnavailable,
+			"complete Space rebootstrap is not enabled",
+		))
 		return
 	}
 	var input relay.SubscriptionRebootstrapCompletion

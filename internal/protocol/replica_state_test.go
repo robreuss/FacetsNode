@@ -87,6 +87,7 @@ func TestReplicaStateAllowsRevisionZeroAndIgnoresSenderCaptureTime(t *testing.T)
 		t.Fatal(err)
 	}
 	sameRevisionSuccessor := fixture.Root
+	sameRevisionSuccessor.CheckpointID = fixture.SuccessorRoot.CheckpointID
 	sameRevisionSuccessor.PredecessorRootDigest = &digest
 	sameRevisionSuccessor.CapturedAtMilliseconds = 0
 	if err := sameRevisionSuccessor.ValidateSuccessor(fixture.Root); err != nil {
@@ -97,6 +98,39 @@ func TestReplicaStateAllowsRevisionZeroAndIgnoresSenderCaptureTime(t *testing.T)
 	substituted.Pieces = slices.Clone(fixture.SuccessorRoot.Pieces)
 	if err := substituted.ValidateSuccessor(fixture.Root); err == nil {
 		t.Fatal("same-revision piece substitution accepted")
+	}
+}
+
+func TestReplicaStateBindsCheckpointIdentity(t *testing.T) {
+	fixture := loadPortableReplicaStateFixture(t)
+	if fixture.Root.CheckpointID != nil || fixture.SuccessorRoot.CheckpointID == nil {
+		t.Fatal("fixture checkpoint identity shape is invalid")
+	}
+
+	omitted := fixture.SuccessorRoot
+	omitted.CheckpointID = nil
+	if err := omitted.Validate(); err == nil {
+		t.Fatal("successor without checkpoint identity accepted")
+	}
+
+	substituted := fixture.SuccessorRoot
+	replacementID := *fixture.SuccessorRoot.CheckpointID
+	replacementID[15] ^= 1
+	substituted.CheckpointID = &replacementID
+	digest, err := substituted.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest == fixture.ExpectedSuccessorRootDigest {
+		t.Fatal("checkpoint substitution did not change root digest")
+	}
+
+	reused := fixture.SuccessorRoot
+	reused.CapturedCoreRevision++
+	reused.PredecessorRootDigest = &fixture.ExpectedSuccessorRootDigest
+	reused.CapturedAtMilliseconds++
+	if err := reused.ValidateSuccessor(fixture.SuccessorRoot); err == nil {
+		t.Fatal("successor checkpoint identity reuse accepted")
 	}
 }
 

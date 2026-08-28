@@ -1126,6 +1126,59 @@ func TestRelaySubscriptionLifecycleStatusAndTenantRotationAreExactRetrySafe(t *t
 	_ = newStatus.Body.Close()
 }
 
+func TestRelayMemberRebootstrapRoutesRemainReleaseGated(t *testing.T) {
+	operatorToken := relayTestToken(240)
+	server, err := NewWithRelay(
+		rendezvous.NewMemoryStore(), relay.NewMemoryStore(), nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), operatorToken,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowMilliseconds := int64(1_000)
+	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
+	handler := server.Handler()
+	authority := provisionRelayTestAuthority(
+		t, handler, operatorToken, nowMilliseconds, 241, 242,
+	)
+	domainRoot := "/v1/relay/tenants/" + authority.Domain.TenantID.String() +
+		"/domains/" + authority.Domain.DomainID.String()
+
+	request := relay.SubscriptionRebootstrapRequest{
+		RetryID: uuid.New(), CheckpointID: uuid.New(), RootMessageID: uuid.New(),
+		RequestedAtMilliseconds: nowMilliseconds,
+	}
+	response := performRelayJSON(
+		t, handler, http.MethodPost, domainRoot+"/subscription-rebootstrap",
+		request, authority.MemberCredential.AuthorizationToken,
+		authority.Member.MemberID,
+	)
+	requireStatus(t, response, http.StatusConflict)
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil || !bytes.Contains(body, []byte(`"code":"checkpoint_unavailable"`)) {
+		t.Fatalf("unexpected rebootstrap release-gate response: %s err=%v", body, err)
+	}
+
+	completion := relay.SubscriptionRebootstrapCompletion{
+		RetryID: uuid.New(), RequestRetryID: request.RetryID,
+		CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
+		CompletedThroughCursor:  relay.EncodeCursor(0),
+		CompletedAtMilliseconds: nowMilliseconds,
+	}
+	response = performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/completion", completion,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, response, http.StatusConflict)
+	body, err = io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil || !bytes.Contains(body, []byte(`"code":"checkpoint_unavailable"`)) {
+		t.Fatalf("unexpected completion release-gate response: %s err=%v", body, err)
+	}
+}
+
 func TestRelayCheckpointHTTPStagesActivatesPlansAndCollects(t *testing.T) {
 	operatorToken := relayTestToken(240)
 	server, err := NewWithRelay(

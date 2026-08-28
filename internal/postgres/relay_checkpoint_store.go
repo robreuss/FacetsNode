@@ -215,6 +215,24 @@ func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.Ad
 	} else if !matches {
 		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpointFence, "checkpoint holder suffix changed")
 	}
+	var recoveryActive bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM relay_subscription_rebootstrap_requests recovery
+			JOIN relay_subscriptions subscription
+			  ON subscription.tenant_id=recovery.tenant_id
+			 AND subscription.domain_id=recovery.domain_id
+			 AND subscription.subscription_id=recovery.subscription_id
+			WHERE recovery.tenant_id=$1 AND recovery.domain_id=$2
+			  AND subscription.status='rebootstrap_required'
+		)
+	`, credential.TenantID, credential.DomainID).Scan(&recoveryActive); err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	if recoveryActive {
+		return relay.CheckpointActivationResponse{}, relay.NewProtocolError(relay.CodeCheckpointNotEligible, "checkpoint activation is blocked by an active client-authorized recovery")
+	}
 	startSequence := covered
 	var previousID uuid.UUID
 	var previousKeyEpoch, previousCovered int64

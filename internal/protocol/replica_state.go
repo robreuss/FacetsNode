@@ -203,6 +203,7 @@ type ReplicaStateRoot struct {
 	DomainID               string                        `json:"domainID"`
 	KeyEpoch               uint64                        `json:"keyEpoch"`
 	CapturedCoreRevision   uint64                        `json:"capturedCoreRevision"`
+	CheckpointID           *uuid.UUID                    `json:"checkpointID,omitempty"`
 	PredecessorRootDigest  *string                       `json:"predecessorRootDigest,omitempty"`
 	CoveredClock           ReplicaStateCausalClock       `json:"coveredClock"`
 	PredecessorMessageIDs  []uuid.UUID                   `json:"predecessorMessageIDs"`
@@ -218,6 +219,10 @@ func (root ReplicaStateRoot) Validate() error {
 		root.KeyEpoch == 0 || root.CapturedAtMilliseconds < 0 || len(root.Pieces) == 0 ||
 		len(root.Pieces) > ReplicaStateMaximumPieceCount ||
 		len(root.CoveredClock.Counters) > ReplicaStateMaximumClockEntryCount {
+		return ErrInvalidReplicaState
+	}
+	if (root.CheckpointID == nil) != (root.PredecessorRootDigest == nil) ||
+		(root.CheckpointID != nil && *root.CheckpointID == uuid.Nil) {
 		return ErrInvalidReplicaState
 	}
 	if root.PredecessorRootDigest != nil && !isReplicaStateDigest(*root.PredecessorRootDigest) {
@@ -328,6 +333,12 @@ func (root ReplicaStateRoot) ReferenceDigest() (string, error) {
 	writeReplicaStateString(&data, root.DomainID)
 	writeReplicaStateUint64(&data, root.KeyEpoch)
 	writeReplicaStateUint64(&data, root.CapturedCoreRevision)
+	if root.CheckpointID == nil {
+		data.WriteByte(0)
+	} else {
+		data.WriteByte(1)
+		data.Write((*root.CheckpointID)[:])
+	}
 	if root.PredecessorRootDigest == nil {
 		data.WriteByte(0)
 	} else {
@@ -407,7 +418,8 @@ func (root ReplicaStateRoot) ValidateSuccessor(predecessor ReplicaStateRoot) err
 		return ErrReplicaStatePredecessor
 	}
 	if root.DomainID != predecessor.DomainID || root.KeyEpoch < predecessor.KeyEpoch ||
-		root.CapturedCoreRevision < predecessor.CapturedCoreRevision {
+		root.CapturedCoreRevision < predecessor.CapturedCoreRevision ||
+		(predecessor.CheckpointID != nil && *root.CheckpointID == *predecessor.CheckpointID) {
 		return ErrInvalidReplicaStateSuccessor
 	}
 	if root.CapturedCoreRevision == predecessor.CapturedCoreRevision &&

@@ -365,39 +365,85 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	if err != nil || blocked.Eligible || len(blocked.MissingCustodySubscriptionIDs) != 1 {
 		t.Fatalf("blocked=%+v err=%v", blocked, err)
 	}
-	request := relay.SubscriptionRebootstrapRequest{RetryID: uuid.New(), RequestedAtMilliseconds: 1_600}
+	request := relay.SubscriptionRebootstrapRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		RootMessageID: retained.MessageID, RequestedAtMilliseconds: 1_600,
+	}
+	wrongRoot := request
+	wrongRoot.RetryID = uuid.New()
+	wrongRoot.RootMessageID = uuid.New()
+	if _, err := store.RequestSubscriptionRebootstrap(ctx, recipient, wrongRoot, 1_600); !relay.ErrorHasCode(err, relay.CodeCheckpointUnavailable) {
+		t.Fatalf("unretained recovery root err=%v", err)
+	}
 	rebootstrap, err := store.RequestSubscriptionRebootstrap(ctx, recipient, request, 1_600)
-	if err != nil || rebootstrap.Subscription.StartCursor == nil || *rebootstrap.Subscription.StartCursor != activation.StartCursor {
+	if err != nil || rebootstrap.CheckpointID != candidate.CheckpointID ||
+		rebootstrap.RootMessageID != retained.MessageID ||
+		rebootstrap.Subscription.StartCursor == nil || *rebootstrap.Subscription.StartCursor != activation.StartCursor {
 		t.Fatalf("rebootstrap=%+v err=%v", rebootstrap, err)
 	}
 	if duplicate, err := store.RequestSubscriptionRebootstrap(ctx, recipient, request, 1_600); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != rebootstrap.Subscription {
 		t.Fatalf("rebootstrap retry=%+v err=%v", duplicate, err)
 	}
+	recoveryFence, recoverySuffix := acquireMemoryFenceAndPublishSuffix(
+		t, store, publisher, retained, 1_601,
+	)
+	recoveryCandidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: recoveryFence.FenceID, TenantID: admin.TenantID,
+		DomainID: admin.DomainID, PublisherSubscriptionID: publisher.MemberID,
+		KeyEpoch: 1, CoveredThroughCursor: recoveryFence.BoundaryCursor,
+		RetainedMessageIDs:    []uuid.UUID{recoverySuffix.MessageID},
+		CreatedAtMilliseconds: 1_603,
+	}
+	if _, err := store.StageCheckpoint(ctx, publisher, recoveryCandidate, 1_603); err != nil {
+		t.Fatal(err)
+	}
+	blockedActivation := relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: recoveryCandidate.CheckpointID,
+		ActivatedAtMilliseconds: 1_604,
+	}
+	if _, err := store.ActivateCheckpoint(ctx, admin, blockedActivation, 1_604); !relay.ErrorHasCode(err, relay.CodeCheckpointNotEligible) {
+		t.Fatalf("checkpoint activation during bound recovery err=%v", err)
+	}
+	if _, err := store.AbortCheckpointFence(ctx, publisher, relay.CheckpointFenceAbortRequest{
+		RetryID: uuid.New(), FenceID: recoveryFence.FenceID,
+		AbortedAtMilliseconds: 1_605,
+	}, 1_605); err != nil {
+		t.Fatal(err)
+	}
 	// A rebootstrap-required subscription is intentionally read-only, but it
 	// must be able to force its stale local cursor back to the checkpoint
 	// boundary and acknowledge the retained ciphertext after durable repair.
-	fetched, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_600)
+	fetched, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_606)
 	if err != nil || len(fetched.Messages) != 1 || fetched.Messages[0].Envelope.MessageID != retained.MessageID {
 		t.Fatalf("rebootstrap fetch=%+v err=%v", fetched, err)
 	}
-	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentAccepted, 1_601); err != nil {
+	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentAccepted, 1_607); err != nil {
 		t.Fatalf("rebootstrap acknowledge err=%v", err)
 	}
 	completion := relay.SubscriptionRebootstrapCompletion{
-		RetryID: uuid.New(), CompletedThroughCursor: relay.EncodeCursor(fetched.NextSequence),
-		CompletedAtMilliseconds: 1_602,
+		RetryID: uuid.New(), RequestRetryID: request.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: retained.MessageID,
+		CompletedThroughCursor:  relay.EncodeCursor(fetched.NextSequence),
+		CompletedAtMilliseconds: 1_608,
 	}
-	if _, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_602); !relay.ErrorHasCode(err, relay.CodeRebootstrapIncomplete) {
+	substitutedCompletion := completion
+	substitutedCompletion.RetryID = uuid.New()
+	substitutedCompletion.RootMessageID = uuid.New()
+	if _, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, substitutedCompletion, 1_608); !relay.ErrorHasCode(err, relay.CodeSubscriptionCollision) {
+		t.Fatalf("substituted recovery completion err=%v", err)
+	}
+	if _, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_608); !relay.ErrorHasCode(err, relay.CodeRebootstrapIncomplete) {
 		t.Fatalf("rebootstrap completion before applied err=%v", err)
 	}
-	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentApplied, 1_603); err != nil {
+	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentApplied, 1_609); err != nil {
 		t.Fatalf("rebootstrap applied receipt err=%v", err)
 	}
-	completed, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_604)
+	completed, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_610)
 	if err != nil || completed.Subscription.Status != relay.SubscriptionActive || completed.Subscription.StartCursor != nil {
 		t.Fatalf("rebootstrap completion=%+v err=%v", completed, err)
 	}
-	if duplicate, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_604); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != completed.Subscription {
+	if duplicate, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_610); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.Subscription != completed.Subscription {
 		t.Fatalf("rebootstrap completion retry=%+v err=%v", duplicate, err)
 	}
 	eligible, err := store.DryRunCheckpointCollection(ctx, admin, relay.CheckpointDryRunRequest{CheckpointID: candidate.CheckpointID})
@@ -407,8 +453,8 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	recoveredPublish := retained
 	recoveredPublish.MessageID = uuid.New()
 	recoveredPublish.PublisherMemberID = recipient.MemberID
-	recoveredPublish.CreatedAtMilliseconds = 1_605
-	if _, err := store.Publish(ctx, recipient, recoveredPublish, 1_605); err != nil {
+	recoveredPublish.CreatedAtMilliseconds = 1_611
+	if _, err := store.Publish(ctx, recipient, recoveredPublish, 1_611); err != nil {
 		t.Fatalf("rebootstrap publish after completion err=%v", err)
 	}
 }

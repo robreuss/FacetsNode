@@ -139,25 +139,36 @@ type SubscriptionStatusChangeResponse struct {
 	Subscription Subscription `json:"subscription"`
 }
 
-// SubscriptionRebootstrapRequest lets an enrolled member fence only its own
-// replica and restart at the relay's latest opaque checkpoint boundary.  The
-// relay selects the cursor; it never inspects the checkpoint payload.
+// CompleteSpaceRebootstrapEnabled remains false until the portable root
+// coverage contract can prove every durable Space scope. Keeping the public
+// member route closed prevents a valid member credential from pinning relay
+// checkpoint administration through an unreleasable recovery attempt.
+const CompleteSpaceRebootstrapEnabled = false
+
+// SubscriptionRebootstrapRequest lets an enrolled member name the exact
+// activated checkpoint/root pair already authorized by its client. The relay
+// validates the opaque identities and selects only the corresponding cursor;
+// it never receives the root digest or inspects the checkpoint payload.
 type SubscriptionRebootstrapRequest struct {
 	RetryID                 uuid.UUID `json:"retryID"`
+	CheckpointID            uuid.UUID `json:"checkpointID"`
+	RootMessageID           uuid.UUID `json:"rootMessageID"`
 	RequestedAtMilliseconds int64     `json:"requestedAtMilliseconds"`
 }
 
 func (r SubscriptionRebootstrapRequest) Validate() error {
-	if r.RetryID == uuid.Nil || r.RequestedAtMilliseconds < 0 {
+	if r.RetryID == uuid.Nil || r.CheckpointID == uuid.Nil || r.RootMessageID == uuid.Nil || r.RequestedAtMilliseconds < 0 {
 		return protocolError(CodeInvalidSubscription, "subscription rebootstrap request is invalid")
 	}
 	return nil
 }
 
 type SubscriptionRebootstrapResponse struct {
-	Acceptance   Acceptance   `json:"acceptance"`
-	RetryID      uuid.UUID    `json:"retryID"`
-	Subscription Subscription `json:"subscription"`
+	Acceptance    Acceptance   `json:"acceptance"`
+	RetryID       uuid.UUID    `json:"retryID"`
+	CheckpointID  uuid.UUID    `json:"checkpointID"`
+	RootMessageID uuid.UUID    `json:"rootMessageID"`
+	Subscription  Subscription `json:"subscription"`
 }
 
 // SubscriptionRebootstrapCompletion is accepted only after the member has
@@ -166,12 +177,17 @@ type SubscriptionRebootstrapResponse struct {
 // can establish delivery completeness without parsing FEF content.
 type SubscriptionRebootstrapCompletion struct {
 	RetryID                 uuid.UUID `json:"retryID"`
+	RequestRetryID          uuid.UUID `json:"requestRetryID"`
+	CheckpointID            uuid.UUID `json:"checkpointID"`
+	RootMessageID           uuid.UUID `json:"rootMessageID"`
 	CompletedThroughCursor  string    `json:"completedThroughCursor"`
 	CompletedAtMilliseconds int64     `json:"completedAtMilliseconds"`
 }
 
 func (r SubscriptionRebootstrapCompletion) Validate() error {
-	if r.RetryID == uuid.Nil || r.CompletedAtMilliseconds < 0 {
+	if r.RetryID == uuid.Nil || r.RequestRetryID == uuid.Nil ||
+		r.CheckpointID == uuid.Nil || r.RootMessageID == uuid.Nil ||
+		r.CompletedAtMilliseconds < 0 {
 		return protocolError(CodeInvalidSubscription, "subscription rebootstrap completion is invalid")
 	}
 	if err := ValidateOpaqueCursor(r.CompletedThroughCursor); err != nil {
@@ -181,9 +197,12 @@ func (r SubscriptionRebootstrapCompletion) Validate() error {
 }
 
 type SubscriptionRebootstrapCompletionResponse struct {
-	Acceptance   Acceptance   `json:"acceptance"`
-	RetryID      uuid.UUID    `json:"retryID"`
-	Subscription Subscription `json:"subscription"`
+	Acceptance     Acceptance   `json:"acceptance"`
+	RetryID        uuid.UUID    `json:"retryID"`
+	RequestRetryID uuid.UUID    `json:"requestRetryID"`
+	CheckpointID   uuid.UUID    `json:"checkpointID"`
+	RootMessageID  uuid.UUID    `json:"rootMessageID"`
+	Subscription   Subscription `json:"subscription"`
 }
 
 // TenantMembershipRevocation is an internal, tenant-authorized operation used
