@@ -1,10 +1,15 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +71,126 @@ func TestReplicaStateRejectsGraphAndSuccessorTampering(t *testing.T) {
 	fork.PredecessorRootDigest = &fixture.ExpectedSuccessorRootDigest
 	if err := fork.ValidateSuccessor(fixture.Root); err == nil {
 		t.Fatal("conflicting predecessor accepted")
+	}
+}
+
+func TestReplicaStateAllowsRevisionZeroAndIgnoresSenderCaptureTime(t *testing.T) {
+	fixture := loadPortableReplicaStateFixture(t)
+	emptyRevision := fixture.Root
+	emptyRevision.CapturedCoreRevision = 0
+	if err := emptyRevision.Validate(); err != nil {
+		t.Fatalf("revision zero rejected: %v", err)
+	}
+
+	digest, err := fixture.Root.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameRevisionSuccessor := fixture.Root
+	sameRevisionSuccessor.PredecessorRootDigest = &digest
+	sameRevisionSuccessor.CapturedAtMilliseconds = 0
+	if err := sameRevisionSuccessor.ValidateSuccessor(fixture.Root); err != nil {
+		t.Fatalf("valid same-revision successor rejected: %v", err)
+	}
+
+	substituted := sameRevisionSuccessor
+	substituted.Pieces = slices.Clone(fixture.SuccessorRoot.Pieces)
+	if err := substituted.ValidateSuccessor(fixture.Root); err == nil {
+		t.Fatal("same-revision piece substitution accepted")
+	}
+}
+
+func TestReplicaStateEnforcesPortableResourceCeilings(t *testing.T) {
+	fixture := loadPortableReplicaStateFixture(t)
+	first := fixture.Root.Pieces[0]
+
+	tooManyPieces := fixture.Root
+	tooManyPieces.Pieces = make(
+		[]ReplicaStatePieceDescriptor,
+		ReplicaStateMaximumPieceCount+1,
+	)
+	for index := range tooManyPieces.Pieces {
+		tooManyPieces.Pieces[index] = first
+	}
+	if err := tooManyPieces.Validate(); err == nil {
+		t.Fatal("piece ceiling not enforced")
+	}
+
+	tooManyDependencies := first
+	tooManyDependencies.DependencyPieceIDs = make(
+		[]string,
+		ReplicaStateMaximumDependenciesPerPiece+1,
+	)
+	for index := range tooManyDependencies.DependencyPieceIDs {
+		tooManyDependencies.DependencyPieceIDs[index] = fixture.Root.Pieces[1].PieceID
+	}
+	if err := tooManyDependencies.Validate(); err == nil {
+		t.Fatal("per-piece dependency ceiling not enforced")
+	}
+
+	tooManyBlobReferences := first
+	tooManyBlobReferences.RequiredBlobReferences = make(
+		[]ReplicaStateBlobReference,
+		ReplicaStateMaximumBlobReferencesPerPiece+1,
+	)
+	for index := range tooManyBlobReferences.RequiredBlobReferences {
+		tooManyBlobReferences.RequiredBlobReferences[index] = first.RequiredBlobReferences[0]
+	}
+	if err := tooManyBlobReferences.Validate(); err == nil {
+		t.Fatal("per-piece blob-reference ceiling not enforced")
+	}
+
+	tooManyClockEntries := fixture.Root
+	tooManyClockEntries.CoveredClock.Counters = make(
+		map[string]uint64,
+		ReplicaStateMaximumClockEntryCount+1,
+	)
+	for index := 0; index <= ReplicaStateMaximumClockEntryCount; index++ {
+		tooManyClockEntries.CoveredClock.Counters[fmt.Sprintf("replica-%d", index)] = 1
+	}
+	if err := tooManyClockEntries.Validate(); err == nil {
+		t.Fatal("clock-entry ceiling not enforced")
+	}
+
+	oversizedIdentifier := strings.Repeat(
+		"é",
+		ReplicaStateMaximumIdentifierByteCount/2+1,
+	)
+	oversizedDomain := fixture.Root
+	oversizedDomain.DomainID = oversizedIdentifier
+	if err := oversizedDomain.Validate(); err == nil {
+		t.Fatal("domain identifier byte ceiling not enforced")
+	}
+	oversizedClockID := fixture.Root
+	oversizedClockID.CoveredClock.Counters = map[string]uint64{oversizedIdentifier: 1}
+	if err := oversizedClockID.Validate(); err == nil {
+		t.Fatal("clock identifier byte ceiling not enforced")
+	}
+
+	pieceIDs := make([]string, ReplicaStateMaximumDependenciesPerPiece+1)
+	for index := range pieceIDs {
+		digest := sha256.Sum256([]byte(fmt.Sprintf("bounded-piece-%d", index)))
+		pieceIDs[index] = base64.RawURLEncoding.EncodeToString(digest[:])
+	}
+	sort.Strings(pieceIDs)
+	denseGraph := make([]ReplicaStatePieceDescriptor, len(pieceIDs))
+	for pieceIndex, pieceID := range pieceIDs {
+		dependencies := make([]string, 0, ReplicaStateMaximumDependenciesPerPiece)
+		for _, candidate := range pieceIDs {
+			if candidate != pieceID {
+				dependencies = append(dependencies, candidate)
+			}
+		}
+		denseGraph[pieceIndex] = ReplicaStatePieceDescriptor{
+			PieceID:            pieceID,
+			ByteCount:          1,
+			DependencyPieceIDs: dependencies,
+		}
+	}
+	denseRoot := fixture.Root
+	denseRoot.Pieces = denseGraph
+	if err := denseRoot.Validate(); err == nil {
+		t.Fatal("total dependency-edge ceiling not enforced")
 	}
 }
 

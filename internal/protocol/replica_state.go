@@ -14,7 +14,15 @@ import (
 	"github.com/google/uuid"
 )
 
-const ReplicaStateVersion = 1
+const (
+	ReplicaStateVersion                         = 1
+	ReplicaStateMaximumPieceCount               = 4_096
+	ReplicaStateMaximumTotalDependencyEdgeCount = 65_536
+	ReplicaStateMaximumDependenciesPerPiece     = 256
+	ReplicaStateMaximumBlobReferencesPerPiece   = 4_096
+	ReplicaStateMaximumClockEntryCount          = 4_096
+	ReplicaStateMaximumIdentifierByteCount      = 1_024
+)
 
 var (
 	ErrInvalidReplicaState          = errors.New("invalid replica state root")
@@ -43,7 +51,9 @@ type ReplicaStatePieceDescriptor struct {
 }
 
 func (piece ReplicaStatePieceDescriptor) Validate() error {
-	if !isReplicaStateDigest(piece.PieceID) || piece.ByteCount <= 0 ||
+	if len(piece.DependencyPieceIDs) > ReplicaStateMaximumDependenciesPerPiece ||
+		len(piece.RequiredBlobReferences) > ReplicaStateMaximumBlobReferencesPerPiece ||
+		!isReplicaStateDigest(piece.PieceID) || piece.ByteCount <= 0 ||
 		!canonicalDigestStrings(piece.DependencyPieceIDs) {
 		return fmt.Errorf("%w: %s", ErrInvalidReplicaStatePiece, piece.PieceID)
 	}
@@ -86,16 +96,19 @@ type ReplicaStateRoot struct {
 
 func (root ReplicaStateRoot) Validate() error {
 	if root.Version != ReplicaStateVersion || root.DomainID == "" ||
-		root.DomainID != strings.TrimSpace(root.DomainID) || len(root.DomainID) > 1024 ||
-		root.KeyEpoch == 0 || root.CapturedCoreRevision == 0 ||
-		root.CapturedAtMilliseconds < 0 || len(root.Pieces) == 0 {
+		root.DomainID != strings.TrimSpace(root.DomainID) ||
+		len(root.DomainID) > ReplicaStateMaximumIdentifierByteCount ||
+		root.KeyEpoch == 0 || root.CapturedAtMilliseconds < 0 || len(root.Pieces) == 0 ||
+		len(root.Pieces) > ReplicaStateMaximumPieceCount ||
+		len(root.CoveredClock.Counters) > ReplicaStateMaximumClockEntryCount {
 		return ErrInvalidReplicaState
 	}
 	if root.PredecessorRootDigest != nil && !isReplicaStateDigest(*root.PredecessorRootDigest) {
 		return ErrInvalidReplicaState
 	}
 	for replicaID, sequence := range root.CoveredClock.Counters {
-		if replicaID == "" || replicaID != strings.TrimSpace(replicaID) || sequence == 0 {
+		if replicaID == "" || replicaID != strings.TrimSpace(replicaID) ||
+			len(replicaID) > ReplicaStateMaximumIdentifierByteCount || sequence == 0 {
 			return ErrInvalidReplicaState
 		}
 	}
@@ -110,7 +123,13 @@ func (root ReplicaStateRoot) Validate() error {
 	pieceByID := make(map[string]ReplicaStatePieceDescriptor, len(root.Pieces))
 	blobByteCounts := make(map[string]int64)
 	previousPieceID := ""
+	totalDependencyEdgeCount := 0
 	for _, piece := range root.Pieces {
+		if len(piece.DependencyPieceIDs) >
+			ReplicaStateMaximumTotalDependencyEdgeCount-totalDependencyEdgeCount {
+			return ErrInvalidReplicaState
+		}
+		totalDependencyEdgeCount += len(piece.DependencyPieceIDs)
 		if err := piece.Validate(); err != nil {
 			return err
 		}
@@ -136,28 +155,36 @@ func (root ReplicaStateRoot) Validate() error {
 			}
 		}
 	}
-	visits := make(map[string]uint8, len(root.Pieces))
-	var visit func(string) error
-	visit = func(pieceID string) error {
-		if visits[pieceID] == 1 {
-			return fmt.Errorf("%w: cycle at %s", ErrReplicaStateDependency, pieceID)
+	dependencyCounts := make(map[string]int, len(root.Pieces))
+	dependents := make(map[string][]string, len(root.Pieces))
+	ready := make([]string, 0, len(root.Pieces))
+	for _, piece := range root.Pieces {
+		dependencyCounts[piece.PieceID] = len(piece.DependencyPieceIDs)
+		if len(piece.DependencyPieceIDs) == 0 {
+			ready = append(ready, piece.PieceID)
 		}
-		if visits[pieceID] == 2 {
-			return nil
+		for _, dependency := range piece.DependencyPieceIDs {
+			dependents[dependency] = append(dependents[dependency], piece.PieceID)
 		}
-		visits[pieceID] = 1
-		for _, dependency := range pieceByID[pieceID].DependencyPieceIDs {
-			if err := visit(dependency); err != nil {
-				return err
+	}
+	completedCount := 0
+	for readyIndex := 0; readyIndex < len(ready); readyIndex++ {
+		pieceID := ready[readyIndex]
+		completedCount++
+		for _, dependent := range dependents[pieceID] {
+			dependencyCounts[dependent]--
+			if dependencyCounts[dependent] == 0 {
+				ready = append(ready, dependent)
 			}
 		}
-		visits[pieceID] = 2
-		return nil
 	}
-	for _, piece := range root.Pieces {
-		if err := visit(piece.PieceID); err != nil {
-			return err
+	if completedCount != len(pieceByID) {
+		for _, piece := range root.Pieces {
+			if dependencyCounts[piece.PieceID] > 0 {
+				return fmt.Errorf("%w: cycle at %s", ErrReplicaStateDependency, piece.PieceID)
+			}
 		}
+		return ErrReplicaStateDependency
 	}
 	return nil
 }
@@ -228,8 +255,11 @@ func (root ReplicaStateRoot) ValidateSuccessor(predecessor ReplicaStateRoot) err
 		return ErrReplicaStatePredecessor
 	}
 	if root.DomainID != predecessor.DomainID || root.KeyEpoch < predecessor.KeyEpoch ||
-		root.CapturedCoreRevision < predecessor.CapturedCoreRevision ||
-		root.CapturedAtMilliseconds <= predecessor.CapturedAtMilliseconds {
+		root.CapturedCoreRevision < predecessor.CapturedCoreRevision {
+		return ErrInvalidReplicaStateSuccessor
+	}
+	if root.CapturedCoreRevision == predecessor.CapturedCoreRevision &&
+		!replicaStatePieceInventoriesEqual(root.Pieces, predecessor.Pieces) {
 		return ErrInvalidReplicaStateSuccessor
 	}
 	for replicaID, previousSequence := range predecessor.CoveredClock.Counters {
@@ -238,6 +268,37 @@ func (root ReplicaStateRoot) ValidateSuccessor(predecessor ReplicaStateRoot) err
 		}
 	}
 	return nil
+}
+
+func replicaStatePieceInventoriesEqual(
+	left []ReplicaStatePieceDescriptor,
+	right []ReplicaStatePieceDescriptor,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].PieceID != right[index].PieceID ||
+			left[index].ByteCount != right[index].ByteCount ||
+			left[index].ItemCount != right[index].ItemCount ||
+			len(left[index].DependencyPieceIDs) != len(right[index].DependencyPieceIDs) ||
+			len(left[index].RequiredBlobReferences) != len(right[index].RequiredBlobReferences) {
+			return false
+		}
+		for dependencyIndex := range left[index].DependencyPieceIDs {
+			if left[index].DependencyPieceIDs[dependencyIndex] !=
+				right[index].DependencyPieceIDs[dependencyIndex] {
+				return false
+			}
+		}
+		for blobIndex := range left[index].RequiredBlobReferences {
+			if left[index].RequiredBlobReferences[blobIndex] !=
+				right[index].RequiredBlobReferences[blobIndex] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (root *ReplicaStateRoot) UnmarshalJSON(data []byte) error {
