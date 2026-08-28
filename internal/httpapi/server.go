@@ -268,6 +268,12 @@ func (s *Server) Handler() http.Handler {
 			s.handleRequestRelaySubscriptionRebootstrap,
 		)
 		register(
+			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscription-rebootstrap/renewal",
+			traffic.SurfaceRelayMessage,
+			mutation,
+			s.handleRenewRelaySubscriptionRebootstrap,
+		)
+		register(
 			"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/subscription-rebootstrap/cancellation",
 			traffic.SurfaceRelayMessage,
 			mutation,

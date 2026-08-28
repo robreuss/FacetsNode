@@ -296,6 +296,27 @@ making a same-ID re-publication safe. A new subscription, or one explicitly chan
 a publisher requires a fresh subscription because a subscription never fetches
 its own publications.
 
+An enrolled member can recover its own complete replica through the exact
+client-authorized retained checkpoint/root pair:
+
+```text
+POST .../subscription-rebootstrap
+POST .../subscription-rebootstrap/renewal
+POST .../subscription-rebootstrap/cancellation
+POST .../subscription-rebootstrap/completion
+```
+
+The first request fences that subscription and selects the latest activated
+checkpoint cursor. Its lease is timed by the server and is at most 24 hours.
+Long recoveries renew in place: a renewal carries a new retry ID but binds the
+original request retry, checkpoint, root, and the exact previously returned
+lease expiry. The relay extends but never shortens the active lease and does
+not change the start cursor or delete acknowledgements. Stale, substituted,
+expired, cancelled, or completed renewals fail closed; exact retries return the
+recorded result. Cancellation releases the lease but preserves the publication
+fence. Completion restores active publication only after every visible retained
+tail message has a durable applied acknowledgement.
+
 ## Blobs and quotas
 
 The whole-blob `PUT .../blobs/{blobID}` route has been removed without a

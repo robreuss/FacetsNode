@@ -37,6 +37,7 @@ type memoryDomain struct {
 	subscriptionCreates      map[uuid.UUID]SubscriptionCreateRequest
 	subscriptionChanges      map[uuid.UUID]memorySubscriptionChange
 	rebootstrapRequests      map[uuid.UUID]memorySubscriptionRebootstrapRequest
+	rebootstrapRenewals      map[uuid.UUID]memorySubscriptionRebootstrapRenewal
 	rebootstrapCancellations map[uuid.UUID]memorySubscriptionRebootstrapCancellation
 	rebootstrapCompletions   map[uuid.UUID]memorySubscriptionRebootstrapCompletion
 	memberSubscriptions      map[uuid.UUID]uuid.UUID
@@ -80,6 +81,14 @@ type memorySubscriptionRebootstrapRequest struct {
 	request               SubscriptionRebootstrapRequest
 	expiresAtMilliseconds int64
 	result                Subscription
+}
+
+type memorySubscriptionRebootstrapRenewal struct {
+	subscriptionID                uuid.UUID
+	request                       SubscriptionRebootstrapRenewal
+	previousExpiresAtMilliseconds int64
+	expiresAtMilliseconds         int64
+	result                        Subscription
 }
 
 type memorySubscriptionRebootstrapCancellation struct {
@@ -295,6 +304,7 @@ func (s *MemoryStore) createDomainLocked(
 		subscriptionCreates:      make(map[uuid.UUID]SubscriptionCreateRequest),
 		subscriptionChanges:      make(map[uuid.UUID]memorySubscriptionChange),
 		rebootstrapRequests:      make(map[uuid.UUID]memorySubscriptionRebootstrapRequest),
+		rebootstrapRenewals:      make(map[uuid.UUID]memorySubscriptionRebootstrapRenewal),
 		rebootstrapCancellations: make(map[uuid.UUID]memorySubscriptionRebootstrapCancellation),
 		rebootstrapCompletions:   make(map[uuid.UUID]memorySubscriptionRebootstrapCompletion),
 		memberSubscriptions: map[uuid.UUID]uuid.UUID{
@@ -1327,6 +1337,106 @@ func (s *MemoryStore) RequestSubscriptionRebootstrap(
 		CheckpointID: request.CheckpointID, RootMessageID: request.RootMessageID,
 		LeaseExpiresAtMilliseconds: leaseExpiresAt,
 		Subscription:               subscription,
+	}, nil
+}
+
+// RenewSubscriptionRebootstrap extends only the exact active request and
+// deliberately leaves the recovery cursor and all acknowledgements untouched.
+func (s *MemoryStore) RenewSubscriptionRebootstrap(
+	_ context.Context,
+	credential Credential,
+	renewal SubscriptionRebootstrapRenewal,
+	nowMilliseconds int64,
+) (SubscriptionRebootstrapRenewalResponse, error) {
+	if err := renewal.Validate(); err != nil {
+		return SubscriptionRebootstrapRenewalResponse{}, err
+	}
+	candidateExpiresAt, err := renewal.LeaseExpiresAt(nowMilliseconds)
+	if err != nil {
+		return SubscriptionRebootstrapRenewalResponse{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain, err := s.authorizedMember(
+		credential, CapabilityFetchMessage, nowMilliseconds,
+	)
+	if err != nil {
+		return SubscriptionRebootstrapRenewalResponse{}, err
+	}
+	subscription, err := readableMemberSubscription(domain, credential.MemberID)
+	if err != nil {
+		return SubscriptionRebootstrapRenewalResponse{}, err
+	}
+	if existing, ok := domain.rebootstrapRenewals[renewal.RetryID]; ok {
+		if existing.subscriptionID == subscription.SubscriptionID &&
+			existing.request == renewal {
+			return SubscriptionRebootstrapRenewalResponse{
+				Acceptance: AcceptanceDuplicate, RetryID: renewal.RetryID,
+				RequestRetryID: renewal.RequestRetryID,
+				CheckpointID:   renewal.CheckpointID, RootMessageID: renewal.RootMessageID,
+				PreviousLeaseExpiresAtMilliseconds: existing.previousExpiresAtMilliseconds,
+				LeaseExpiresAtMilliseconds:         existing.expiresAtMilliseconds,
+				Subscription:                       existing.result,
+			}, nil
+		}
+		return SubscriptionRebootstrapRenewalResponse{}, protocolError(
+			CodeSubscriptionCollision,
+			"subscription rebootstrap renewal retry ID was reused",
+		)
+	}
+	recovery, ok := domain.rebootstrapRequests[renewal.RequestRetryID]
+	if !ok || recovery.subscriptionID != subscription.SubscriptionID ||
+		recovery.request.CheckpointID != renewal.CheckpointID ||
+		recovery.request.RootMessageID != renewal.RootMessageID {
+		return SubscriptionRebootstrapRenewalResponse{}, protocolError(
+			CodeSubscriptionCollision,
+			"subscription rebootstrap renewal does not match its request",
+		)
+	}
+	if recovery.expiresAtMilliseconds !=
+		renewal.ExpectedLeaseExpiresAtMilliseconds {
+		return SubscriptionRebootstrapRenewalResponse{}, protocolError(
+			CodeSubscriptionCollision,
+			"subscription rebootstrap renewal lease is stale",
+		)
+	}
+	if !memoryRebootstrapRequestIsActive(
+		domain, renewal.RequestRetryID, recovery, nowMilliseconds,
+	) {
+		return SubscriptionRebootstrapRenewalResponse{}, protocolError(
+			CodeRebootstrapExpired,
+			"subscription rebootstrap lease expired or was finalized",
+		)
+	}
+	if subscription.Status != SubscriptionRebootstrapRequired ||
+		subscription.StartCursor == nil ||
+		recovery.result.StartCursor == nil ||
+		*subscription.StartCursor != *recovery.result.StartCursor {
+		return SubscriptionRebootstrapRenewalResponse{}, protocolError(
+			CodeSubscriptionCollision,
+			"subscription rebootstrap renewal state changed",
+		)
+	}
+	previousExpiresAt := recovery.expiresAtMilliseconds
+	if candidateExpiresAt > recovery.expiresAtMilliseconds {
+		recovery.expiresAtMilliseconds = candidateExpiresAt
+		domain.rebootstrapRequests[renewal.RequestRetryID] = recovery
+	}
+	domain.rebootstrapRenewals[renewal.RetryID] =
+		memorySubscriptionRebootstrapRenewal{
+			subscriptionID:                subscription.SubscriptionID,
+			request:                       renewal,
+			previousExpiresAtMilliseconds: previousExpiresAt,
+			expiresAtMilliseconds:         recovery.expiresAtMilliseconds,
+			result:                        subscription,
+		}
+	return SubscriptionRebootstrapRenewalResponse{
+		Acceptance: AcceptanceAccepted, RetryID: renewal.RetryID,
+		RequestRetryID: renewal.RequestRetryID,
+		CheckpointID:   renewal.CheckpointID, RootMessageID: renewal.RootMessageID,
+		PreviousLeaseExpiresAtMilliseconds: previousExpiresAt,
+		LeaseExpiresAtMilliseconds:         recovery.expiresAtMilliseconds,
+		Subscription:                       subscription,
 	}, nil
 }
 

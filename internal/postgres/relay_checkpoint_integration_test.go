@@ -280,6 +280,28 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	if duplicate, err := store.RequestSubscriptionRebootstrap(ctx, recipient, rebootstrapRequest, 1_252); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || !reflect.DeepEqual(duplicate.Subscription, rebootstrap.Subscription) {
 		t.Fatalf("rebootstrap request retry=%+v err=%v", duplicate, err)
 	}
+	renewal := relay.SubscriptionRebootstrapRenewal{
+		RetryID: uuid.New(), RequestRetryID: rebootstrapRequest.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: retainedSuffix.MessageID,
+		ExpectedLeaseExpiresAtMilliseconds: rebootstrap.LeaseExpiresAtMilliseconds,
+		RequestedAtMilliseconds:            1_253,
+		LeaseDurationMilliseconds:          relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
+	}
+	renewed, err := store.RenewSubscriptionRebootstrap(ctx, recipient, renewal, 1_253)
+	if err != nil || renewed.Acceptance != relay.AcceptanceAccepted ||
+		renewed.PreviousLeaseExpiresAtMilliseconds != rebootstrap.LeaseExpiresAtMilliseconds ||
+		renewed.LeaseExpiresAtMilliseconds <= rebootstrap.LeaseExpiresAtMilliseconds ||
+		!reflect.DeepEqual(renewed.Subscription, rebootstrap.Subscription) {
+		t.Fatalf("rebootstrap renewal=%+v err=%v", renewed, err)
+	}
+	if duplicate, err := store.RenewSubscriptionRebootstrap(ctx, recipient, renewal, 1_253); err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate || duplicate.LeaseExpiresAtMilliseconds != renewed.LeaseExpiresAtMilliseconds {
+		t.Fatalf("rebootstrap renewal retry=%+v err=%v", duplicate, err)
+	}
+	staleRenewal := renewal
+	staleRenewal.RetryID = uuid.New()
+	if _, err := store.RenewSubscriptionRebootstrap(ctx, recipient, staleRenewal, 1_253); !relay.ErrorHasCode(err, relay.CodeSubscriptionCollision) {
+		t.Fatalf("stale rebootstrap renewal err=%v", err)
+	}
 	recoveryFenceRequest := relay.CheckpointFenceRequest{
 		RetryID: uuid.New(), FenceID: uuid.New(),
 		RequestedAtMilliseconds: 1_262,

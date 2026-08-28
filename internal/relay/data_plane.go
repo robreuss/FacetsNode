@@ -196,6 +196,56 @@ type SubscriptionRebootstrapResponse struct {
 	Subscription               Subscription `json:"subscription"`
 }
 
+// SubscriptionRebootstrapRenewal extends one active recovery lease without
+// selecting another checkpoint/root or resetting the subscription cursor and
+// acknowledgments. ExpectedLeaseExpiresAtMilliseconds is a compare-and-swap
+// value from the relay's previous authenticated response.
+type SubscriptionRebootstrapRenewal struct {
+	RetryID                            uuid.UUID `json:"retryID"`
+	RequestRetryID                     uuid.UUID `json:"requestRetryID"`
+	CheckpointID                       uuid.UUID `json:"checkpointID"`
+	RootMessageID                      uuid.UUID `json:"rootMessageID"`
+	ExpectedLeaseExpiresAtMilliseconds int64     `json:"expectedLeaseExpiresAtMilliseconds"`
+	RequestedAtMilliseconds            int64     `json:"requestedAtMilliseconds"`
+	LeaseDurationMilliseconds          int64     `json:"leaseDurationMilliseconds"`
+}
+
+func (r SubscriptionRebootstrapRenewal) Validate() error {
+	if r.RetryID == uuid.Nil || r.RequestRetryID == uuid.Nil ||
+		r.CheckpointID == uuid.Nil || r.RootMessageID == uuid.Nil ||
+		r.ExpectedLeaseExpiresAtMilliseconds <= 0 ||
+		r.RequestedAtMilliseconds < 0 ||
+		r.LeaseDurationMilliseconds < MinimumSubscriptionRebootstrapLeaseMilliseconds ||
+		r.LeaseDurationMilliseconds > MaximumSubscriptionRebootstrapLeaseMilliseconds {
+		return protocolError(CodeInvalidSubscription, "subscription rebootstrap renewal is invalid")
+	}
+	return nil
+}
+
+func (r SubscriptionRebootstrapRenewal) LeaseExpiresAt(
+	nowMilliseconds int64,
+) (int64, error) {
+	if err := r.Validate(); err != nil {
+		return 0, err
+	}
+	if nowMilliseconds < 0 ||
+		nowMilliseconds > math.MaxInt64-r.LeaseDurationMilliseconds {
+		return 0, protocolError(CodeInvalidSubscription, "subscription rebootstrap renewal lease is invalid")
+	}
+	return nowMilliseconds + r.LeaseDurationMilliseconds, nil
+}
+
+type SubscriptionRebootstrapRenewalResponse struct {
+	Acceptance                         Acceptance   `json:"acceptance"`
+	RetryID                            uuid.UUID    `json:"retryID"`
+	RequestRetryID                     uuid.UUID    `json:"requestRetryID"`
+	CheckpointID                       uuid.UUID    `json:"checkpointID"`
+	RootMessageID                      uuid.UUID    `json:"rootMessageID"`
+	PreviousLeaseExpiresAtMilliseconds int64        `json:"previousLeaseExpiresAtMilliseconds"`
+	LeaseExpiresAtMilliseconds         int64        `json:"leaseExpiresAtMilliseconds"`
+	Subscription                       Subscription `json:"subscription"`
+}
+
 // SubscriptionRebootstrapCancellation releases the checkpoint-rollover lease
 // without making the discarded replica writable again. A later recovery must
 // bind a new request to the then-current activated checkpoint/root.

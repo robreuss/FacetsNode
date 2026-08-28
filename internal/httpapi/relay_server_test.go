@@ -1297,6 +1297,47 @@ func TestRelayMemberRebootstrapRoutesBindAndCompleteExactActivatedRoot(t *testin
 		requestedResult.LeaseExpiresAtMilliseconds != nowMilliseconds+relay.DefaultSubscriptionRebootstrapLeaseMilliseconds {
 		t.Fatalf("unexpected rebootstrap response: %+v", requestedResult)
 	}
+	renewal := relay.SubscriptionRebootstrapRenewal{
+		RetryID: uuid.New(), RequestRetryID: request.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: rootEnvelope.MessageID,
+		ExpectedLeaseExpiresAtMilliseconds: requestedResult.LeaseExpiresAtMilliseconds,
+		RequestedAtMilliseconds:            nowMilliseconds,
+		LeaseDurationMilliseconds:          relay.DefaultSubscriptionRebootstrapLeaseMilliseconds,
+	}
+	renewedResponse := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/renewal", renewal,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, renewedResponse, http.StatusCreated)
+	var renewedResult relay.SubscriptionRebootstrapRenewalResponse
+	if err := json.NewDecoder(renewedResponse.Body).Decode(&renewedResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = renewedResponse.Body.Close()
+	if renewedResult.RequestRetryID != request.RetryID ||
+		renewedResult.PreviousLeaseExpiresAtMilliseconds != requestedResult.LeaseExpiresAtMilliseconds ||
+		renewedResult.LeaseExpiresAtMilliseconds < requestedResult.LeaseExpiresAtMilliseconds ||
+		renewedResult.Subscription.Status != relay.SubscriptionRebootstrapRequired {
+		t.Fatalf("unexpected rebootstrap renewal: %+v", renewedResult)
+	}
+	renewedRetry := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/renewal", renewal,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, renewedRetry, http.StatusOK)
+	_ = renewedRetry.Body.Close()
+	staleRenewal := renewal
+	staleRenewal.RetryID = uuid.New()
+	staleRenewal.ExpectedLeaseExpiresAtMilliseconds--
+	staleResponse := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/renewal", staleRenewal,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, staleResponse, http.StatusConflict)
+	_ = staleResponse.Body.Close()
 	cancellation := relay.SubscriptionRebootstrapCancellation{
 		RetryID: uuid.New(), RequestRetryID: request.RetryID,
 		CheckpointID: candidate.CheckpointID, RootMessageID: rootEnvelope.MessageID,
