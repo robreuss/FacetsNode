@@ -868,6 +868,31 @@ func TestDeploymentIssuesBearerAuthorizedGrantBeforeBulkUpload(t *testing.T) {
 	if uploadRecorder.Code != http.StatusCreated {
 		t.Fatalf("authorized upload status=%d body=%s", uploadRecorder.Code, uploadRecorder.Body.String())
 	}
+	uploadStatusRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/relay/tenants/"+authority.Domain.TenantID.String()+
+			"/domains/"+authority.Domain.DomainID.String()+
+			"/blob-uploads/"+uploadID.String(),
+		nil,
+	)
+	uploadStatusRequest.Header.Set("Authorization", "Bearer "+authority.MemberCredential.AuthorizationToken)
+	uploadStatusRequest.Header.Set("X-Facets-Member-ID", authority.Member.MemberID.String())
+	uploadStatusRequest.Header.Set(serviceauthority.HeaderBulkTransferGrant, grantHeader)
+	uploadStatusRequest.Header.Set(serviceauthority.HeaderBulkResourceID, uploadID.String())
+	uploadStatusRequest.Header.Set(serviceauthority.HeaderBulkDirection, string(serviceauthority.BulkUpload))
+	setAuthorityHeaders(
+		uploadStatusRequest.Header, scope, 1, digest, deploymentID, routeID,
+		serviceauthority.TrafficBulk,
+	)
+	uploadStatusRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(uploadStatusRecorder, uploadStatusRequest)
+	if uploadStatusRecorder.Code != http.StatusOK {
+		t.Fatalf(
+			"authorized upload status read=%d body=%s",
+			uploadStatusRecorder.Code,
+			uploadStatusRecorder.Body.String(),
+		)
+	}
 
 	missingGrant := uploadRequest.Clone(uploadRequest.Context())
 	missingGrant.Body = io.NopCloser(bytes.NewReader(uploadBody))

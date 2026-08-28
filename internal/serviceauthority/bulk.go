@@ -206,7 +206,7 @@ func (registry *BindingRegistry) AuthorizeBulkTransfer(
 	direction := BulkDirection(directionValue)
 	if resourceErr != nil || directionErr != nil || grantErr != nil ||
 		!validBulkResourceID(resourceID) || !direction.Valid() ||
-		(direction == BulkUpload && access != RequestMutation) {
+		!bulkDirectionAllowsAccess(direction, access, method) {
 		return BulkGrantPayload{}, ErrInvalid
 	}
 	grant, payload, err := ParseBulkTransferGrantHeader(grantValue)
@@ -231,6 +231,18 @@ func (registry *BindingRegistry) AuthorizeBulkTransfer(
 		return BulkGrantPayload{}, ErrInvalid
 	}
 	return payload, nil
+}
+
+func bulkDirectionAllowsAccess(
+	direction BulkDirection,
+	access RequestAccess,
+	method string,
+) bool {
+	if direction != BulkUpload {
+		return true
+	}
+	return access == RequestMutation ||
+		(access == RequestRead && method == http.MethodGet)
 }
 
 func validBulkResourceID(value string) bool {
