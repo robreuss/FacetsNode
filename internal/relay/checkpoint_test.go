@@ -369,6 +369,12 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
 		RootMessageID: retained.MessageID, RequestedAtMilliseconds: 1_600,
 	}
+	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentAccepted, 1_599); err != nil {
+		t.Fatalf("pre-rebootstrap accepted acknowledgment err=%v", err)
+	}
+	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentApplied, 1_599); err != nil {
+		t.Fatalf("pre-rebootstrap applied acknowledgment err=%v", err)
+	}
 	wrongRoot := request
 	wrongRoot.RetryID = uuid.New()
 	wrongRoot.RootMessageID = uuid.New()
@@ -438,6 +444,9 @@ func TestMemoryCheckpointRebootstrapWaivesFrozenCustody(t *testing.T) {
 	}
 	if _, err := store.Acknowledge(ctx, recipient, retained.MessageID, relay.AcknowledgmentApplied, 1_609); err != nil {
 		t.Fatalf("rebootstrap applied receipt err=%v", err)
+	}
+	if quiet, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_609); err != nil || len(quiet.Messages) != 0 || quiet.NextSequence != fetched.NextSequence {
+		t.Fatalf("rebootstrap quiet tail=%+v err=%v", quiet, err)
 	}
 	completed, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_610)
 	if err != nil || completed.Subscription.Status != relay.SubscriptionActive || completed.Subscription.StartCursor != nil {

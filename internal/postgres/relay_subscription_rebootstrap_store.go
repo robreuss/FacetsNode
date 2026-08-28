@@ -153,6 +153,16 @@ func requestSubscriptionRebootstrapTx(
 		}
 		startSequence = checkpointStart
 		if _, err := tx.Exec(ctx, `
+			DELETE FROM relay_acknowledgments a
+			USING relay_messages m
+			WHERE a.tenant_id=$1 AND a.domain_id=$2
+			  AND a.subscription_id=$3
+			  AND m.tenant_id=a.tenant_id AND m.domain_id=a.domain_id
+			  AND m.message_id=a.message_id AND m.domain_sequence>$4
+		`, credential.TenantID, credential.DomainID, subscriptionID, *startSequence); err != nil {
+			return relay.SubscriptionRebootstrapResponse{}, fmt.Errorf("reset rebootstrap acknowledgments: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
 			UPDATE relay_subscriptions
 			SET status=$4,start_sequence=$5,updated_at_milliseconds=$6,updated_at=now()
 			WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3

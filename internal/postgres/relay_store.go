@@ -1136,6 +1136,27 @@ func (s *RelayStore) Fetch(
 			afterSequence = startSequence
 		}
 	}
+	var authorizedRebootstrap bool
+	if subscriptionStatus == relay.SubscriptionRebootstrapRequired {
+		if err := transaction.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM relay_subscription_rebootstrap_requests r
+				JOIN relay_subscriptions s
+				  ON s.tenant_id=r.tenant_id AND s.domain_id=r.domain_id
+				 AND s.subscription_id=r.subscription_id
+				WHERE r.tenant_id=$1 AND r.domain_id=$2
+				  AND r.subscription_id=$3
+				  AND s.status='rebootstrap_required'
+				  AND r.result_start_sequence=s.start_sequence
+				  AND r.result_updated_at_milliseconds=s.updated_at_milliseconds
+			)
+		`, credential.TenantID, credential.DomainID, subscriptionID).Scan(
+			&authorizedRebootstrap,
+		); err != nil {
+			return relay.FetchResult{}, fmt.Errorf("verify bound subscription rebootstrap: %w", err)
+		}
+	}
 	var activeFenceBoundary int64
 	if err := transaction.QueryRow(ctx, `SELECT boundary_sequence FROM relay_checkpoint_fences WHERE tenant_id=$1 AND domain_id=$2 AND status='active' LIMIT 1`, credential.TenantID, credential.DomainID).Scan(&activeFenceBoundary); err == nil {
 		if activeFenceBoundary < highWatermark {
@@ -1151,22 +1172,16 @@ func (s *RelayStore) Fetch(
 		FROM relay_messages
 		WHERE tenant_id = $1 AND domain_id = $2
 		  AND domain_sequence > $3 AND domain_sequence <= $4
+		  AND (NOT $7 OR NOT EXISTS (
+		      SELECT 1 FROM relay_acknowledgments a
+		      WHERE a.tenant_id=relay_messages.tenant_id
+		        AND a.domain_id=relay_messages.domain_id
+		        AND a.message_id=relay_messages.message_id
+		        AND a.subscription_id=$5 AND a.stage='applied'
+		  ))
 		  AND (
 		      publisher_subscription_id <> $5
-		      OR EXISTS (
-		          SELECT 1
-		          FROM relay_subscription_rebootstrap_requests r
-		          JOIN relay_subscriptions s
-		            ON s.tenant_id=r.tenant_id AND s.domain_id=r.domain_id
-		           AND s.subscription_id=r.subscription_id
-		          WHERE r.tenant_id=relay_messages.tenant_id
-		            AND r.domain_id=relay_messages.domain_id
-		            AND r.subscription_id=$5
-		            AND s.status='rebootstrap_required'
-		            AND s.start_sequence=$3
-		            AND r.result_start_sequence=s.start_sequence
-		            AND r.result_updated_at_milliseconds=s.updated_at_milliseconds
-		      )
+		      OR $7
 		  )
 		  AND (checkpoint_fence_id IS NULL OR EXISTS (
 		      SELECT 1 FROM relay_checkpoint_fences f
@@ -1175,7 +1190,8 @@ func (s *RelayStore) Fetch(
 		ORDER BY domain_sequence
 		LIMIT $6
 	`, credential.TenantID, credential.DomainID, int64(afterSequence),
-		highWatermark, subscriptionID, limit)
+		highWatermark, subscriptionID, limit,
+		authorizedRebootstrap)
 	if err != nil {
 		return relay.FetchResult{}, fmt.Errorf("fetch relay messages: %w", err)
 	}

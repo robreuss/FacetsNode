@@ -1294,6 +1294,11 @@ func (s *MemoryStore) RequestSubscriptionRebootstrap(
 		return SubscriptionRebootstrapResponse{}, protocolError(CodeCheckpointUnavailable, "authorized recovery checkpoint is not the latest activated checkpoint")
 	}
 	startCursor := EncodeCursor(checkpoint.startSequence)
+	for _, message := range domain.messages {
+		if message.message.Sequence > checkpoint.startSequence {
+			delete(message.acknowledgments, subscription.SubscriptionID)
+		}
+	}
 	subscription.Status = SubscriptionRebootstrapRequired
 	subscription.StartCursor = &startCursor
 	subscription.UpdatedAtMilliseconds = nowMilliseconds
@@ -1722,6 +1727,10 @@ func (s *MemoryStore) Fetch(
 		if stored.message.Sequence <= afterSequence {
 			continue
 		}
+		if memorySubscriptionHasAuthorizedRecovery(domain, subscription) &&
+			stored.acknowledgments[subscription.SubscriptionID] == AcknowledgmentApplied {
+			continue
+		}
 		if stored.publisherSubscription == subscription.SubscriptionID &&
 			!memoryOwnMessageIsInAuthorizedRecovery(domain, subscription, stored) {
 			continue
@@ -1845,11 +1854,18 @@ func memoryOwnMessageIsInAuthorizedRecovery(
 	subscription Subscription,
 	message *memoryMessage,
 ) bool {
-	if subscription.Status != SubscriptionRebootstrapRequired || subscription.StartCursor == nil {
+	if !memorySubscriptionHasAuthorizedRecovery(domain, subscription) {
 		return false
 	}
 	startSequence, err := DecodeCursor(*subscription.StartCursor)
-	if err != nil || message.message.Sequence <= startSequence {
+	return err == nil && message.message.Sequence > startSequence
+}
+
+func memorySubscriptionHasAuthorizedRecovery(
+	domain *memoryDomain,
+	subscription Subscription,
+) bool {
+	if subscription.Status != SubscriptionRebootstrapRequired || subscription.StartCursor == nil {
 		return false
 	}
 	for _, request := range domain.rebootstrapRequests {
