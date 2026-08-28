@@ -285,8 +285,9 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	recoverySuffix := retainedSuffix
 	recoverySuffix.MessageID = uuid.New()
 	recoverySuffix.CreatedAtMilliseconds = 1_263
-	if _, err := store.Publish(ctx, publisher, recoverySuffix, 1_263); err != nil {
-		t.Fatal(err)
+	recoverySuffixPublish, err := store.Publish(ctx, publisher, recoverySuffix, 1_263)
+	if err != nil || recoverySuffixPublish.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("publish recovery suffix=%+v err=%v", recoverySuffixPublish, err)
 	}
 	recoveryCandidate := relay.CheckpointCandidate{
 		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
@@ -418,7 +419,7 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM relay_blobs WHERE tenant_id=$1 AND domain_id=$2 AND blob_id=$3`, tenantID, domainID, blobOneID).Scan(&republishedBlobAuthority); err != nil {
 		t.Fatal(err)
 	}
-	if lastSequence != 4 || queuedBlobDeletions != 1 || republishedBlobAuthority != 1 {
+	if lastSequence != int64(recoverySuffixPublish.Sequence) || queuedBlobDeletions != 1 || republishedBlobAuthority != 1 {
 		t.Fatalf("last_sequence=%d queued_blob_deletions=%d republished_blob_authority=%d", lastSequence, queuedBlobDeletions, republishedBlobAuthority)
 	}
 	for index := 0; index < 2; index++ {
