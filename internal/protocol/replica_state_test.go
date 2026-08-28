@@ -194,9 +194,66 @@ func TestReplicaStateEnforcesPortableResourceCeilings(t *testing.T) {
 	}
 }
 
+func TestReplicaStateCoverageIsExplicitCanonicalAndNonSubstitutable(t *testing.T) {
+	fixture := loadPortableReplicaStateFixture(t)
+	if fixture.Root.Coverage.Profile != ReplicaStateCanonicalCoreCoverageProfile {
+		t.Fatal("fixture did not declare canonical-core coverage")
+	}
+	count, ok := fixture.Root.Coverage.canonicalItemCount()
+	if !ok || count != 150 {
+		t.Fatalf("canonical item count=%d valid=%v", count, ok)
+	}
+
+	mismatched := fixture.Root
+	mismatched.Coverage.CanonicalModelTypes = slices.Clone(
+		fixture.Root.Coverage.CanonicalModelTypes,
+	)
+	mismatched.Coverage.CanonicalModelTypes[0].ItemCount = 149
+	if err := mismatched.Validate(); err == nil {
+		t.Fatal("coverage/item inventory mismatch accepted")
+	}
+
+	noncanonical := fixture.Root
+	noncanonical.Coverage.CanonicalModelTypes = []ReplicaStateModelTypeCoverage{
+		{ModelTypeRaw: 5, ItemCount: 50},
+		{ModelTypeRaw: 4, ItemCount: 100},
+	}
+	if err := noncanonical.Validate(); err == nil {
+		t.Fatal("noncanonical model-type coverage accepted")
+	}
+
+	reservedCompleteClaim := fixture.Root
+	reservedCompleteClaim.Coverage.Profile = ReplicaStateCompleteSpaceCoverageProfile
+	reservedCompleteClaim.Coverage.ExcludedDurableScopes = []string{}
+	if err := reservedCompleteClaim.Validate(); err == nil {
+		t.Fatal("reserved complete-space coverage accepted")
+	}
+
+	digest, err := fixture.Root.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	substituted := fixture.Root
+	substituted.Coverage.CanonicalModelTypes = []ReplicaStateModelTypeCoverage{
+		{ModelTypeRaw: 3, ItemCount: 50},
+		{ModelTypeRaw: 4, ItemCount: 100},
+	}
+	substitutedDigest, err := substituted.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if substitutedDigest == digest {
+		t.Fatal("coverage substitution did not change root digest")
+	}
+	substituted.PredecessorRootDigest = &digest
+	if err := substituted.ValidateSuccessor(fixture.Root); err == nil {
+		t.Fatal("same-revision coverage substitution accepted")
+	}
+}
+
 func loadPortableReplicaStateFixture(t *testing.T) portableReplicaStateFixture {
 	t.Helper()
-	path := filepath.Join("..", "testfixture", "replica-state-root-portable-v1.json")
+	path := filepath.Join("..", "testfixture", "replica-state-root-portable-v2.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

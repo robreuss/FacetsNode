@@ -1,8 +1,8 @@
 {
-  "format": "facets.replica-state-root-fixture.v1",
+  "format": "facets.replica-state-root-fixture.v2",
   "warning": "Portable client contract. FacetsNode stores the containing message and blobs opaquely and does not decode this state.",
   "root": {
-    "version": 1,
+    "version": 2,
     "domainID": "11111111-2222-3333-4444-555555555555",
     "keyEpoch": 7,
     "capturedCoreRevision": 41,
@@ -16,6 +16,33 @@
       "10000000-0000-0000-0000-000000000001",
       "20000000-0000-0000-0000-000000000002"
     ],
+    "coverage": {
+      "version": 1,
+      "profile": "facets.replica-state.canonical-core.v1",
+      "canonicalModelTypes": [
+        {
+          "modelTypeRaw": 4,
+          "itemCount": 150
+        }
+      ],
+      "coveredSemanticScopes": [
+        "facets.canonical-objects",
+        "facets.extensions",
+        "facets.media",
+        "facets.relationships"
+      ],
+      "sidecars": [],
+      "excludedDurableScopes": [
+        "facets.annotations",
+        "facets.category-definitions",
+        "facets.category-memberships",
+        "facets.lenses",
+        "facets.local-authoring-state",
+        "facets.ordered-compositions",
+        "facets.portable-analytics",
+        "facets.workspace-designs"
+      ]
+    },
     "pieces": [
       {
         "pieceID": "3fKR45enFwmi8GEIfiX-wbOqPFWUnTHhWPxq0PViIgA",
@@ -50,13 +77,13 @@
     ],
     "capturedAtMilliseconds": 1787875200000
   },
-  "expectedRootDigest": "0aDHkYXzYLaO7YkjpzfwkP5aJp2v_Ad4N44VwkjhZdA",
+  "expectedRootDigest": "5f4E9Y-MaQ9_Pb0oSo6wO8K_bW0Ma-pLZejWbxHcxDk",
   "successorRoot": {
-    "version": 1,
+    "version": 2,
     "domainID": "11111111-2222-3333-4444-555555555555",
     "keyEpoch": 7,
     "capturedCoreRevision": 42,
-    "predecessorRootDigest": "0aDHkYXzYLaO7YkjpzfwkP5aJp2v_Ad4N44VwkjhZdA",
+    "predecessorRootDigest": "5f4E9Y-MaQ9_Pb0oSo6wO8K_bW0Ma-pLZejWbxHcxDk",
     "coveredClock": {
       "counters": {
         "device-a": 13,
@@ -66,6 +93,33 @@
     "predecessorMessageIDs": [
       "30000000-0000-0000-0000-000000000003"
     ],
+    "coverage": {
+      "version": 1,
+      "profile": "facets.replica-state.canonical-core.v1",
+      "canonicalModelTypes": [
+        {
+          "modelTypeRaw": 4,
+          "itemCount": 101
+        }
+      ],
+      "coveredSemanticScopes": [
+        "facets.canonical-objects",
+        "facets.extensions",
+        "facets.media",
+        "facets.relationships"
+      ],
+      "sidecars": [],
+      "excludedDurableScopes": [
+        "facets.annotations",
+        "facets.category-definitions",
+        "facets.category-memberships",
+        "facets.lenses",
+        "facets.local-authoring-state",
+        "facets.ordered-compositions",
+        "facets.portable-analytics",
+        "facets.workspace-designs"
+      ]
+    },
     "pieces": [
       {
         "pieceID": "3fKR45enFwmi8GEIfiX-wbOqPFWUnTHhWPxq0PViIgA",
@@ -100,5 +154,5 @@
     ],
     "capturedAtMilliseconds": 1787875260000
   },
-  "expectedSuccessorRootDigest": "aCB30muMRv5gtBAZAM0jFburSRJR2JGorDbLdgEeoKQ"
+  "expectedSuccessorRootDigest": "FsQlsllOZ8dBXERPVxKXOZq0uAVsJmVGZA_PrM4An38"
 }
