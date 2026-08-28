@@ -1320,14 +1320,14 @@ func (s *RelayStore) Acknowledge(
 	); err != nil {
 		return relay.AcknowledgmentResult{}, err
 	}
-	subscriptionID, _, err := loadReadableMemberSubscription(
+	subscriptionID, subscriptionStatus, err := loadReadableMemberSubscription(
 		ctx, transaction, credential.TenantID, credential.DomainID,
 		credential.MemberID, "FOR SHARE",
 	)
 	if err != nil {
 		return relay.AcknowledgmentResult{}, err
 	}
-	_, found, err = loadRelayMessage(
+	message, found, err := loadRelayMessage(
 		ctx,
 		transaction,
 		credential.TenantID,
@@ -1349,10 +1349,37 @@ func (s *RelayStore) Acknowledge(
 		return relay.AcknowledgmentResult{}, fmt.Errorf("load message publisher subscription: %w", err)
 	}
 	if publisherSubscriptionID == subscriptionID {
-		return relay.AcknowledgmentResult{}, relay.NewProtocolError(
-			relay.CodeInvalidAcknowledgment,
-			"publisher cannot acknowledge its message",
-		)
+		var ownMessageIsInAuthorizedRecovery bool
+		if subscriptionStatus == relay.SubscriptionRebootstrapRequired {
+			err = transaction.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM relay_subscriptions s
+					WHERE s.tenant_id=$1 AND s.domain_id=$2
+					  AND s.subscription_id=$3
+					  AND s.status='rebootstrap_required'
+					  AND s.start_sequence IS NOT NULL
+					  AND s.start_sequence < $4
+					  AND EXISTS (
+					      SELECT 1
+					      FROM relay_subscription_rebootstrap_requests r
+					      WHERE r.tenant_id=s.tenant_id AND r.domain_id=s.domain_id
+					        AND r.subscription_id=s.subscription_id
+					        AND r.result_start_sequence=s.start_sequence)
+				)
+			`, credential.TenantID, credential.DomainID, subscriptionID, int64(message.Sequence)).Scan(
+				&ownMessageIsInAuthorizedRecovery,
+			)
+			if err != nil {
+				return relay.AcknowledgmentResult{}, fmt.Errorf("verify publisher recovery acknowledgment: %w", err)
+			}
+		}
+		if !ownMessageIsInAuthorizedRecovery {
+			return relay.AcknowledgmentResult{}, relay.NewProtocolError(
+				relay.CodeInvalidAcknowledgment,
+				"publisher cannot acknowledge its message",
+			)
+		}
 	}
 	var existing relay.AcknowledgmentStage
 	err = transaction.QueryRow(ctx, `

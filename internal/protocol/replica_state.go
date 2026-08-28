@@ -66,6 +66,7 @@ var replicaStateCompleteSpaceScopes = []string{
 	"facets.canonical-objects",
 	"facets.category-definitions",
 	"facets.category-memberships",
+	"facets.dataset-source",
 	"facets.document-library",
 	"facets.extension-schemas",
 	"facets.extensions",
@@ -80,6 +81,7 @@ var replicaStateCompleteSpaceScopes = []string{
 var replicaStateCompleteSpaceSidecarKinds = []string{
 	"facets.category-definitions",
 	"facets.category-memberships",
+	"facets.dataset-source",
 	"facets.document-library",
 	"facets.extension-schemas",
 	"facets.lenses",
@@ -463,12 +465,16 @@ func (root ReplicaStateRoot) ValidateSuccessor(predecessor ReplicaStateRoot) err
 		(predecessor.CheckpointID != nil && *root.CheckpointID == *predecessor.CheckpointID) {
 		return ErrInvalidReplicaStateSuccessor
 	}
+	promotesCoverageProfile :=
+		predecessor.Coverage.Profile == ReplicaStateCanonicalCoreCoverageProfile &&
+			root.Coverage.Profile == ReplicaStateCompleteSpaceCoverageProfile
 	if root.CapturedCoreRevision == predecessor.CapturedCoreRevision &&
 		(!replicaStatePieceInventoriesEqual(root.Pieces, predecessor.Pieces) ||
-			!reflect.DeepEqual(root.Coverage, predecessor.Coverage)) {
+			!reflect.DeepEqual(root.Coverage, predecessor.Coverage)) &&
+		!promotesCoverageProfile {
 		return ErrInvalidReplicaStateSuccessor
 	}
-	if root.Coverage.Profile != predecessor.Coverage.Profile {
+	if root.Coverage.Profile != predecessor.Coverage.Profile && !promotesCoverageProfile {
 		return ErrInvalidReplicaStateSuccessor
 	}
 	for replicaID, previousSequence := range predecessor.CoveredClock.Counters {

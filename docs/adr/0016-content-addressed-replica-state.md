@@ -77,21 +77,26 @@ FacetsNode/internal/testfixture/replica-complete-space-coverage-portable-v1.json
 Its exact-file SHA-256 is:
 
 ```text
-b1577db9c246a2558756f3087258825a176099fb0685fb7d289b6ae989fcd74a
+9fc93c8500e81a8f9cffc1678ec6718e81231cb4bb621c5dd2d67de2a59f88a0
 ```
 
 The complete inventory requires canonical objects (including Text, Document,
 and Annotation), relationships, extensions, media, and exact content-addressed
 sidecars for category definitions and memberships, the active and archived
 Document library, extension schemas, Lenses, ordered compositions and snapshot
-sets, portable analytics, and Workspace designs. Device-private settings,
+sets, exact Dataset source files, portable analytics, and Workspace designs. Device-private settings,
 credentials, queues, caches, Document undo history, and local Assistant
 conversation state are outside the portable semantic Space.
 
-This contract is not a release gate by itself. Production capture still emits
-`canonical-core.v1`; the client replacement predicate and public FacetsNode
-rebootstrap routes remain disabled until every sidecar is typed, validated, and
-applied atomically into a demonstrably empty staging package.
+Production capture emits `complete-space.v1` only under exclusive snapshot
+admission, binds the durable source revision, and validates every manifest and
+canonical-object inventory before publication. Client replacement and the
+FacetsNode rebootstrap routes are enabled only for an exact activated
+checkpoint/root. The client applies that root into a demonstrably empty staging
+package and replaces the fenced package atomically. FacetsNode restores
+publication only after the recovering subscription records applied receipts for
+every retained envelope in the recovery interval, including envelopes that the
+same subscription published before recovery.
 
 ## Digest encoding
 

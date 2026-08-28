@@ -19,6 +19,7 @@
       "facets.canonical-objects",
       "facets.category-definitions",
       "facets.category-memberships",
+      "facets.dataset-source",
       "facets.document-library",
       "facets.extension-schemas",
       "facets.extensions",
@@ -41,6 +42,12 @@
         "digest": "gXnl_mdA3L_O2aU3Nd5YJB17xVw8XfvA8HSLLPn0hlU",
         "byteCount": 102,
         "itemCount": 12
+      },
+      {
+        "kind": "facets.dataset-source",
+        "digest": "REREREREREREREREREREREREREREREREREREREREREQ",
+        "byteCount": 109,
+        "itemCount": 1
       },
       {
         "kind": "facets.document-library",

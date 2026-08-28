@@ -1309,9 +1309,10 @@ func (s *MemoryStore) RequestSubscriptionRebootstrap(
 }
 
 // CompleteSubscriptionRebootstrap restores publication only after every
-// readable, externally published envelope in the recovery tail has an applied
-// receipt for this subscription.  The relay checks delivery state only; it
-// never parses the encrypted content.
+// readable envelope in the recovery tail has an applied receipt for this
+// subscription. This includes messages the same subscription published before
+// it entered recovery. The relay checks delivery state only; it never parses
+// the encrypted content.
 func (s *MemoryStore) CompleteSubscriptionRebootstrap(
 	_ context.Context,
 	credential Credential,
@@ -1364,8 +1365,7 @@ func (s *MemoryStore) CompleteSubscriptionRebootstrap(
 		return SubscriptionRebootstrapCompletionResponse{}, protocolError(CodeInvalidCursor, "rebootstrap completion cursor is outside the retained history")
 	}
 	for _, message := range domain.messages {
-		if message.message.Sequence <= startSequence || message.message.Sequence > throughSequence ||
-			message.publisherSubscription == subscription.SubscriptionID {
+		if message.message.Sequence <= startSequence || message.message.Sequence > throughSequence {
 			continue
 		}
 		if message.checkpointFenceID != nil {
@@ -1810,7 +1810,8 @@ func (s *MemoryStore) Acknowledge(
 	if !ok {
 		return AcknowledgmentResult{}, protocolError(CodeMessageNotFound, "message was not found")
 	}
-	if message.publisherSubscription == subscription.SubscriptionID {
+	if message.publisherSubscription == subscription.SubscriptionID &&
+		!memoryOwnMessageIsInAuthorizedRecovery(domain, subscription, message) {
 		return AcknowledgmentResult{}, protocolError(
 			CodeInvalidAcknowledgment,
 			"publisher cannot acknowledge its message",
@@ -1834,6 +1835,30 @@ func (s *MemoryStore) Acknowledge(
 		Acceptance: AcceptanceAccepted,
 		Stage:      stage,
 	}, nil
+}
+
+func memoryOwnMessageIsInAuthorizedRecovery(
+	domain *memoryDomain,
+	subscription Subscription,
+	message *memoryMessage,
+) bool {
+	if subscription.Status != SubscriptionRebootstrapRequired || subscription.StartCursor == nil {
+		return false
+	}
+	startSequence, err := DecodeCursor(*subscription.StartCursor)
+	if err != nil || message.message.Sequence <= startSequence {
+		return false
+	}
+	for _, request := range domain.rebootstrapRequests {
+		if request.subscriptionID == subscription.SubscriptionID &&
+			request.result.Status == SubscriptionRebootstrapRequired &&
+			request.result.StartCursor != nil &&
+			*request.result.StartCursor == *subscription.StartCursor &&
+			request.result.UpdatedAtMilliseconds == subscription.UpdatedAtMilliseconds {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *MemoryStore) PrepareBlobPublish(

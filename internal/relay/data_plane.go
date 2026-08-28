@@ -139,11 +139,11 @@ type SubscriptionStatusChangeResponse struct {
 	Subscription Subscription `json:"subscription"`
 }
 
-// CompleteSpaceRebootstrapEnabled remains false until the portable root
-// coverage contract can prove every durable Space scope. Keeping the public
-// member route closed prevents a valid member credential from pinning relay
-// checkpoint administration through an unreleasable recovery attempt.
-const CompleteSpaceRebootstrapEnabled = false
+// CompleteSpaceRebootstrapEnabled records that clients can now prove complete
+// Space coverage before naming an opaque checkpoint/root pair. The relay still
+// does not inspect that proof: it binds the member to the exact latest retained
+// pair and requires durable tail application before restoring publication.
+const CompleteSpaceRebootstrapEnabled = true
 
 // SubscriptionRebootstrapRequest lets an enrolled member name the exact
 // activated checkpoint/root pair already authorized by its client. The relay

@@ -1126,7 +1126,7 @@ func TestRelaySubscriptionLifecycleStatusAndTenantRotationAreExactRetrySafe(t *t
 	_ = newStatus.Body.Close()
 }
 
-func TestRelayMemberRebootstrapRoutesRemainReleaseGated(t *testing.T) {
+func TestRelayMemberRebootstrapRoutesRejectUnavailableAuthority(t *testing.T) {
 	operatorToken := relayTestToken(240)
 	server, err := NewWithRelay(
 		rendezvous.NewMemoryStore(), relay.NewMemoryStore(), nil,
@@ -1157,7 +1157,7 @@ func TestRelayMemberRebootstrapRoutesRemainReleaseGated(t *testing.T) {
 	body, err := io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if err != nil || !bytes.Contains(body, []byte(`"code":"checkpoint_unavailable"`)) {
-		t.Fatalf("unexpected rebootstrap release-gate response: %s err=%v", body, err)
+		t.Fatalf("unexpected unavailable-root response: %s err=%v", body, err)
 	}
 
 	completion := relay.SubscriptionRebootstrapCompletion{
@@ -1171,11 +1171,220 @@ func TestRelayMemberRebootstrapRoutesRemainReleaseGated(t *testing.T) {
 		domainRoot+"/subscription-rebootstrap/completion", completion,
 		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
 	)
-	requireStatus(t, response, http.StatusConflict)
+	requireStatus(t, response, http.StatusBadRequest)
 	body, err = io.ReadAll(response.Body)
 	_ = response.Body.Close()
-	if err != nil || !bytes.Contains(body, []byte(`"code":"checkpoint_unavailable"`)) {
-		t.Fatalf("unexpected completion release-gate response: %s err=%v", body, err)
+	if err != nil || !bytes.Contains(body, []byte(`"code":"invalid_subscription"`)) {
+		t.Fatalf("unexpected unrequested-completion response: %s err=%v", body, err)
+	}
+}
+
+func TestRelayMemberRebootstrapRoutesBindAndCompleteExactActivatedRoot(t *testing.T) {
+	operatorToken := relayTestToken(243)
+	store := relay.NewMemoryStore()
+	server, err := NewWithRelay(
+		rendezvous.NewMemoryStore(), store, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), operatorToken,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nowMilliseconds := int64(1_000)
+	server.now = func() time.Time { return time.UnixMilli(nowMilliseconds) }
+	handler := server.Handler()
+	authority := provisionRelayTestAuthority(
+		t, handler, operatorToken, nowMilliseconds, 244, 245,
+	)
+	domainRoot := "/v1/relay/tenants/" + authority.Domain.TenantID.String() +
+		"/domains/" + authority.Domain.DomainID.String()
+
+	nowMilliseconds = 1_100
+	fenceRequest := relay.CheckpointFenceRequest{
+		RetryID: uuid.New(), FenceID: uuid.New(),
+		RequestedAtMilliseconds: nowMilliseconds,
+	}
+	fenceResponse := performRelayJSON(
+		t, handler, http.MethodPost, domainRoot+"/checkpoint-fences",
+		fenceRequest, authority.MemberCredential.AuthorizationToken,
+		authority.Member.MemberID,
+	)
+	requireStatus(t, fenceResponse, http.StatusCreated)
+	var fence relay.CheckpointFenceResponse
+	if err := json.NewDecoder(fenceResponse.Body).Decode(&fence); err != nil {
+		t.Fatal(err)
+	}
+	_ = fenceResponse.Body.Close()
+
+	rootEnvelope := relay.Envelope{
+		Version: relay.SchemaVersion, Algorithm: relay.EnvelopeAlgorithm,
+		TenantID: authority.Domain.TenantID, DomainID: authority.Domain.DomainID,
+		MessageID: uuid.New(), PublisherMemberID: authority.Member.MemberID,
+		KeyEpoch: 1, CreatedAtMilliseconds: nowMilliseconds,
+		Nonce:             base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xa1}, 12)),
+		Ciphertext:        base64.RawURLEncoding.EncodeToString([]byte("opaque-complete-space-root")),
+		AuthenticationTag: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xb2}, 16)),
+	}
+	published := performRelayJSON(
+		t, handler, http.MethodPut,
+		domainRoot+"/messages/"+rootEnvelope.MessageID.String(), rootEnvelope,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, published, http.StatusCreated)
+	_ = published.Body.Close()
+
+	candidate := relay.CheckpointCandidate{
+		Version: relay.SchemaVersion, RetryID: uuid.New(), CheckpointID: uuid.New(),
+		FenceID: fence.FenceID, TenantID: authority.Domain.TenantID,
+		DomainID:                authority.Domain.DomainID,
+		PublisherSubscriptionID: authority.SubscriptionID, KeyEpoch: 1,
+		CoveredThroughCursor: fence.BoundaryCursor,
+		RetainedMessageIDs:   []uuid.UUID{rootEnvelope.MessageID},
+		RetainedBlobIDs:      []string{}, CreatedAtMilliseconds: nowMilliseconds,
+	}
+	staged := performRelayJSON(
+		t, handler, http.MethodPost, domainRoot+"/checkpoints/candidates",
+		candidate, authority.MemberCredential.AuthorizationToken,
+		authority.Member.MemberID,
+	)
+	requireStatus(t, staged, http.StatusCreated)
+	_ = staged.Body.Close()
+
+	nowMilliseconds = 1_200
+	activation := relay.CheckpointActivationRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		ActivatedAtMilliseconds: nowMilliseconds,
+	}
+	activated := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/checkpoints/"+candidate.CheckpointID.String()+"/activation",
+		activation, authority.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, activated, http.StatusCreated)
+	_ = activated.Body.Close()
+
+	request := relay.SubscriptionRebootstrapRequest{
+		RetryID: uuid.New(), CheckpointID: candidate.CheckpointID,
+		RootMessageID:           rootEnvelope.MessageID,
+		RequestedAtMilliseconds: nowMilliseconds,
+	}
+	wrongRoot := request
+	wrongRoot.RetryID = uuid.New()
+	wrongRoot.RootMessageID = uuid.New()
+	rejected := performRelayJSON(
+		t, handler, http.MethodPost, domainRoot+"/subscription-rebootstrap",
+		wrongRoot, authority.MemberCredential.AuthorizationToken,
+		authority.Member.MemberID,
+	)
+	requireStatus(t, rejected, http.StatusConflict)
+	_ = rejected.Body.Close()
+
+	requested := performRelayJSON(
+		t, handler, http.MethodPost, domainRoot+"/subscription-rebootstrap",
+		request, authority.MemberCredential.AuthorizationToken,
+		authority.Member.MemberID,
+	)
+	requireStatus(t, requested, http.StatusCreated)
+	var requestedResult relay.SubscriptionRebootstrapResponse
+	if err := json.NewDecoder(requested.Body).Decode(&requestedResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = requested.Body.Close()
+	if requestedResult.CheckpointID != candidate.CheckpointID ||
+		requestedResult.RootMessageID != rootEnvelope.MessageID ||
+		requestedResult.Subscription.Status != relay.SubscriptionRebootstrapRequired {
+		t.Fatalf("unexpected rebootstrap response: %+v", requestedResult)
+	}
+
+	completion := relay.SubscriptionRebootstrapCompletion{
+		RetryID: uuid.New(), RequestRetryID: request.RetryID,
+		CheckpointID: candidate.CheckpointID, RootMessageID: rootEnvelope.MessageID,
+		CompletedThroughCursor:  relay.EncodeCursor(1),
+		CompletedAtMilliseconds: nowMilliseconds,
+	}
+	completed := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/completion", completion,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, completed, http.StatusConflict)
+	body, err := io.ReadAll(completed.Body)
+	_ = completed.Body.Close()
+	if err != nil || !bytes.Contains(body, []byte(`"code":"rebootstrap_incomplete"`)) {
+		t.Fatalf("unexpected incomplete-rebootstrap response: %s err=%v", body, err)
+	}
+
+	rootPath := domainRoot + "/messages/" + rootEnvelope.MessageID.String()
+	for _, stage := range []string{"accepted", "applied"} {
+		acknowledged := performRelayJSON(
+			t, handler, http.MethodPost,
+			rootPath+"/acknowledgments", map[string]string{"stage": stage},
+			authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+		)
+		requireStatus(t, acknowledged, http.StatusOK)
+		_ = acknowledged.Body.Close()
+	}
+
+	completed = performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/completion", completion,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, completed, http.StatusCreated)
+	var completedResult relay.SubscriptionRebootstrapCompletionResponse
+	if err := json.NewDecoder(completed.Body).Decode(&completedResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = completed.Body.Close()
+	if completedResult.Subscription.Status != relay.SubscriptionActive ||
+		completedResult.Subscription.StartCursor != nil {
+		t.Fatalf("unexpected rebootstrap completion: %+v", completedResult)
+	}
+	retry := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/subscription-rebootstrap/completion", completion,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, retry, http.StatusOK)
+	_ = retry.Body.Close()
+
+	// A later administrative recovery-mode transition must not reuse the
+	// completed member request to authorize self-acknowledgment. Only the exact
+	// currently bound rebootstrap request grants that narrow exception.
+	nowMilliseconds = 1_300
+	laterEnvelope := rootEnvelope
+	laterEnvelope.MessageID = uuid.New()
+	laterEnvelope.CreatedAtMilliseconds = nowMilliseconds
+	laterPublished := performRelayJSON(
+		t, handler, http.MethodPut,
+		domainRoot+"/messages/"+laterEnvelope.MessageID.String(), laterEnvelope,
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, laterPublished, http.StatusCreated)
+	_ = laterPublished.Body.Close()
+	nowMilliseconds = 1_400
+	statusRequest := relay.SubscriptionStatusChangeRequest{
+		RetryID: uuid.New(), Status: relay.SubscriptionRebootstrapRequired,
+		ChangedAtMilliseconds: nowMilliseconds,
+	}
+	statusPath := domainRoot + "/subscriptions/" +
+		authority.SubscriptionID.String() + "/status"
+	changed := performRelayJSON(
+		t, handler, http.MethodPost, statusPath, statusRequest,
+		authority.AdministrationCredential.AuthorizationToken, uuid.Nil,
+	)
+	requireStatus(t, changed, http.StatusCreated)
+	_ = changed.Body.Close()
+	staleAcknowledgment := performRelayJSON(
+		t, handler, http.MethodPost,
+		domainRoot+"/messages/"+laterEnvelope.MessageID.String()+"/acknowledgments",
+		map[string]string{"stage": "accepted"},
+		authority.MemberCredential.AuthorizationToken, authority.Member.MemberID,
+	)
+	requireStatus(t, staleAcknowledgment, http.StatusConflict)
+	body, err = io.ReadAll(staleAcknowledgment.Body)
+	_ = staleAcknowledgment.Body.Close()
+	if err != nil || !bytes.Contains(body, []byte(`"code":"invalid_acknowledgment"`)) {
+		t.Fatalf("unexpected stale-recovery acknowledgment response: %s err=%v", body, err)
 	}
 }
 

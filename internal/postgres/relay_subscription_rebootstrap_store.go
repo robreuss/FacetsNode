@@ -337,7 +337,6 @@ func completeSubscriptionRebootstrapTx(
 			FROM relay_messages m
 			WHERE m.tenant_id=$1 AND m.domain_id=$2
 			  AND m.domain_sequence > $3 AND m.domain_sequence <= $4
-			  AND m.publisher_subscription_id <> $5
 			  AND (m.checkpoint_fence_id IS NULL OR EXISTS (
 			      SELECT 1 FROM relay_checkpoint_fences f
 			      WHERE f.tenant_id=m.tenant_id AND f.domain_id=m.domain_id

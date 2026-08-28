@@ -108,6 +108,72 @@ func TestReplicaStateAllowsRevisionZeroAndIgnoresSenderCaptureTime(t *testing.T)
 	}
 }
 
+func TestReplicaStateCoveragePromotesOnceToCompleteSpace(t *testing.T) {
+	fixture := loadPortableReplicaStateFixture(t)
+	completeFixture := loadPortableCompleteSpaceCoverageFixture(t)
+	references := make([]ReplicaStateBlobReference, 0, len(completeFixture.Coverage.Sidecars))
+	for _, sidecar := range completeFixture.Coverage.Sidecars {
+		references = append(references, ReplicaStateBlobReference{
+			BlobID:    sidecar.Digest,
+			ByteCount: sidecar.ByteCount,
+		})
+	}
+	sort.Slice(references, func(left, right int) bool {
+		return references[left].BlobID < references[right].BlobID
+	})
+	predecessorDigest, err := fixture.Root.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointID := fixture.SuccessorRoot.CheckpointID
+	itemCount, ok := completeFixture.Coverage.canonicalItemCount()
+	if !ok {
+		t.Fatal("complete fixture item count overflow")
+	}
+	promoted := ReplicaStateRoot{
+		Version:               fixture.Root.Version,
+		DomainID:              fixture.Root.DomainID,
+		KeyEpoch:              fixture.Root.KeyEpoch,
+		CapturedCoreRevision:  fixture.Root.CapturedCoreRevision,
+		CheckpointID:          checkpointID,
+		PredecessorRootDigest: &predecessorDigest,
+		CoveredClock:          fixture.Root.CoveredClock,
+		Coverage:              completeFixture.Coverage,
+		Pieces: []ReplicaStatePieceDescriptor{{
+			PieceID:                "0G_PuACy792gbilqXy7FJbgb8EGYDlLasljwluqgA5s",
+			ByteCount:              512,
+			RequiredBlobReferences: references,
+			ItemCount:              itemCount,
+		}},
+		CapturedAtMilliseconds: fixture.Root.CapturedAtMilliseconds + 1,
+	}
+	if err := promoted.ValidateSuccessor(fixture.Root); err != nil {
+		t.Fatalf("canonical-to-complete promotion rejected: %v", err)
+	}
+
+	downgradeID := *fixture.SuccessorRoot.CheckpointID
+	downgradeID[15] ^= 1
+	promotedDigest, err := promoted.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	downgrade := ReplicaStateRoot{
+		Version:                promoted.Version,
+		DomainID:               promoted.DomainID,
+		KeyEpoch:               promoted.KeyEpoch,
+		CapturedCoreRevision:   promoted.CapturedCoreRevision + 1,
+		CheckpointID:           &downgradeID,
+		PredecessorRootDigest:  &promotedDigest,
+		CoveredClock:           promoted.CoveredClock,
+		Coverage:               fixture.Root.Coverage,
+		Pieces:                 fixture.Root.Pieces,
+		CapturedAtMilliseconds: promoted.CapturedAtMilliseconds + 1,
+	}
+	if err := downgrade.ValidateSuccessor(promoted); err == nil {
+		t.Fatal("complete-to-canonical downgrade accepted")
+	}
+}
+
 func TestReplicaStateBindsCheckpointIdentity(t *testing.T) {
 	fixture := loadPortableReplicaStateFixture(t)
 	if fixture.Root.CheckpointID != nil || fixture.SuccessorRoot.CheckpointID == nil {
