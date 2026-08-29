@@ -361,9 +361,6 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 			t.Fatalf("rebootstrap accepted acknowledgment=%+v err=%v", acknowledgment, err)
 		}
 	}
-	if quiet, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_254); err != nil || len(quiet.Messages) != 0 || quiet.NextSequence != rebootstrapFetch.NextSequence {
-		t.Fatalf("rebootstrap quiet tail=%+v err=%v", quiet, err)
-	}
 	completion := relay.SubscriptionRebootstrapCompletion{
 		RetryID: uuid.New(), RequestRetryID: rebootstrapRequest.RetryID,
 		CheckpointID: candidate.CheckpointID, RootMessageID: retainedSuffix.MessageID,
@@ -383,6 +380,9 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		if acknowledgment, err := store.Acknowledge(ctx, recipient, message.Envelope.MessageID, relay.AcknowledgmentApplied, 1_254); err != nil || acknowledgment.Acceptance != relay.AcceptanceAccepted {
 			t.Fatalf("rebootstrap applied acknowledgment=%+v err=%v", acknowledgment, err)
 		}
+	}
+	if quiet, err := store.Fetch(ctx, recipient, relay.MaximumSequence, 10, 1_254); err != nil || len(quiet.Messages) != 0 || quiet.NextSequence != rebootstrapFetch.NextSequence {
+		t.Fatalf("rebootstrap quiet tail=%+v err=%v", quiet, err)
 	}
 	completed, err := store.CompleteSubscriptionRebootstrap(ctx, recipient, completion, 1_255)
 	if err != nil || completed.Acceptance != relay.AcceptanceAccepted || completed.Subscription.Status != relay.SubscriptionActive {
