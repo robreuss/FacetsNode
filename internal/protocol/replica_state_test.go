@@ -29,6 +29,16 @@ type portableCompleteSpaceCoverageFixture struct {
 	Coverage ReplicaStateCoverage `json:"coverage"`
 }
 
+type portableHostileJSONFixture struct {
+	Format  string `json:"format"`
+	Warning string `json:"warning"`
+	Cases   []struct {
+		Name          string `json:"name"`
+		Accepted      bool   `json:"accepted"`
+		JSONBase64URL string `json:"jsonBase64URL"`
+	} `json:"cases"`
+}
+
 func TestPortableReplicaStateRoots(t *testing.T) {
 	fixture := loadPortableReplicaStateFixture(t)
 	if err := fixture.Root.Validate(); err != nil {
@@ -47,6 +57,39 @@ func TestPortableReplicaStateRoots(t *testing.T) {
 	}
 	if fixture.Root.Pieces[0].PieceID != fixture.SuccessorRoot.Pieces[0].PieceID {
 		t.Fatal("successor did not structurally share the unchanged piece")
+	}
+}
+
+func TestCanonicalReplicaStateRootJSONRejectsAlternateAndHostileEncodings(t *testing.T) {
+	fixture := loadPortableHostileJSONFixture(t)
+	if fixture.Format != "facets.replica-state-hostile-json.v1" || len(fixture.Cases) != 11 {
+		t.Fatalf("unexpected hostile fixture shape: %s cases=%d", fixture.Format, len(fixture.Cases))
+	}
+	for _, testCase := range fixture.Cases {
+		bytes, err := base64.RawURLEncoding.Strict().DecodeString(testCase.JSONBase64URL)
+		if err != nil {
+			t.Fatalf("decode %s: %v", testCase.Name, err)
+		}
+		root, decodeErr := DecodeCanonicalReplicaStateRoot(bytes)
+		if testCase.Accepted {
+			if decodeErr != nil {
+				t.Fatalf("rejected %s: %v", testCase.Name, decodeErr)
+			}
+			canonical, err := root.CanonicalJSON()
+			if err != nil || !reflect.DeepEqual(canonical, bytes) {
+				t.Fatalf("canonical mismatch %s: %v", testCase.Name, err)
+			}
+			normalized := root
+			normalized.Coverage.Sidecars = nil
+			normalized.Pieces = slices.Clone(root.Pieces)
+			normalized.Pieces[0].DependencyPieceIDs = nil
+			canonical, err = normalized.CanonicalJSON()
+			if err != nil || !reflect.DeepEqual(canonical, bytes) {
+				t.Fatalf("nil collection normalization mismatch %s: %v", testCase.Name, err)
+			}
+		} else if decodeErr == nil {
+			t.Fatalf("hostile fixture %s accepted", testCase.Name)
+		}
 	}
 }
 
@@ -441,6 +484,20 @@ func loadPortableCompleteSpaceCoverageFixture(t *testing.T) portableCompleteSpac
 		t.Fatal(err)
 	}
 	var fixture portableCompleteSpaceCoverageFixture
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func loadPortableHostileJSONFixture(t *testing.T) portableHostileJSONFixture {
+	t.Helper()
+	path := filepath.Join("..", "testfixture", "replica-state-hostile-json-v1.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture portableHostileJSONFixture
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}

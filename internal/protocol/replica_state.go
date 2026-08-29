@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -447,6 +449,137 @@ func (root ReplicaStateRoot) ReferenceDigest() (string, error) {
 	writeReplicaStateUint64(&data, uint64(root.CapturedAtMilliseconds))
 	digest := sha256.Sum256(data.Bytes())
 	return base64.RawURLEncoding.EncodeToString(digest[:]), nil
+}
+
+// CanonicalJSON returns the sole portable JSON representation admitted for a
+// state-root blob. FacetsNode remains content-blind in relay operation; this
+// codec mirrors the client contract so future control-plane use and portable
+// fixtures cannot acquire parser-dependent meanings.
+func (root ReplicaStateRoot) CanonicalJSON() ([]byte, error) {
+	if err := root.Validate(); err != nil {
+		return nil, err
+	}
+	var checkpointID *string
+	if root.CheckpointID != nil {
+		value := strings.ToLower(root.CheckpointID.String())
+		checkpointID = &value
+	}
+	predecessorMessageIDs := make([]string, len(root.PredecessorMessageIDs))
+	for index, messageID := range root.PredecessorMessageIDs {
+		predecessorMessageIDs[index] = strings.ToLower(messageID.String())
+	}
+	coveredClock := ReplicaStateCausalClock{
+		Counters: make(map[string]uint64, len(root.CoveredClock.Counters)),
+	}
+	for replicaID, sequence := range root.CoveredClock.Counters {
+		coveredClock.Counters[replicaID] = sequence
+	}
+	coverage := root.Coverage
+	coverage.CanonicalModelTypes = append(
+		[]ReplicaStateModelTypeCoverage{},
+		root.Coverage.CanonicalModelTypes...,
+	)
+	coverage.CoveredSemanticScopes = append(
+		[]string{},
+		root.Coverage.CoveredSemanticScopes...,
+	)
+	coverage.Sidecars = append(
+		[]ReplicaStateSidecarCoverage{},
+		root.Coverage.Sidecars...,
+	)
+	coverage.ExcludedDurableScopes = append(
+		[]string{},
+		root.Coverage.ExcludedDurableScopes...,
+	)
+	pieces := append([]ReplicaStatePieceDescriptor{}, root.Pieces...)
+	for index := range pieces {
+		pieces[index].DependencyPieceIDs = append(
+			[]string{},
+			root.Pieces[index].DependencyPieceIDs...,
+		)
+		pieces[index].RequiredBlobReferences = append(
+			[]ReplicaStateBlobReference{},
+			root.Pieces[index].RequiredBlobReferences...,
+		)
+	}
+	type canonicalRoot struct {
+		Version                int                           `json:"version"`
+		DomainID               string                        `json:"domainID"`
+		KeyEpoch               uint64                        `json:"keyEpoch"`
+		CapturedCoreRevision   uint64                        `json:"capturedCoreRevision"`
+		CheckpointID           *string                       `json:"checkpointID,omitempty"`
+		PredecessorRootDigest  *string                       `json:"predecessorRootDigest,omitempty"`
+		CoveredClock           ReplicaStateCausalClock       `json:"coveredClock"`
+		PredecessorMessageIDs  []string                      `json:"predecessorMessageIDs"`
+		Coverage               ReplicaStateCoverage          `json:"coverage"`
+		Pieces                 []ReplicaStatePieceDescriptor `json:"pieces"`
+		CapturedAtMilliseconds int64                         `json:"capturedAtMilliseconds"`
+	}
+	encoded, err := json.Marshal(canonicalRoot{
+		Version:                root.Version,
+		DomainID:               root.DomainID,
+		KeyEpoch:               root.KeyEpoch,
+		CapturedCoreRevision:   root.CapturedCoreRevision,
+		CheckpointID:           checkpointID,
+		PredecessorRootDigest:  root.PredecessorRootDigest,
+		CoveredClock:           coveredClock,
+		PredecessorMessageIDs:  predecessorMessageIDs,
+		Coverage:               coverage,
+		Pieces:                 pieces,
+		CapturedAtMilliseconds: root.CapturedAtMilliseconds,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return canonicalReplicaStateJSON(encoded)
+}
+
+// DecodeCanonicalReplicaStateRoot rejects every representation other than the
+// exact output of CanonicalJSON. The exact-byte comparison rejects duplicate,
+// unknown, and case-variant keys; missing or null required collections;
+// alternate UUID spellings; malformed UTF-8; and insignificant formatting.
+func DecodeCanonicalReplicaStateRoot(data []byte) (ReplicaStateRoot, error) {
+	if !utf8.Valid(data) {
+		return ReplicaStateRoot{}, ErrInvalidReplicaState
+	}
+	var root ReplicaStateRoot
+	if err := json.Unmarshal(data, &root); err != nil {
+		return ReplicaStateRoot{}, err
+	}
+	canonical, err := root.CanonicalJSON()
+	if err != nil {
+		return ReplicaStateRoot{}, err
+	}
+	if !bytes.Equal(canonical, data) {
+		return ReplicaStateRoot{}, ErrInvalidReplicaState
+	}
+	return root, nil
+}
+
+func canonicalReplicaStateJSON(data []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, ErrInvalidReplicaState
+		}
+		return nil, err
+	}
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	canonical := bytes.TrimSuffix(buffer.Bytes(), []byte("\n"))
+	canonical = bytes.ReplaceAll(canonical, []byte(`\u2028`), []byte("\u2028"))
+	canonical = bytes.ReplaceAll(canonical, []byte(`\u2029`), []byte("\u2029"))
+	return canonical, nil
 }
 
 func (root ReplicaStateRoot) ValidateSuccessor(predecessor ReplicaStateRoot) error {
