@@ -19,19 +19,21 @@ import (
 	serviceauthority "github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
-const nodeTransportObservationPortableFixtureSHA256 = "2ad225405b42b2bcf45be588ff08e64d5125d024d55f2e10491d8120f12e780f"
+const nodeTransportObservationPortableFixtureSHA256 = "7ad6ebe91e3a999d6e62c4583661ce8c89027eec072415469414ee0fa1fa56b7"
 
 //go:embed node-transport-observation-portable-v1.json
 var nodeTransportObservationPortableFixture []byte
 
 type portableNodeTransportObservationFixture struct {
-	ExpectedPayload                          serviceauthority.NodeTransportObservationPayload `json:"expectedPayload"`
-	ExpectedProtectedEnvelopeReferenceDigest string                                           `json:"expectedProtectedEnvelopeReferenceDigest"`
-	ExpectedRecordReferenceDigest            string                                           `json:"expectedRecordReferenceDigest"`
-	Format                                   string                                           `json:"format"`
-	ProtectedObservationEnvelope             []byte                                           `json:"protectedObservationEnvelope"`
-	Record                                   serviceauthority.NodeTransportObservation        `json:"record"`
-	TrustedDeployment                        serviceauthority.DeploymentDescriptor            `json:"trustedDeployment"`
+	ExpectedPayload                                      serviceauthority.NodeTransportObservationPayload `json:"expectedPayload"`
+	ExpectedProtectedEnvelopeReferenceDigest             string                                           `json:"expectedProtectedEnvelopeReferenceDigest"`
+	ExpectedRecipientPrincipalDeviceGrantReferenceDigest string                                           `json:"expectedRecipientPrincipalDeviceGrantReferenceDigest"`
+	ExpectedRecordReferenceDigest                        string                                           `json:"expectedRecordReferenceDigest"`
+	Format                                               string                                           `json:"format"`
+	ProtectedObservationEnvelope                         []byte                                           `json:"protectedObservationEnvelope"`
+	RecipientPrincipalDeviceGrantRecord                  []byte                                           `json:"recipientPrincipalDeviceGrantRecord"`
+	Record                                               serviceauthority.NodeTransportObservation        `json:"record"`
+	TrustedDeployment                                    serviceauthority.DeploymentDescriptor            `json:"trustedDeployment"`
 }
 
 type nodeObservationFixture struct {
@@ -118,6 +120,13 @@ func TestNodeTransportObservationPortableFixture(t *testing.T) {
 			uint64(len(fixture.ProtectedObservationEnvelope)) {
 		t.Fatalf("portable protected-envelope binding mismatch: digest=%q err=%v", protectedDigest, err)
 	}
+	grantDigest, err := serviceauthority.RecipientPrincipalDeviceGrantRecordReferenceDigest(
+		fixture.RecipientPrincipalDeviceGrantRecord,
+	)
+	if err != nil || grantDigest != fixture.ExpectedRecipientPrincipalDeviceGrantReferenceDigest ||
+		verified.DeliveryProtection.RecipientAuthorityReference.ReferenceDigest != grantDigest {
+		t.Fatalf("portable recipient grant reference mismatch: digest=%q err=%v", grantDigest, err)
+	}
 
 	if fixture.Record.Signature.SignerID != fixture.TrustedDeployment.DeploymentID ||
 		fixture.Record.Signature.PublicSigningKeyX963 !=
@@ -137,8 +146,14 @@ func TestNodeTransportObservationPortableFixture(t *testing.T) {
 		verified.DeliveryProtection.DeliveryRecipientDeviceID !=
 			uuid.MustParse("71000000-0000-0000-0000-000000000005") ||
 		verified.DeliveryProtection.RecipientAgreementKeyFingerprint !=
-			strings.Repeat("f", 64) ||
-		verified.DeliveryProtection.RecipientEncryptionKeyEpoch != 3 {
+			"89896264c58fca553508257b18703781fcd99c22a66186aa74f56e76f9b27cbe" ||
+		verified.DeliveryProtection.RecipientAuthorityReference.Kind !=
+			serviceauthority.NodeTransportDeviceSyncPrincipalGrantReference ||
+		verified.DeliveryProtection.RecipientAuthorityReference.GrantID == nil ||
+		*verified.DeliveryProtection.RecipientAuthorityReference.GrantID !=
+			uuid.MustParse("71000000-0000-0000-0000-000000000008") ||
+		verified.DeliveryProtection.RecipientAuthorityReference.DeviceGeneration == nil ||
+		*verified.DeliveryProtection.RecipientAuthorityReference.DeviceGeneration != 3 {
 		t.Fatal("portable authority/service/recipient binding differs from frozen expected values")
 	}
 
@@ -197,6 +212,12 @@ func TestNodeTransportObservationSeparatesIntegrityAuthorityAndRecipientBinding(
 		t.Fatal("observation accepted another recipient agreement key")
 	}
 	wrongRecipient = fixture.recipient
+	wrongGeneration := *wrongRecipient.RecipientAuthorityReference.DeviceGeneration + 1
+	wrongRecipient.RecipientAuthorityReference.DeviceGeneration = &wrongGeneration
+	if err := observation.ValidateRecipientBinding(wrongRecipient); err == nil {
+		t.Fatal("observation accepted another recipient authority generation")
+	}
+	wrongRecipient = fixture.recipient
 	wrongRecipient.EncryptionSuite = "P256-HKDF-SHA256+A128GCM"
 	if err := observation.ValidateRecipientBinding(wrongRecipient); err == nil {
 		t.Fatal("observation accepted another recipient encryption suite")
@@ -218,6 +239,181 @@ func TestNodeTransportObservationSeparatesIntegrityAuthorityAndRecipientBinding(
 	unknown := bytes.Replace(encoded, []byte(`{"payload":`), []byte(`{"extra":1,"payload":`), 1)
 	if _, err := serviceauthority.DecodeNodeTransportObservation(unknown); err == nil {
 		t.Fatal("wrapper with unknown field decoded")
+	}
+}
+
+func TestNodeTransportObservationRecipientAuthorityReferenceIsClosedAndScopeBound(t *testing.T) {
+	fixture := newNodeObservationFixture(t)
+	observation := signNodeObservation(t, fixture, fixture.payload)
+
+	wrongReference := fixture.recipient
+	wrongReference.RecipientAuthorityReference.ReferenceDigest = strings.Repeat("a", 64)
+	if err := observation.ValidateRecipientBinding(wrongReference); err == nil {
+		t.Fatal("observation accepted another recipient authority record")
+	}
+	wrongGrantID := fixture.recipient
+	replacementGrantID := uuid.New()
+	wrongGrantID.RecipientAuthorityReference.GrantID = &replacementGrantID
+	if err := observation.ValidateRecipientBinding(wrongGrantID); err == nil {
+		t.Fatal("observation accepted another recipient grant identity")
+	}
+
+	participantID := uuid.MustParse("23000000-0000-0000-0000-000000000003")
+	sharedReference := sharedSpaceRecipientAuthorityReference(
+		participantID,
+		9,
+		strings.Repeat("9", 64),
+	)
+	sharedPayload := fixture.payload
+	sharedPayload.ServiceKind = serviceauthority.ScopeSharedSpace
+	sharedPayload.Authority.Scope.Kind = serviceauthority.ScopeSharedSpace
+	sharedPayload.DeliveryProtection.RecipientAuthorityReference = sharedReference
+	sharedObservation, err := fixture.deploymentSigner.SignNodeTransportObservation(sharedPayload)
+	if err != nil {
+		t.Fatalf("valid Shared Space roster reference rejected: %v", err)
+	}
+	sharedExpected := serviceauthority.NodeTransportExpectedRecipient{
+		DeviceID:                    fixture.recipient.DeviceID,
+		AgreementKeyFingerprint:     fixture.recipient.AgreementKeyFingerprint,
+		RecipientAuthorityReference: sharedReference,
+		EncryptionSuite:             fixture.recipient.EncryptionSuite,
+	}
+	if err := sharedObservation.ValidateRecipientBinding(sharedExpected); err != nil {
+		t.Fatalf("exact Shared Space roster binding rejected: %v", err)
+	}
+	wrongRosterRevision := *sharedReference.RosterRevision + 1
+	sharedExpected.RecipientAuthorityReference.RosterRevision = &wrongRosterRevision
+	if err := sharedObservation.ValidateRecipientBinding(sharedExpected); err == nil {
+		t.Fatal("observation accepted another Shared Space roster revision")
+	}
+
+	hostile := []struct {
+		name   string
+		mutate func(*serviceauthority.NodeTransportObservationPayload)
+	}{
+		{"device scope with shared roster", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.DeliveryProtection.RecipientAuthorityReference = sharedReference
+		}},
+		{"shared scope with device grant", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.ServiceKind = serviceauthority.ScopeSharedSpace
+			value.Authority.Scope.Kind = serviceauthority.ScopeSharedSpace
+		}},
+		{"compute scope with recipient reference", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.ServiceKind = serviceauthority.ScopeComputePool
+			value.Authority.Scope.Kind = serviceauthority.ScopeComputePool
+		}},
+		{"device grant missing generation", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.DeliveryProtection.RecipientAuthorityReference.DeviceGeneration = nil
+		}},
+		{"device grant missing grant identity", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.DeliveryProtection.RecipientAuthorityReference.GrantID = nil
+		}},
+		{"device grant zero generation", func(value *serviceauthority.NodeTransportObservationPayload) {
+			zero := uint64(0)
+			value.DeliveryProtection.RecipientAuthorityReference.DeviceGeneration = &zero
+		}},
+		{"device grant with participant", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.DeliveryProtection.RecipientAuthorityReference.ParticipantID = &participantID
+		}},
+		{"device grant with roster revision", func(value *serviceauthority.NodeTransportObservationPayload) {
+			revision := uint64(1)
+			value.DeliveryProtection.RecipientAuthorityReference.RosterRevision = &revision
+		}},
+		{"shared roster missing participant", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.ServiceKind = serviceauthority.ScopeSharedSpace
+			value.Authority.Scope.Kind = serviceauthority.ScopeSharedSpace
+			value.DeliveryProtection.RecipientAuthorityReference = sharedReference
+			value.DeliveryProtection.RecipientAuthorityReference.ParticipantID = nil
+		}},
+		{"shared roster missing revision", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.ServiceKind = serviceauthority.ScopeSharedSpace
+			value.Authority.Scope.Kind = serviceauthority.ScopeSharedSpace
+			value.DeliveryProtection.RecipientAuthorityReference = sharedReference
+			value.DeliveryProtection.RecipientAuthorityReference.RosterRevision = nil
+		}},
+		{"shared roster zero revision", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.ServiceKind = serviceauthority.ScopeSharedSpace
+			value.Authority.Scope.Kind = serviceauthority.ScopeSharedSpace
+			value.DeliveryProtection.RecipientAuthorityReference = sharedReference
+			zero := uint64(0)
+			value.DeliveryProtection.RecipientAuthorityReference.RosterRevision = &zero
+		}},
+		{"shared roster with grant", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.ServiceKind = serviceauthority.ScopeSharedSpace
+			value.Authority.Scope.Kind = serviceauthority.ScopeSharedSpace
+			value.DeliveryProtection.RecipientAuthorityReference = sharedReference
+			grantID := uuid.New()
+			value.DeliveryProtection.RecipientAuthorityReference.GrantID = &grantID
+		}},
+		{"shared roster with device generation", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.ServiceKind = serviceauthority.ScopeSharedSpace
+			value.Authority.Scope.Kind = serviceauthority.ScopeSharedSpace
+			value.DeliveryProtection.RecipientAuthorityReference = sharedReference
+			generation := uint64(1)
+			value.DeliveryProtection.RecipientAuthorityReference.DeviceGeneration = &generation
+		}},
+		{"unknown recipient authority kind", func(value *serviceauthority.NodeTransportObservationPayload) {
+			value.DeliveryProtection.RecipientAuthorityReference.Kind =
+				serviceauthority.NodeTransportRecipientAuthorityReferenceKind("generic")
+		}},
+	}
+	for _, test := range hostile {
+		t.Run(test.name, func(t *testing.T) {
+			payload := fixture.payload
+			test.mutate(&payload)
+			if _, err := fixture.deploymentSigner.SignNodeTransportObservation(payload); err == nil {
+				t.Fatal("hostile recipient-authority shape was signed")
+			}
+		})
+	}
+
+	// Strict canonical verification rejects each unknown/mixed field on its
+	// own, even when a deployment key signs those exact hostile bytes.
+	rawHostile := []struct {
+		name   string
+		mutate func(delivery map[string]any, reference map[string]any)
+	}{
+		{"legacy common epoch field", func(delivery map[string]any, _ map[string]any) {
+			delivery["recipientEncryptionKeyEpoch"] = float64(3)
+		}},
+		{"mixed participant field", func(_ map[string]any, reference map[string]any) {
+			reference["participantID"] = participantID.String()
+		}},
+		{"unknown authority field", func(_ map[string]any, reference map[string]any) {
+			reference["unknownAuthorityField"] = true
+		}},
+	}
+	for _, test := range rawHostile {
+		t.Run("signed JSON "+test.name, func(t *testing.T) {
+			validBytes, err := json.Marshal(fixture.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(validBytes, &raw); err != nil {
+				t.Fatal(err)
+			}
+			delivery := raw["deliveryProtection"].(map[string]any)
+			reference := delivery["recipientAuthorityReference"].(map[string]any)
+			test.mutate(delivery, reference)
+			hostileBytes, err := json.Marshal(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hostileObservation := serviceauthority.NodeTransportObservation{
+				Payload: hostileBytes,
+				Signature: signPortableRecord(
+					t,
+					fixture.deploymentKey,
+					fixture.descriptor.DeploymentID,
+					serviceauthority.NodeTransportObservationSignatureDomain,
+					hostileBytes,
+				),
+			}
+			if _, err := hostileObservation.VerifiedPayload(); err == nil {
+				t.Fatal("signed hostile recipient-authority JSON verified")
+			}
+		})
 	}
 }
 
@@ -383,7 +579,7 @@ func TestNodeTransportObservationRejectsHostileFactAndHeaderShapes(t *testing.T)
 		{"service kind aliases implementation", func(value *serviceauthority.NodeTransportObservationPayload) {
 			value.ServiceKind = serviceauthority.ScopeKind("facets_node")
 		}},
-		{"epoch without recipient key fingerprint", func(value *serviceauthority.NodeTransportObservationPayload) {
+		{"recipient authority without recipient key fingerprint", func(value *serviceauthority.NodeTransportObservationPayload) {
 			value.DeliveryProtection.RecipientAgreementKeyFingerprint = ""
 		}},
 		{"noncanonical source revision", func(value *serviceauthority.NodeTransportObservationPayload) {
@@ -509,6 +705,29 @@ func TestNodeTransportProtectedEnvelopeReferenceBindsExactBytes(t *testing.T) {
 	}
 }
 
+func TestNodeTransportPrincipalDeviceGrantReferenceBindsFullSignedRecord(t *testing.T) {
+	first := []byte(`{"payload":"AQID","signature":{"algorithm":"ES256","signature":"AA"}}`)
+	digest, err := serviceauthority.RecipientPrincipalDeviceGrantRecordReferenceDigest(first)
+	if err != nil || len(digest) != 64 {
+		t.Fatalf("principal-device-grant reference failed: digest=%q err=%v", digest, err)
+	}
+	second := bytes.Replace(first, []byte(`"signature":"AA"`), []byte(`"signature":"AB"`), 1)
+	other, err := serviceauthority.RecipientPrincipalDeviceGrantRecordReferenceDigest(second)
+	if err != nil || other == digest {
+		t.Fatal("principal-device-grant signature mutation did not change reference")
+	}
+	if _, err := serviceauthority.RecipientPrincipalDeviceGrantRecordReferenceDigest(nil); err == nil {
+		t.Fatal("empty principal-device-grant record admitted")
+	}
+	tooLarge := make(
+		[]byte,
+		serviceauthority.MaximumRecipientPrincipalDeviceGrantRecordByteCount+1,
+	)
+	if _, err := serviceauthority.RecipientPrincipalDeviceGrantRecordReferenceDigest(tooLarge); err == nil {
+		t.Fatal("oversized principal-device-grant record admitted")
+	}
+}
+
 func newNodeObservationFixture(t *testing.T) nodeObservationFixture {
 	t.Helper()
 	deploymentID := uuid.MustParse("21000000-0000-0000-0000-000000000001")
@@ -591,7 +810,12 @@ func newNodeObservationFixture(t *testing.T) nodeObservationFixture {
 	}
 	recipient := serviceauthority.NodeTransportExpectedRecipient{
 		DeviceID:                uuid.MustParse("23000000-0000-0000-0000-000000000001"),
-		AgreementKeyFingerprint: strings.Repeat("c", 64), EncryptionKeyEpoch: 4,
+		AgreementKeyFingerprint: strings.Repeat("c", 64),
+		RecipientAuthorityReference: deviceSyncRecipientAuthorityReference(
+			uuid.MustParse("23000000-0000-0000-0000-000000000002"),
+			4,
+			strings.Repeat("f", 64),
+		),
 		EncryptionSuite: serviceauthority.NodeTransportObservationEncryptionSuite,
 	}
 	relayDigest := strings.Repeat("d", 64)
@@ -606,7 +830,7 @@ func newNodeObservationFixture(t *testing.T) nodeObservationFixture {
 			ProtectedObservationEnvelopeByteCount:       uint64(len(protectedEnvelope)),
 			ProtectedObservationEnvelopeReferenceDigest: protectedDigest,
 			RecipientAgreementKeyFingerprint:            recipient.AgreementKeyFingerprint,
-			RecipientEncryptionKeyEpoch:                 recipient.EncryptionKeyEpoch,
+			RecipientAuthorityReference:                 recipient.RecipientAuthorityReference,
 		},
 		DeploymentID: deploymentID,
 		Fact: factWith(
@@ -634,6 +858,32 @@ func newNodeObservationFixture(t *testing.T) nodeObservationFixture {
 		anchor: anchor, authorityKey: authorityKey, deploymentKey: deploymentKey,
 		deploymentSigner: deploymentSigner, descriptor: descriptor, manifest: manifest,
 		manifestDigest: manifestDigest, payload: payload, recipient: recipient,
+	}
+}
+
+func deviceSyncRecipientAuthorityReference(
+	grantID uuid.UUID,
+	deviceGeneration uint64,
+	referenceDigest string,
+) serviceauthority.NodeTransportRecipientAuthorityReference {
+	return serviceauthority.NodeTransportRecipientAuthorityReference{
+		DeviceGeneration: &deviceGeneration,
+		GrantID:          &grantID,
+		Kind:             serviceauthority.NodeTransportDeviceSyncPrincipalGrantReference,
+		ReferenceDigest:  referenceDigest,
+	}
+}
+
+func sharedSpaceRecipientAuthorityReference(
+	participantID uuid.UUID,
+	rosterRevision uint64,
+	referenceDigest string,
+) serviceauthority.NodeTransportRecipientAuthorityReference {
+	return serviceauthority.NodeTransportRecipientAuthorityReference{
+		Kind:            serviceauthority.NodeTransportSharedSpaceRosterReference,
+		ParticipantID:   &participantID,
+		ReferenceDigest: referenceDigest,
+		RosterRevision:  &rosterRevision,
 	}
 }
 

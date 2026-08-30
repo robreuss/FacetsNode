@@ -48,6 +48,7 @@ The domains are distinct:
 Facets Node transport observation v1\0
 Facets Node transport observation reference v1\0
 Facets Node protected observation envelope reference v1\0
+Facets Node recipient principal device grant record reference v1\0
 ```
 
 The canonical signed payload is at most 64 KiB. The signature is the existing
@@ -96,8 +97,8 @@ The signed `deliveryProtection` binds all of:
 
 - exact delivery recipient device ID;
 - exact recipient agreement/encryption-key fingerprint;
-- positive recipient encryption-key epoch;
 - closed `P256-HKDF-SHA256+A256GCM` suite identifier;
+- one exact closed recipient-authority record reference;
 - reference digest and byte count of the complete canonical protected
   observation envelope.
 
@@ -105,8 +106,41 @@ The protected-envelope reference covers its exact canonical bytes, including
 ephemeral agreement key, nonce, authentication tag, and ciphertext. The
 protected envelope is capped at 128 KiB. This checkpoint does not implement
 encryption or decryptability. `ValidateRecipientBinding` only compares the
-signed binding with a recipient/key identity independently known by the caller;
-service-authority validation cannot authorize a recipient key.
+signed binding, including the complete authority reference, with values
+independently known by the caller. Service-authority validation cannot
+authorize a recipient key, and the authority reference only identifies the
+historical record that a later verifier must consult.
+
+The recipient-authority union is exact:
+
+- `device_sync` requires `device_sync_principal_grant`, carrying positive
+  `deviceGeneration`, exact grant UUID, and the reference digest of the exact
+  canonical full signed principal-device-grant record (payload plus signature);
+- `shared_space` requires `shared_space_roster`, carrying exact participant
+  UUID, positive roster revision, and the existing full signed roster
+  attestation digest;
+- `compute_pool` is rejected in v1.
+
+The Device Sync grant-record reference helper domain-separates and hashes at
+most 64 KiB of caller-supplied exact canonical full-record bytes. It does not
+decode, verify, or authorize those bytes. A signature mutation therefore
+changes the reference, but possession of matching bytes remains only an input
+to later historical authority evaluation.
+
+Future Device Sync intake must match the exact service-scope principal, grant
+ID, recipient device ID, device generation, agreement-key fingerprint, and
+full signed-grant digest, then evaluate the complete authenticated root,
+grant, supersession, expiry/not-before, capability, and revocation set at the
+observation's commit time. In particular, any required receive capability is
+an intake decision, not a claim made by this reference.
+
+Future Shared Space intake must resolve the exact independently accepted
+roster authority chain and match the referenced roster revision, full signed
+attestation digest, participant ID, recipient device ID, and agreement-key
+fingerprint. Shared Space has no authenticated device-key epoch today, so v1
+does not invent one. If the roster later defines such a generation, portable
+observations require a new schema version rather than reinterpreting this
+record.
 
 A Device Sync or Shared Space relay envelope referenced by a fact uses its own
 complete canonical `relay_envelope` reference digest. It is not the protected
@@ -147,6 +181,8 @@ those exact bytes. It does not prove that:
 
 - the fact is true, complete, fresh, or non-equivocated;
 - the referenced protected envelope is decryptable or was delivered;
+- the referenced recipient authority record is authentic, current, unrevoked,
+  capability-bearing, or authorized for the recipient;
 - FacetsNode durably accepted or retained any other bytes;
 - a recipient durably accepted, decrypted, applied, or agreed with the fact;
 - a local Space is compromised, safe, quarantined, backed up, or restorable;
@@ -164,7 +200,8 @@ depend on it; FacetsSecurityCore must not become a dependency of this portable
 transport contract.
 
 A byte-identical Go/Swift golden fixture freezes the agreed wire names,
-canonical bytes, signature, protected-envelope binding, and reference digest.
+canonical bytes, signature, protected-envelope binding, exact signed Device
+Sync grant-record reference, and observation reference digest.
 Subsequent, separately reviewed work may add:
 
 1. a recipient-owned foreign-observation inbox with replay/conflict handling,

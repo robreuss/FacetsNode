@@ -14,15 +14,17 @@ import (
 )
 
 const (
-	NodeTransportObservationVersion                 = 1
-	MaximumNodeTransportObservationPayloadByteCount = 64 * 1024
-	MaximumProtectedObservationEnvelopeByteCount    = 128 * 1024
-	MaximumNodeTransportFactEvidenceByteCount       = 128 * 1024
-	NodeTransportObservationSignatureDomain         = "Facets Node transport observation v1\x00"
-	NodeTransportObservationReferenceDomain         = "Facets Node transport observation reference v1\x00"
-	NodeTransportProtectedEnvelopeReferenceDomain   = "Facets Node protected observation envelope reference v1\x00"
-	NodeTransportObservationEncryptionSuite         = "P256-HKDF-SHA256+A256GCM"
-	NodeTransportObservationImplementationID        = "facets_node_go"
+	NodeTransportObservationVersion                     = 1
+	MaximumNodeTransportObservationPayloadByteCount     = 64 * 1024
+	MaximumProtectedObservationEnvelopeByteCount        = 128 * 1024
+	MaximumNodeTransportFactEvidenceByteCount           = 128 * 1024
+	NodeTransportObservationSignatureDomain             = "Facets Node transport observation v1\x00"
+	NodeTransportObservationReferenceDomain             = "Facets Node transport observation reference v1\x00"
+	NodeTransportProtectedEnvelopeReferenceDomain       = "Facets Node protected observation envelope reference v1\x00"
+	NodeTransportRecipientPrincipalGrantReferenceDomain = "Facets Node recipient principal device grant record reference v1\x00"
+	NodeTransportObservationEncryptionSuite             = "P256-HKDF-SHA256+A256GCM"
+	NodeTransportObservationImplementationID            = "facets_node_go"
+	MaximumRecipientPrincipalDeviceGrantRecordByteCount = 64 * 1024
 )
 
 var nodeTransportMachineIdentifier = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -119,13 +121,33 @@ type NodeTransportObservationAuthority struct {
 	Scope                   Scope  `json:"scope"`
 }
 
+type NodeTransportRecipientAuthorityReferenceKind string
+
+const (
+	NodeTransportDeviceSyncPrincipalGrantReference NodeTransportRecipientAuthorityReferenceKind = "device_sync_principal_grant"
+	NodeTransportSharedSpaceRosterReference        NodeTransportRecipientAuthorityReferenceKind = "shared_space_roster"
+)
+
+// NodeTransportRecipientAuthorityReference identifies the exact independently
+// authenticated recipient-authority record that a later inbox must consult.
+// It does not itself authorize that record, recipient, key, or capability.
+// The declaration order is canonical sorted-key JSON.
+type NodeTransportRecipientAuthorityReference struct {
+	DeviceGeneration *uint64                                      `json:"deviceGeneration,omitempty"`
+	GrantID          *uuid.UUID                                   `json:"grantID,omitempty"`
+	Kind             NodeTransportRecipientAuthorityReferenceKind `json:"kind"`
+	ParticipantID    *uuid.UUID                                   `json:"participantID,omitempty"`
+	ReferenceDigest  string                                       `json:"referenceDigest"`
+	RosterRevision   *uint64                                      `json:"rosterRevision,omitempty"`
+}
+
 type NodeTransportDeliveryProtection struct {
-	DeliveryRecipientDeviceID                   uuid.UUID `json:"deliveryRecipientDeviceID"`
-	EncryptionSuite                             string    `json:"encryptionSuite"`
-	ProtectedObservationEnvelopeByteCount       uint64    `json:"protectedObservationEnvelopeByteCount"`
-	ProtectedObservationEnvelopeReferenceDigest string    `json:"protectedObservationEnvelopeReferenceDigest"`
-	RecipientAgreementKeyFingerprint            string    `json:"recipientAgreementKeyFingerprint"`
-	RecipientEncryptionKeyEpoch                 uint64    `json:"recipientEncryptionKeyEpoch"`
+	DeliveryRecipientDeviceID                   uuid.UUID                                `json:"deliveryRecipientDeviceID"`
+	EncryptionSuite                             string                                   `json:"encryptionSuite"`
+	ProtectedObservationEnvelopeByteCount       uint64                                   `json:"protectedObservationEnvelopeByteCount"`
+	ProtectedObservationEnvelopeReferenceDigest string                                   `json:"protectedObservationEnvelopeReferenceDigest"`
+	RecipientAgreementKeyFingerprint            string                                   `json:"recipientAgreementKeyFingerprint"`
+	RecipientAuthorityReference                 NodeTransportRecipientAuthorityReference `json:"recipientAuthorityReference"`
 }
 
 type NodeTransportImplementation struct {
@@ -165,10 +187,10 @@ type NodeTransportObservation struct {
 }
 
 type NodeTransportExpectedRecipient struct {
-	DeviceID                uuid.UUID
-	AgreementKeyFingerprint string
-	EncryptionKeyEpoch      uint64
-	EncryptionSuite         string
+	DeviceID                    uuid.UUID
+	AgreementKeyFingerprint     string
+	RecipientAuthorityReference NodeTransportRecipientAuthorityReference
+	EncryptionSuite             string
 }
 
 func (authority NodeTransportObservationAuthority) Validate() error {
@@ -179,6 +201,51 @@ func (authority NodeTransportObservationAuthority) Validate() error {
 	return nil
 }
 
+func (reference NodeTransportRecipientAuthorityReference) Validate() error {
+	if !validDigest(reference.ReferenceDigest) {
+		return ErrInvalid
+	}
+	switch reference.Kind {
+	case NodeTransportDeviceSyncPrincipalGrantReference:
+		if reference.DeviceGeneration == nil || *reference.DeviceGeneration == 0 ||
+			reference.GrantID == nil || *reference.GrantID == uuid.Nil ||
+			reference.ParticipantID != nil || reference.RosterRevision != nil {
+			return ErrInvalid
+		}
+	case NodeTransportSharedSpaceRosterReference:
+		if reference.DeviceGeneration != nil || reference.GrantID != nil ||
+			reference.ParticipantID == nil || *reference.ParticipantID == uuid.Nil ||
+			reference.RosterRevision == nil || *reference.RosterRevision == 0 {
+			return ErrInvalid
+		}
+	default:
+		return ErrInvalid
+	}
+	return nil
+}
+
+func (reference NodeTransportRecipientAuthorityReference) equals(
+	other NodeTransportRecipientAuthorityReference,
+) bool {
+	if reference.Kind != other.Kind || reference.ReferenceDigest != other.ReferenceDigest {
+		return false
+	}
+	switch reference.Kind {
+	case NodeTransportDeviceSyncPrincipalGrantReference:
+		return reference.DeviceGeneration != nil && other.DeviceGeneration != nil &&
+			*reference.DeviceGeneration == *other.DeviceGeneration &&
+			reference.GrantID != nil && other.GrantID != nil &&
+			*reference.GrantID == *other.GrantID
+	case NodeTransportSharedSpaceRosterReference:
+		return reference.ParticipantID != nil && other.ParticipantID != nil &&
+			*reference.ParticipantID == *other.ParticipantID &&
+			reference.RosterRevision != nil && other.RosterRevision != nil &&
+			*reference.RosterRevision == *other.RosterRevision
+	default:
+		return false
+	}
+}
+
 func (protection NodeTransportDeliveryProtection) Validate() error {
 	if protection.DeliveryRecipientDeviceID == uuid.Nil ||
 		protection.EncryptionSuite != NodeTransportObservationEncryptionSuite ||
@@ -186,7 +253,7 @@ func (protection NodeTransportDeliveryProtection) Validate() error {
 		protection.ProtectedObservationEnvelopeByteCount > MaximumProtectedObservationEnvelopeByteCount ||
 		!validDigest(protection.ProtectedObservationEnvelopeReferenceDigest) ||
 		!validDigest(protection.RecipientAgreementKeyFingerprint) ||
-		protection.RecipientEncryptionKeyEpoch == 0 {
+		protection.RecipientAuthorityReference.Validate() != nil {
 		return ErrInvalid
 	}
 	return nil
@@ -218,6 +285,22 @@ func (payload NodeTransportObservationPayload) Validate() error {
 		!validDigest(payload.SigningKeyFingerprint) ||
 		payload.OccurredAtMilliseconds < 0 ||
 		payload.CommittedAtMilliseconds < payload.OccurredAtMilliseconds {
+		return ErrInvalid
+	}
+	switch payload.ServiceKind {
+	case ScopeDeviceSync:
+		if payload.DeliveryProtection.RecipientAuthorityReference.Kind !=
+			NodeTransportDeviceSyncPrincipalGrantReference {
+			return ErrInvalid
+		}
+	case ScopeSharedSpace:
+		if payload.DeliveryProtection.RecipientAuthorityReference.Kind !=
+			NodeTransportSharedSpaceRosterReference {
+			return ErrInvalid
+		}
+	case ScopeComputePool:
+		return ErrInvalid
+	default:
 		return ErrInvalid
 	}
 	if payload.Sequence == 1 {
@@ -597,12 +680,15 @@ func (observation NodeTransportObservation) ValidateRecipientBinding(
 ) error {
 	payload, err := observation.VerifiedPayload()
 	if err != nil || expected.DeviceID == uuid.Nil ||
-		!validDigest(expected.AgreementKeyFingerprint) || expected.EncryptionKeyEpoch == 0 ||
+		!validDigest(expected.AgreementKeyFingerprint) ||
+		expected.RecipientAuthorityReference.Validate() != nil ||
 		expected.EncryptionSuite != NodeTransportObservationEncryptionSuite ||
 		payload.DeliveryProtection.DeliveryRecipientDeviceID != expected.DeviceID ||
 		payload.DeliveryProtection.RecipientAgreementKeyFingerprint !=
 			expected.AgreementKeyFingerprint ||
-		payload.DeliveryProtection.RecipientEncryptionKeyEpoch != expected.EncryptionKeyEpoch ||
+		!payload.DeliveryProtection.RecipientAuthorityReference.equals(
+			expected.RecipientAuthorityReference,
+		) ||
 		payload.DeliveryProtection.EncryptionSuite != expected.EncryptionSuite {
 		return ErrInvalid
 	}
@@ -705,6 +791,24 @@ func ProtectedObservationEnvelopeReferenceDigest(canonicalEnvelope []byte) (stri
 	digest := sha256Bytes(append(
 		[]byte(NodeTransportProtectedEnvelopeReferenceDomain),
 		canonicalEnvelope...,
+	))
+	return hex.EncodeToString(digest), nil
+}
+
+// RecipientPrincipalDeviceGrantRecordReferenceDigest identifies the exact
+// canonical full signed principal-device-grant record bytes, including the
+// payload and signature. This helper does not canonical-decode or authorize
+// the grant; a later inbox must do both against independently trusted history.
+func RecipientPrincipalDeviceGrantRecordReferenceDigest(
+	canonicalSignedGrantRecord []byte,
+) (string, error) {
+	if len(canonicalSignedGrantRecord) == 0 ||
+		len(canonicalSignedGrantRecord) > MaximumRecipientPrincipalDeviceGrantRecordByteCount {
+		return "", ErrInvalid
+	}
+	digest := sha256Bytes(append(
+		[]byte(NodeTransportRecipientPrincipalGrantReferenceDomain),
+		canonicalSignedGrantRecord...,
 	))
 	return hex.EncodeToString(digest), nil
 }
