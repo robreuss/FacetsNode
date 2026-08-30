@@ -1,0 +1,85 @@
+{
+  "expectedPayload": {
+    "authority": {
+      "authorityManifestDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "authorityRevision": 7,
+      "scope": {
+        "kind": "device_sync",
+        "scopeID": "71000000-0000-0000-0000-000000000002"
+      }
+    },
+    "committedAtMilliseconds": 1700000000050,
+    "deliveryProtection": {
+      "deliveryRecipientDeviceID": "71000000-0000-0000-0000-000000000005",
+      "encryptionSuite": "P256-HKDF-SHA256+A256GCM",
+      "protectedObservationEnvelopeByteCount": 160,
+      "protectedObservationEnvelopeReferenceDigest": "46f9b9c062be0396ee024da241e6a1bf284a4e091b26128524e6c0e15d013195",
+      "recipientAgreementKeyFingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "recipientEncryptionKeyEpoch": 3
+    },
+    "deploymentID": "71000000-0000-0000-0000-000000000001",
+    "fact": {
+      "evidence": [
+        {
+          "byteCount": 64,
+          "kind": "transport_record",
+          "referenceDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "kind": "replayed_envelope",
+      "references": [
+        {
+          "kind": "relay_envelope",
+          "referenceDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    "implementation": {
+      "implementationIdentifier": "facets_node_go",
+      "observationProtocolVersion": 1,
+      "serviceProtocolIdentifier": "facets_node_relay",
+      "serviceProtocolVersion": 3,
+      "sourceRevision": "cccccccccccccccccccccccccccccccccccccccc",
+      "sourceTreeDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "observationID": "71000000-0000-0000-0000-000000000004",
+    "occurredAtMilliseconds": 1700000000000,
+    "sequence": 1,
+    "serviceKind": "device_sync",
+    "signingKeyFingerprint": "a9f300eb5960e89133af7362011a1e26f0e2ea2e36dc402a04af6c192b891a8c",
+    "streamID": "71000000-0000-0000-0000-000000000003",
+    "version": 1
+  },
+  "expectedProtectedEnvelopeReferenceDigest": "46f9b9c062be0396ee024da241e6a1bf284a4e091b26128524e6c0e15d013195",
+  "expectedRecordReferenceDigest": "eb3f499ac0da9f3acbb1bbfa6b2b4bfd460208d81045fbc0f14bfa6b39ffd54b",
+  "format": "facets.node-transport-observation.portable.v1",
+  "protectedObservationEnvelope": "eyJhdXRoZW50aWNhdGlvblRhZyI6ImRHVnpkQzEwWVdjIiwiY2lwaGVydGV4dCI6ImRHVnpkQzFqYVhCb1pYSjBaWGgwIiwiZXBoZW1lcmFsUHVibGljS2V5WDk2MyI6ImRHVnpkQzFsY0dobGJXVnlZV3d0YTJWNSIsIm5vbmNlIjoiZEdWemRDMXViMjVqWlEiLCJ2ZXJzaW9uIjoxfQ==",
+  "record": {
+    "payload": "eyJhdXRob3JpdHkiOnsiYXV0aG9yaXR5TWFuaWZlc3REaWdlc3QiOiJlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlIiwiYXV0aG9yaXR5UmV2aXNpb24iOjcsInNjb3BlIjp7ImtpbmQiOiJkZXZpY2Vfc3luYyIsInNjb3BlSUQiOiI3MTAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDIifX0sImNvbW1pdHRlZEF0TWlsbGlzZWNvbmRzIjoxNzAwMDAwMDAwMDUwLCJkZWxpdmVyeVByb3RlY3Rpb24iOnsiZGVsaXZlcnlSZWNpcGllbnREZXZpY2VJRCI6IjcxMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwNSIsImVuY3J5cHRpb25TdWl0ZSI6IlAyNTYtSEtERi1TSEEyNTYrQTI1NkdDTSIsInByb3RlY3RlZE9ic2VydmF0aW9uRW52ZWxvcGVCeXRlQ291bnQiOjE2MCwicHJvdGVjdGVkT2JzZXJ2YXRpb25FbnZlbG9wZVJlZmVyZW5jZURpZ2VzdCI6IjQ2ZjliOWMwNjJiZTAzOTZlZTAyNGRhMjQxZTZhMWJmMjg0YTRlMDkxYjI2MTI4NTI0ZTZjMGUxNWQwMTMxOTUiLCJyZWNpcGllbnRBZ3JlZW1lbnRLZXlGaW5nZXJwcmludCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYiLCJyZWNpcGllbnRFbmNyeXB0aW9uS2V5RXBvY2giOjN9LCJkZXBsb3ltZW50SUQiOiI3MTAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJmYWN0Ijp7ImV2aWRlbmNlIjpbeyJieXRlQ291bnQiOjY0LCJraW5kIjoidHJhbnNwb3J0X3JlY29yZCIsInJlZmVyZW5jZURpZ2VzdCI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIifV0sImtpbmQiOiJyZXBsYXllZF9lbnZlbG9wZSIsInJlZmVyZW5jZXMiOlt7ImtpbmQiOiJyZWxheV9lbnZlbG9wZSIsInJlZmVyZW5jZURpZ2VzdCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEifV19LCJpbXBsZW1lbnRhdGlvbiI6eyJpbXBsZW1lbnRhdGlvbklkZW50aWZpZXIiOiJmYWNldHNfbm9kZV9nbyIsIm9ic2VydmF0aW9uUHJvdG9jb2xWZXJzaW9uIjoxLCJzZXJ2aWNlUHJvdG9jb2xJZGVudGlmaWVyIjoiZmFjZXRzX25vZGVfcmVsYXkiLCJzZXJ2aWNlUHJvdG9jb2xWZXJzaW9uIjozLCJzb3VyY2VSZXZpc2lvbiI6ImNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJzb3VyY2VUcmVlRGlnZXN0IjoiZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZCJ9LCJvYnNlcnZhdGlvbklEIjoiNzEwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDA0Iiwib2NjdXJyZWRBdE1pbGxpc2Vjb25kcyI6MTcwMDAwMDAwMDAwMCwic2VxdWVuY2UiOjEsInNlcnZpY2VLaW5kIjoiZGV2aWNlX3N5bmMiLCJzaWduaW5nS2V5RmluZ2VycHJpbnQiOiJhOWYzMDBlYjU5NjBlODkxMzNhZjczNjIwMTFhMWUyNmYwZTJlYTJlMzZkYzQwMmEwNGFmNmMxOTJiODkxYThjIiwic3RyZWFtSUQiOiI3MTAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDMiLCJ2ZXJzaW9uIjoxfQ==",
+    "signature": {
+      "algorithm": "ES256",
+      "publicSigningKeyX963": "BHzyexiNA09-ilI4AwS1GsPAiWnid_IbNaYLSPxHZpl4B3dVENuO0EApPZrGn3Qw27p9reY86YIpngS3nSJ4c9E",
+      "signature": "7fkXD5MkRG6GTO_I_hPLK-b3NCqMbZsAYjGerWnE0zRO4rCe43c9SR1UkO3B7FGOd4Epw_HEAEV5-_JTyOBseg",
+      "signerID": "71000000-0000-0000-0000-000000000001",
+      "signingKeyFingerprint": "a9f300eb5960e89133af7362011a1e26f0e2ea2e36dc402a04af6c192b891a8c"
+    }
+  },
+  "trustedDeployment": {
+    "createdAtMilliseconds": 1700000000000,
+    "deploymentID": "71000000-0000-0000-0000-000000000001",
+    "publicSigningKeyX963": "BHzyexiNA09-ilI4AwS1GsPAiWnid_IbNaYLSPxHZpl4B3dVENuO0EApPZrGn3Qw27p9reY86YIpngS3nSJ4c9E",
+    "routes": [
+      {
+        "endpoint": "https://node.example.test",
+        "kind": "direct_https",
+        "networkScope": "public_internet",
+        "routeID": "71000000-0000-0000-0000-000000000007",
+        "serverAuthentication": {
+          "kind": "web_pki"
+        }
+      }
+    ],
+    "signingKeyFingerprint": "a9f300eb5960e89133af7362011a1e26f0e2ea2e36dc402a04af6c192b891a8c",
+    "version": 1
+  }
+}
