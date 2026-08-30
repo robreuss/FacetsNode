@@ -53,14 +53,14 @@ content-addressed state pieces, and the ordinary message tail after that root.
 The canonical portable contract is mirrored in Swift and Go:
 
 ```text
-Facets/Packages/FacetsDeveloperKit/Tests/FacetsFEFTests/Fixtures/replica-state-root-portable-v1.json
-FacetsNode/internal/testfixture/replica-state-root-portable-v1.json
+Facets/Packages/FacetsDeveloperKit/Tests/FacetsFEFTests/Fixtures/replica-state-root-portable-v2.json
+FacetsNode/internal/testfixture/replica-state-root-portable-v2.json
 ```
 
 Its exact-file SHA-256 is:
 
 ```text
-c0ad2b2d1ed0f5951686987c0a6d75f837e0ab231c5d649726d943d562b91b72
+cb817bd73011500f7183a841540c4d8f3c8b3cfe7325fce4919c3bf2b27a7dd4
 ```
 
 The Go types and fixture tests prove cross-language encoding and digest parity.

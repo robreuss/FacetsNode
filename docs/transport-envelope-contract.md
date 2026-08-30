@@ -113,8 +113,8 @@ root; it retains the containing message and encrypted blob IDs through the
 ordinary checkpoint candidate. See ADR 0016 and the byte-identical fixture:
 
 ```text
-FacetsNode/internal/testfixture/replica-state-root-portable-v1.json
-Facets/Packages/FacetsDeveloperKit/Tests/FacetsFEFTests/Fixtures/replica-state-root-portable-v1.json
+FacetsNode/internal/testfixture/replica-state-root-portable-v2.json
+Facets/Packages/FacetsDeveloperKit/Tests/FacetsFEFTests/Fixtures/replica-state-root-portable-v2.json
 ```
 
 Blobs are content-addressed and may be uploaded or resumed separately from the
