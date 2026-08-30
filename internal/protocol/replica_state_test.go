@@ -124,7 +124,7 @@ func TestReplicaStateRejectsGraphAndSuccessorTampering(t *testing.T) {
 	}
 }
 
-func TestReplicaStateAllowsRevisionZeroAndIgnoresSenderCaptureTime(t *testing.T) {
+func TestReplicaStateLocalRevisionAndCaptureTimeDoNotGovernSuccessors(t *testing.T) {
 	fixture := loadPortableReplicaStateFixture(t)
 	emptyRevision := fixture.Root
 	emptyRevision.CapturedCoreRevision = 0
@@ -145,9 +145,23 @@ func TestReplicaStateAllowsRevisionZeroAndIgnoresSenderCaptureTime(t *testing.T)
 	}
 
 	substituted := sameRevisionSuccessor
+	substituted.CapturedCoreRevision = fixture.Root.CapturedCoreRevision + 1
 	substituted.Pieces = slices.Clone(fixture.SuccessorRoot.Pieces)
 	if err := substituted.ValidateSuccessor(fixture.Root); err == nil {
-		t.Fatal("same-revision piece substitution accepted")
+		t.Fatal("same-clock piece substitution accepted")
+	}
+
+	maximumLocalRevision := fixture.Root
+	maximumLocalRevision.CapturedCoreRevision = ^uint64(0)
+	maximumDigest, err := maximumLocalRevision.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	causallyAdvancedLowerRevision := fixture.SuccessorRoot
+	causallyAdvancedLowerRevision.CapturedCoreRevision = 1
+	causallyAdvancedLowerRevision.PredecessorRootDigest = &maximumDigest
+	if err := causallyAdvancedLowerRevision.ValidateSuccessor(maximumLocalRevision); err != nil {
+		t.Fatalf("causally advanced lower local revision rejected: %v", err)
 	}
 }
 

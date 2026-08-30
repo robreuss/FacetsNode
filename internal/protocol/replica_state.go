@@ -594,26 +594,35 @@ func (root ReplicaStateRoot) ValidateSuccessor(predecessor ReplicaStateRoot) err
 		return ErrReplicaStatePredecessor
 	}
 	if root.DomainID != predecessor.DomainID || root.KeyEpoch < predecessor.KeyEpoch ||
-		root.CapturedCoreRevision < predecessor.CapturedCoreRevision ||
 		(predecessor.CheckpointID != nil && *root.CheckpointID == *predecessor.CheckpointID) {
 		return ErrInvalidReplicaStateSuccessor
 	}
 	promotesCoverageProfile :=
 		predecessor.Coverage.Profile == ReplicaStateCanonicalCoreCoverageProfile &&
 			root.Coverage.Profile == ReplicaStateCompleteSpaceCoverageProfile
-	if root.CapturedCoreRevision == predecessor.CapturedCoreRevision &&
+	if root.Coverage.Profile != predecessor.Coverage.Profile && !promotesCoverageProfile {
+		return ErrInvalidReplicaStateSuccessor
+	}
+	clockAdvanced := false
+	for replicaID, previousSequence := range predecessor.CoveredClock.Counters {
+		currentSequence := root.CoveredClock.Counters[replicaID]
+		if currentSequence < previousSequence {
+			return ErrInvalidReplicaStateSuccessor
+		}
+		if currentSequence > previousSequence {
+			clockAdvanced = true
+		}
+	}
+	for replicaID := range root.CoveredClock.Counters {
+		if _, existed := predecessor.CoveredClock.Counters[replicaID]; !existed {
+			clockAdvanced = true
+		}
+	}
+	if !clockAdvanced &&
 		(!replicaStatePieceInventoriesEqual(root.Pieces, predecessor.Pieces) ||
 			!reflect.DeepEqual(root.Coverage, predecessor.Coverage)) &&
 		!promotesCoverageProfile {
 		return ErrInvalidReplicaStateSuccessor
-	}
-	if root.Coverage.Profile != predecessor.Coverage.Profile && !promotesCoverageProfile {
-		return ErrInvalidReplicaStateSuccessor
-	}
-	for replicaID, previousSequence := range predecessor.CoveredClock.Counters {
-		if root.CoveredClock.Counters[replicaID] < previousSequence {
-			return ErrInvalidReplicaStateSuccessor
-		}
 	}
 	return nil
 }

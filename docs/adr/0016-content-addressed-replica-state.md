@@ -43,6 +43,10 @@ content-addressed state pieces, and the ordinary message tail after that root.
 - A successor root names the exact predecessor digest, cannot move its causal
   frontier or key epoch backward, and may reuse any unchanged piece IDs. A key
   epoch change recaptures and reseals the pieces under the new epoch.
+- `capturedCoreRevision` is local to the publishing package and is not
+  successor authority across replicas. The covered causal clock determines
+  progress; an equal frontier cannot substitute the piece inventory or
+  coverage except for the one canonical-to-complete coverage promotion.
 - The existing relay checkpoint candidate retains the new root message, all
   encrypted piece blobs reachable from it, and their required encrypted
   resource/media blobs. No new FacetsNode persistence subsystem is introduced.
