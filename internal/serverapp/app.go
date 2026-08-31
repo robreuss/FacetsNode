@@ -39,6 +39,18 @@ func Main(service config.Service) {
 		}
 		return
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "issue-backup-account-admission" {
+		if err := issueBackupAccountAdmission(
+			service,
+			os.Args[2:],
+			os.Stdout,
+			time.Now,
+		); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "issue Backup custody account admission: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "issue-shared-space-admission" {
 		if err := issueSharedSpaceAdmission(service, os.Args[2:]); err != nil {
 			_, _ = fmt.Fprintf(
@@ -118,6 +130,18 @@ func Main(service config.Service) {
 			logger,
 		); err != nil {
 			logger.Error("Compute Pool Service failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if service == config.BackupCustody {
+		if err := runBackupCustodyService(
+			rootContext,
+			pool,
+			configuration,
+			logger,
+		); err != nil {
+			logger.Error("Backup Custody Service failed", "error", err)
 			os.Exit(1)
 		}
 		return

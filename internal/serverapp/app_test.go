@@ -11,8 +11,32 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/relay"
 )
+
+func TestBackupCustodyServiceConfigurationIsDedicated(t *testing.T) {
+	configuration := config.Config{
+		Service:                       config.BackupCustody,
+		DatabaseURL:                   "postgres://backup-only",
+		DeploymentID:                  uuid.New(),
+		DeploymentSigningKeyFile:      "/authority/signing-key",
+		DeploymentRoutePolicyFile:     "/authority/routes.json",
+		ServiceAuthorityBindingsFile:  "/authority/bindings.json",
+		BackupAccountAdmissionKeyFile: "/authority/admission-key",
+		BackupCustodyRoot:             "/custody",
+		BackupMaximumChunkBytes:       1,
+		BackupMaximumGenerationBytes:  1,
+		TransferPeriod:                time.Minute,
+	}
+	if err := validateBackupCustodyConfiguration(configuration); err != nil {
+		t.Fatal(err)
+	}
+	configuration.BlobRoot = "/shared-relay-blobs"
+	if err := validateBackupCustodyConfiguration(configuration); err == nil {
+		t.Fatal("Backup service accepted a relay/blob root fallback")
+	}
+}
 
 type maintenanceAuthority struct {
 	blobs        map[string]bool

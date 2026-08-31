@@ -21,7 +21,11 @@ RUN for value in "$FACETS_SERVER_SOURCE_REVISION" "$FACETS_SERVER_SOURCE_TREE"; 
         -o /out/facets-shared-spaces-server ./cmd/facets-shared-spaces-server && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
         -o /out/facets-compute-pool-server ./cmd/facets-compute-pool-server && \
-    mkdir -p /out/blobs && chown 65532:65532 /out/blobs
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+        -o /out/facets-backup-custody-server ./cmd/facets-backup-custody-server && \
+    mkdir -p /out/blobs /out/backup-custody/custody && \
+    chmod 0700 /out/backup-custody /out/backup-custody/custody && \
+    chown -R 65532:65532 /out/blobs /out/backup-custody
 
 FROM scratch AS device-sync
 ARG FACETS_SERVER_SOURCE_REVISION
@@ -61,3 +65,16 @@ COPY --chown=65532:65532 --from=build /out/blobs /var/lib/facets-compute-pool/bl
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/facets-compute-pool-server"]
+
+FROM scratch AS backup-custody
+ARG FACETS_SERVER_SOURCE_REVISION
+ARG FACETS_SERVER_SOURCE_TREE
+LABEL org.opencontainers.image.title="Facets Backup Custody Service" \
+      org.opencontainers.image.revision="$FACETS_SERVER_SOURCE_REVISION" \
+      org.opencontainers.image.source-tree="$FACETS_SERVER_SOURCE_TREE"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/facets-backup-custody-server /facets-backup-custody-server
+COPY --chown=65532:65532 --from=build /out/backup-custody /var/lib/facets-backup-custody
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/facets-backup-custody-server"]

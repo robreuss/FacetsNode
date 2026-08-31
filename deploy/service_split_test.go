@@ -153,6 +153,10 @@ func TestDockerfilePublishesAllServiceImages(t *testing.T) {
 		"ENTRYPOINT [\"/facets-shared-spaces-server\"]",
 		"FROM scratch AS compute-pool",
 		"ENTRYPOINT [\"/facets-compute-pool-server\"]",
+		"FROM scratch AS backup-custody",
+		"COPY --from=build /out/facets-backup-custody-server /facets-backup-custody-server",
+		"COPY --chown=65532:65532 --from=build /out/backup-custody /var/lib/facets-backup-custody",
+		"ENTRYPOINT [\"/facets-backup-custody-server\"]",
 	})
 }
 
