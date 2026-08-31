@@ -417,6 +417,16 @@ func TestNodeTransportObservationRecipientAuthorityReferenceIsClosedAndScopeBoun
 	}
 }
 
+func TestNodeTransportObservationRejectsBackupCustodyScope(t *testing.T) {
+	fixture := newNodeObservationFixture(t)
+	payload := fixture.payload
+	payload.ServiceKind = serviceauthority.ScopeBackupCustody
+	payload.Authority.Scope.Kind = serviceauthority.ScopeBackupCustody
+	if payload.Validate() == nil {
+		t.Fatal("Backup custody must not enter NodeTransportObservation")
+	}
+}
+
 func TestNodeTransportObservationStreamContinuityAndExactReplay(t *testing.T) {
 	fixture := newNodeObservationFixture(t)
 	first := signNodeObservation(t, fixture, fixture.payload)

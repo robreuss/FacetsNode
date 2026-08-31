@@ -45,6 +45,7 @@ const (
 	ScopeDeviceSync                ScopeKind    = "device_sync"
 	ScopeSharedSpace               ScopeKind    = "shared_space"
 	ScopeComputePool               ScopeKind    = "compute_pool"
+	ScopeBackupCustody             ScopeKind    = "backup_custody"
 )
 
 var ErrBindingConflict = errors.New("service authority binding conflicts with current authority")
@@ -59,7 +60,8 @@ var errBindingPersistenceAmbiguous = errors.New(
 type ScopeKind string
 
 func (kind ScopeKind) Valid() bool {
-	return kind == ScopeDeviceSync || kind == ScopeSharedSpace || kind == ScopeComputePool
+	return kind == ScopeDeviceSync || kind == ScopeSharedSpace ||
+		kind == ScopeComputePool || kind == ScopeBackupCustody
 }
 
 type TrafficClass string

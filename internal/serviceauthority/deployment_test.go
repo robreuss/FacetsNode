@@ -1,6 +1,7 @@
 package serviceauthority
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -89,6 +91,175 @@ func TestComputePoolIsAnIndependentPortableServiceScope(t *testing.T) {
 	want := `{"kind":"compute_pool","scopeID":"61000000-0000-0000-0000-000000000003"}`
 	if string(encoded) != want {
 		t.Fatalf("compute Pool scope=%s; want %s", encoded, want)
+	}
+}
+
+func TestBackupCustodyIsAnAccountScopedPortableServiceScope(t *testing.T) {
+	scope := Scope{Kind: ScopeBackupCustody, ScopeID: uuid.MustParse("10000000-0000-0000-0000-000000000004")}
+	if err := scope.Validate(); err != nil {
+		t.Fatalf("validate Backup scope: %v", err)
+	}
+	encoded, err := json.Marshal(scope)
+	if err != nil {
+		t.Fatalf("encode Backup scope: %v", err)
+	}
+	if string(encoded) != `{"kind":"backup_custody","scopeID":"10000000-0000-0000-0000-000000000004"}` {
+		t.Fatalf("unexpected Backup scope: %s", encoded)
+	}
+}
+
+func TestBackupCustodyReceiptsRequireExactHistoricalDeploymentAndPointInTimeRetention(t *testing.T) {
+	fixture := newBootstrapFixture(t)
+	accountID := uuid.MustParse("20000000-0000-4000-8000-000000000001")
+	scope := Scope{Kind: ScopeBackupCustody, ScopeID: accountID}
+	anchor := fixture.anchor
+	anchor.Scope = scope
+	validUntil := int64(5_000)
+	manifestPayload := ManifestPayload{
+		ActiveDeployment: fixture.descriptor, IssuedAtMilliseconds: 1_000,
+		PreparedDeployments: []DeploymentDescriptor{}, Revision: 1, Scope: scope,
+		Transition: TransitionInitialActivation, TransportPolicy: fixture.policy,
+		ValidFromMilliseconds: 1_000, ValidUntilMilliseconds: &validUntil,
+		Version: SchemaVersion,
+	}
+	manifestBytes, err := json.Marshal(manifestPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{Payload: manifestBytes, Signature: signTestAuthorityRecord(
+		t, fixture.authorityKey, fixture.authorityID,
+		"Facets service authority manifest v1\x00", manifestBytes,
+	)}
+	manifestDigest, err := manifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := BackupCustodyGenerationRecord{
+		AccountID:   accountID,
+		BackupSetID: uuid.MustParse("10000000-0000-4000-8000-000000000001"),
+		Generation:  1, OuterByteCount: 2_522,
+		OuterDigest: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32)),
+		TargetID:    uuid.MustParse("30000000-0000-4000-8000-000000000001"),
+		UploadID:    uuid.MustParse("40000000-0000-4000-8000-000000000001"), Version: 1,
+	}
+	authority := BackupCustodyAuthorityContext{
+		AuthorityManifestDigest: manifestDigest, AuthorityRevision: 1,
+		DeploymentID: fixture.descriptor.DeploymentID, Scope: scope,
+	}
+	payload := BackupCustodyReceiptPayload{
+		Authority:    authority,
+		CredentialID: uuid.MustParse("50000000-0000-4000-8000-000000000001"),
+		Generation:   generation, IssuedAtMilliseconds: 2_000,
+		Kind:      BackupCustodyCommittedKind,
+		ReceiptID: uuid.MustParse("80000000-0000-4000-8000-000000000001"),
+		RequestID: uuid.MustParse("70000000-0000-4000-8000-000000000001"),
+		Version:   1,
+	}
+	deploymentSigner := fixtureDeploymentSigner(t, fixture.descriptor)
+	receipt, err := deploymentSigner.SignBackupCustodyReceipt(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorized, err := receipt.Authorize(anchor, manifest); err != nil || !reflect.DeepEqual(authorized, payload) {
+		t.Fatalf("historical receipt rejected: %v", err)
+	}
+	wrongDomainSignature, err := deploymentSigner.signRecord(
+		BackupRetentionReceiptSignatureDomain,
+		receipt.Payload,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongDomainReceipt := BackupCustodyReceipt{
+		Payload: receipt.Payload, Signature: wrongDomainSignature,
+	}
+	if _, err := wrongDomainReceipt.VerifiedPayload(); err == nil {
+		t.Fatal("custody payload accepted a retention receipt signature domain")
+	}
+
+	retention, err := NewBackupRetentionReceiptPayload(
+		uuid.New(), authority, uuid.New(), payload.CredentialID, receipt,
+		anchor, manifest, 2_500, 2_500,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retentionReceipt, err := deploymentSigner.SignBackupCustodyReceipt(retention)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified, err := retentionReceipt.Authorize(anchor, manifest); err != nil ||
+		verified.RetainedThroughMilliseconds == nil || *verified.RetainedThroughMilliseconds != 2_500 {
+		t.Fatalf("point-in-time retention receipt rejected: %v", err)
+	}
+	custodyReference, _ := receipt.ReferenceDigest()
+	retentionReference, _ := retentionReceipt.ReferenceDigest()
+	if custodyReference == retentionReference {
+		t.Fatal("custody and retention receipt reference domains collided")
+	}
+	if _, err := NewBackupRetentionReceiptPayload(
+		uuid.New(), authority, uuid.New(), payload.CredentialID, receipt,
+		anchor, manifest, 2_501, 2_500,
+	); err == nil {
+		t.Fatal("future retention promise accepted")
+	}
+	if _, err := NewBackupRetentionReceiptPayload(
+		uuid.New(), authority, uuid.New(), payload.CredentialID, receipt,
+		anchor, manifest, 2_499, 2_500,
+	); err == nil {
+		t.Fatal("past retention value accepted as current proof")
+	}
+
+	wrongAnchor := anchor
+	wrongAnchor.Scope.ScopeID = uuid.New()
+	if _, err := receipt.Authorize(wrongAnchor, manifest); err == nil {
+		t.Fatal("wrong account authority accepted")
+	}
+	if _, err := NewBackupRetentionReceiptPayload(
+		uuid.New(), authority, uuid.New(), payload.CredentialID, receipt,
+		wrongAnchor, manifest, 2_500, 2_500,
+	); err == nil {
+		t.Fatal("retention proof referenced custody without exact historical authorization")
+	}
+	attackerSeed := make([]byte, 32)
+	attackerSeed[31] = 15
+	attacker, err := NewDeploymentSigner(fixture.descriptor.DeploymentID, attackerSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attackerReceipt, err := attacker.SignBackupCustodyReceipt(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attackerReceipt.Authorize(anchor, manifest); err == nil {
+		t.Fatal("wrong deployment signing key authorized")
+	}
+	expiredPayload := manifestPayload
+	expiry := int64(1_500)
+	expiredPayload.ValidUntilMilliseconds = &expiry
+	expiredBytes, _ := json.Marshal(expiredPayload)
+	expiredManifest := Manifest{Payload: expiredBytes, Signature: signTestAuthorityRecord(
+		t, fixture.authorityKey, fixture.authorityID,
+		"Facets service authority manifest v1\x00", expiredBytes,
+	)}
+	if _, err := receipt.Authorize(anchor, expiredManifest); err == nil {
+		t.Fatal("expired historical authority accepted")
+	}
+
+	highS := receipt
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(highS.Signature.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := new(big.Int).SetBytes(raw[32:])
+	s.Sub(elliptic.P256().Params().N, s).FillBytes(raw[32:])
+	highS.Signature.Signature = base64.RawURLEncoding.EncodeToString(raw)
+	if _, err := highS.VerifiedPayload(); err == nil {
+		t.Fatal("high-S receipt accepted")
+	}
+	encoded, _ := receipt.CanonicalJSON()
+	if _, err := DecodeBackupCustodyReceipt(append(encoded, '\n')); err == nil {
+		t.Fatal("noncanonical receipt accepted")
 	}
 }
 
