@@ -227,7 +227,6 @@ func runBackupCustodyService(
 		signer,
 		bindings,
 		uint64(configuration.BackupMaximumChunkBytes),
-		configuration.BackupMaximumCredentialLifetime,
 		configuration.TransferPeriod,
 		configuration.TrafficLimits,
 		readiness,
@@ -352,15 +351,19 @@ func validateBackupCustodyConfiguration(configuration config.Config) error {
 }
 
 var backupCustodyDatabaseTables = map[string]struct{}{
-	"facets_backup_custody_schema_migrations": {},
-	"backup_custody_accounts":                 {},
-	"backup_custody_requests":                 {},
-	"backup_custody_authority_history":        {},
-	"backup_custody_targets":                  {},
-	"backup_custody_uploads":                  {},
-	"backup_custody_generations":              {},
-	"backup_custody_upload_chunks":            {},
-	"backup_custody_retention_receipts":       {},
+	"facets_backup_custody_schema_migrations":     {},
+	"backup_custody_accounts":                     {},
+	"backup_custody_requests":                     {},
+	"backup_custody_authority_history":            {},
+	"backup_custody_account_control":              {},
+	"backup_custody_control_commands":             {},
+	"backup_custody_targets":                      {},
+	"backup_custody_credential_grants":            {},
+	"backup_custody_credential_grant_transitions": {},
+	"backup_custody_uploads":                      {},
+	"backup_custody_generations":                  {},
+	"backup_custody_upload_chunks":                {},
+	"backup_custody_retention_receipts":           {},
 }
 
 func requireDedicatedBackupCustodyDatabase(ctx context.Context, pool *pgxpool.Pool) error {
@@ -405,15 +408,17 @@ func validateBackupCustodyDatabaseTables(tables []string) error {
 
 func backupCustodyStoreLimits(configuration config.Config) postgres.BackupCustodyStoreLimits {
 	return postgres.BackupCustodyStoreLimits{
-		MaximumActiveUploads:   configuration.BackupMaximumActiveUploads,
-		MaximumTargets:         configuration.BackupMaximumTargets,
-		MaximumGenerations:     configuration.BackupMaximumGenerations,
-		MaximumRequests:        configuration.BackupMaximumRequests,
-		MaximumRetentionProofs: configuration.BackupMaximumRetentionProofs,
-		MaximumChunksPerUpload: configuration.BackupMaximumChunksPerUpload,
-		MaximumChunkBytes:      configuration.BackupMaximumChunkBytes,
-		MaximumStagingBytes:    configuration.BackupMaximumStagingBytes,
-		MaximumCommittedBytes:  configuration.BackupMaximumCommittedBytes,
+		MaximumActiveUploads:                  configuration.BackupMaximumActiveUploads,
+		MaximumTargets:                        configuration.BackupMaximumTargets,
+		MaximumGenerations:                    configuration.BackupMaximumGenerations,
+		MaximumRequests:                       configuration.BackupMaximumRequests,
+		MaximumRetentionProofs:                configuration.BackupMaximumRetentionProofs,
+		MaximumControlRecords:                 configuration.BackupMaximumControlRecords,
+		MaximumCredentialLifetimeMilliseconds: configuration.BackupMaximumCredentialLifetime.Milliseconds(),
+		MaximumChunksPerUpload:                configuration.BackupMaximumChunksPerUpload,
+		MaximumChunkBytes:                     configuration.BackupMaximumChunkBytes,
+		MaximumStagingBytes:                   configuration.BackupMaximumStagingBytes,
+		MaximumCommittedBytes:                 configuration.BackupMaximumCommittedBytes,
 	}
 }
 
@@ -456,6 +461,7 @@ func recoverBackupCustodyStandbyAccounts(
 			credential,
 			candidate.claimID,
 			candidate.enrollment,
+			account.record.InitialControlAnchor,
 		); err != nil {
 			return err
 		}
@@ -490,6 +496,9 @@ func reconcileBackupCustodyAuthorityState(
 		return err
 	}
 	for _, account := range accounts {
+		if err := store.ValidateControlLedger(ctx, account.record.AccountID); err != nil {
+			return serviceauthority.ErrBindingUnavailable
+		}
 		current := backupCustodyDurableAuthority{
 			revision:     account.record.AuthorityRevision,
 			digest:       account.record.AuthorityManifestDigest,

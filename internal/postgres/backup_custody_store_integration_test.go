@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,10 +18,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -42,7 +45,9 @@ func TestPostgresBackupCustodyUploadLedgerRequiresExactOrderedContinuity(t *test
 	if _, err := pool.Exec(ctx, `
 		DROP TABLE IF EXISTS backup_custody_retention_receipts,
 			backup_custody_upload_chunks, backup_custody_generations,
-			backup_custody_uploads, backup_custody_targets,
+			backup_custody_uploads, backup_custody_credential_grant_transitions,
+			backup_custody_credential_grants, backup_custody_targets,
+			backup_custody_control_commands, backup_custody_account_control,
 			backup_custody_authority_history, backup_custody_requests,
 			backup_custody_accounts CASCADE;
 		DROP TABLE IF EXISTS facets_backup_custody_schema_migrations;
@@ -55,8 +60,9 @@ func TestPostgresBackupCustodyUploadLedgerRequiresExactOrderedContinuity(t *test
 	deploymentID := uuid.New()
 	store, err := postgresstore.NewBackupCustodyStore(pool, deploymentID, postgresstore.BackupCustodyStoreLimits{
 		MaximumActiveUploads: 2, MaximumTargets: 2, MaximumGenerations: 10, MaximumRequests: 20,
-		MaximumRetentionProofs: 10, MaximumChunksPerUpload: 10,
-		MaximumChunkBytes: 1024, MaximumStagingBytes: 4096, MaximumCommittedBytes: 8192,
+		MaximumRetentionProofs: 10, MaximumControlRecords: 20, MaximumCredentialLifetimeMilliseconds: 10_000,
+		MaximumChunksPerUpload: 10,
+		MaximumChunkBytes:      1024, MaximumStagingBytes: 4096, MaximumCommittedBytes: 8192,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -71,8 +77,9 @@ func TestPostgresBackupCustodyUploadLedgerRequiresExactOrderedContinuity(t *test
 		}
 		reopened, err := postgresstore.NewBackupCustodyStore(pool, deploymentID, postgresstore.BackupCustodyStoreLimits{
 			MaximumActiveUploads: 2, MaximumTargets: 2, MaximumGenerations: 10, MaximumRequests: 20,
-			MaximumRetentionProofs: 10, MaximumChunksPerUpload: 10,
-			MaximumChunkBytes: 1024, MaximumStagingBytes: 4096, MaximumCommittedBytes: 8192,
+			MaximumRetentionProofs: 10, MaximumControlRecords: 20, MaximumCredentialLifetimeMilliseconds: 10_000,
+			MaximumChunksPerUpload: 10,
+			MaximumChunkBytes:      1024, MaximumStagingBytes: 4096, MaximumCommittedBytes: 8192,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -120,12 +127,14 @@ func TestPostgresBackupCustodyDurableAuthorityReceiptsReplayAndQuotas(t *testing
 	defer pool.Close()
 	resetBackupCustodySchema(t, ctx, pool)
 	deploymentID := uuid.New()
-	store, err := postgresstore.NewBackupCustodyStore(pool, deploymentID, postgresstore.BackupCustodyStoreLimits{
+	limits := postgresstore.BackupCustodyStoreLimits{
 		MaximumActiveUploads: 1, MaximumTargets: 2, MaximumGenerations: 4, MaximumRequests: 20,
-		MaximumRetentionProofs: 1, MaximumChunksPerUpload: 4,
-		MaximumChunkBytes: 2 * 1024 * 1024, MaximumStagingBytes: 4 * 1024 * 1024,
+		MaximumRetentionProofs: 1, MaximumControlRecords: 4, MaximumCredentialLifetimeMilliseconds: 10_000,
+		MaximumChunksPerUpload: 4,
+		MaximumChunkBytes:      2 * 1024 * 1024, MaximumStagingBytes: 4 * 1024 * 1024,
 		MaximumCommittedBytes: 8 * 1024 * 1024,
-	})
+	}
+	store, err := postgresstore.NewBackupCustodyStore(pool, deploymentID, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,21 +173,27 @@ func TestPostgresBackupCustodyDurableAuthorityReceiptsReplayAndQuotas(t *testing
 	}
 	provisioning := backupcustody.ProvisioningCustody{Store: store, Journal: journal, Registry: registry, Signer: signer, Clock: clock}
 	claimID := uuid.New()
-	if err := provisioning.ProvisionAccount(ctx, admission, claimID, enrollment); err != nil {
+	controlSigner := newBackupControlSigner(accountID, 1, 41)
+	initialControlAnchor := controlSigner.anchor(t)
+	if err := provisioning.ProvisionAccount(ctx, admission, claimID, enrollment, initialControlAnchor); err != nil {
 		t.Fatal(err)
 	}
 	// The committed account, not the now-removed journal, is exact replay
 	// authority even after the original bootstrap window.
 	clock.now = time.UnixMilli(5_000)
-	if err := provisioning.ProvisionAccount(ctx, admission, claimID, enrollment); err != nil {
+	if err := provisioning.ProvisionAccount(ctx, admission, claimID, enrollment, initialControlAnchor); err != nil {
 		t.Fatalf("committed account replay: %v", err)
 	}
 	clock.now = time.UnixMilli(1_100)
 	binding := serviceauthority.RequestBinding{Scope: serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: accountID},
 		AuthorityRevision: 1, AuthorityDigest: manifestDigest, DeploymentID: deploymentID,
 		RouteID: manifestPayload.ActiveDeployment.Routes[0].RouteID, TrafficClass: serviceauthority.TrafficBulk}
-	targetCredential, targetRequest := backupIntegrationTarget(t, admissionReference, uuid.New(), uuid.New(), uuid.New(), 1_100)
-	if err := provisioning.CreateTarget(ctx, admission, targetRequest, targetCredential, binding); err != nil {
+	targetCredential := backupIntegrationTarget(t, accountID, uuid.New(), uuid.New())
+	control := backupcustody.ControlCustody{Store: store, Registry: registry, Clock: clock}
+	createCommand := backupCreateTargetCommand(t, controlSigner, initialControlAnchor, targetCredential, uuid.New(), 1)
+	controlBinding := binding
+	controlBinding.TrafficClass = serviceauthority.TrafficControl
+	if _, err := control.Submit(ctx, createCommand, controlBinding); err != nil {
 		t.Fatal(err)
 	}
 	coordinator := backupcustody.Coordinator{Store: store, Content: content, Registry: registry, Signer: signer,
@@ -275,17 +290,375 @@ func TestPostgresBackupCustodyDurableAuthorityReceiptsReplayAndQuotas(t *testing
 		t.Fatalf("retention metadata quota err=%v", err)
 	}
 
-	conflictingCredential, conflictingRequest := backupIntegrationTarget(t, admissionReference, uuid.New(), uuid.New(), targetRequest.RequestID, 1_200)
-	if err := provisioning.CreateTarget(ctx, admission, conflictingRequest, conflictingCredential, binding); !errors.Is(err, backupcustody.ErrConflict) {
-		t.Fatalf("global request conflict err=%v", err)
-	}
-	secondCredential, secondRequest := backupIntegrationTarget(t, admissionReference, uuid.New(), uuid.New(), uuid.New(), 1_200)
-	if err := provisioning.CreateTarget(ctx, admission, secondRequest, secondCredential, binding); err != nil {
+	firstReference, _ := createCommand.ReferenceDigest()
+	secondCredential := backupIntegrationTarget(t, accountID, uuid.New(), uuid.New())
+	secondCommand := backupCreateTargetCommandWithPredecessor(t, controlSigner, secondCredential, uuid.New(), 2, firstReference)
+	if _, err := control.Submit(ctx, secondCommand, controlBinding); err != nil {
 		t.Fatalf("second target within quota: %v", err)
 	}
-	thirdCredential, thirdRequest := backupIntegrationTarget(t, admissionReference, uuid.New(), uuid.New(), uuid.New(), 1_200)
-	if err := provisioning.CreateTarget(ctx, admission, thirdRequest, thirdCredential, binding); !errors.Is(err, backupcustody.ErrConflict) {
+	secondReference, _ := secondCommand.ReferenceDigest()
+	thirdCredential := backupIntegrationTarget(t, accountID, uuid.New(), uuid.New())
+	thirdCommand := backupCreateTargetCommandWithPredecessor(t, controlSigner, thirdCredential, uuid.New(), 3, secondReference)
+	if _, err := control.Submit(ctx, thirdCommand, controlBinding); !errors.Is(err, backupcustody.ErrConflict) {
 		t.Fatalf("target metadata quota err=%v", err)
+	}
+
+	createPayload, err := createCommand.DecodedPayload()
+	if err != nil || createPayload.Effect.Grant == nil {
+		t.Fatalf("initial grant payload err=%v", err)
+	}
+	initialGrantReference, err := createPayload.Effect.Grant.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokeCommand := backupRevokeCommand(t, controlSigner, uuid.New(), 3, secondReference, initialGrantReference)
+	if _, err := control.Submit(ctx, revokeCommand, controlBinding); err != nil {
+		t.Fatalf("revoke credential: %v", err)
+	}
+	revokeReference, _ := revokeCommand.ReferenceDigest()
+
+	newReadRequest := readRequest
+	newReadRequest.RequestID = uuid.New()
+	if _, err := coordinator.Read(ctx, targetCredential, newReadRequest, binding); !errors.Is(err, backupcustody.ErrUnauthorized) {
+		t.Fatalf("revoked grant admitted new read err=%v", err)
+	}
+	if replayedGeneration, err := coordinator.FinalizeUpload(ctx, targetCredential, binding, upload.UploadID); err != nil {
+		t.Fatalf("historical finalized replay after revoke err=%v", err)
+	} else if reference, referenceErr := replayedGeneration.ReferenceDigest(); referenceErr != nil || reference != storedGeneration.CustodyReceiptReferenceDigest {
+		t.Fatalf("historical finalized replay reference=%q err=%v", reference, referenceErr)
+	}
+	retentionReference, _ := retention.ReferenceDigest()
+	if replayedRetention, err := coordinator.ConfirmRetention(ctx, targetCredential, retentionRequest, binding); err != nil {
+		t.Fatalf("historical retention replay after revoke err=%v", err)
+	} else if reference, referenceErr := replayedRetention.ReferenceDigest(); referenceErr != nil || reference != retentionReference {
+		t.Fatalf("historical retention replay reference=%q err=%v", reference, referenceErr)
+	}
+
+	// Validly signed receipts are still rejected unless their exact grant was
+	// accepted by the referenced control head and remained active at that head.
+	// This covers head-before-grant, head-at-transition and mismatched
+	// grant/head projections in load, replay and readiness paths.
+	initialAnchorReference, _ := initialControlAnchor.ReferenceDigest()
+	secondPayloadForProjection, err := secondCommand.DecodedPayload()
+	if err != nil || secondPayloadForProjection.Effect.Grant == nil {
+		t.Fatalf("second projection payload err=%v", err)
+	}
+	secondGrantReferenceForProjection, _ := secondPayloadForProjection.Effect.Grant.ReferenceDigest()
+	secondAuthorizationDigest, err := secondCredential.AuthorizationDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondUse := backupcustody.CredentialUse{Reference: secondCredential.Reference, AuthorizationDigest: secondAuthorizationDigest}
+	if err := store.AuthorizeHistoricalCredential(ctx, secondUse, secondGrantReferenceForProjection, firstReference, backupcustody.Publish, 1_200); err == nil {
+		t.Fatal("grant accepted after the selected head was historically authorized")
+	}
+	initialAuthorizationDigest, err := targetCredential.AuthorizationDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialUse := backupcustody.CredentialUse{Reference: targetCredential.Reference, AuthorizationDigest: initialAuthorizationDigest}
+	if err := store.AuthorizeHistoricalCredential(ctx, initialUse, initialGrantReference, revokeReference, backupcustody.Publish, 1_200); err == nil {
+		t.Fatal("grant transitioned at the selected head was historically authorized")
+	}
+	type custodyProjectionCase struct {
+		name           string
+		grantReference string
+		headReference  string
+	}
+	for _, test := range []custodyProjectionCase{
+		{name: "head before grant", grantReference: initialGrantReference, headReference: initialAnchorReference},
+		{name: "head at revoke", grantReference: initialGrantReference, headReference: revokeReference},
+		{name: "mismatched grant and head", grantReference: secondGrantReferenceForProjection, headReference: secondReference},
+	} {
+		t.Run("custody receipt "+test.name, func(t *testing.T) {
+			mutatedReceipt, mutatedBytes, mutatedReference := backupMutatedReceipt(t, signer, storedGeneration.CustodyReceipt, test.grantReference, test.headReference)
+			if _, err := pool.Exec(ctx, `UPDATE backup_custody_generations SET custody_receipt_record=$3,custody_receipt_reference_digest=$4,credential_grant_reference_digest=$5,control_head_reference_digest=$6 WHERE account_id=$1 AND upload_id=$2`, accountID, upload.UploadID, mutatedBytes, mutatedReference, test.grantReference, test.headReference); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.LoadGeneration(ctx, accountID, storedGeneration.GenerationReferenceDigest); err == nil {
+				t.Fatal("historically invalid signed custody row loaded")
+			}
+			if _, err := coordinator.FinalizeUpload(ctx, targetCredential, binding, upload.UploadID); err == nil {
+				t.Fatal("historically invalid signed custody row replayed")
+			}
+			if err := store.ValidateControlLedger(ctx, accountID); err == nil {
+				t.Fatal("historically invalid signed custody row passed readiness")
+			}
+			_ = mutatedReceipt
+			if _, err := pool.Exec(ctx, `UPDATE backup_custody_generations SET custody_receipt_record=$3,custody_receipt_reference_digest=$4,credential_grant_reference_digest=$5,control_head_reference_digest=$6 WHERE account_id=$1 AND upload_id=$2`, accountID, upload.UploadID, storedGeneration.CustodyReceiptBytes, storedGeneration.CustodyReceiptReferenceDigest, initialGrantReference, firstReference); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	mutatedRetention, mutatedRetentionBytes, mutatedRetentionReference := backupMutatedReceipt(t, signer, retention, initialGrantReference, revokeReference)
+	if _, err := pool.Exec(ctx, `UPDATE backup_custody_retention_receipts SET receipt_record=$3,receipt_reference_digest=$4,credential_grant_reference_digest=$5,control_head_reference_digest=$6 WHERE account_id=$1 AND request_id=$2`, accountID, retentionRequest.RequestID, mutatedRetentionBytes, mutatedRetentionReference, initialGrantReference, revokeReference); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadRetentionByRequest(ctx, accountID, retentionRequest.RequestID); err == nil {
+		t.Fatal("historically invalid signed retention row loaded")
+	}
+	if _, err := coordinator.ConfirmRetention(ctx, targetCredential, retentionRequest, binding); err == nil {
+		t.Fatal("historically invalid signed retention row replayed")
+	}
+	if err := store.ValidateControlLedger(ctx, accountID); err == nil {
+		t.Fatal("historically invalid signed retention row passed readiness")
+	}
+	_ = mutatedRetention
+	if _, err := pool.Exec(ctx, `UPDATE backup_custody_retention_receipts SET receipt_record=$3,receipt_reference_digest=$4,credential_grant_reference_digest=$5,control_head_reference_digest=$6 WHERE account_id=$1 AND request_id=$2`, accountID, retentionRequest.RequestID, retentionBytes, retentionReference, initialGrantReference, firstReference); err != nil {
+		t.Fatal(err)
+	}
+
+	rotatedSigner := newBackupControlSigner(accountID, 2, 42)
+	rotateCommand := backupRotateControlCommand(t, controlSigner, rotatedSigner, uuid.New(), 4, revokeReference)
+	if _, err := control.Submit(ctx, rotateCommand, controlBinding); err != nil {
+		t.Fatalf("rotate control key: %v", err)
+	}
+	rotateReference, _ := rotateCommand.ReferenceDigest()
+	if err := store.ValidateControlLedger(ctx, accountID); err != nil {
+		t.Fatalf("complete control ledger rejected: %v", err)
+	}
+
+	// Exact historical command replay is resolved before validating the now-
+	// rotated current head. Conflicting CommandID reuse still fails closed.
+	if replayed, err := control.Submit(ctx, createCommand, controlBinding); err != nil ||
+		replayed.Sequence != 1 || replayed.CommandReferenceDigest != firstReference {
+		t.Fatalf("historical exact command replay err=%v acceptance=%+v", err, replayed)
+	}
+	conflictingCredential := backupIntegrationTarget(t, accountID, uuid.New(), uuid.New())
+	conflictingCommand := backupCreateTargetCommand(t, controlSigner, initialControlAnchor, conflictingCredential, createCommandID(t, createCommand), 1)
+	if _, err := control.Submit(ctx, conflictingCommand, controlBinding); !errors.Is(err, backupcustody.ErrConflict) {
+		t.Fatalf("historical command identity conflict err=%v", err)
+	}
+
+	// The independently configured command-ledger bound is enforced even for
+	// an otherwise valid command under the rotated key and exact current head.
+	quotaCredential := backupIntegrationTarget(t, accountID, secondCredential.Reference.TargetID, secondCredential.Reference.BackupSetID)
+	quotaCommand := backupGrantCommand(t, rotatedSigner, quotaCredential, uuid.New(), 5, rotateReference)
+	if _, err := control.Submit(ctx, quotaCommand, controlBinding); !errors.Is(err, backupcustody.ErrConflict) {
+		t.Fatalf("control ledger quota err=%v", err)
+	}
+
+	// A command and a data admission serialize on the same account/control row.
+	// Either the upload admission linearizes before revocation, or it is denied;
+	// no partial command/projection is permitted in either outcome.
+	concurrencyLimits := limits
+	concurrencyLimits.MaximumControlRecords = 8
+	concurrencyLimits.MaximumActiveUploads = 4
+	concurrencyStore, err := postgresstore.NewBackupCustodyStore(pool, deploymentID, concurrencyLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPayload, err := secondCommand.DecodedPayload()
+	if err != nil || secondPayload.Effect.Grant == nil {
+		t.Fatalf("second grant payload err=%v", err)
+	}
+	secondGrantReference, err := secondPayload.Effect.Grant.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	concurrentRevoke := backupRevokeCommand(t, rotatedSigner, uuid.New(), 5, rotateReference, secondGrantReference)
+	concurrentControl := backupcustody.ControlCustody{Store: concurrencyStore, Registry: registry, Clock: clock}
+	concurrentCoordinator := coordinator
+	concurrentCoordinator.Store = concurrencyStore
+	concurrentPublish := backupcustody.PublishRequest{Version: backupcustody.Version, RequestID: uuid.New(),
+		RequestedAtMilliseconds: clock.now.UnixMilli(), Credential: secondCredential.Reference, Generation: 1}
+	start := make(chan struct{})
+	controlResult := make(chan error, 1)
+	type uploadResult struct {
+		record backupcustody.UploadRecord
+		err    error
+	}
+	uploadOutcome := make(chan uploadResult, 1)
+	go func() {
+		<-start
+		_, err := concurrentControl.Submit(ctx, concurrentRevoke, controlBinding)
+		controlResult <- err
+	}()
+	go func() {
+		<-start
+		record, err := concurrentCoordinator.BeginUpload(ctx, secondCredential, concurrentPublish, binding)
+		uploadOutcome <- uploadResult{record: record, err: err}
+	}()
+	close(start)
+	if err := <-controlResult; err != nil {
+		t.Fatalf("concurrent revoke: %v", err)
+	}
+	concurrentUpload := <-uploadOutcome
+	if concurrentUpload.err != nil && !errors.Is(concurrentUpload.err, backupcustody.ErrUnauthorized) {
+		t.Fatalf("concurrent upload admission err=%v", concurrentUpload.err)
+	}
+	if concurrentUpload.err == nil {
+		chunkDigest := sha256.Sum256([]byte{0x01})
+		if _, err := concurrentCoordinator.AppendUploadChunk(ctx, secondCredential, binding, concurrentUpload.record.UploadID, 0, []byte{0x01}, hex.EncodeToString(chunkDigest[:])); !errors.Is(err, backupcustody.ErrUnauthorized) {
+			t.Fatalf("post-revocation append err=%v", err)
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM backup_custody_uploads WHERE account_id=$1 AND upload_id=$2`, accountID, concurrentUpload.record.UploadID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM backup_custody_requests WHERE account_id=$1 AND request_id=$2`, accountID, concurrentPublish.RequestID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := concurrencyStore.ValidateControlLedger(ctx, accountID); err != nil {
+		t.Fatalf("concurrent ledger validation: %v", err)
+	}
+
+	// Readiness validates exact command projections, not only foreign keys and
+	// row counts. Each internally consistent SQL substitution below must fail.
+	if _, err := pool.Exec(ctx, `UPDATE backup_custody_targets SET create_control_command_reference_digest=$3 WHERE account_id=$1 AND target_id=$2`, accountID, targetCredential.Reference.TargetID, revokeReference); err != nil {
+		t.Fatal(err)
+	}
+	if err := concurrencyStore.ValidateControlLedger(ctx, accountID); err == nil {
+		t.Fatal("wrong target command projection accepted")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE backup_custody_targets SET create_control_command_reference_digest=$3 WHERE account_id=$1 AND target_id=$2`, accountID, targetCredential.Reference.TargetID, firstReference); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE backup_custody_credential_grants SET accepted_control_command_reference_digest=$3 WHERE account_id=$1 AND grant_reference_digest=$2`, accountID, initialGrantReference, rotateReference); err != nil {
+		t.Fatal(err)
+	}
+	if err := concurrencyStore.ValidateControlLedger(ctx, accountID); err == nil {
+		t.Fatal("wrong grant command projection accepted")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE backup_custody_credential_grants SET accepted_control_command_reference_digest=$3 WHERE account_id=$1 AND grant_reference_digest=$2`, accountID, initialGrantReference, firstReference); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE backup_custody_credential_grant_transitions SET accepted_control_command_reference_digest=$3 WHERE account_id=$1 AND prior_grant_reference_digest=$2`, accountID, initialGrantReference, rotateReference); err != nil {
+		t.Fatal(err)
+	}
+	if err := concurrencyStore.ValidateControlLedger(ctx, accountID); err == nil {
+		t.Fatal("wrong transition command projection accepted")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE backup_custody_credential_grant_transitions SET accepted_control_command_reference_digest=$3 WHERE account_id=$1 AND prior_grant_reference_digest=$2`, accountID, initialGrantReference, revokeReference); err != nil {
+		t.Fatal(err)
+	}
+	foreignTargetID, foreignSetID := uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO backup_custody_targets(account_id,target_id,backup_set_id,create_control_command_reference_digest,created_at_milliseconds) VALUES($1,$2,$3,$4,$5)`, accountID, foreignTargetID, foreignSetID, rotateReference, clock.now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err := concurrencyStore.ValidateControlLedger(ctx, accountID); err == nil {
+		t.Fatal("orphan target projection accepted")
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM backup_custody_targets WHERE account_id=$1 AND target_id=$2`, accountID, foreignTargetID); err != nil {
+		t.Fatal(err)
+	}
+	if err := concurrencyStore.ValidateControlLedger(ctx, accountID); err != nil {
+		t.Fatalf("restored ledger rejected: %v", err)
+	}
+
+	// Begin, append and read each re-evaluate capability and exclusive expiry
+	// after acquiring the same account/control row lock used by commands and
+	// data operations. A pre-lock authorization time cannot survive a wait that
+	// crosses credential expiry.
+	concurrentRevokeReference, _ := concurrentRevoke.ReferenceDigest()
+	expiryCredential := backupIntegrationTarget(t, accountID, secondCredential.Reference.TargetID, secondCredential.Reference.BackupSetID)
+	expiryGrant := backupGrantCommand(t, rotatedSigner, expiryCredential, uuid.New(), 6, concurrentRevokeReference)
+	if _, err := concurrentControl.Submit(ctx, expiryGrant, controlBinding); err != nil {
+		t.Fatalf("expiry-test grant: %v", err)
+	}
+	clock.now = time.UnixMilli(9_000)
+	expiryCoordinator := concurrentCoordinator
+	expiryCoordinator.Clock = clock
+	firstPublish := backupcustody.PublishRequest{Version: backupcustody.Version, RequestID: uuid.New(),
+		RequestedAtMilliseconds: 9_000, Credential: expiryCredential.Reference, Generation: 1}
+	firstUpload, err := expiryCoordinator.BeginUpload(ctx, expiryCredential, firstPublish, binding)
+	if err != nil {
+		t.Fatalf("expiry fixture begin generation 1: %v", err)
+	}
+	expiryWire := backupIntegrationOuterWire(t, expiryCredential.Reference.BackupSetID)
+	expiryWireDigest := sha256.Sum256(expiryWire)
+	if _, err := expiryCoordinator.AppendUploadChunk(ctx, expiryCredential, binding, firstUpload.UploadID, 0, expiryWire, hex.EncodeToString(expiryWireDigest[:])); err != nil {
+		t.Fatalf("expiry fixture append generation 1: %v", err)
+	}
+	expiryFirstGeneration, err := expiryCoordinator.FinalizeUpload(ctx, expiryCredential, binding, firstUpload.UploadID)
+	if err != nil {
+		t.Fatalf("expiry fixture finalize generation 1: %v", err)
+	}
+	expiryFirstPayload, err := expiryFirstGeneration.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiryFirstGenerationReference, err := expiryFirstPayload.Generation.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPublish := firstPublish
+	secondPublish.RequestID = uuid.New()
+	secondPublish.Generation = 2
+	secondPublish.ExpectedHeadReferenceDigest = &expiryFirstGenerationReference
+	secondUpload, err := expiryCoordinator.BeginUpload(ctx, expiryCredential, secondPublish, binding)
+	if err != nil {
+		t.Fatalf("expiry fixture begin generation 2: %v", err)
+	}
+
+	expiredBeginClock := newBackupLockCrossingClock(time.UnixMilli(9_999), time.UnixMilli(10_000))
+	expiredBeginCoordinator := expiryCoordinator
+	expiredBeginCoordinator.Clock = expiredBeginClock
+	expiredPublish := secondPublish
+	expiredPublish.RequestID = uuid.New()
+	expiredPublish.Generation = 3
+	beginLock := lockBackupAccount(t, ctx, pool, accountID)
+	beginResult := make(chan error, 1)
+	go func() {
+		_, err := expiredBeginCoordinator.BeginUpload(ctx, expiryCredential, expiredPublish, binding)
+		beginResult <- err
+	}()
+	<-expiredBeginClock.firstRead
+	if err := beginLock.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-beginResult; !errors.Is(err, backupcustody.ErrUnauthorized) {
+		t.Fatalf("begin crossing expiry err=%v", err)
+	}
+	var expiredBeginCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM backup_custody_requests WHERE request_id=$1`, expiredPublish.RequestID).Scan(&expiredBeginCount); err != nil || expiredBeginCount != 0 {
+		t.Fatalf("expired begin durable count=%d err=%v", expiredBeginCount, err)
+	}
+
+	expiredAppendClock := newBackupLockCrossingClock(time.UnixMilli(9_999), time.UnixMilli(10_000))
+	expiredAppendCoordinator := expiryCoordinator
+	expiredAppendCoordinator.Clock = expiredAppendClock
+	appendLock := lockBackupAccount(t, ctx, pool, accountID)
+	appendResult := make(chan error, 1)
+	go func() {
+		_, err := expiredAppendCoordinator.AppendUploadChunk(ctx, expiryCredential, binding, secondUpload.UploadID, 0, []byte{0x01}, hex.EncodeToString(backupPostgresSHA256([]byte{0x01})))
+		appendResult <- err
+	}()
+	<-expiredAppendClock.firstRead
+	if err := appendLock.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-appendResult; !errors.Is(err, backupcustody.ErrUnauthorized) {
+		t.Fatalf("append crossing expiry err=%v", err)
+	}
+	var expiredChunkCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM backup_custody_upload_chunks WHERE account_id=$1 AND upload_id=$2`, accountID, secondUpload.UploadID).Scan(&expiredChunkCount); err != nil || expiredChunkCount != 0 {
+		t.Fatalf("expired append durable chunks=%d err=%v", expiredChunkCount, err)
+	}
+
+	expiredReadClock := newBackupLockCrossingClock(time.UnixMilli(9_999), time.UnixMilli(10_000))
+	expiredReadCoordinator := expiryCoordinator
+	expiredReadCoordinator.Clock = expiredReadClock
+	expiredReadRequest := backupcustody.ReadRequest{Version: backupcustody.Version, RequestID: uuid.New(),
+		RequestedAtMilliseconds: 9_999, Credential: expiryCredential.Reference}
+	readLock := lockBackupAccount(t, ctx, pool, accountID)
+	readResult := make(chan error, 1)
+	go func() {
+		result, err := expiredReadCoordinator.Read(ctx, expiryCredential, expiredReadRequest, binding)
+		if result.Content != nil {
+			_ = result.Content.Close()
+			if err == nil {
+				err = errors.New("expired read returned content")
+			}
+		}
+		readResult <- err
+	}()
+	<-expiredReadClock.firstRead
+	if err := readLock.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-readResult; !errors.Is(err, backupcustody.ErrUnauthorized) {
+		t.Fatalf("read crossing expiry err=%v", err)
 	}
 }
 
@@ -297,7 +670,9 @@ func resetBackupCustodySchema(t *testing.T, ctx context.Context, pool *pgxpool.P
 	if _, err := pool.Exec(ctx, `
 		DROP TABLE IF EXISTS backup_custody_retention_receipts,
 			backup_custody_upload_chunks, backup_custody_generations,
-			backup_custody_uploads, backup_custody_targets,
+			backup_custody_uploads, backup_custody_credential_grant_transitions,
+			backup_custody_credential_grants, backup_custody_targets,
+			backup_custody_control_commands, backup_custody_account_control,
 			backup_custody_authority_history, backup_custody_requests,
 			backup_custody_accounts CASCADE;
 		DROP TABLE IF EXISTS facets_backup_custody_schema_migrations;
@@ -309,10 +684,10 @@ func resetBackupCustodySchema(t *testing.T, ctx context.Context, pool *pgxpool.P
 	}
 }
 
-func backupIntegrationTarget(t *testing.T, admission backupcustody.AccountAdmissionReference, targetID, setID, requestID uuid.UUID, now int64) (backupcustody.TargetCredential, backupcustody.CreateTargetRequest) {
+func backupIntegrationTarget(t *testing.T, accountID, targetID, setID uuid.UUID) backupcustody.TargetCredential {
 	t.Helper()
 	reference := backupcustody.TargetCredentialReference{Version: backupcustody.Version,
-		AccountID: admission.AccountID, TargetID: targetID, BackupSetID: setID,
+		AccountID: accountID, TargetID: targetID, BackupSetID: setID,
 		CredentialID: uuid.New(), Capabilities: []backupcustody.Capability{
 			backupcustody.Publish, backupcustody.Read, backupcustody.RetentionProof,
 		}, ExpiresAtMilliseconds: 10_000,
@@ -321,12 +696,142 @@ func backupIntegrationTarget(t *testing.T, admission backupcustody.AccountAdmiss
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := backupcustody.CreateTargetRequest{Version: backupcustody.Version, Admission: admission,
-		TargetID: targetID, BackupSetID: setID, RequestID: requestID, RequestedAtMilliseconds: now}
-	if request.Validate() != nil {
-		t.Fatal("invalid target fixture")
+	return credential
+}
+
+type backupControlSigner struct {
+	accountID  uuid.UUID
+	generation uint64
+	keyID      uuid.UUID
+	private    ed25519.PrivateKey
+}
+
+func newBackupControlSigner(accountID uuid.UUID, generation uint64, seed byte) backupControlSigner {
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
+	public := private.Public().(ed25519.PublicKey)
+	digest := sha256.Sum256(append([]byte("Facets backup custody account control key ID v1\x00"), public...))
+	idBytes := append([]byte(nil), digest[:16]...)
+	idBytes[6] = (idBytes[6] & 0x0f) | 0x50
+	idBytes[8] = (idBytes[8] & 0x3f) | 0x80
+	keyID, _ := uuid.FromBytes(idBytes)
+	return backupControlSigner{accountID: accountID, generation: generation, keyID: keyID, private: private}
+}
+
+func (signer backupControlSigner) anchor(t *testing.T) backupcustody.ControlPossessionAnchor {
+	t.Helper()
+	public := signer.private.Public().(ed25519.PublicKey)
+	fingerprint := sha256.Sum256(public)
+	unsigned := backupcustody.ControlPossessionAnchorUnsigned{Version: backupcustody.CredentialAuthorityVersion,
+		AccountID: signer.accountID, Algorithm: backupcustody.CredentialAuthoritySignatureAlgorithm,
+		ControlGeneration: signer.generation, ControlKeyID: signer.keyID,
+		PublicSigningKey: base64.RawURLEncoding.EncodeToString(public), SigningKeyFingerprint: hex.EncodeToString(fingerprint[:])}
+	encoded, _ := json.Marshal(unsigned)
+	anchor := backupcustody.ControlPossessionAnchor{Unsigned: unsigned,
+		PossessionSignature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(signer.private,
+			append([]byte("Facets backup custody account control possession v1\x00"), encoded...)))}
+	if anchor.VerifyPossession() != nil {
+		t.Fatal("invalid control anchor fixture")
 	}
-	return credential, request
+	return anchor
+}
+
+func backupCreateTargetCommand(t *testing.T, signer backupControlSigner, anchor backupcustody.ControlPossessionAnchor, credential backupcustody.TargetCredential, commandID uuid.UUID, sequence uint64) backupcustody.SignedControlCommand {
+	t.Helper()
+	predecessor, err := anchor.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backupCreateTargetCommandWithPredecessor(t, signer, credential, commandID, sequence, predecessor)
+}
+
+func backupCreateTargetCommandWithPredecessor(t *testing.T, signer backupControlSigner, credential backupcustody.TargetCredential, commandID uuid.UUID, sequence uint64, predecessor string) backupcustody.SignedControlCommand {
+	t.Helper()
+	authorizationDigest, err := credential.AuthorizationDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := backupcustody.CredentialGrant{Version: backupcustody.CredentialAuthorityVersion,
+		Credential: credential.Reference, AuthorizationDigest: authorizationDigest}
+	targetID, backupSetID := credential.Reference.TargetID, credential.Reference.BackupSetID
+	payload := backupcustody.ControlCommandPayload{Version: backupcustody.CredentialAuthorityVersion,
+		AccountID: signer.accountID, CommandID: commandID, ControlGeneration: signer.generation,
+		ControlKeyID: signer.keyID, PredecessorReferenceDigest: predecessor, Sequence: sequence,
+		Effect: backupcustody.ControlEffect{Kind: backupcustody.CreateTargetWithInitialGrant,
+			TargetID: &targetID, BackupSetID: &backupSetID, Grant: &grant}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := backupcustody.SignedControlCommand{Payload: encoded,
+		AuthoritySignature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(signer.private,
+			append([]byte("Facets backup custody account control command authority v1\x00"), encoded...)))}
+	if _, err := record.DecodedPayload(); err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func backupGrantCommand(t *testing.T, signer backupControlSigner, credential backupcustody.TargetCredential, commandID uuid.UUID, sequence uint64, predecessor string) backupcustody.SignedControlCommand {
+	t.Helper()
+	authorizationDigest, err := credential.AuthorizationDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := backupcustody.CredentialGrant{Version: backupcustody.CredentialAuthorityVersion,
+		Credential: credential.Reference, AuthorizationDigest: authorizationDigest}
+	payload := backupcustody.ControlCommandPayload{Version: backupcustody.CredentialAuthorityVersion,
+		AccountID: signer.accountID, CommandID: commandID, ControlGeneration: signer.generation,
+		ControlKeyID: signer.keyID, PredecessorReferenceDigest: predecessor, Sequence: sequence,
+		Effect: backupcustody.ControlEffect{Kind: backupcustody.GrantCredential, Grant: &grant}}
+	return backupSignedControlCommand(t, signer, nil, payload)
+}
+
+func backupRevokeCommand(t *testing.T, signer backupControlSigner, commandID uuid.UUID, sequence uint64, predecessor, priorGrant string) backupcustody.SignedControlCommand {
+	t.Helper()
+	payload := backupcustody.ControlCommandPayload{Version: backupcustody.CredentialAuthorityVersion,
+		AccountID: signer.accountID, CommandID: commandID, ControlGeneration: signer.generation,
+		ControlKeyID: signer.keyID, PredecessorReferenceDigest: predecessor, Sequence: sequence,
+		Effect: backupcustody.ControlEffect{Kind: backupcustody.RevokeCredential, PriorGrantReferenceDigest: &priorGrant}}
+	return backupSignedControlCommand(t, signer, nil, payload)
+}
+
+func backupRotateControlCommand(t *testing.T, signer, next backupControlSigner, commandID uuid.UUID, sequence uint64, predecessor string) backupcustody.SignedControlCommand {
+	t.Helper()
+	nextAnchor := next.anchor(t)
+	payload := backupcustody.ControlCommandPayload{Version: backupcustody.CredentialAuthorityVersion,
+		AccountID: signer.accountID, CommandID: commandID, ControlGeneration: signer.generation,
+		ControlKeyID: signer.keyID, PredecessorReferenceDigest: predecessor, Sequence: sequence,
+		Effect: backupcustody.ControlEffect{Kind: backupcustody.RotateControlKey, ControlAnchor: &nextAnchor}}
+	return backupSignedControlCommand(t, signer, &next, payload)
+}
+
+func backupSignedControlCommand(t *testing.T, signer backupControlSigner, next *backupControlSigner, payload backupcustody.ControlCommandPayload) backupcustody.SignedControlCommand {
+	t.Helper()
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := backupcustody.SignedControlCommand{Payload: encoded,
+		AuthoritySignature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(signer.private,
+			append([]byte("Facets backup custody account control command authority v1\x00"), encoded...)))}
+	if next != nil {
+		signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(next.private,
+			append([]byte("Facets backup custody account control command new possession v1\x00"), encoded...)))
+		record.NewPossessionSignature = &signature
+	}
+	if _, err := record.DecodedPayload(); err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func createCommandID(t *testing.T, command backupcustody.SignedControlCommand) uuid.UUID {
+	t.Helper()
+	payload, err := command.DecodedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload.CommandID
 }
 
 func backupIntegrationOuterWire(t *testing.T, setID uuid.UUID) []byte {
@@ -450,9 +955,74 @@ func backupPostgresSHA256(input []byte) []byte {
 	return digest[:]
 }
 
+func backupMutatedReceipt(
+	t *testing.T,
+	signer *serviceauthority.DeploymentSigner,
+	source serviceauthority.BackupCustodyReceipt,
+	grantReference, headReference string,
+) (serviceauthority.BackupCustodyReceipt, []byte, string) {
+	t.Helper()
+	payload, err := source.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload.CredentialGrantReferenceDigest = grantReference
+	payload.ControlHeadReferenceDigest = headReference
+	receipt, err := signer.SignBackupCustodyReceipt(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := receipt.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipt, encoded, reference
+}
+
 type backupIntegrationClock struct{ now time.Time }
 
 func (clock *backupIntegrationClock) Now() time.Time { return clock.now }
+
+type backupLockCrossingClock struct {
+	mu        sync.Mutex
+	first     time.Time
+	second    time.Time
+	firstRead chan struct{}
+	reads     int
+}
+
+func newBackupLockCrossingClock(first, second time.Time) *backupLockCrossingClock {
+	return &backupLockCrossingClock{first: first, second: second, firstRead: make(chan struct{})}
+}
+
+func (clock *backupLockCrossingClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	clock.reads++
+	if clock.reads == 1 {
+		close(clock.firstRead)
+		return clock.first
+	}
+	return clock.second
+}
+
+func lockBackupAccount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, accountID uuid.UUID) pgx.Tx {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var locked uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT account_id FROM backup_custody_accounts WHERE account_id=$1 FOR UPDATE`, accountID).Scan(&locked); err != nil || locked != accountID {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("lock Backup account got=%s err=%v", locked, err)
+	}
+	return tx
+}
 
 type backupIntegrationAuthorityHistory struct {
 	anchor   serviceauthority.TrustAnchor
@@ -475,7 +1045,7 @@ func installBackupUploadLedger(t *testing.T, ctx context.Context, pool interface
 		t.Fatal(err)
 	}
 	accountID, targetID, setID, uploadID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	createRequestID, publishRequestID := uuid.New(), uuid.New()
+	publishRequestID := uuid.New()
 	credential := backupcustody.TargetCredentialReference{
 		Version: backupcustody.Version, AccountID: accountID, TargetID: targetID, BackupSetID: setID,
 		CredentialID: uuid.New(), Capabilities: []backupcustody.Capability{backupcustody.Publish},
@@ -487,28 +1057,64 @@ func installBackupUploadLedger(t *testing.T, ctx context.Context, pool interface
 	if err != nil || request.Validate() != nil {
 		t.Fatalf("invalid fixture request: %v", err)
 	}
-	credentialBytes, err := json.Marshal(credential)
+	credentialSecret, err := backupcustody.NewTargetCredential(credential)
 	if err != nil {
 		t.Fatal(err)
 	}
+	controlSigner := newBackupControlSigner(accountID, 1, 93)
+	anchor := controlSigner.anchor(t)
+	command := backupCreateTargetCommand(t, controlSigner, anchor, credentialSecret, uuid.New(), 1)
+	anchorBytes, _ := anchor.CanonicalJSON()
+	anchorReference, _ := anchor.ReferenceDigest()
+	commandBytes, _ := command.CanonicalJSON()
+	commandReference, _ := command.ReferenceDigest()
+	payload, _ := command.DecodedPayload()
+	grantReference, _ := payload.Effect.Grant.ReferenceDigest()
+	grantBytes, _ := json.Marshal(payload.Effect.Grant)
+	acceptance := backupcustody.ControlCommandAcceptance{Version: backupcustody.CredentialAuthorityVersion,
+		AccountID: accountID, CommandID: payload.CommandID, Sequence: 1, CommandReferenceDigest: commandReference,
+		ControlHeadReferenceDigest: commandReference, ControlGeneration: 1, ControlKeyID: controlSigner.keyID,
+		CredentialGrantReferenceDigest: &grantReference}
+	acceptanceBytes, _ := json.Marshal(acceptance)
 	digest := strings.Repeat("a", 64)
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO backup_custody_accounts(account_id,claim_id,admission_id,admission_record,
+	if _, err := pool.Exec(ctx, `INSERT INTO backup_custody_accounts(account_id,claim_id,admission_id,admission_record,
 			admission_authorization_digest,authority_revision,authority_manifest_digest,deployment_id,
 			initial_anchor_record,initial_manifest_record,initial_enrollment_record,
 			server_time_high_water_milliseconds,state,created_at_milliseconds)
-		VALUES($1,$2,$3,'{}',$4,1,$4,$5,'{}','{}','{}',1000,'writable',1000);
-		INSERT INTO backup_custody_requests(request_id,account_id,operation,request_record)
-		VALUES($6,$1,'create_target','{}'),($7,$1,'begin_upload',$8);
-		INSERT INTO backup_custody_targets(account_id,target_id,backup_set_id,credential_id,
-			credential_record,credential_authorization_digest,admission_authorization_digest,
-			create_request_id,create_request_record,created_at_milliseconds)
-		VALUES($1,$9,$10,$11,$12,$4,$4,$6,'{}',1000);
-		INSERT INTO backup_custody_uploads(account_id,upload_id,target_id,backup_set_id,
+		VALUES($1,$2,$3,'{}',$4,1,$4,$5,'{}','{}','{}',1000,'writable',1000)`,
+		accountID, uuid.New(), uuid.New(), digest, deploymentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO backup_custody_account_control(account_id,initial_anchor_record,initial_anchor_reference_digest,
+			current_anchor_record,current_anchor_reference_digest,head_sequence,head_reference_digest,control_generation,control_key_id)
+		VALUES($1,$2,$3,$2,$3,1,$4,1,$5)`, accountID, anchorBytes, anchorReference, commandReference, controlSigner.keyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO backup_custody_control_commands(account_id,sequence,command_id,predecessor_reference_digest,
+			command_reference_digest,command_record,acceptance_record,effect_kind,accepted_at_milliseconds)
+		VALUES($1,1,$2,$3,$4,$5,$6,'create_target_with_initial_grant',1000)`,
+		accountID, payload.CommandID, anchorReference, commandReference, commandBytes, acceptanceBytes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO backup_custody_requests(request_id,account_id,operation,request_record)
+		VALUES($1,$2,'begin_upload',$3)`, publishRequestID, accountID, requestBytes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO backup_custody_targets(account_id,target_id,backup_set_id,
+			create_control_command_reference_digest,created_at_milliseconds)
+		VALUES($1,$2,$3,$4,1000)`, accountID, targetID, setID, commandReference); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO backup_custody_credential_grants(account_id,credential_id,target_id,backup_set_id,
+			grant_reference_digest,grant_record,authorization_digest,accepted_control_command_reference_digest)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, accountID, credential.CredentialID, targetID, setID,
+		grantReference, grantBytes, payload.Effect.Grant.AuthorizationDigest, commandReference); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO backup_custody_uploads(account_id,upload_id,target_id,backup_set_id,
 			publish_request_id,request_record,committed_bytes,maximum_chunk_count,state,created_at_milliseconds)
-		VALUES($1,$13,$9,$10,$7,$8,$14,$15,'uploading',1000)
-	`, accountID, uuid.New(), uuid.New(), digest, deploymentID, createRequestID, publishRequestID,
-		requestBytes, targetID, setID, credential.CredentialID, credentialBytes, uploadID, committed, maximum); err != nil {
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'uploading',1000)`, accountID, uploadID, targetID, setID,
+		publishRequestID, requestBytes, committed, maximum); err != nil {
 		t.Fatal(err)
 	}
 	for index, chunk := range chunks {

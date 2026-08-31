@@ -56,6 +56,10 @@ func (coordinator *Coordinator) BeginUpload(
 		request.Generation > math.MaxInt64 || !targetReferencesEqual(credential.Reference, request.Credential) {
 		return UploadRecord{}, serviceauthority.ErrInvalid
 	}
+	use, err := credentialUse(credential)
+	if err != nil {
+		return UploadRecord{}, serviceauthority.ErrInvalid
+	}
 	requestBytes, err := canonicalRequest(request)
 	if err != nil {
 		return UploadRecord{}, err
@@ -68,23 +72,15 @@ func (coordinator *Coordinator) BeginUpload(
 	if !credential.Reference.Admits(Publish, now.UnixMilli()) {
 		return UploadRecord{}, ErrUnauthorized
 	}
-	target, err := coordinator.Store.LoadTarget(ctx, request.Credential.AccountID, request.Credential.TargetID)
-	if err != nil {
-		return UploadRecord{}, err
-	}
-	if !credential.Authorizes(target.Credential, target.CredentialAuthorizationDigest) ||
-		target.BackupSetID != request.Credential.BackupSetID {
-		return UploadRecord{}, ErrUnauthorized
-	}
 	upload := UploadRecord{
-		AccountID: target.AccountID, TargetID: target.TargetID, BackupSetID: target.BackupSetID,
+		AccountID: request.Credential.AccountID, TargetID: request.Credential.TargetID, BackupSetID: request.Credential.BackupSetID,
 		UploadID: coordinator.NewID(), Request: request, RequestBytes: requestBytes,
 		CreatedAtMilliseconds: now.UnixMilli(),
 	}
 	if upload.UploadID == uuid.Nil {
 		return UploadRecord{}, serviceauthority.ErrInvalid
 	}
-	reserved, created, err := coordinator.Store.ReserveUpload(ctx, upload, authorization)
+	reserved, created, err := coordinator.Store.ReserveUpload(ctx, upload, use, coordinator.Clock, authorization)
 	if err != nil {
 		return UploadRecord{}, err
 	}
@@ -113,6 +109,10 @@ func (coordinator *Coordinator) AppendUploadChunk(
 		!validHexDigest(chunkSHA256) {
 		return 0, serviceauthority.ErrInvalid
 	}
+	use, useErr := credentialUse(credential)
+	if useErr != nil {
+		return 0, serviceauthority.ErrInvalid
+	}
 	digest := sha256.Sum256(chunk)
 	if !bytes.Equal([]byte(hex.EncodeToString(digest[:])), []byte(chunkSHA256)) {
 		return 0, serviceauthority.ErrInvalid
@@ -122,15 +122,10 @@ func (coordinator *Coordinator) AppendUploadChunk(
 		return 0, err
 	}
 	defer lease.Release()
-	target, err := coordinator.Store.LoadTarget(ctx, credential.Reference.AccountID, credential.Reference.TargetID)
-	if err != nil {
-		return 0, err
-	}
-	if !credential.Authorizes(target.Credential, target.CredentialAuthorizationDigest) ||
-		!credential.Reference.Admits(Publish, now.UnixMilli()) {
+	if !credential.Reference.Admits(Publish, now.UnixMilli()) {
 		return 0, ErrUnauthorized
 	}
-	appendLease, err := coordinator.Store.BeginUploadAppend(ctx, target.AccountID, uploadID, offset, chunkSHA256, uint64(len(chunk)), authorization)
+	appendLease, err := coordinator.Store.BeginUploadAppend(ctx, credential.Reference.AccountID, uploadID, offset, chunkSHA256, uint64(len(chunk)), use, coordinator.Clock, authorization)
 	if err != nil {
 		return 0, err
 	}
@@ -141,7 +136,8 @@ func (coordinator *Coordinator) AppendUploadChunk(
 		}
 	}()
 	upload := appendLease.Upload()
-	if upload.TargetID != target.TargetID || upload.BackupSetID != target.BackupSetID {
+	if !targetReferencesEqual(upload.Request.Credential, credential.Reference) || upload.TargetID != credential.Reference.TargetID ||
+		upload.BackupSetID != credential.Reference.BackupSetID {
 		return 0, ErrConflict
 	}
 	if existingNext := appendLease.ExistingNextOffset(); existingNext != nil {
@@ -154,7 +150,7 @@ func (coordinator *Coordinator) AppendUploadChunk(
 		committed = true
 		return *existingNext, nil
 	}
-	if upload.TargetID != target.TargetID || upload.CommittedBytes != offset {
+	if upload.TargetID != credential.Reference.TargetID || upload.CommittedBytes != offset {
 		return 0, ErrConflict
 	}
 	next, err := coordinator.Content.ReconcileAndAppend(
@@ -181,15 +177,18 @@ func (coordinator *Coordinator) FinalizeUpload(
 	if coordinator.validate() != nil || uploadID == uuid.Nil {
 		return serviceauthority.BackupCustodyReceipt{}, serviceauthority.ErrInvalid
 	}
+	use, useErr := credentialUse(credential)
+	if useErr != nil {
+		return serviceauthority.BackupCustodyReceipt{}, serviceauthority.ErrInvalid
+	}
 	// Exact committed retries are resolved before current freshness checks. The
 	// stored receipt remains evidence of the historical accepted mutation.
 	if existing, err := coordinator.Store.LoadGenerationByUpload(ctx, credential.Reference.AccountID, uploadID); err == nil {
 		payload, verifyErr := existing.CustodyReceipt.VerifiedPayload()
-		target, targetErr := coordinator.Store.LoadTarget(ctx, credential.Reference.AccountID, existing.Generation.TargetID)
-		if verifyErr == nil && existing.ValidateStored() == nil && targetErr == nil && payload.CredentialID == credential.Reference.CredentialID &&
+		if verifyErr == nil && existing.ValidateStored() == nil && payload.CredentialID == credential.Reference.CredentialID &&
 			existing.Generation.AccountID == credential.Reference.AccountID && existing.Generation.TargetID == credential.Reference.TargetID &&
 			existing.Generation.BackupSetID == credential.Reference.BackupSetID &&
-			credential.Authorizes(target.Credential, target.CredentialAuthorizationDigest) {
+			coordinator.Store.AuthorizeHistoricalCredential(ctx, use, payload.CredentialGrantReferenceDigest, payload.ControlHeadReferenceDigest, Publish, payload.IssuedAtMilliseconds) == nil {
 			return existing.CustodyReceipt, nil
 		}
 		return serviceauthority.BackupCustodyReceipt{}, ErrConflict
@@ -201,7 +200,7 @@ func (coordinator *Coordinator) FinalizeUpload(
 		return serviceauthority.BackupCustodyReceipt{}, err
 	}
 	defer lease.Release()
-	finalization, err := coordinator.Store.BeginFinalization(ctx, credential.Reference.AccountID, uploadID, authorization)
+	finalization, err := coordinator.Store.BeginFinalization(ctx, credential.Reference.AccountID, uploadID, use, authorization)
 	if err != nil {
 		return serviceauthority.BackupCustodyReceipt{}, err
 	}
@@ -212,7 +211,8 @@ func (coordinator *Coordinator) FinalizeUpload(
 		}
 	}()
 	upload, target := finalization.Upload(), finalization.Target()
-	if !credential.Authorizes(target.Credential, target.CredentialAuthorizationDigest) || upload.TargetID != target.TargetID || upload.BackupSetID != target.BackupSetID {
+	if upload.TargetID != target.TargetID || upload.BackupSetID != target.BackupSetID ||
+		!targetReferencesEqual(upload.Request.Credential, credential.Reference) {
 		return serviceauthority.BackupCustodyReceipt{}, ErrUnauthorized
 	}
 	if existing := finalization.Existing(); existing != nil {
@@ -228,8 +228,7 @@ func (coordinator *Coordinator) FinalizeUpload(
 		committed = true
 		return existing.CustodyReceipt, nil
 	}
-	if !credential.Authorizes(target.Credential, target.CredentialAuthorizationDigest) ||
-		!credential.Reference.Admits(Publish, now.UnixMilli()) || upload.TargetID != target.TargetID {
+	if !credential.Reference.Admits(Publish, now.UnixMilli()) || upload.TargetID != target.TargetID {
 		return serviceauthority.BackupCustodyReceipt{}, ErrUnauthorized
 	}
 	file, err := coordinator.Content.OpenFinalizationBytes(target.AccountID, target.TargetID, upload.Request.Generation, uploadID)
@@ -263,11 +262,14 @@ func (coordinator *Coordinator) FinalizeUpload(
 		return serviceauthority.BackupCustodyReceipt{}, err
 	}
 	authority := authorityContext(freshAuthorization)
+	credentialAuthority := finalization.CredentialAuthority()
 	payload := serviceauthority.BackupCustodyReceiptPayload{
 		Version:   serviceauthority.BackupCustodyReceiptVersion,
 		ReceiptID: coordinator.NewID(), RequestID: upload.Request.RequestID,
 		CredentialID: credential.Reference.CredentialID, Authority: authority,
 		Generation: record, IssuedAtMilliseconds: freshNow.UnixMilli(), Kind: serviceauthority.BackupCustodyCommittedKind,
+		CredentialGrantReferenceDigest: credentialAuthority.GrantReferenceDigest,
+		ControlHeadReferenceDigest:     credentialAuthority.ControlHead.ReferenceDigest,
 	}
 	receipt, err := coordinator.Signer.SignBackupCustodyReceipt(payload)
 	if err != nil {
@@ -303,6 +305,10 @@ func (coordinator *Coordinator) ConfirmRetention(
 		!targetReferencesEqual(credential.Reference, request.Credential) {
 		return serviceauthority.BackupCustodyReceipt{}, serviceauthority.ErrInvalid
 	}
+	use, useErr := credentialUse(credential)
+	if useErr != nil {
+		return serviceauthority.BackupCustodyReceipt{}, serviceauthority.ErrInvalid
+	}
 	requestBytes, err := canonicalRequest(request)
 	if err != nil {
 		return serviceauthority.BackupCustodyReceipt{}, err
@@ -310,9 +316,9 @@ func (coordinator *Coordinator) ConfirmRetention(
 	// Historical exact retry still requires possession of the exact stored
 	// target bearer, but does not require current authority freshness.
 	if existing, loadErr := coordinator.Store.LoadRetentionByRequest(ctx, request.Credential.AccountID, request.RequestID); loadErr == nil {
-		target, targetErr := coordinator.Store.LoadTarget(ctx, request.Credential.AccountID, request.Credential.TargetID)
-		if targetErr == nil && existing.ValidateStored() == nil && bytes.Equal(existing.RequestBytes, requestBytes) &&
-			credential.Authorizes(target.Credential, target.CredentialAuthorizationDigest) {
+		payload, payloadErr := existing.Receipt.VerifiedPayload()
+		if payloadErr == nil && existing.ValidateStored() == nil && bytes.Equal(existing.RequestBytes, requestBytes) &&
+			coordinator.Store.AuthorizeHistoricalCredential(ctx, use, payload.CredentialGrantReferenceDigest, payload.ControlHeadReferenceDigest, RetentionProof, payload.IssuedAtMilliseconds) == nil {
 			return existing.Receipt, nil
 		}
 		return serviceauthority.BackupCustodyReceipt{}, ErrConflict
@@ -327,7 +333,7 @@ func (coordinator *Coordinator) ConfirmRetention(
 	if now.UnixMilli() < request.MinimumRetainedThroughMilliseconds {
 		return serviceauthority.BackupCustodyReceipt{}, serviceauthority.ErrInvalid
 	}
-	confirmation, err := coordinator.Store.BeginRetention(ctx, request, requestBytes, authorization)
+	confirmation, err := coordinator.Store.BeginRetention(ctx, request, requestBytes, use, authorization)
 	if err != nil {
 		return serviceauthority.BackupCustodyReceipt{}, err
 	}
@@ -338,7 +344,7 @@ func (coordinator *Coordinator) ConfirmRetention(
 		}
 	}()
 	if existing := confirmation.Existing(); existing != nil {
-		if existing.ValidateStored() != nil || !bytes.Equal(existing.RequestBytes, requestBytes) || !credential.Authorizes(confirmation.Target().Credential, confirmation.Target().CredentialAuthorizationDigest) {
+		if existing.ValidateStored() != nil || !bytes.Equal(existing.RequestBytes, requestBytes) {
 			return serviceauthority.BackupCustodyReceipt{}, ErrConflict
 		}
 		if err := confirmation.Abort(ctx); err != nil {
@@ -351,8 +357,7 @@ func (coordinator *Coordinator) ConfirmRetention(
 		return serviceauthority.BackupCustodyReceipt{}, ErrClockRollback
 	}
 	target := confirmation.Target()
-	if !credential.Authorizes(target.Credential, target.CredentialAuthorizationDigest) ||
-		!credential.Reference.Admits(RetentionProof, now.UnixMilli()) {
+	if !credential.Reference.Admits(RetentionProof, now.UnixMilli()) {
 		return serviceauthority.BackupCustodyReceipt{}, ErrUnauthorized
 	}
 	generation := confirmation.Generation()
@@ -393,7 +398,8 @@ func (coordinator *Coordinator) ConfirmRetention(
 	}
 	payload, err := serviceauthority.NewBackupRetentionReceiptPayload(
 		coordinator.NewID(), authorityContext(freshAuthorization), request.RequestID,
-		credential.Reference.CredentialID, generation.CustodyReceipt, anchor, manifest,
+		credential.Reference.CredentialID, confirmation.CredentialAuthority().GrantReferenceDigest,
+		confirmation.CredentialAuthority().ControlHead.ReferenceDigest, generation.CustodyReceipt, anchor, manifest,
 		freshNow.UnixMilli(), freshNow.UnixMilli(),
 	)
 	if err != nil {
@@ -435,9 +441,9 @@ func (coordinator *Coordinator) Read(
 	if coordinator.validate() != nil || request.Validate() != nil || !targetReferencesEqual(credential.Reference, request.Credential) {
 		return ReadResult{}, serviceauthority.ErrInvalid
 	}
-	initialTarget, err := coordinator.Store.LoadTarget(ctx, request.Credential.AccountID, request.Credential.TargetID)
-	if err != nil || !credential.Authorizes(initialTarget.Credential, initialTarget.CredentialAuthorizationDigest) {
-		return ReadResult{}, ErrUnauthorized
+	use, err := credentialUse(credential)
+	if err != nil {
+		return ReadResult{}, serviceauthority.ErrInvalid
 	}
 	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: request.Credential.AccountID}
 	if binding.Scope != scope {
@@ -457,12 +463,11 @@ func (coordinator *Coordinator) Read(
 	if err != nil {
 		return ReadResult{}, err
 	}
-	target, generation, err := coordinator.Store.ReadSnapshot(ctx, authorization, request.Credential.TargetID, request.GenerationReferenceDigest)
+	target, generation, err := coordinator.Store.ReadSnapshot(ctx, authorization, use, coordinator.Clock, request.Credential.TargetID, request.GenerationReferenceDigest)
 	if err != nil {
 		return ReadResult{}, err
 	}
-	if !credential.Authorizes(target.Credential, target.CredentialAuthorizationDigest) ||
-		generation.ValidateStored() != nil || generation.Generation.TargetID != target.TargetID ||
+	if generation.ValidateStored() != nil || generation.Generation.TargetID != target.TargetID ||
 		generation.Generation.BackupSetID != target.BackupSetID {
 		return ReadResult{}, ErrNotFound
 	}

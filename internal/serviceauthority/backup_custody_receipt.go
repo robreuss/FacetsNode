@@ -97,21 +97,25 @@ func (record BackupCustodyGenerationRecord) ValidateSuccessor(
 }
 
 type BackupCustodyReceiptPayload struct {
-	Authority                     BackupCustodyAuthorityContext `json:"authority"`
-	CredentialID                  uuid.UUID                     `json:"credentialID"`
-	CustodyReceiptReferenceDigest *string                       `json:"custodyReceiptReferenceDigest,omitempty"`
-	Generation                    BackupCustodyGenerationRecord `json:"generation"`
-	IssuedAtMilliseconds          int64                         `json:"issuedAtMilliseconds"`
-	Kind                          string                        `json:"kind"`
-	ReceiptID                     uuid.UUID                     `json:"receiptID"`
-	RequestID                     uuid.UUID                     `json:"requestID"`
-	RetainedThroughMilliseconds   *int64                        `json:"retainedThroughMilliseconds,omitempty"`
-	Version                       int                           `json:"version"`
+	Authority                      BackupCustodyAuthorityContext `json:"authority"`
+	ControlHeadReferenceDigest     string                        `json:"controlHeadReferenceDigest"`
+	CredentialGrantReferenceDigest string                        `json:"credentialGrantReferenceDigest"`
+	CredentialID                   uuid.UUID                     `json:"credentialID"`
+	CustodyReceiptReferenceDigest  *string                       `json:"custodyReceiptReferenceDigest,omitempty"`
+	Generation                     BackupCustodyGenerationRecord `json:"generation"`
+	IssuedAtMilliseconds           int64                         `json:"issuedAtMilliseconds"`
+	Kind                           string                        `json:"kind"`
+	ReceiptID                      uuid.UUID                     `json:"receiptID"`
+	RequestID                      uuid.UUID                     `json:"requestID"`
+	RetainedThroughMilliseconds    *int64                        `json:"retainedThroughMilliseconds,omitempty"`
+	Version                        int                           `json:"version"`
 }
 
 func (payload BackupCustodyReceiptPayload) Validate() error {
 	if payload.Version != BackupCustodyReceiptVersion || payload.ReceiptID == uuid.Nil ||
 		payload.RequestID == uuid.Nil || payload.CredentialID == uuid.Nil ||
+		!validDigest(payload.ControlHeadReferenceDigest) ||
+		!validDigest(payload.CredentialGrantReferenceDigest) ||
 		payload.IssuedAtMilliseconds < 0 || payload.Authority.Validate() != nil ||
 		payload.Generation.Validate() != nil || payload.Authority.Scope.ScopeID != payload.Generation.AccountID {
 		return ErrInvalid
@@ -239,6 +243,8 @@ func NewBackupRetentionReceiptPayload(
 	authority BackupCustodyAuthorityContext,
 	requestID uuid.UUID,
 	credentialID uuid.UUID,
+	credentialGrantReferenceDigest string,
+	controlHeadReferenceDigest string,
 	custodyReceipt BackupCustodyReceipt,
 	custodyAnchor TrustAnchor,
 	custodyManifest Manifest,
@@ -253,7 +259,9 @@ func NewBackupRetentionReceiptPayload(
 	}
 	payload := BackupCustodyReceiptPayload{
 		Authority: authority, CredentialID: credentialID,
-		CustodyReceiptReferenceDigest: &ref, Generation: custody.Generation,
+		CredentialGrantReferenceDigest: credentialGrantReferenceDigest,
+		ControlHeadReferenceDigest:     controlHeadReferenceDigest,
+		CustodyReceiptReferenceDigest:  &ref, Generation: custody.Generation,
 		IssuedAtMilliseconds: issuedAtMilliseconds, Kind: BackupRetentionConfirmedKind,
 		ReceiptID: receiptID, RequestID: requestID,
 		RetainedThroughMilliseconds: &retainedThroughMilliseconds,

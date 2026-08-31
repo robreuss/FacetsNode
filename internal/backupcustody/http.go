@@ -40,33 +40,28 @@ type AdmissionVerifier interface {
 }
 
 type ProvisionAccountRequest struct {
-	Admission         AccountAdmissionReference          `json:"admission"`
-	ClaimID           uuid.UUID                          `json:"claimID"`
-	InitialEnrollment serviceauthority.InitialEnrollment `json:"initialEnrollment"`
-	Version           int                                `json:"version"`
-}
-
-type CreateTargetHTTPBody struct {
-	Request          CreateTargetRequest       `json:"request"`
-	TargetCredential TargetCredentialReference `json:"targetCredential"`
-	Version          int                       `json:"version"`
+	Admission            AccountAdmissionReference          `json:"admission"`
+	ClaimID              uuid.UUID                          `json:"claimID"`
+	InitialControlAnchor ControlPossessionAnchor            `json:"initialControlAnchor"`
+	InitialEnrollment    serviceauthority.InitialEnrollment `json:"initialEnrollment"`
+	Version              int                                `json:"version"`
 }
 
 type HTTPHandler struct {
-	coordinator               *Coordinator
-	provisioning              *ProvisioningCustody
-	admissionVerifier         AdmissionVerifier
-	deploymentSigner          *serviceauthority.DeploymentSigner
-	authorityBindings         *serviceauthority.BindingRegistry
-	maximumChunkBytes         uint64
-	maximumCredentialLifetime time.Duration
-	now                       func() time.Time
-	streamNow                 func() time.Time
-	streamIdlePeriod          time.Duration
-	readiness                 func(context.Context) error
-	afterProvision            func() error
-	management                backupTrafficControl
-	storage                   backupTrafficControl
+	coordinator       *Coordinator
+	control           *ControlCustody
+	provisioning      *ProvisioningCustody
+	admissionVerifier AdmissionVerifier
+	deploymentSigner  *serviceauthority.DeploymentSigner
+	authorityBindings *serviceauthority.BindingRegistry
+	maximumChunkBytes uint64
+	now               func() time.Time
+	streamNow         func() time.Time
+	streamIdlePeriod  time.Duration
+	readiness         func(context.Context) error
+	afterProvision    func() error
+	management        backupTrafficControl
+	storage           backupTrafficControl
 }
 
 type backupTrafficControl struct {
@@ -82,7 +77,6 @@ func NewHTTPHandler(
 	deploymentSigner *serviceauthority.DeploymentSigner,
 	authorityBindings *serviceauthority.BindingRegistry,
 	maximumChunkBytes uint64,
-	maximumCredentialLifetime time.Duration,
 	streamIdlePeriod time.Duration,
 	trafficLimits traffic.Limits,
 	readiness func(context.Context) error,
@@ -94,7 +88,6 @@ func NewHTTPHandler(
 		deploymentSigner == nil || authorityBindings == nil ||
 		maximumChunkBytes == 0 || maximumChunkBytes > maximumHTTPChunkBytes ||
 		maximumChunkBytes > coordinator.MaximumChunkBytes ||
-		maximumCredentialLifetime < time.Minute || maximumCredentialLifetime > 365*24*time.Hour ||
 		streamIdlePeriod <= 0 || streamIdlePeriod > time.Hour ||
 		coordinator.Registry != authorityBindings || coordinator.Signer != deploymentSigner ||
 		provisioning.Registry != authorityBindings || provisioning.Signer != deploymentSigner ||
@@ -104,20 +97,20 @@ func NewHTTPHandler(
 	management := newBackupTrafficControl(trafficLimits[traffic.SurfaceManagement])
 	storage := newBackupTrafficControl(trafficLimits[traffic.SurfaceStorage])
 	return &HTTPHandler{
-		coordinator:               coordinator,
-		provisioning:              provisioning,
-		admissionVerifier:         admissionVerifier,
-		deploymentSigner:          deploymentSigner,
-		authorityBindings:         authorityBindings,
-		maximumChunkBytes:         maximumChunkBytes,
-		maximumCredentialLifetime: maximumCredentialLifetime,
-		now:                       time.Now,
-		streamNow:                 time.Now,
-		streamIdlePeriod:          streamIdlePeriod,
-		readiness:                 readiness,
-		afterProvision:            afterProvision,
-		management:                management,
-		storage:                   storage,
+		coordinator:       coordinator,
+		control:           &ControlCustody{Store: coordinator.Store, Registry: coordinator.Registry, Clock: coordinator.Clock},
+		provisioning:      provisioning,
+		admissionVerifier: admissionVerifier,
+		deploymentSigner:  deploymentSigner,
+		authorityBindings: authorityBindings,
+		maximumChunkBytes: maximumChunkBytes,
+		now:               time.Now,
+		streamNow:         time.Now,
+		streamIdlePeriod:  streamIdlePeriod,
+		readiness:         readiness,
+		afterProvision:    afterProvision,
+		management:        management,
+		storage:           storage,
 	}, nil
 }
 
@@ -128,7 +121,7 @@ func (handler *HTTPHandler) Handler() http.Handler {
 	mux.Handle("POST /v1/service-deployment/bootstrap-proof", handler.limited(handler.management, http.HandlerFunc(handler.handleBootstrapDeploymentProof)))
 	mux.Handle("POST /v1/service-deployment/proof", handler.limited(handler.management, http.HandlerFunc(handler.handleDeploymentProof)))
 	mux.Handle("POST /v1/backup-accounts/{accountID}/provision", handler.limited(handler.management, http.HandlerFunc(handler.handleProvisionAccount)))
-	mux.Handle("POST /v1/backup-accounts/{accountID}/targets", handler.limited(handler.management, http.HandlerFunc(handler.handleCreateTarget)))
+	mux.Handle("POST /v1/backup-accounts/{accountID}/control-commands", handler.limited(handler.management, http.HandlerFunc(handler.handleControlCommand)))
 	mux.Handle("POST /v1/backup-accounts/{accountID}/uploads", handler.limited(handler.management, http.HandlerFunc(handler.handleBeginUpload)))
 	mux.Handle("PUT /v1/backup-accounts/{accountID}/uploads/{uploadID}/chunks", handler.limited(handler.storage, http.HandlerFunc(handler.handleUploadChunk)))
 	mux.Handle("POST /v1/backup-accounts/{accountID}/uploads/{uploadID}/finalize", handler.limited(handler.management, http.HandlerFunc(handler.handleFinalizeUpload)))
@@ -276,7 +269,8 @@ func (handler *HTTPHandler) handleProvisionAccount(writer http.ResponseWriter, r
 	var body ProvisionAccountRequest
 	if !ok || decodeBoundedJSON(request, &body, maximumProvisionRequestBytes, true) != nil ||
 		body.Version != Version || body.ClaimID == uuid.Nil || body.Admission.Validate() != nil ||
-		body.Admission.AccountID != accountID {
+		body.Admission.AccountID != accountID || body.InitialControlAnchor.VerifyPossession() != nil ||
+		body.InitialControlAnchor.Unsigned.AccountID != accountID || body.InitialControlAnchor.Unsigned.ControlGeneration != 1 {
 		writeBackupError(writer, http.StatusBadRequest, "invalid_account_provisioning")
 		return
 	}
@@ -285,7 +279,7 @@ func (handler *HTTPHandler) handleProvisionAccount(writer http.ResponseWriter, r
 		writeBackupError(writer, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	provisionErr := handler.provisioning.ProvisionAccount(request.Context(), credential, body.ClaimID, body.InitialEnrollment)
+	provisionErr := handler.provisioning.ProvisionAccount(request.Context(), credential, body.ClaimID, body.InitialEnrollment, body.InitialControlAnchor)
 	// Provisioning can durably advance the database and binding registry before
 	// the client receives a response. Reconciliation therefore deliberately runs
 	// outside the request context; a disconnected client cannot poison global
@@ -301,40 +295,30 @@ func (handler *HTTPHandler) handleProvisionAccount(writer http.ResponseWriter, r
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-func (handler *HTTPHandler) handleCreateTarget(writer http.ResponseWriter, request *http.Request) {
+func (handler *HTTPHandler) handleControlCommand(writer http.ResponseWriter, request *http.Request) {
 	accountID, ok := pathUUID(request, "accountID")
-	var body CreateTargetHTTPBody
-	now := handler.now().UnixMilli()
-	// v1 is intentionally a runnable custody slice, not a complete credential
-	// lifecycle: the one-time account admission can create targets only while it
-	// remains valid, and target credentials expire without renewal. A later
-	// portable+durable rotation protocol is required before ongoing deployment.
-	if !ok || decodeBoundedJSON(request, &body, MaximumRequestByteCount, true) != nil || body.Version != Version ||
-		body.Request.Validate() != nil || body.TargetCredential.Validate() != nil ||
-		body.Request.Admission.AccountID != accountID || body.TargetCredential.AccountID != accountID ||
-		body.TargetCredential.TargetID != body.Request.TargetID || body.TargetCredential.BackupSetID != body.Request.BackupSetID ||
-		body.TargetCredential.ExpiresAtMilliseconds <= now ||
-		body.TargetCredential.ExpiresAtMilliseconds > now+handler.maximumCredentialLifetime.Milliseconds() {
-		writeBackupError(writer, http.StatusBadRequest, "invalid_target_request")
+	body, bodyErr := readBoundedBody(request, MaximumCredentialAuthorityRecordByteCount, true)
+	record, recordErr := DecodeSignedControlCommand(body)
+	if !ok || bodyErr != nil || recordErr != nil {
+		writeBackupError(writer, http.StatusBadRequest, "invalid_control_command")
 		return
 	}
-	admission, admissionOK := accountCredential(request, body.Request.Admission)
-	targetBearer, targetOK := singleHeader(request.Header, HeaderTargetCredentialBearer)
-	target, targetErr := ParseTargetCredential(body.TargetCredential, targetBearer)
+	payload, _ := record.DecodedPayload()
 	binding, bindingErr := handler.binding(request, accountID, serviceauthority.TrafficControl)
-	if !admissionOK || !targetOK || targetErr != nil {
-		writeBackupError(writer, http.StatusUnauthorized, "unauthorized")
+	if payload.AccountID != accountID {
+		writeBackupError(writer, http.StatusBadRequest, "invalid_control_command")
 		return
 	}
 	if bindingErr != nil {
 		writeBackupError(writer, http.StatusConflict, "stale_or_invalid_service_authority")
 		return
 	}
-	if err := handler.provisioning.CreateTarget(request.Context(), admission, body.Request, target, binding); err != nil {
+	acceptance, err := handler.control.Submit(request.Context(), record, binding)
+	if err != nil {
 		writeBackupOperationError(writer, err)
 		return
 	}
-	writer.WriteHeader(http.StatusNoContent)
+	writeBackupJSON(writer, http.StatusOK, acceptance)
 }
 
 func (handler *HTTPHandler) handleBeginUpload(writer http.ResponseWriter, request *http.Request) {

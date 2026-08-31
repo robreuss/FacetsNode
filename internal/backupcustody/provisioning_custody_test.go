@@ -88,7 +88,8 @@ func TestProvisioningCustodyReplaysCommittedClaimAndReconstructsStandbyJournal(t
 	store := &provisioningCoordinatorStore{}
 	custody := ProvisioningCustody{Store: store, Journal: journal, Registry: serviceauthority.NewBindingRegistry(), Signer: signer, Clock: clock}
 	claimID := uuid.New()
-	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment); err != nil {
+	anchor := newTestControlSigner(t, reference.AccountID, 1, 81).anchor(t)
+	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment, anchor); err != nil {
 		t.Fatal(err)
 	}
 	if store.state != AccountStateWritable || store.prepareCount != 1 || store.activateCount != 1 {
@@ -98,7 +99,7 @@ func TestProvisioningCustodyReplaysCommittedClaimAndReconstructsStandbyJournal(t
 		t.Fatalf("committed journal cleanup found=%t err=%v", found, err)
 	}
 	clock.now = time.UnixMilli(5_000)
-	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment); err != nil {
+	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment, anchor); err != nil {
 		t.Fatalf("expired committed replay failed: %v", err)
 	}
 	if store.prepareCount != 1 || store.activateCount != 2 {
@@ -108,18 +109,19 @@ func TestProvisioningCustodyReplaysCommittedClaimAndReconstructsStandbyJournal(t
 	store.state = AccountStateStandby
 	store.failActivation = true
 	clock.now = time.UnixMilli(1_200)
-	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment); err == nil {
+	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment, anchor); err == nil {
 		t.Fatal("injected standby activation failure was ignored")
 	}
 	claim := PreparedAccountClaim{Version: preparedAccountClaimVersion, AccountID: store.record.AccountID,
 		Admission: store.record.Admission, AdmissionAuthorizationDigest: store.record.AdmissionAuthorizationDigest,
-		ClaimID: store.record.ClaimID, ClaimedAtMilliseconds: store.record.CreatedAtMilliseconds, InitialEnrollment: enrollment}
+		ClaimID: store.record.ClaimID, ClaimedAtMilliseconds: store.record.CreatedAtMilliseconds,
+		InitialEnrollment: enrollment, InitialControlAnchor: anchor}
 	if err := journal.RemoveExact(claim); err != nil {
 		t.Fatal(err)
 	}
 	store.failActivation = false
 	clock.now = time.UnixMilli(5_000)
-	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment); err != nil {
+	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment, anchor); err != nil {
 		t.Fatalf("standby reconstruction failed: %v", err)
 	}
 	if store.state != AccountStateWritable {
@@ -129,7 +131,7 @@ func TestProvisioningCustodyReplaysCommittedClaimAndReconstructsStandbyJournal(t
 	tampered := store.record
 	tampered.AuthorityManifestDigest = strings.Repeat("f", 64)
 	store.record = tampered
-	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment); !errors.Is(err, ErrConflict) {
+	if err := custody.ProvisionAccount(context.Background(), credential, claimID, enrollment, anchor); !errors.Is(err, ErrConflict) {
 		t.Fatalf("conflicting committed claim err=%v", err)
 	}
 }
@@ -204,7 +206,8 @@ func fixturePreparedAccountClaim(t *testing.T, credential AccountAdmissionCreden
 		Version: preparedAccountClaimVersion, AccountID: credential.Reference.AccountID,
 		Admission: credential.Reference, AdmissionAuthorizationDigest: digest,
 		ClaimID: claimID, ClaimedAtMilliseconds: now,
-		InitialEnrollment: fixtureBackupEnrollment(t, credential.Reference.AccountID),
+		InitialControlAnchor: newTestControlSigner(t, credential.Reference.AccountID, 1, 82).anchor(t),
+		InitialEnrollment:    fixtureBackupEnrollment(t, credential.Reference.AccountID),
 	}
 }
 

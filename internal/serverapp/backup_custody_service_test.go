@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -34,22 +35,25 @@ import (
 
 func TestBackupCustodyStoreLimitsAreMappedWithoutRelayFallback(t *testing.T) {
 	configuration := config.Config{
-		BackupMaximumActiveUploads:   2,
-		BackupMaximumTargets:         3,
-		BackupMaximumGenerations:     4,
-		BackupMaximumRequests:        5,
-		BackupMaximumRetentionProofs: 6,
-		BackupMaximumChunksPerUpload: 7,
-		BackupMaximumChunkBytes:      8,
-		BackupMaximumStagingBytes:    9,
-		BackupMaximumCommittedBytes:  10,
+		BackupMaximumActiveUploads:      2,
+		BackupMaximumTargets:            3,
+		BackupMaximumGenerations:        4,
+		BackupMaximumRequests:           5,
+		BackupMaximumRetentionProofs:    6,
+		BackupMaximumChunksPerUpload:    7,
+		BackupMaximumChunkBytes:         8,
+		BackupMaximumStagingBytes:       9,
+		BackupMaximumCommittedBytes:     10,
+		BackupMaximumControlRecords:     11,
+		BackupMaximumCredentialLifetime: 12 * time.Millisecond,
 	}
 	limits := backupCustodyStoreLimits(configuration)
 	if limits.MaximumActiveUploads != 2 || limits.MaximumTargets != 3 ||
 		limits.MaximumGenerations != 4 || limits.MaximumRequests != 5 ||
 		limits.MaximumRetentionProofs != 6 || limits.MaximumChunksPerUpload != 7 ||
 		limits.MaximumChunkBytes != 8 || limits.MaximumStagingBytes != 9 ||
-		limits.MaximumCommittedBytes != 10 {
+		limits.MaximumCommittedBytes != 10 || limits.MaximumControlRecords != 11 ||
+		limits.MaximumCredentialLifetimeMilliseconds != 12 {
 		t.Fatalf("mapped Backup limits=%+v", limits)
 	}
 }
@@ -115,7 +119,9 @@ func TestBackupCustodyOneConnectionRecoversStandbyWithoutInventoryDeadlock(t *te
 	if _, err := admin.Exec(ctx, `
 		DROP TABLE IF EXISTS backup_custody_retention_receipts,
 			backup_custody_upload_chunks, backup_custody_generations,
-			backup_custody_uploads, backup_custody_targets,
+			backup_custody_uploads, backup_custody_credential_grant_transitions,
+			backup_custody_credential_grants, backup_custody_targets,
+			backup_custody_control_commands, backup_custody_account_control,
 			backup_custody_authority_history, backup_custody_requests,
 			backup_custody_accounts CASCADE;
 		DROP TABLE IF EXISTS facets_backup_custody_schema_migrations;
@@ -163,11 +169,13 @@ func TestBackupCustodyOneConnectionRecoversStandbyWithoutInventoryDeadlock(t *te
 		AuthorityRevision:            binding.Revision(), AuthorityManifestDigest: binding.ManifestDigest(),
 		DeploymentID: deploymentID, InitialManifestRecord: binding.ManifestRecord(),
 		InitialAnchorRecord: anchorRecord, InitialEnrollmentRecord: enrollmentRecord,
-		InitialBinding: binding, CreatedAtMilliseconds: 1_100,
+		InitialBinding: binding, InitialControlAnchor: backupServiceTestControlAnchor(t, accountID),
+		CreatedAtMilliseconds: 1_100,
 	}
 	limits := postgres.BackupCustodyStoreLimits{
 		MaximumActiveUploads: 1, MaximumTargets: 2, MaximumGenerations: 4,
 		MaximumRequests: 8, MaximumRetentionProofs: 4, MaximumChunksPerUpload: 4,
+		MaximumControlRecords: 8, MaximumCredentialLifetimeMilliseconds: 10_000,
 		MaximumChunkBytes: 1024, MaximumStagingBytes: 4096, MaximumCommittedBytes: 8192,
 	}
 	bootstrapStore, err := postgres.NewBackupCustodyStore(admin, deploymentID, limits)
@@ -485,4 +493,41 @@ func backupServiceTestSign(
 func backupServiceTestSHA256(input []byte) []byte {
 	digest := sha256.Sum256(input)
 	return digest[:]
+}
+
+func backupServiceTestControlAnchor(t *testing.T, accountID uuid.UUID) backupcustody.ControlPossessionAnchor {
+	t.Helper()
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x6d}, ed25519.SeedSize))
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	keyDigest := sha256.Sum256(append([]byte("Facets backup custody account control key ID v1\x00"), publicKey...))
+	keyIDBytes := append([]byte(nil), keyDigest[:16]...)
+	keyIDBytes[6] = (keyIDBytes[6] & 0x0f) | 0x50
+	keyIDBytes[8] = (keyIDBytes[8] & 0x3f) | 0x80
+	keyID, err := uuid.FromBytes(keyIDBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := sha256.Sum256(publicKey)
+	unsigned := backupcustody.ControlPossessionAnchorUnsigned{
+		Version: backupcustody.CredentialAuthorityVersion, AccountID: accountID,
+		Algorithm:         backupcustody.CredentialAuthoritySignatureAlgorithm,
+		ControlGeneration: 1, ControlKeyID: keyID,
+		PublicSigningKey:      base64.RawURLEncoding.EncodeToString(publicKey),
+		SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
+	}
+	unsignedBytes, err := json.Marshal(unsigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := backupcustody.ControlPossessionAnchor{
+		Unsigned: unsigned,
+		PossessionSignature: base64.RawURLEncoding.EncodeToString(ed25519.Sign(
+			privateKey,
+			append([]byte("Facets backup custody account control possession v1\x00"), unsignedBytes...),
+		)),
+	}
+	if err := anchor.VerifyPossession(); err != nil {
+		t.Fatal(err)
+	}
+	return anchor
 }

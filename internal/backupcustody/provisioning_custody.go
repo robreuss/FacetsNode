@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"syscall"
 
 	"github.com/google/uuid"
@@ -24,6 +23,7 @@ type PreparedAccountClaim struct {
 	AdmissionAuthorizationDigest string                             `json:"admissionAuthorizationDigest"`
 	ClaimID                      uuid.UUID                          `json:"claimID"`
 	ClaimedAtMilliseconds        int64                              `json:"claimedAtMilliseconds"`
+	InitialControlAnchor         ControlPossessionAnchor            `json:"initialControlAnchor"`
 	InitialEnrollment            serviceauthority.InitialEnrollment `json:"initialEnrollment"`
 	Version                      int                                `json:"version"`
 }
@@ -32,6 +32,9 @@ func (claim PreparedAccountClaim) validate() error {
 	expected := serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: claim.AccountID}
 	if claim.Version != preparedAccountClaimVersion || claim.AccountID == uuid.Nil || claim.ClaimID == uuid.Nil ||
 		claim.ClaimedAtMilliseconds < 0 || claim.Admission.Validate() != nil || claim.Admission.AccountID != claim.AccountID ||
+		claim.InitialControlAnchor.VerifyPossession() != nil ||
+		claim.InitialControlAnchor.Unsigned.AccountID != claim.AccountID ||
+		claim.InitialControlAnchor.Unsigned.ControlGeneration != 1 ||
 		!validHexDigest(claim.AdmissionAuthorizationDigest) {
 		return serviceauthority.ErrInvalid
 	}
@@ -389,9 +392,13 @@ func (custody *ProvisioningCustody) ProvisionAccount(
 	credential AccountAdmissionCredential,
 	claimID uuid.UUID,
 	enrollment serviceauthority.InitialEnrollment,
+	initialControlAnchor ControlPossessionAnchor,
 ) error {
 	if custody == nil || custody.Store == nil || custody.Journal == nil || custody.Registry == nil ||
-		custody.Signer == nil || custody.Clock == nil || claimID == uuid.Nil || credential.Reference.AccountID == uuid.Nil {
+		custody.Signer == nil || custody.Clock == nil || claimID == uuid.Nil || credential.Reference.AccountID == uuid.Nil ||
+		initialControlAnchor.VerifyPossession() != nil ||
+		initialControlAnchor.Unsigned.AccountID != credential.Reference.AccountID ||
+		initialControlAnchor.Unsigned.ControlGeneration != 1 {
 		return serviceauthority.ErrInvalid
 	}
 	nowMilliseconds := custody.Clock.Now().UnixMilli()
@@ -427,7 +434,11 @@ func (custody *ProvisioningCustody) ProvisionAccount(
 		}
 		claim := PreparedAccountClaim{Version: preparedAccountClaimVersion, AccountID: persisted.AccountID,
 			Admission: persisted.Admission, AdmissionAuthorizationDigest: persisted.AdmissionAuthorizationDigest,
-			ClaimID: persisted.ClaimID, ClaimedAtMilliseconds: persisted.CreatedAtMilliseconds, InitialEnrollment: enrollment}
+			ClaimID: persisted.ClaimID, ClaimedAtMilliseconds: persisted.CreatedAtMilliseconds,
+			InitialControlAnchor: persisted.InitialControlAnchor, InitialEnrollment: enrollment}
+		if persisted.InitialControlAnchor != initialControlAnchor {
+			return ErrConflict
+		}
 		storedClaim, hasStoredClaim, err := custody.Journal.Load(claim.AccountID)
 		if err != nil {
 			return err
@@ -469,7 +480,8 @@ func (custody *ProvisioningCustody) ProvisionAccount(
 		}
 		claim = PreparedAccountClaim{Version: preparedAccountClaimVersion, AccountID: credential.Reference.AccountID,
 			Admission: credential.Reference, AdmissionAuthorizationDigest: authorizationDigest,
-			ClaimID: claimID, ClaimedAtMilliseconds: nowMilliseconds, InitialEnrollment: enrollment}
+			ClaimID: claimID, ClaimedAtMilliseconds: nowMilliseconds,
+			InitialControlAnchor: initialControlAnchor, InitialEnrollment: enrollment}
 		if claim.validate() != nil {
 			return serviceauthority.ErrInvalid
 		}
@@ -480,7 +492,8 @@ func (custody *ProvisioningCustody) ProvisionAccount(
 		expectedEnrollment, encodeErr := json.Marshal(enrollment)
 		storedEnrollment, storedErr := json.Marshal(claim.InitialEnrollment)
 		if encodeErr != nil || storedErr != nil || claim.ClaimID != claimID || claim.Admission != credential.Reference ||
-			claim.AdmissionAuthorizationDigest != authorizationDigest || !bytes.Equal(expectedEnrollment, storedEnrollment) {
+			claim.AdmissionAuthorizationDigest != authorizationDigest || claim.InitialControlAnchor != initialControlAnchor ||
+			!bytes.Equal(expectedEnrollment, storedEnrollment) {
 			return ErrConflict
 		}
 		if _, err := custody.Journal.Prepare(claim); err != nil {
@@ -489,6 +502,7 @@ func (custody *ProvisioningCustody) ProvisionAccount(
 	}
 	account := AccountRecord{AccountID: claim.AccountID, ClaimID: claim.ClaimID, Admission: claim.Admission,
 		AdmissionAuthorizationDigest: claim.AdmissionAuthorizationDigest,
+		InitialControlAnchor:         claim.InitialControlAnchor,
 		AuthorityRevision:            binding.Revision(), AuthorityManifestDigest: binding.ManifestDigest(),
 		DeploymentID: binding.LocalDeploymentID(), InitialManifestRecord: binding.ManifestRecord(),
 		InitialAnchorRecord: anchorRecord, InitialEnrollmentRecord: enrollmentRecord, InitialBinding: binding,
@@ -509,66 +523,6 @@ func (custody *ProvisioningCustody) ProvisionAccount(
 	// journal is no longer authority. Cleanup failure is retried opportunistically.
 	_ = custody.Journal.RemoveExact(claim)
 	return nil
-}
-
-func (custody *ProvisioningCustody) CreateTarget(
-	ctx context.Context,
-	admission AccountAdmissionCredential,
-	request CreateTargetRequest,
-	targetCredential TargetCredential,
-	binding serviceauthority.RequestBinding,
-) error {
-	if custody == nil || custody.Store == nil || custody.Registry == nil || custody.Clock == nil || request.Validate() != nil ||
-		admission.Reference != request.Admission ||
-		targetCredential.Reference.AccountID != request.Admission.AccountID ||
-		targetCredential.Reference.TargetID != request.TargetID ||
-		targetCredential.Reference.BackupSetID != request.BackupSetID {
-		return serviceauthority.ErrInvalid
-	}
-	admissionDigest, err := admission.AuthorizationDigest()
-	targetDigest, targetErr := targetCredential.AuthorizationDigest()
-	requestBytes, requestErr := canonicalRequest(request)
-	if err != nil || targetErr != nil || requestErr != nil {
-		return serviceauthority.ErrInvalid
-	}
-	// The database rechecks the admission digest under its account row lock.
-	target := TargetRecord{AccountID: request.Admission.AccountID, TargetID: request.TargetID,
-		BackupSetID: request.BackupSetID, Credential: targetCredential.Reference,
-		CredentialAuthorizationDigest: targetDigest, AdmissionAuthorizationDigest: admissionDigest, CreateRequest: requestBytes,
-		CreatedAtMilliseconds: request.RequestedAtMilliseconds}
-	if !admission.Authorizes(request.Admission, admissionDigest) {
-		return ErrUnauthorized
-	}
-	if existing, loadErr := custody.Store.LoadTarget(ctx, target.AccountID, target.TargetID); loadErr == nil {
-		if existing.AccountID == target.AccountID && existing.TargetID == target.TargetID && existing.BackupSetID == target.BackupSetID &&
-			reflect.DeepEqual(existing.Credential, target.Credential) && existing.CredentialAuthorizationDigest == target.CredentialAuthorizationDigest &&
-			existing.AdmissionAuthorizationDigest == target.AdmissionAuthorizationDigest && bytes.Equal(existing.CreateRequest, target.CreateRequest) &&
-			existing.CreatedAtMilliseconds == target.CreatedAtMilliseconds && admission.Authorizes(request.Admission, existing.AdmissionAuthorizationDigest) &&
-			targetCredential.Authorizes(existing.Credential, existing.CredentialAuthorizationDigest) {
-			return nil
-		}
-		return ErrConflict
-	} else if !errors.Is(loadErr, ErrNotFound) {
-		return loadErr
-	}
-	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: request.Admission.AccountID}
-	if binding.Scope != scope {
-		return serviceauthority.ErrInvalid
-	}
-	lease, err := custody.Registry.AcquireMutationLease(ctx, scope)
-	if err != nil {
-		return err
-	}
-	defer lease.Release()
-	now := custody.Clock.Now()
-	authorization, err := custody.Registry.AuthorizeMutationAt(binding, now)
-	if err != nil {
-		return err
-	}
-	if now.UnixMilli() < 0 || now.UnixMilli() >= request.Admission.ExpiresAtMilliseconds {
-		return ErrUnauthorized
-	}
-	return custody.Store.CreateTarget(ctx, target, authorization)
 }
 
 func canonicalJSONUnchecked(value any) []byte {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -144,7 +145,7 @@ func TestBackupHTTPProvisionRunsDurableReconciliationOutsideCallerCancellation(t
 			var reconciliations int
 			handler, err := NewHTTPHandler(
 				coordinator, provisioning, acceptingAdmissionVerifier{}, signer, registry,
-				1024, 24*time.Hour, time.Minute, traffic.DefaultLimits(),
+				1024, time.Minute, traffic.DefaultLimits(),
 				func(context.Context) error { return nil },
 				func() error { reconciliations++; return afterErr },
 			)
@@ -154,6 +155,7 @@ func TestBackupHTTPProvisionRunsDurableReconciliationOutsideCallerCancellation(t
 			handler.now = func() time.Time { return time.UnixMilli(1_100) }
 			body, _ := json.Marshal(ProvisionAccountRequest{
 				Version: Version, Admission: reference, ClaimID: uuid.New(), InitialEnrollment: enrollment,
+				InitialControlAnchor: newTestControlSigner(t, reference.AccountID, 1, 72).anchor(t),
 			})
 			ctx, cancel := context.WithCancel(context.Background())
 			store.cancel = cancel
@@ -232,7 +234,7 @@ func TestBackupHTTPHandlerRejectsChunkLimitAboveFixedMemoryCap(t *testing.T) {
 	_, err := NewHTTPHandler(
 		&harness.coordinator, provisioning, acceptingAdmissionVerifier{},
 		harness.coordinator.Signer, harness.coordinator.Registry,
-		maximumHTTPChunkBytes+1, 24*time.Hour, time.Minute, traffic.DefaultLimits(),
+		maximumHTTPChunkBytes+1, time.Minute, traffic.DefaultLimits(),
 		func(context.Context) error { return nil }, func() error { return nil },
 	)
 	if err == nil {
@@ -243,125 +245,47 @@ func TestBackupHTTPHandlerRejectsChunkLimitAboveFixedMemoryCap(t *testing.T) {
 	if _, err := NewHTTPHandler(
 		&harness.coordinator, provisioning, acceptingAdmissionVerifier{},
 		harness.coordinator.Signer, harness.coordinator.Registry,
-		maximumHTTPChunkBytes, 24*time.Hour, time.Minute, traffic.DefaultLimits(),
+		maximumHTTPChunkBytes, time.Minute, traffic.DefaultLimits(),
 		func(context.Context) error { return nil }, func() error { return nil },
 	); err != nil {
 		t.Fatalf("fixed 64 MiB cap rejected: %v", err)
 	}
 }
 
-func TestBackupHTTPUsesServerTimeForTargetCredentialLifetime(t *testing.T) {
-	handler, harness := newBackupHTTPTestHandler(t, []Capability{Publish}, traffic.DefaultLimits(), nil)
-	defer harness.content.Close()
-	handler.maximumCredentialLifetime = time.Hour
-	handler.now = func() time.Time { return time.UnixMilli(10_000) }
-	admissionReference := AccountAdmissionReference{
-		Version:               Version,
-		AccountID:             harness.target.AccountID,
-		AdmissionID:           uuid.New(),
-		ExpiresAtMilliseconds: 100_000_000,
-		RequestNonce:          base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)),
-	}
-	admission, err := NewAccountAdmissionCredential(admissionReference)
-	if err != nil {
-		t.Fatal(err)
-	}
-	targetReference := harness.credential.Reference
-	targetReference.ExpiresAtMilliseconds = 10_000 + time.Hour.Milliseconds() + 1
-	target, err := NewTargetCredential(targetReference)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := json.Marshal(CreateTargetHTTPBody{
-		Version: Version,
-		Request: CreateTargetRequest{
-			Version:                 Version,
-			Admission:               admissionReference,
-			BackupSetID:             targetReference.BackupSetID,
-			RequestID:               uuid.New(),
-			RequestedAtMilliseconds: 9_000,
-			TargetID:                targetReference.TargetID,
-		},
-		TargetCredential: targetReference,
-	})
-	request := httptest.NewRequest(http.MethodPost, "/v1/backup-accounts/"+harness.target.AccountID.String()+"/targets", bytes.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+admission.TransportBearer())
-	request.Header.Set(HeaderTargetCredentialBearer, target.TransportBearer())
-	response := httptest.NewRecorder()
-	handler.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("overlong target credential status=%d", response.Code)
-	}
-}
-
-func TestBackupHTTPCreateTargetBindsAdmissionTargetAndControlAuthority(t *testing.T) {
+func TestBackupHTTPControlCommandUsesOwnerSignatureAndControlAuthority(t *testing.T) {
 	harness := newCoordinatorHarness(t, []Capability{Publish})
 	defer harness.content.Close()
-	store := &httpCreateTargetStore{faultingCoordinatorStore: *harness.store}
+	authority := newTestControlSigner(t, harness.target.AccountID, 1, 75)
+	anchor := authority.anchor(t)
+	predecessor, _ := anchor.ReferenceDigest()
+	digest, _ := harness.credential.AuthorizationDigest()
+	grant := CredentialGrant{Version: CredentialAuthorityVersion, Credential: harness.credential.Reference, AuthorizationDigest: digest}
+	payload := ControlCommandPayload{Version: CredentialAuthorityVersion, AccountID: harness.target.AccountID,
+		CommandID: uuid.New(), ControlGeneration: 1, ControlKeyID: authority.keyID, Sequence: 1,
+		PredecessorReferenceDigest: predecessor, Effect: ControlEffect{Kind: CreateTargetWithInitialGrant,
+			TargetID: &harness.target.TargetID, BackupSetID: &harness.target.BackupSetID, Grant: &grant}}
+	record, err := signControlCommand(payload, authority, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &httpControlStore{faultingCoordinatorStore: *harness.store, expected: record}
 	harness.coordinator.Store = store
 	handler, _ := newBackupHTTPTestHandlerFromHarness(t, &harness, traffic.DefaultLimits())
-	admissionReference := AccountAdmissionReference{
-		Version: Version, AccountID: harness.target.AccountID, AdmissionID: uuid.New(),
-		ExpiresAtMilliseconds: 2_000,
-		RequestNonce:          base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x24}, 32)),
-	}
-	admission, err := NewAccountAdmissionCredential(admissionReference)
-	if err != nil {
-		t.Fatal(err)
-	}
-	targetReference := TargetCredentialReference{
-		Version: Version, AccountID: harness.target.AccountID,
-		TargetID: uuid.New(), BackupSetID: uuid.New(), CredentialID: uuid.New(),
-		Capabilities: []Capability{Publish}, ExpiresAtMilliseconds: 2_000,
-		RequestNonce: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x25}, 32)),
-	}
-	targetCredential, err := NewTargetCredential(targetReference)
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestValue := CreateTargetRequest{
-		Version: Version, Admission: admissionReference, BackupSetID: targetReference.BackupSetID,
-		RequestID: uuid.New(), RequestedAtMilliseconds: 1_100, TargetID: targetReference.TargetID,
-	}
-	body, _ := json.Marshal(CreateTargetHTTPBody{
-		Version: Version, Request: requestValue, TargetCredential: targetReference,
-	})
+	body, _ := record.CanonicalJSON()
 	request := httptest.NewRequest(
 		http.MethodPost,
-		"/v1/backup-accounts/"+harness.target.AccountID.String()+"/targets",
+		"/v1/backup-accounts/"+harness.target.AccountID.String()+"/control-commands",
 		bytes.NewReader(body),
 	)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+admission.TransportBearer())
-	request.Header.Set(HeaderTargetCredentialBearer, targetCredential.TransportBearer())
 	setBackupHTTPAuthority(request, harness.binding, serviceauthority.TrafficControl)
 	response := httptest.NewRecorder()
 	handler.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent || store.created.TargetID != targetReference.TargetID ||
-		store.created.BackupSetID != targetReference.BackupSetID {
-		t.Fatalf("create target status=%d record=%+v", response.Code, store.created)
+	if response.Code != http.StatusOK || store.calls != 1 {
+		t.Fatalf("control command status=%d calls=%d", response.Code, store.calls)
 	}
-
-	conflictingReference := targetReference
-	conflictingReference.CredentialID = uuid.New()
-	conflictingCredential, _ := NewTargetCredential(conflictingReference)
-	conflictingBody, _ := json.Marshal(CreateTargetHTTPBody{
-		Version: Version, Request: requestValue, TargetCredential: conflictingReference,
-	})
-	conflicting := httptest.NewRequest(
-		http.MethodPost,
-		"/v1/backup-accounts/"+harness.target.AccountID.String()+"/targets",
-		bytes.NewReader(conflictingBody),
-	)
-	conflicting.Header.Set("Content-Type", "application/json")
-	conflicting.Header.Set("Authorization", "Bearer "+admission.TransportBearer())
-	conflicting.Header.Set(HeaderTargetCredentialBearer, conflictingCredential.TransportBearer())
-	setBackupHTTPAuthority(conflicting, harness.binding, serviceauthority.TrafficControl)
-	conflictingResponse := httptest.NewRecorder()
-	handler.Handler().ServeHTTP(conflictingResponse, conflicting)
-	if conflictingResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("conflicting target identity enumerated status=%d", conflictingResponse.Code)
+	if strings.Contains(string(body), harness.credential.TransportBearer()) {
+		t.Fatal("control command exposed raw bearer")
 	}
 }
 
@@ -654,7 +578,6 @@ func newBackupHTTPTestHandlerFromHarness(t *testing.T, harness *coordinatorHarne
 		harness.coordinator.Signer,
 		harness.coordinator.Registry,
 		harness.coordinator.MaximumChunkBytes,
-		24*time.Hour,
 		time.Minute,
 		limits,
 		func(context.Context) error { return nil },
@@ -712,7 +635,10 @@ type httpBeginStore struct {
 	reserved UploadRecord
 }
 
-func (store *httpBeginStore) ReserveUpload(_ context.Context, proposed UploadRecord, _ serviceauthority.MutationAuthorization) (UploadRecord, bool, error) {
+func (store *httpBeginStore) ReserveUpload(_ context.Context, proposed UploadRecord, use CredentialUse, _ Clock, _ serviceauthority.MutationAuthorization) (UploadRecord, bool, error) {
+	if !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) || use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
+		return UploadRecord{}, false, ErrUnauthorized
+	}
 	if store.reserved.UploadID == uuid.Nil {
 		store.reserved = proposed
 		store.upload = proposed
@@ -727,10 +653,13 @@ func (store *httpBeginStore) ReserveUpload(_ context.Context, proposed UploadRec
 func (store *httpBeginStore) ReadSnapshot(
 	_ context.Context,
 	authorization ReadAuthorization,
+	use CredentialUse,
+	_ Clock,
 	targetID uuid.UUID,
 	reference *string,
 ) (TargetRecord, GenerationRecord, error) {
-	if authorization.Validate() != nil || targetID != store.target.TargetID ||
+	if authorization.Validate() != nil || !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) ||
+		use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest || targetID != store.target.TargetID ||
 		(reference != nil && *reference != store.generation.GenerationReferenceDigest) {
 		return TargetRecord{}, GenerationRecord{}, ErrNotFound
 	}
@@ -739,38 +668,35 @@ func (store *httpBeginStore) ReadSnapshot(
 
 type httpReadNotFoundStore struct{ faultingCoordinatorStore }
 
-func (*httpReadNotFoundStore) ReadSnapshot(context.Context, ReadAuthorization, uuid.UUID, *string) (TargetRecord, GenerationRecord, error) {
+func (*httpReadNotFoundStore) ReadSnapshot(context.Context, ReadAuthorization, CredentialUse, Clock, uuid.UUID, *string) (TargetRecord, GenerationRecord, error) {
 	return TargetRecord{}, GenerationRecord{}, ErrNotFound
 }
 
-type httpCreateTargetStore struct {
+type httpControlStore struct {
 	faultingCoordinatorStore
-	created TargetRecord
+	expected SignedControlCommand
+	calls    int
 }
 
-func (store *httpCreateTargetStore) LoadTarget(
+func (store *httpControlStore) ApplyControlCommand(
 	_ context.Context,
-	accountID uuid.UUID,
-	targetID uuid.UUID,
-) (TargetRecord, error) {
-	if store.created.AccountID == accountID && store.created.TargetID == targetID {
-		return store.created, nil
-	}
-	return store.faultingCoordinatorStore.LoadTarget(context.Background(), accountID, targetID)
-}
-
-func (store *httpCreateTargetStore) CreateTarget(
-	_ context.Context,
-	target TargetRecord,
+	record SignedControlCommand,
 	authorization serviceauthority.MutationAuthorization,
-) error {
+) (ControlCommandAcceptance, error) {
+	expectedBytes, _ := store.expected.CanonicalJSON()
+	recordBytes, _ := record.CanonicalJSON()
+	payload, _ := record.DecodedPayload()
+	reference, _ := record.ReferenceDigest()
 	if authorization.ValidateFor(
 		serviceauthority.ScopeBackupCustody, authorization.DeploymentID(),
-	) != nil || authorization.Scope().ScopeID != target.AccountID || store.created.AccountID != uuid.Nil {
-		return ErrConflict
+	) != nil || authorization.Scope().ScopeID != payload.AccountID || !bytes.Equal(expectedBytes, recordBytes) {
+		return ControlCommandAcceptance{}, ErrConflict
 	}
-	store.created = target
-	return nil
+	store.calls++
+	return ControlCommandAcceptance{Version: CredentialAuthorityVersion, AccountID: payload.AccountID,
+		CommandID: payload.CommandID, Sequence: payload.Sequence, CommandReferenceDigest: reference,
+		ControlHeadReferenceDigest: reference, ControlGeneration: payload.ControlGeneration,
+		ControlKeyID: payload.ControlKeyID}, nil
 }
 
 type cancelingProvisionStore struct {

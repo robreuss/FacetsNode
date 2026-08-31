@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,10 +151,12 @@ func TestBackupCustodyReceiptsRequireExactHistoricalDeploymentAndPointInTimeRete
 		Authority:    authority,
 		CredentialID: uuid.MustParse("50000000-0000-4000-8000-000000000001"),
 		Generation:   generation, IssuedAtMilliseconds: 2_000,
-		Kind:      BackupCustodyCommittedKind,
-		ReceiptID: uuid.MustParse("80000000-0000-4000-8000-000000000001"),
-		RequestID: uuid.MustParse("70000000-0000-4000-8000-000000000001"),
-		Version:   1,
+		CredentialGrantReferenceDigest: strings.Repeat("a", 64),
+		ControlHeadReferenceDigest:     strings.Repeat("b", 64),
+		Kind:                           BackupCustodyCommittedKind,
+		ReceiptID:                      uuid.MustParse("80000000-0000-4000-8000-000000000001"),
+		RequestID:                      uuid.MustParse("70000000-0000-4000-8000-000000000001"),
+		Version:                        1,
 	}
 	deploymentSigner := fixtureDeploymentSigner(t, fixture.descriptor)
 	receipt, err := deploymentSigner.SignBackupCustodyReceipt(payload)
@@ -178,7 +181,8 @@ func TestBackupCustodyReceiptsRequireExactHistoricalDeploymentAndPointInTimeRete
 	}
 
 	retention, err := NewBackupRetentionReceiptPayload(
-		uuid.New(), authority, uuid.New(), payload.CredentialID, receipt,
+		uuid.New(), authority, uuid.New(), payload.CredentialID,
+		payload.CredentialGrantReferenceDigest, payload.ControlHeadReferenceDigest, receipt,
 		anchor, manifest, 2_500, 2_500,
 	)
 	if err != nil {
@@ -198,13 +202,15 @@ func TestBackupCustodyReceiptsRequireExactHistoricalDeploymentAndPointInTimeRete
 		t.Fatal("custody and retention receipt reference domains collided")
 	}
 	if _, err := NewBackupRetentionReceiptPayload(
-		uuid.New(), authority, uuid.New(), payload.CredentialID, receipt,
+		uuid.New(), authority, uuid.New(), payload.CredentialID,
+		payload.CredentialGrantReferenceDigest, payload.ControlHeadReferenceDigest, receipt,
 		anchor, manifest, 2_501, 2_500,
 	); err == nil {
 		t.Fatal("future retention promise accepted")
 	}
 	if _, err := NewBackupRetentionReceiptPayload(
-		uuid.New(), authority, uuid.New(), payload.CredentialID, receipt,
+		uuid.New(), authority, uuid.New(), payload.CredentialID,
+		payload.CredentialGrantReferenceDigest, payload.ControlHeadReferenceDigest, receipt,
 		anchor, manifest, 2_499, 2_500,
 	); err == nil {
 		t.Fatal("past retention value accepted as current proof")
@@ -216,7 +222,8 @@ func TestBackupCustodyReceiptsRequireExactHistoricalDeploymentAndPointInTimeRete
 		t.Fatal("wrong account authority accepted")
 	}
 	if _, err := NewBackupRetentionReceiptPayload(
-		uuid.New(), authority, uuid.New(), payload.CredentialID, receipt,
+		uuid.New(), authority, uuid.New(), payload.CredentialID,
+		payload.CredentialGrantReferenceDigest, payload.ControlHeadReferenceDigest, receipt,
 		wrongAnchor, manifest, 2_500, 2_500,
 	); err == nil {
 		t.Fatal("retention proof referenced custody without exact historical authorization")

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,7 @@ func TestCoordinatorReadUsesDurableAuthoritySnapshotAndVerifiesObject(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	credentialAuthority := testAcceptedCredentialAuthority(t, reference, credentialDigest)
 	authorityDigest := strings.Repeat("a", 64)
 	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: accountID}
 	receipt, err := signer.SignBackupCustodyReceipt(serviceauthority.BackupCustodyReceiptPayload{
@@ -73,6 +75,8 @@ func TestCoordinatorReadUsesDurableAuthoritySnapshotAndVerifiesObject(t *testing
 		IssuedAtMilliseconds: 1_000, Generation: generation,
 		Authority: serviceauthority.BackupCustodyAuthorityContext{Scope: scope, AuthorityRevision: 1,
 			AuthorityManifestDigest: authorityDigest, DeploymentID: deploymentID},
+		CredentialGrantReferenceDigest: credentialAuthority.GrantReferenceDigest,
+		ControlHeadReferenceDigest:     credentialAuthority.ControlHead.ReferenceDigest,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -81,9 +85,8 @@ func TestCoordinatorReadUsesDurableAuthoritySnapshotAndVerifiesObject(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := TargetRecord{AccountID: accountID, TargetID: targetID, BackupSetID: setID,
-		Credential: reference, CredentialAuthorizationDigest: credentialDigest}
-	store := &readCoordinatorStore{target: target, generation: storedGeneration}
+	target := TargetRecord{AccountID: accountID, TargetID: targetID, BackupSetID: setID}
+	store := &readCoordinatorStore{target: target, generation: storedGeneration, credentialAuthority: credentialAuthority}
 	registry := serviceauthority.NewBindingRegistry()
 	if err := registry.Activate(scope, serviceauthority.CurrentBinding{
 		Revision: 1, Digest: authorityDigest, DeploymentID: deploymentID,
@@ -322,18 +325,22 @@ func (unusedAuthorityHistory) ResolveBackupCustodyAuthority(context.Context, ser
 }
 
 type readCoordinatorStore struct {
-	target            TargetRecord
-	generation        GenerationRecord
-	lastAuthorization ReadAuthorization
-	readCount         int
+	target              TargetRecord
+	generation          GenerationRecord
+	credentialAuthority AcceptedCredentialAuthority
+	lastAuthorization   ReadAuthorization
+	readCount           int
 }
 
 func (store *readCoordinatorStore) LoadTarget(context.Context, uuid.UUID, uuid.UUID) (TargetRecord, error) {
 	return store.target, nil
 }
-func (store *readCoordinatorStore) ReadSnapshot(_ context.Context, authorization ReadAuthorization, targetID uuid.UUID, reference *string) (TargetRecord, GenerationRecord, error) {
+func (store *readCoordinatorStore) ReadSnapshot(_ context.Context, authorization ReadAuthorization, use CredentialUse, _ Clock, targetID uuid.UUID, reference *string) (TargetRecord, GenerationRecord, error) {
 	if authorization.Validate() != nil || targetID != store.target.TargetID || reference != nil {
 		return TargetRecord{}, GenerationRecord{}, serviceauthority.ErrInvalid
+	}
+	if !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) || use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
+		return TargetRecord{}, GenerationRecord{}, ErrUnauthorized
 	}
 	store.lastAuthorization = authorization
 	store.readCount++
@@ -348,19 +355,20 @@ func (*readCoordinatorStore) PrepareAccount(context.Context, AccountRecord) erro
 func (*readCoordinatorStore) ActivateAccount(context.Context, uuid.UUID, uint64, string, uuid.UUID, int64) error {
 	return serviceauthority.ErrInvalid
 }
-func (*readCoordinatorStore) CreateTarget(context.Context, TargetRecord, serviceauthority.MutationAuthorization) error {
-	return serviceauthority.ErrInvalid
+func (*readCoordinatorStore) ApplyControlCommand(context.Context, SignedControlCommand, serviceauthority.MutationAuthorization) (ControlCommandAcceptance, error) {
+	return ControlCommandAcceptance{}, serviceauthority.ErrInvalid
 }
-func (*readCoordinatorStore) ReserveUpload(context.Context, UploadRecord, serviceauthority.MutationAuthorization) (UploadRecord, bool, error) {
+func (*readCoordinatorStore) ValidateControlLedger(context.Context, uuid.UUID) error { return nil }
+func (*readCoordinatorStore) ReserveUpload(context.Context, UploadRecord, CredentialUse, Clock, serviceauthority.MutationAuthorization) (UploadRecord, bool, error) {
 	return UploadRecord{}, false, serviceauthority.ErrInvalid
 }
 func (*readCoordinatorStore) LoadUpload(context.Context, uuid.UUID, uuid.UUID) (UploadRecord, error) {
 	return UploadRecord{}, serviceauthority.ErrInvalid
 }
-func (*readCoordinatorStore) BeginUploadAppend(context.Context, uuid.UUID, uuid.UUID, uint64, string, uint64, serviceauthority.MutationAuthorization) (UploadAppend, error) {
+func (*readCoordinatorStore) BeginUploadAppend(context.Context, uuid.UUID, uuid.UUID, uint64, string, uint64, CredentialUse, Clock, serviceauthority.MutationAuthorization) (UploadAppend, error) {
 	return nil, serviceauthority.ErrInvalid
 }
-func (*readCoordinatorStore) BeginFinalization(context.Context, uuid.UUID, uuid.UUID, serviceauthority.MutationAuthorization) (Finalization, error) {
+func (*readCoordinatorStore) BeginFinalization(context.Context, uuid.UUID, uuid.UUID, CredentialUse, serviceauthority.MutationAuthorization) (Finalization, error) {
 	return nil, serviceauthority.ErrInvalid
 }
 func (*readCoordinatorStore) LoadGenerationByUpload(context.Context, uuid.UUID, uuid.UUID) (GenerationRecord, error) {
@@ -369,10 +377,13 @@ func (*readCoordinatorStore) LoadGenerationByUpload(context.Context, uuid.UUID, 
 func (*readCoordinatorStore) LoadGeneration(context.Context, uuid.UUID, string) (GenerationRecord, error) {
 	return GenerationRecord{}, serviceauthority.ErrInvalid
 }
+func (*readCoordinatorStore) AuthorizeHistoricalCredential(context.Context, CredentialUse, string, string, Capability, int64) error {
+	return serviceauthority.ErrInvalid
+}
 func (*readCoordinatorStore) LoadRetentionByRequest(context.Context, uuid.UUID, uuid.UUID) (RetentionRecord, error) {
 	return RetentionRecord{}, serviceauthority.ErrInvalid
 }
-func (*readCoordinatorStore) BeginRetention(context.Context, RetentionProofRequest, []byte, serviceauthority.MutationAuthorization) (RetentionConfirmation, error) {
+func (*readCoordinatorStore) BeginRetention(context.Context, RetentionProofRequest, []byte, CredentialUse, serviceauthority.MutationAuthorization) (RetentionConfirmation, error) {
 	return nil, serviceauthority.ErrInvalid
 }
 
@@ -416,9 +427,9 @@ func newCoordinatorHarness(t *testing.T, capabilities []Capability) coordinatorH
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := TargetRecord{AccountID: accountID, TargetID: targetID, BackupSetID: setID,
-		Credential: reference, CredentialAuthorizationDigest: credentialDigest}
-	store := &faultingCoordinatorStore{target: target}
+	target := TargetRecord{AccountID: accountID, TargetID: targetID, BackupSetID: setID}
+	store := &faultingCoordinatorStore{target: target,
+		credentialAuthority: testAcceptedCredentialAuthority(t, reference, credentialDigest)}
 	parent := t.TempDir()
 	if err := os.Chmod(parent, 0o700); err != nil {
 		t.Fatal(err)
@@ -444,6 +455,18 @@ type fixedAuthorityHistory struct {
 	manifest serviceauthority.Manifest
 }
 
+func testAcceptedCredentialAuthority(t *testing.T, reference TargetCredentialReference, authorizationDigest string) AcceptedCredentialAuthority {
+	t.Helper()
+	grant := CredentialGrant{Version: CredentialAuthorityVersion, Credential: reference, AuthorizationDigest: authorizationDigest}
+	grantReference, err := grant.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return AcceptedCredentialAuthority{Grant: grant, GrantReferenceDigest: grantReference,
+		ControlHead: AcceptedControlHead{AccountID: reference.AccountID, Sequence: 1,
+			ControlGeneration: 1, ControlKeyID: uuid.New(), ReferenceDigest: strings.Repeat("c", 64)}}
+}
+
 func (history fixedAuthorityHistory) ResolveBackupCustodyAuthority(_ context.Context, authority serviceauthority.BackupCustodyAuthorityContext) (serviceauthority.TrustAnchor, serviceauthority.Manifest, error) {
 	digest, err := history.manifest.ReferenceDigest()
 	if err != nil || authority.Scope != history.anchor.Scope || authority.AuthorityManifestDigest != digest {
@@ -465,6 +488,7 @@ type faultingCoordinatorStore struct {
 	failAppendBeforeCommitOnce   bool
 	ambiguousFinalizeOnce        bool
 	failFinalizeBeforeCommitOnce bool
+	credentialAuthority          AcceptedCredentialAuthority
 }
 
 func (store *faultingCoordinatorStore) LoadTarget(_ context.Context, accountID, targetID uuid.UUID) (TargetRecord, error) {
@@ -474,9 +498,12 @@ func (store *faultingCoordinatorStore) LoadTarget(_ context.Context, accountID, 
 	return store.target, nil
 }
 
-func (store *faultingCoordinatorStore) BeginUploadAppend(_ context.Context, accountID, uploadID uuid.UUID, offset uint64, digest string, length uint64, _ serviceauthority.MutationAuthorization) (UploadAppend, error) {
+func (store *faultingCoordinatorStore) BeginUploadAppend(_ context.Context, accountID, uploadID uuid.UUID, offset uint64, digest string, length uint64, use CredentialUse, _ Clock, _ serviceauthority.MutationAuthorization) (UploadAppend, error) {
 	if store.upload.AccountID != accountID || store.upload.UploadID != uploadID {
 		return nil, ErrNotFound
+	}
+	if !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) || use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
+		return nil, ErrUnauthorized
 	}
 	lease := &faultingUploadAppend{store: store, upload: store.upload, digest: digest, length: length}
 	if offset < store.upload.CommittedBytes {
@@ -500,9 +527,21 @@ func (store *faultingCoordinatorStore) LoadGenerationByUpload(_ context.Context,
 	return GenerationRecord{}, ErrNotFound
 }
 
-func (store *faultingCoordinatorStore) BeginFinalization(_ context.Context, accountID, uploadID uuid.UUID, _ serviceauthority.MutationAuthorization) (Finalization, error) {
+func (store *faultingCoordinatorStore) AuthorizeHistoricalCredential(_ context.Context, use CredentialUse, grantReference, headReference string, required Capability, issuedAt int64) error {
+	if !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) || use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest ||
+		grantReference != store.credentialAuthority.GrantReferenceDigest || headReference != store.credentialAuthority.ControlHead.ReferenceDigest ||
+		!store.credentialAuthority.Grant.Credential.Admits(required, issuedAt) {
+		return ErrUnauthorized
+	}
+	return nil
+}
+
+func (store *faultingCoordinatorStore) BeginFinalization(_ context.Context, accountID, uploadID uuid.UUID, use CredentialUse, _ serviceauthority.MutationAuthorization) (Finalization, error) {
 	if store.upload.AccountID != accountID || store.upload.UploadID != uploadID {
 		return nil, ErrNotFound
+	}
+	if !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) || use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
+		return nil, ErrUnauthorized
 	}
 	return &faultingFinalization{store: store}, nil
 }
@@ -514,9 +553,12 @@ func (store *faultingCoordinatorStore) LoadRetentionByRequest(_ context.Context,
 	return RetentionRecord{}, ErrNotFound
 }
 
-func (store *faultingCoordinatorStore) BeginRetention(_ context.Context, request RetentionProofRequest, requestBytes []byte, _ serviceauthority.MutationAuthorization) (RetentionConfirmation, error) {
+func (store *faultingCoordinatorStore) BeginRetention(_ context.Context, request RetentionProofRequest, requestBytes []byte, use CredentialUse, _ serviceauthority.MutationAuthorization) (RetentionConfirmation, error) {
 	if store.generation.GenerationReferenceDigest != request.GenerationReferenceDigest {
 		return nil, ErrNotFound
+	}
+	if !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) || use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
+		return nil, ErrUnauthorized
 	}
 	return &faultingRetention{store: store, request: request, requestBytes: append([]byte(nil), requestBytes...)}, nil
 }
@@ -566,6 +608,9 @@ func (lease *faultingFinalization) Existing() *GenerationRecord {
 	copy := lease.store.generation
 	return &copy
 }
+func (lease *faultingFinalization) CredentialAuthority() AcceptedCredentialAuthority {
+	return lease.store.credentialAuthority
+}
 func (*faultingFinalization) Revalidate(context.Context, serviceauthority.MutationAuthorization) error {
 	return nil
 }
@@ -595,6 +640,9 @@ type faultingRetention struct {
 func (lease *faultingRetention) Target() TargetRecord         { return lease.store.target }
 func (lease *faultingRetention) Generation() GenerationRecord { return lease.store.generation }
 func (*faultingRetention) Existing() *RetentionRecord         { return nil }
+func (lease *faultingRetention) CredentialAuthority() AcceptedCredentialAuthority {
+	return lease.store.credentialAuthority
+}
 func (lease *faultingRetention) ServerTimeHighWaterMilliseconds() int64 {
 	return lease.store.retentionHighWater
 }

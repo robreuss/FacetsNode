@@ -104,34 +104,6 @@ type PublishRequest struct {
 	Version                     int                       `json:"version"`
 }
 
-type CreateTargetRequest struct {
-	Admission               AccountAdmissionReference `json:"admission"`
-	BackupSetID             uuid.UUID                 `json:"backupSetID"`
-	RequestID               uuid.UUID                 `json:"requestID"`
-	RequestedAtMilliseconds int64                     `json:"requestedAtMilliseconds"`
-	TargetID                uuid.UUID                 `json:"targetID"`
-	Version                 int                       `json:"version"`
-}
-
-func (request CreateTargetRequest) Validate() error {
-	if request.Version != Version || request.RequestID == uuid.Nil || request.TargetID == uuid.Nil ||
-		request.BackupSetID == uuid.Nil || request.Admission.Validate() != nil ||
-		request.RequestedAtMilliseconds < 0 ||
-		request.RequestedAtMilliseconds >= request.Admission.ExpiresAtMilliseconds {
-		return serviceauthority.ErrInvalid
-	}
-	return nil
-}
-
-func (request CreateTargetRequest) Scope() (serviceauthority.Scope, error) {
-	if request.Validate() != nil {
-		return serviceauthority.Scope{}, serviceauthority.ErrInvalid
-	}
-	return serviceauthority.Scope{
-		Kind: serviceauthority.ScopeBackupCustody, ScopeID: request.Admission.AccountID,
-	}, nil
-}
-
 func (request PublishRequest) Validate() error {
 	if request.Version != Version || request.RequestID == uuid.Nil || request.Generation == 0 ||
 		!request.Credential.Admits(Publish, request.RequestedAtMilliseconds) {
@@ -287,14 +259,6 @@ func DecodeAccountAdmissionReference(input []byte) (AccountAdmissionReference, e
 
 func DecodeTargetCredentialReference(input []byte) (TargetCredentialReference, error) {
 	var value TargetCredentialReference
-	if decodeCanonical(input, &value) != nil || value.Validate() != nil {
-		return value, serviceauthority.ErrInvalid
-	}
-	return value, nil
-}
-
-func DecodeCreateTargetRequest(input []byte) (CreateTargetRequest, error) {
-	var value CreateTargetRequest
 	if decodeCanonical(input, &value) != nil || value.Validate() != nil {
 		return value, serviceauthority.ErrInvalid
 	}

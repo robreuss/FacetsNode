@@ -184,22 +184,11 @@ func TestAuthorizationTypesAndStrictCanonicalRequestDecoding(t *testing.T) {
 		RequestNonce:          base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32)),
 		Version:               Version,
 	}
-	create := CreateTargetRequest{
-		Admission: admission, BackupSetID: credential.BackupSetID,
-		RequestID: uuid.New(), RequestedAtMilliseconds: 1_000,
-		TargetID: credential.TargetID, Version: Version,
-	}
-	if create.Validate() != nil {
-		t.Fatal("account admission did not admit target creation")
-	}
 	if _, err := DecodeAccountAdmissionReference(mustJSON(t, admission)); err != nil {
 		t.Fatalf("canonical admission rejected: %v", err)
 	}
 	if _, err := DecodeTargetCredentialReference(mustJSON(t, credential)); err != nil {
 		t.Fatalf("canonical credential rejected: %v", err)
-	}
-	if _, err := DecodeCreateTargetRequest(mustJSON(t, create)); err != nil {
-		t.Fatalf("canonical create rejected: %v", err)
 	}
 	validPublish := PublishRequest{
 		Credential: testCredential(Publish), Generation: 1,

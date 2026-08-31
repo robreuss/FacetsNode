@@ -30,6 +30,7 @@ type AccountRecord struct {
 	InitialManifestRecord        []byte
 	InitialAnchorRecord          []byte
 	InitialEnrollmentRecord      []byte
+	InitialControlAnchor         ControlPossessionAnchor
 	InitialBinding               *serviceauthority.InitialBinding
 	CreatedAtMilliseconds        int64
 }
@@ -79,16 +80,66 @@ func (authorization ReadAuthorization) AuthorizedAtMilliseconds() int64 {
 }
 
 type TargetRecord struct {
-	AccountID                     uuid.UUID
-	TargetID                      uuid.UUID
-	BackupSetID                   uuid.UUID
-	Credential                    TargetCredentialReference
-	CredentialAuthorizationDigest string
-	AdmissionAuthorizationDigest  string
-	CreateRequest                 []byte
-	CreatedAtMilliseconds         int64
-	Head                          *serviceauthority.BackupCustodyGenerationRecord
-	HeadReferenceDigest           *string
+	AccountID                           uuid.UUID
+	TargetID                            uuid.UUID
+	BackupSetID                         uuid.UUID
+	CreateControlCommandReferenceDigest string
+	CreatedAtMilliseconds               int64
+	Head                                *serviceauthority.BackupCustodyGenerationRecord
+	HeadReferenceDigest                 *string
+}
+
+// CredentialUse is a bounded, secret-free proof derived from one presented
+// bearer. The bearer itself never crosses into persistence or logging.
+type CredentialUse struct {
+	Reference           TargetCredentialReference
+	AuthorizationDigest string
+}
+
+func credentialUse(credential TargetCredential) (CredentialUse, error) {
+	digest, err := credential.AuthorizationDigest()
+	if err != nil {
+		return CredentialUse{}, err
+	}
+	return CredentialUse{Reference: credential.Reference, AuthorizationDigest: digest}, nil
+}
+
+type ControlCommandAcceptance struct {
+	AccountID                      uuid.UUID `json:"accountID"`
+	CommandID                      uuid.UUID `json:"commandID"`
+	CommandReferenceDigest         string    `json:"commandReferenceDigest"`
+	ControlGeneration              uint64    `json:"controlGeneration"`
+	ControlHeadReferenceDigest     string    `json:"controlHeadReferenceDigest"`
+	ControlKeyID                   uuid.UUID `json:"controlKeyID"`
+	CredentialGrantReferenceDigest *string   `json:"credentialGrantReferenceDigest,omitempty"`
+	Sequence                       uint64    `json:"sequence"`
+	Version                        int       `json:"version"`
+}
+
+func (value ControlCommandAcceptance) Validate() error {
+	if value.Version != CredentialAuthorityVersion || value.AccountID == uuid.Nil || value.CommandID == uuid.Nil ||
+		value.Sequence == 0 || value.ControlGeneration == 0 || value.ControlKeyID == uuid.Nil ||
+		!validHexDigest(value.CommandReferenceDigest) ||
+		value.ControlHeadReferenceDigest != value.CommandReferenceDigest ||
+		(value.CredentialGrantReferenceDigest != nil && !validHexDigest(*value.CredentialGrantReferenceDigest)) {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
+type AcceptedCredentialAuthority struct {
+	Grant                CredentialGrant
+	GrantReferenceDigest string
+	ControlHead          AcceptedControlHead
+}
+
+func (value AcceptedCredentialAuthority) Validate() error {
+	reference, err := value.Grant.ReferenceDigest()
+	if err != nil || reference != value.GrantReferenceDigest || value.ControlHead.AccountID != value.Grant.Credential.AccountID ||
+		value.ControlHead.Sequence == 0 || !validHexDigest(value.ControlHead.ReferenceDigest) {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
 }
 
 type UploadRecord struct {
@@ -165,6 +216,7 @@ type Finalization interface {
 	Upload() UploadRecord
 	Target() TargetRecord
 	Existing() *GenerationRecord
+	CredentialAuthority() AcceptedCredentialAuthority
 	Revalidate(context.Context, serviceauthority.MutationAuthorization) error
 	Commit(context.Context, GenerationRecord) error
 	Abort(context.Context) error
@@ -181,6 +233,7 @@ type RetentionConfirmation interface {
 	Target() TargetRecord
 	Generation() GenerationRecord
 	Existing() *RetentionRecord
+	CredentialAuthority() AcceptedCredentialAuthority
 	ServerTimeHighWaterMilliseconds() int64
 	Revalidate(context.Context, serviceauthority.MutationAuthorization) error
 	Commit(context.Context, RetentionRecord, int64) error
@@ -193,17 +246,19 @@ type Store interface {
 	LoadAccountClaim(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (AccountRecord, string, error)
 	PrepareAccount(context.Context, AccountRecord) error
 	ActivateAccount(context.Context, uuid.UUID, uint64, string, uuid.UUID, int64) error
-	CreateTarget(context.Context, TargetRecord, serviceauthority.MutationAuthorization) error
+	ApplyControlCommand(context.Context, SignedControlCommand, serviceauthority.MutationAuthorization) (ControlCommandAcceptance, error)
+	ValidateControlLedger(context.Context, uuid.UUID) error
 	LoadTarget(context.Context, uuid.UUID, uuid.UUID) (TargetRecord, error)
-	ReserveUpload(context.Context, UploadRecord, serviceauthority.MutationAuthorization) (UploadRecord, bool, error)
+	ReserveUpload(context.Context, UploadRecord, CredentialUse, Clock, serviceauthority.MutationAuthorization) (UploadRecord, bool, error)
 	LoadUpload(context.Context, uuid.UUID, uuid.UUID) (UploadRecord, error)
-	BeginUploadAppend(context.Context, uuid.UUID, uuid.UUID, uint64, string, uint64, serviceauthority.MutationAuthorization) (UploadAppend, error)
-	BeginFinalization(context.Context, uuid.UUID, uuid.UUID, serviceauthority.MutationAuthorization) (Finalization, error)
+	BeginUploadAppend(context.Context, uuid.UUID, uuid.UUID, uint64, string, uint64, CredentialUse, Clock, serviceauthority.MutationAuthorization) (UploadAppend, error)
+	BeginFinalization(context.Context, uuid.UUID, uuid.UUID, CredentialUse, serviceauthority.MutationAuthorization) (Finalization, error)
+	AuthorizeHistoricalCredential(context.Context, CredentialUse, string, string, Capability, int64) error
 	LoadGenerationByUpload(context.Context, uuid.UUID, uuid.UUID) (GenerationRecord, error)
 	LoadGeneration(context.Context, uuid.UUID, string) (GenerationRecord, error)
 	LoadRetentionByRequest(context.Context, uuid.UUID, uuid.UUID) (RetentionRecord, error)
-	BeginRetention(context.Context, RetentionProofRequest, []byte, serviceauthority.MutationAuthorization) (RetentionConfirmation, error)
-	ReadSnapshot(context.Context, ReadAuthorization, uuid.UUID, *string) (TargetRecord, GenerationRecord, error)
+	BeginRetention(context.Context, RetentionProofRequest, []byte, CredentialUse, serviceauthority.MutationAuthorization) (RetentionConfirmation, error)
+	ReadSnapshot(context.Context, ReadAuthorization, CredentialUse, Clock, uuid.UUID, *string) (TargetRecord, GenerationRecord, error)
 }
 
 type ReadResult struct {

@@ -39,6 +39,7 @@ type Config struct {
 	BackupMaximumGenerations        int
 	BackupMaximumRequests           int
 	BackupMaximumRetentionProofs    int
+	BackupMaximumControlRecords     int
 	BackupMaximumChunksPerUpload    int
 	BackupMaximumChunkBytes         int64
 	BackupMaximumGenerationBytes    int64
@@ -121,6 +122,7 @@ func Load(service Service) (Config, error) {
 		BackupMaximumGenerations:        4_096,
 		BackupMaximumRequests:           16_384,
 		BackupMaximumRetentionProofs:    16_384,
+		BackupMaximumControlRecords:     65_536,
 		BackupMaximumChunksPerUpload:    262_144,
 		BackupMaximumChunkBytes:         8 * 1_024 * 1_024,
 		BackupMaximumGenerationBytes:    1 << 40,
@@ -341,6 +343,7 @@ func loadBackupCustodyLimits(configuration *Config, prefix string) error {
 		{prefix + "_MAXIMUM_GENERATIONS", &configuration.BackupMaximumGenerations, 1, 10_000_000},
 		{prefix + "_MAXIMUM_REQUESTS", &configuration.BackupMaximumRequests, 1, 100_000_000},
 		{prefix + "_MAXIMUM_RETENTION_PROOFS", &configuration.BackupMaximumRetentionProofs, 1, 100_000_000},
+		{prefix + "_MAXIMUM_CONTROL_RECORDS", &configuration.BackupMaximumControlRecords, 1, 100_000_000},
 		{prefix + "_MAXIMUM_CHUNKS_PER_UPLOAD", &configuration.BackupMaximumChunksPerUpload, 1, 10_000_000},
 	}
 	for _, value := range integerValues {
