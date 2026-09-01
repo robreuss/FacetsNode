@@ -249,6 +249,7 @@ type Store interface {
 	ApplyControlCommand(context.Context, SignedControlCommand, serviceauthority.MutationAuthorization) (ControlCommandAcceptance, error)
 	ValidateControlLedger(context.Context, uuid.UUID) error
 	LoadTarget(context.Context, uuid.UUID, uuid.UUID) (TargetRecord, error)
+	AuthorizeUploadSnapshot(context.Context, ReadAuthorization, CredentialUse, Clock, uuid.UUID) (UploadRecord, error)
 	ReserveUpload(context.Context, UploadRecord, CredentialUse, Clock, serviceauthority.MutationAuthorization) (UploadRecord, bool, error)
 	LoadUpload(context.Context, uuid.UUID, uuid.UUID) (UploadRecord, error)
 	BeginUploadAppend(context.Context, uuid.UUID, uuid.UUID, uint64, string, uint64, CredentialUse, Clock, serviceauthority.MutationAuthorization) (UploadAppend, error)
@@ -258,12 +259,21 @@ type Store interface {
 	LoadGeneration(context.Context, uuid.UUID, string) (GenerationRecord, error)
 	LoadRetentionByRequest(context.Context, uuid.UUID, uuid.UUID) (RetentionRecord, error)
 	BeginRetention(context.Context, RetentionProofRequest, []byte, CredentialUse, serviceauthority.MutationAuthorization) (RetentionConfirmation, error)
-	ReadSnapshot(context.Context, ReadAuthorization, CredentialUse, Clock, uuid.UUID, *string) (TargetRecord, GenerationRecord, error)
+	ReadSnapshot(context.Context, ReadAuthorization, CredentialUse, Clock, uuid.UUID, string) (TargetRecord, GenerationRecord, error)
+	ListGenerationSnapshot(context.Context, ReadAuthorization, CredentialUse, Clock, GenerationListRequest) (TargetRecord, GenerationRecord, []GenerationRecord, error)
 }
 
 type ReadResult struct {
-	Generation GenerationRecord
-	Content    io.ReadCloser
+	Generation     GenerationRecord
+	Content        io.ReadCloser
+	RangeOffset    uint64
+	RangeByteCount uint64
+}
+
+type GenerationListResult struct {
+	Target TargetRecord
+	Head   GenerationRecord
+	Items  []GenerationRecord
 }
 
 func cloneGeneration(record *serviceauthority.BackupCustodyGenerationRecord) *serviceauthority.BackupCustodyGenerationRecord {

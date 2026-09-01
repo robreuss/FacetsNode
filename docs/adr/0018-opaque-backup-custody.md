@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted as a contract-only checkpoint. No HTTP route, database, object store,
-client intake, or retention worker is introduced here.
+Accepted and implemented as a runnable custody-service vertical slice plus the
+bounded generation-discovery and range-transport checkpoint. App orchestration,
+automatic scheduling, retention-policy rotation, and deletion remain separate.
 
 ## Decision
 
@@ -17,8 +18,9 @@ target and Backup set. Household and Shared-Space deduplication are excluded.
 Account admission and target operation authorization are different types and
 are never interchangeable. A target credential is bound to one account,
 target, Backup set, capability set, credential identity, nonce, and expiry.
-References in the portable request are not bearers; a future handler must
-authenticate the corresponding credential before it evaluates the contract.
+References in the portable request are not bearers. The handler authenticates
+the corresponding current credential and exact accepted account-control ledger
+before it evaluates any target operation.
 
 For publish, the service parses the encrypted Backup outer record and computes
 its SHA-256 digest and byte count itself. It never trusts client-sent digest or
@@ -48,8 +50,41 @@ A later point requires a new proof after rechecking the object. Retention does
 not claim that the FEF is complete, clean, latest-known-good, decryptable, or
 restorable.
 
-The same protocol applies to local Facets Box and hosted Facets Box. Service
-transport, quotas, HTTP paths, database/object-store transactions, credential
-issuance, and account billing are later checkpoints. Node transport observations
-explicitly reject this scope; Backup receipts are not Sentry evidence or a Node
-observation stream.
+Generation discovery is bounded to 32 items per canonical page. The first page
+pins one exact signed custody head. Every successor request exact-binds both
+that head and the prior page's final generation reference; the service reads
+only the resulting immutable prefix even when a concurrent publish advances
+the current target. Every item carries its original deployment-signed custody
+receipt. A client must authorize each receipt against its exact accepted
+historical service manifest; the page wrapper itself is not authority.
+
+Reads require an exact generation reference, positive offset, and a bounded
+byte count no greater than 64 MiB. A partial response carries the complete
+object byte count and digest, exact generation reference, original custody
+receipt, and exact returned range coordinates. The content store authenticates
+the complete object before opening the range, retains the exact regular-file
+descriptor and inode through streaming, and detects pathname, type, or size
+substitution. Full-file digest verification and Backup b20 authentication still
+belong to the client after assembling the ranges; no partial range is a restore
+or plaintext-validation receipt.
+
+Large upload chunks and download ranges additionally require a short-lived
+deployment-signed bulk grant. Backup issues a grant only after current target
+credential validation against its durable ledger. Its resource ID
+domain-separates upload chunks from download ranges and binds the exact public
+credential-reference digest plus upload or generation identity, offset, and
+byte count. The generic signed grant separately binds Backup scope, exact
+authority manifest, deployment, route, direction, maximum bytes, and a maximum
+five-minute validity interval. Swapping any credential, route, direction,
+resource, offset, or count fails before storage effects. Grants never convey
+decryption, retention-policy, deletion, or restore-selection authority.
+
+The same service binary and protocol apply to local and hosted Facets Box.
+The dedicated PostgreSQL database and private opaque content root are not relay
+or application stores. Public errors deliberately do not distinguish wrong
+credentials from absent/conflicting target objects. Begin-upload exact replay
+remains the only upload status/resume operation. No app client, UI, scheduler,
+Recovery Root custody, Personal Sync delivery, account billing, retention
+worker, deletion, or opaque-object interpretation is added by this transport
+checkpoint. Node transport observations explicitly reject this scope; Backup
+receipts are not Sentry evidence or a Node observation stream.

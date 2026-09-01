@@ -539,6 +539,100 @@ func (store *ContentStore) OpenObject(record serviceauthority.BackupCustodyGener
 	return file, nil
 }
 
+// OpenObjectRange authenticates the complete immutable object first, then
+// serves only the requested range from the same held descriptor. Path identity
+// and size are rechecked at range completion and close; a pathname swap can
+// therefore never redirect an established read to foreign bytes.
+func (store *ContentStore) OpenObjectRange(
+	record serviceauthority.BackupCustodyGenerationRecord,
+	path string,
+	offset uint64,
+	maximumByteCount uint64,
+) (io.ReadCloser, uint64, error) {
+	if store == nil || maximumByteCount == 0 || maximumByteCount > MaximumRangeByteCount ||
+		offset >= record.OuterByteCount || offset > math.MaxInt64 ||
+		maximumByteCount > math.MaxInt64 || offset > ^uint64(0)-maximumByteCount {
+		return nil, 0, serviceauthority.ErrInvalid
+	}
+	file, err := store.OpenObject(record, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := file.Stat()
+	if err != nil || info.Size() < 0 || uint64(info.Size()) != record.OuterByteCount {
+		_ = file.Close()
+		return nil, 0, serviceauthority.ErrInvalid
+	}
+	count := maximumByteCount
+	if remaining := record.OuterByteCount - offset; count > remaining {
+		count = remaining
+	}
+	reader := &heldObjectRange{
+		file: file, section: io.NewSectionReader(file, int64(offset), int64(count)),
+		store: store, path: path, identity: info, expectedSize: info.Size(), remaining: count,
+	}
+	return reader, count, nil
+}
+
+type heldObjectRange struct {
+	file         *os.File
+	section      *io.SectionReader
+	store        *ContentStore
+	path         string
+	identity     os.FileInfo
+	expectedSize int64
+	remaining    uint64
+}
+
+func (reader *heldObjectRange) Read(buffer []byte) (int, error) {
+	if reader == nil || reader.file == nil || reader.section == nil {
+		return 0, serviceauthority.ErrInvalid
+	}
+	if reader.remaining == 0 {
+		if err := reader.validate(); err != nil {
+			return 0, err
+		}
+		return 0, io.EOF
+	}
+	if uint64(len(buffer)) > reader.remaining {
+		buffer = buffer[:reader.remaining]
+	}
+	count, err := reader.section.Read(buffer)
+	if count < 0 || uint64(count) > reader.remaining {
+		return 0, serviceauthority.ErrInvalid
+	}
+	reader.remaining -= uint64(count)
+	if errors.Is(err, io.EOF) && reader.remaining != 0 {
+		return count, serviceauthority.ErrInvalid
+	}
+	return count, err
+}
+
+func (reader *heldObjectRange) Close() error {
+	if reader == nil || reader.file == nil {
+		return nil
+	}
+	validationErr := reader.validate()
+	file := reader.file
+	reader.file = nil
+	reader.section = nil
+	return errors.Join(validationErr, file.Close())
+}
+
+func (reader *heldObjectRange) validate() error {
+	if reader.file == nil || reader.store == nil || reader.store.validateRoot() != nil {
+		return serviceauthority.ErrInvalid
+	}
+	held, heldErr := reader.file.Stat()
+	pathInfo, pathErr := reader.store.root.Lstat(reader.path)
+	if heldErr != nil || pathErr != nil || !held.Mode().IsRegular() ||
+		held.Size() != reader.expectedSize || !os.SameFile(reader.identity, held) ||
+		pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(held, pathInfo) {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
 func (store *ContentStore) validateRoot() error {
 	if store == nil || store.root == nil || store.rootDirectory == nil || store.stagingDirectory == nil ||
 		store.processLock == nil || store.parentRoot == nil || store.parentDirectory == nil {

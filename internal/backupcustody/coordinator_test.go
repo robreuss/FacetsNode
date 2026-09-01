@@ -1,9 +1,11 @@
 package backupcustody
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -99,7 +101,9 @@ func TestCoordinatorReadUsesDurableAuthoritySnapshotAndVerifiesObject(t *testing
 	coordinator := Coordinator{Store: store, Content: content, Registry: registry, Signer: signer,
 		AuthorityHistory: unusedAuthorityHistory{}, Clock: fixedBackupClock{time.UnixMilli(1_100)},
 		MaximumChunkBytes: 1024, MaximumGenerationBytes: 4096, NewID: uuid.New}
-	request := ReadRequest{Version: Version, RequestID: uuid.New(), RequestedAtMilliseconds: 1_100, Credential: reference}
+	request := ReadRequest{Version: Version, RequestID: uuid.New(), RequestedAtMilliseconds: 1_100,
+		Credential: reference, GenerationReferenceDigest: storedGeneration.GenerationReferenceDigest,
+		MaximumByteCount: uint64(len(opaque)), RangeOffset: 0}
 	result, err := coordinator.Read(context.Background(), credential, request, binding)
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +118,11 @@ func TestCoordinatorReadUsesDurableAuthoritySnapshotAndVerifiesObject(t *testing
 		store.lastAuthorization.AuthorizedAtMilliseconds() != 1_100 {
 		t.Fatalf("durable read admission was not exact: count=%d auth=%+v", store.readCount, store.lastAuthorization)
 	}
+	controlBinding := binding
+	controlBinding.TrafficClass = serviceauthority.TrafficControl
+	if _, err := coordinator.Read(context.Background(), credential, request, controlBinding); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("control route read err=%v", err)
+	}
 
 	if err := os.Chmod(filepath.Join(parent, "custody", object), 0o600); err != nil {
 		t.Fatal(err)
@@ -123,6 +132,121 @@ func TestCoordinatorReadUsesDurableAuthoritySnapshotAndVerifiesObject(t *testing
 	}
 	if _, err := coordinator.Read(context.Background(), credential, request, binding); err == nil {
 		t.Fatal("tampered opaque generation was returned")
+	}
+}
+
+func TestCoordinatorPinsGenerationPagesAndIssuesExactBulkGrants(t *testing.T) {
+	harness := newCoordinatorHarness(t, []Capability{Publish, Read})
+	defer harness.content.Close()
+	makeStored := func(number uint64, predecessor *string) GenerationRecord {
+		t.Helper()
+		generation := serviceauthority.BackupCustodyGenerationRecord{
+			Version: Version, AccountID: harness.target.AccountID, TargetID: harness.target.TargetID,
+			BackupSetID: harness.target.BackupSetID, Generation: number, UploadID: uuid.New(),
+			PredecessorReferenceDigest: predecessor,
+			OuterDigest:                base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{byte(number)}, 32)),
+			OuterByteCount:             4096,
+		}
+		receipt, err := harness.coordinator.Signer.SignBackupCustodyReceipt(serviceauthority.BackupCustodyReceiptPayload{
+			Version: serviceauthority.BackupCustodyReceiptVersion, ReceiptID: uuid.New(), RequestID: uuid.New(),
+			CredentialID: harness.credential.Reference.CredentialID, Kind: serviceauthority.BackupCustodyCommittedKind,
+			IssuedAtMilliseconds: 1_000 + int64(number), Generation: generation,
+			Authority: serviceauthority.BackupCustodyAuthorityContext{Scope: harness.binding.Scope, AuthorityRevision: harness.binding.AuthorityRevision,
+				AuthorityManifestDigest: harness.binding.AuthorityDigest, DeploymentID: harness.binding.DeploymentID},
+			CredentialGrantReferenceDigest: harness.store.credentialAuthority.GrantReferenceDigest,
+			ControlHeadReferenceDigest:     harness.store.credentialAuthority.ControlHead.ReferenceDigest,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, err := generationStorage(generation, receipt, objectPath(generation))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stored
+	}
+	first := makeStored(1, nil)
+	second := makeStored(2, &first.GenerationReferenceDigest)
+	third := makeStored(3, &second.GenerationReferenceDigest)
+	fourth := makeStored(4, &third.GenerationReferenceDigest)
+	headReference := third.GenerationReferenceDigest
+	target := harness.target
+	target.Head = cloneGeneration(&fourth.Generation)
+	target.HeadReferenceDigest = &fourth.GenerationReferenceDigest
+	upload := UploadRecord{AccountID: target.AccountID, TargetID: target.TargetID, BackupSetID: target.BackupSetID,
+		UploadID: uuid.New(), CommittedBytes: 128}
+	store := &readCoordinatorStore{target: target, generation: third, items: []GenerationRecord{third},
+		upload: upload, credentialAuthority: harness.store.credentialAuthority}
+	harness.coordinator.Store = store
+	controlBinding := harness.binding
+	controlBinding.TrafficClass = serviceauthority.TrafficControl
+
+	list := GenerationListRequest{Version: Version, RequestID: uuid.New(), Credential: harness.credential.Reference,
+		AfterGeneration: 2, AfterGenerationReferenceDigest: &second.GenerationReferenceDigest,
+		SnapshotHeadReferenceDigest: &headReference, PageCount: 2, RequestedAtMilliseconds: 1_100}
+	listed, err := harness.coordinator.ListGenerations(context.Background(), harness.credential, list, controlBinding)
+	if err != nil || listed.Head.GenerationReferenceDigest != headReference || len(listed.Items) != 1 ||
+		listed.Target.HeadReferenceDigest == nil || *listed.Target.HeadReferenceDigest != fourth.GenerationReferenceDigest {
+		t.Fatalf("list=%+v err=%v", listed, err)
+	}
+	page := GenerationListPage{Version: Version, RequestID: list.RequestID,
+		AfterGeneration: list.AfterGeneration, AfterGenerationReferenceDigest: list.AfterGenerationReferenceDigest,
+		SnapshotHeadReferenceDigest: listed.Head.GenerationReferenceDigest,
+		SnapshotHeadCustodyReceipt:  listed.Head.CustodyReceipt,
+		Items: []GenerationListItem{{GenerationReferenceDigest: listed.Items[0].GenerationReferenceDigest,
+			CustodyReceipt: listed.Items[0].CustodyReceipt}}}
+	if err := page.ValidateResponse(list); err != nil {
+		t.Fatalf("historical head did not remain pinned after current advance: %v", err)
+	}
+	if _, err := harness.coordinator.ListGenerations(context.Background(), harness.credential, list, harness.binding); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("bulk route list err=%v", err)
+	}
+
+	downloadResource, err := DownloadRangeResourceID(harness.credential.Reference, headReference, 64, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadRequest := serviceauthority.BulkGrantRequest{Version: serviceauthority.SchemaVersion,
+		Direction: serviceauthority.BulkDownload, RequiredByteCount: 1024,
+		ResourceID: downloadResource, RouteID: harness.binding.RouteID}
+	downloadGrant, err := harness.coordinator.IssueBulkTransferGrant(
+		context.Background(), harness.credential, downloadRequest, controlBinding,
+	)
+	var downloadPayload serviceauthority.BulkGrantPayload
+	if err != nil || json.Unmarshal(downloadGrant.Payload, &downloadPayload) != nil ||
+		downloadPayload.ResourceID != downloadResource || downloadPayload.Direction != serviceauthority.BulkDownload ||
+		downloadPayload.MaximumByteCount != 1024 || downloadPayload.RouteID != harness.binding.RouteID {
+		t.Fatalf("download payload=%+v err=%v", downloadPayload, err)
+	}
+	wrongRouteRequest := downloadRequest
+	wrongRouteRequest.RouteID = uuid.New()
+	if _, err := harness.coordinator.IssueBulkTransferGrant(
+		context.Background(), harness.credential, wrongRouteRequest, controlBinding,
+	); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("undeclared bulk route grant err=%v", err)
+	}
+
+	uploadResource, err := UploadChunkResourceID(harness.credential.Reference, upload.UploadID, upload.CommittedBytes, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest := serviceauthority.BulkGrantRequest{Version: serviceauthority.SchemaVersion,
+		Direction: serviceauthority.BulkUpload, RequiredByteCount: 512,
+		ResourceID: uploadResource, RouteID: harness.binding.RouteID}
+	uploadGrant, err := harness.coordinator.IssueBulkTransferGrant(
+		context.Background(), harness.credential, uploadRequest, controlBinding,
+	)
+	var uploadPayload serviceauthority.BulkGrantPayload
+	if err != nil || json.Unmarshal(uploadGrant.Payload, &uploadPayload) != nil ||
+		uploadPayload.ResourceID != uploadResource || uploadPayload.Direction != serviceauthority.BulkUpload ||
+		uploadPayload.MaximumByteCount != 512 {
+		t.Fatalf("upload payload=%+v err=%v", uploadPayload, err)
+	}
+
+	conflictResource, _ := UploadChunkResourceID(harness.credential.Reference, upload.UploadID, upload.CommittedBytes+1, 512)
+	uploadRequest.ResourceID = conflictResource
+	if _, err := harness.coordinator.IssueBulkTransferGrant(context.Background(), harness.credential, uploadRequest, controlBinding); err == nil {
+		t.Fatal("grant issued for a non-current upload offset")
 	}
 }
 
@@ -327,6 +451,8 @@ func (unusedAuthorityHistory) ResolveBackupCustodyAuthority(context.Context, ser
 type readCoordinatorStore struct {
 	target              TargetRecord
 	generation          GenerationRecord
+	items               []GenerationRecord
+	upload              UploadRecord
 	credentialAuthority AcceptedCredentialAuthority
 	lastAuthorization   ReadAuthorization
 	readCount           int
@@ -335,8 +461,8 @@ type readCoordinatorStore struct {
 func (store *readCoordinatorStore) LoadTarget(context.Context, uuid.UUID, uuid.UUID) (TargetRecord, error) {
 	return store.target, nil
 }
-func (store *readCoordinatorStore) ReadSnapshot(_ context.Context, authorization ReadAuthorization, use CredentialUse, _ Clock, targetID uuid.UUID, reference *string) (TargetRecord, GenerationRecord, error) {
-	if authorization.Validate() != nil || targetID != store.target.TargetID || reference != nil {
+func (store *readCoordinatorStore) ReadSnapshot(_ context.Context, authorization ReadAuthorization, use CredentialUse, _ Clock, targetID uuid.UUID, reference string) (TargetRecord, GenerationRecord, error) {
+	if authorization.Validate() != nil || targetID != store.target.TargetID || reference != store.generation.GenerationReferenceDigest {
 		return TargetRecord{}, GenerationRecord{}, serviceauthority.ErrInvalid
 	}
 	if !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) || use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
@@ -345,6 +471,22 @@ func (store *readCoordinatorStore) ReadSnapshot(_ context.Context, authorization
 	store.lastAuthorization = authorization
 	store.readCount++
 	return store.target, store.generation, nil
+}
+func (store *readCoordinatorStore) AuthorizeUploadSnapshot(_ context.Context, authorization ReadAuthorization, use CredentialUse, _ Clock, uploadID uuid.UUID) (UploadRecord, error) {
+	if authorization.Validate() != nil || uploadID != store.upload.UploadID ||
+		!reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) ||
+		use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
+		return UploadRecord{}, ErrUnauthorized
+	}
+	return store.upload, nil
+}
+func (store *readCoordinatorStore) ListGenerationSnapshot(_ context.Context, authorization ReadAuthorization, use CredentialUse, _ Clock, request GenerationListRequest) (TargetRecord, GenerationRecord, []GenerationRecord, error) {
+	if authorization.Validate() != nil || request.Validate() != nil ||
+		!reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) ||
+		use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest || len(store.items) == 0 {
+		return TargetRecord{}, GenerationRecord{}, nil, ErrUnauthorized
+	}
+	return store.target, store.generation, append([]GenerationRecord(nil), store.items...), nil
 }
 func (*readCoordinatorStore) LoadAccountClaim(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (AccountRecord, string, error) {
 	return AccountRecord{}, "", ErrNotFound

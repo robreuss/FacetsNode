@@ -206,16 +206,44 @@ func TestPostgresBackupCustodyDurableAuthorityReceiptsReplayAndQuotas(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	uploadResource, err := backupcustody.UploadChunkResourceID(
+		targetCredential.Reference, upload.UploadID, 0, uint64(len(wire)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadGrant, err := coordinator.IssueBulkTransferGrant(ctx, targetCredential, serviceauthority.BulkGrantRequest{
+		Version: serviceauthority.SchemaVersion, Direction: serviceauthority.BulkUpload,
+		RequiredByteCount: int64(len(wire)), ResourceID: uploadResource, RouteID: binding.RouteID,
+	}, controlBinding)
+	if err != nil {
+		t.Fatalf("issue upload grant: %v", err)
+	}
+	var uploadGrantPayload serviceauthority.BulkGrantPayload
+	if json.Unmarshal(uploadGrant.Payload, &uploadGrantPayload) != nil || uploadGrantPayload.ResourceID != uploadResource {
+		t.Fatal("upload grant did not bind exact durable upload snapshot")
+	}
 	wireDigest := sha256.Sum256(wire)
 	if next, err := coordinator.AppendUploadChunk(ctx, targetCredential, binding, upload.UploadID, 0, wire, hex.EncodeToString(wireDigest[:])); err != nil || next != uint64(len(wire)) {
 		t.Fatalf("append next=%d err=%v", next, err)
 	}
-	if _, err := coordinator.FinalizeUpload(ctx, targetCredential, binding, upload.UploadID); err != nil {
+	custodyReceipt, err := coordinator.FinalizeUpload(ctx, targetCredential, binding, upload.UploadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custodyPayload, err := custodyReceipt.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generationReference, err := custodyPayload.Generation.ReferenceDigest()
+	if err != nil {
 		t.Fatal(err)
 	}
 	clock.now = time.UnixMilli(1_200)
 	readRequest := backupcustody.ReadRequest{Version: backupcustody.Version, RequestID: uuid.New(),
-		RequestedAtMilliseconds: 1_200, Credential: targetCredential.Reference}
+		RequestedAtMilliseconds: 1_200, Credential: targetCredential.Reference,
+		GenerationReferenceDigest: generationReference,
+		MaximumByteCount:          uint64(len(wire)), RangeOffset: 0}
 	read, err := coordinator.Read(ctx, targetCredential, readRequest, binding)
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +252,44 @@ func TestPostgresBackupCustodyDurableAuthorityReceiptsReplayAndQuotas(t *testing
 	closeErr := read.Content.Close()
 	if err != nil || closeErr != nil || !bytes.Equal(readBytes, wire) {
 		t.Fatalf("read byteCount=%d err=%v close=%v", len(readBytes), err, closeErr)
+	}
+	listRequest := backupcustody.GenerationListRequest{Version: backupcustody.Version, RequestID: uuid.New(),
+		Credential: targetCredential.Reference, AfterGeneration: 0, PageCount: 1, RequestedAtMilliseconds: 1_200}
+	listed, err := coordinator.ListGenerations(ctx, targetCredential, listRequest, controlBinding)
+	if err != nil || len(listed.Items) != 1 || listed.Head.GenerationReferenceDigest != generationReference ||
+		listed.Items[0].GenerationReferenceDigest != generationReference {
+		t.Fatalf("generation list=%+v err=%v", listed, err)
+	}
+	rangeOffset, rangeCount := uint64(17), uint64(41)
+	downloadResource, err := backupcustody.DownloadRangeResourceID(
+		targetCredential.Reference, generationReference, rangeOffset, rangeCount,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadGrant, err := coordinator.IssueBulkTransferGrant(ctx, targetCredential, serviceauthority.BulkGrantRequest{
+		Version: serviceauthority.SchemaVersion, Direction: serviceauthority.BulkDownload,
+		RequiredByteCount: int64(rangeCount), ResourceID: downloadResource, RouteID: binding.RouteID,
+	}, controlBinding)
+	if err != nil {
+		t.Fatalf("issue download grant: %v", err)
+	}
+	var downloadGrantPayload serviceauthority.BulkGrantPayload
+	if json.Unmarshal(downloadGrant.Payload, &downloadGrantPayload) != nil || downloadGrantPayload.ResourceID != downloadResource {
+		t.Fatal("download grant did not bind exact durable generation snapshot")
+	}
+	rangeRequest := readRequest
+	rangeRequest.RequestID = uuid.New()
+	rangeRequest.RangeOffset = rangeOffset
+	rangeRequest.MaximumByteCount = rangeCount
+	rangeRead, err := coordinator.Read(ctx, targetCredential, rangeRequest, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rangeBytes, rangeErr := io.ReadAll(rangeRead.Content)
+	rangeCloseErr := rangeRead.Content.Close()
+	if rangeErr != nil || rangeCloseErr != nil || !bytes.Equal(rangeBytes, wire[rangeOffset:rangeOffset+rangeCount]) {
+		t.Fatalf("range byteCount=%d err=%v close=%v", len(rangeBytes), rangeErr, rangeCloseErr)
 	}
 
 	clock.now = time.UnixMilli(1_100)
@@ -640,7 +706,9 @@ func TestPostgresBackupCustodyDurableAuthorityReceiptsReplayAndQuotas(t *testing
 	expiredReadCoordinator := expiryCoordinator
 	expiredReadCoordinator.Clock = expiredReadClock
 	expiredReadRequest := backupcustody.ReadRequest{Version: backupcustody.Version, RequestID: uuid.New(),
-		RequestedAtMilliseconds: 9_999, Credential: expiryCredential.Reference}
+		RequestedAtMilliseconds: 9_999, Credential: expiryCredential.Reference,
+		GenerationReferenceDigest: expiryFirstGenerationReference,
+		MaximumByteCount:          1, RangeOffset: 0}
 	readLock := lockBackupAccount(t, ctx, pool, accountID)
 	readResult := make(chan error, 1)
 	go func() {

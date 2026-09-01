@@ -16,11 +16,14 @@ import (
 )
 
 type portableFixture struct {
-	GenerationReferenceDigest string `json:"generationReferenceDigest"`
-	OuterEnvelopeBase64URL    string `json:"outerEnvelopeBase64URL"`
-	PayloadCanonicalBase64URL string `json:"payloadCanonicalBase64URL"`
-	ReceiptCanonicalBase64URL string `json:"receiptCanonicalBase64URL"`
-	ReceiptReferenceDigest    string `json:"receiptReferenceDigest"`
+	DownloadRangeResourceID         string `json:"downloadRangeResourceID"`
+	GenerationReferenceDigest       string `json:"generationReferenceDigest"`
+	OuterEnvelopeBase64URL          string `json:"outerEnvelopeBase64URL"`
+	PayloadCanonicalBase64URL       string `json:"payloadCanonicalBase64URL"`
+	ReceiptCanonicalBase64URL       string `json:"receiptCanonicalBase64URL"`
+	ReceiptReferenceDigest          string `json:"receiptReferenceDigest"`
+	TargetCredentialReferenceDigest string `json:"targetCredentialReferenceDigest"`
+	UploadChunkResourceID           string `json:"uploadChunkResourceID"`
 }
 
 func TestPortableFixtureComputesExactOpaqueGenerationAndReceipt(t *testing.T) {
@@ -72,6 +75,145 @@ func TestPortableFixtureComputesExactOpaqueGenerationAndReceipt(t *testing.T) {
 	reference, err := receipt.ReferenceDigest()
 	if err != nil || reference != fixture.ReceiptReferenceDigest {
 		t.Fatalf("receipt reference=%s err=%v", reference, err)
+	}
+	portableCredential := TargetCredentialReference{
+		Version: Version, AccountID: record.AccountID, TargetID: record.TargetID,
+		BackupSetID: record.BackupSetID, CredentialID: payload.CredentialID,
+		RequestNonce: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32)),
+		Capabilities: []Capability{Publish}, ExpiresAtMilliseconds: payload.IssuedAtMilliseconds + 1,
+	}
+	credentialReference, err := portableCredential.ReferenceDigest()
+	if err != nil || credentialReference != fixture.TargetCredentialReferenceDigest {
+		t.Fatalf("credential reference=%s err=%v", credentialReference, err)
+	}
+	uploadResource, err := UploadChunkResourceID(portableCredential, record.UploadID, 64, 1024)
+	if err != nil || uploadResource != fixture.UploadChunkResourceID {
+		t.Fatalf("upload resource=%s err=%v", uploadResource, err)
+	}
+	downloadResource, err := DownloadRangeResourceID(portableCredential, fixture.GenerationReferenceDigest, 64, 1024)
+	if err != nil || downloadResource != fixture.DownloadRangeResourceID {
+		t.Fatalf("download resource=%s err=%v", downloadResource, err)
+	}
+	parsed, err := ParseBackupBulkResourceID(downloadResource)
+	if err != nil || parsed.Direction != serviceauthority.BulkDownload || parsed.Offset != 64 || parsed.ByteCount != 1024 ||
+		parsed.GenerationReferenceDigest != fixture.GenerationReferenceDigest {
+		t.Fatalf("parsed download resource=%+v err=%v", parsed, err)
+	}
+	item := GenerationListItem{GenerationReferenceDigest: fixture.GenerationReferenceDigest, CustodyReceipt: receipt}
+	page := GenerationListPage{Version: Version, RequestID: uuid.New(), AfterGeneration: 0,
+		SnapshotHeadReferenceDigest: fixture.GenerationReferenceDigest,
+		SnapshotHeadCustodyReceipt:  receipt, Items: []GenerationListItem{item}}
+	pageBytes := mustJSON(t, page)
+	if decoded, err := DecodeGenerationListPage(pageBytes); err != nil || decoded.Validate() != nil {
+		t.Fatalf("generation page rejected: %v", err)
+	}
+	if _, err := DecodeGenerationListPage(bytes.Repeat([]byte{'x'}, MaximumGenerationPageByteCount+1)); err == nil {
+		t.Fatal("oversized generation page accepted")
+	}
+}
+
+func TestGenerationPagesPinThreeGenerationSnapshotAndRejectDiscontinuity(t *testing.T) {
+	credential := testCredential(Read)
+	enrollment, signer := fixtureBackupEnrollmentAndSigner(t, credential.AccountID)
+	manifestReference, err := enrollment.Manifest.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := serviceauthority.BackupCustodyAuthorityContext{
+		Scope:             serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: credential.AccountID},
+		AuthorityRevision: 1, AuthorityManifestDigest: manifestReference, DeploymentID: signer.DeploymentID(),
+	}
+	makeItem := func(generation uint64, predecessor *string, targetID uuid.UUID) GenerationListItem {
+		t.Helper()
+		record := serviceauthority.BackupCustodyGenerationRecord{
+			Version: Version, AccountID: credential.AccountID, TargetID: targetID,
+			BackupSetID: credential.BackupSetID, Generation: generation, UploadID: uuid.New(),
+			PredecessorReferenceDigest: predecessor,
+			OuterDigest:                base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{byte(generation)}, 32)),
+			OuterByteCount:             1024 + generation,
+		}
+		reference, err := record.ReferenceDigest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt, err := signer.SignBackupCustodyReceipt(serviceauthority.BackupCustodyReceiptPayload{
+			Version: serviceauthority.BackupCustodyReceiptVersion, ReceiptID: uuid.New(), RequestID: uuid.New(),
+			CredentialID: credential.CredentialID, Kind: serviceauthority.BackupCustodyCommittedKind,
+			IssuedAtMilliseconds: 1_000 + int64(generation), Generation: record, Authority: authority,
+			CredentialGrantReferenceDigest: strings.Repeat("a", 64),
+			ControlHeadReferenceDigest:     strings.Repeat("b", 64),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return GenerationListItem{GenerationReferenceDigest: reference, CustodyReceipt: receipt}
+	}
+
+	first := makeItem(1, nil, credential.TargetID)
+	second := makeItem(2, &first.GenerationReferenceDigest, credential.TargetID)
+	third := makeItem(3, &second.GenerationReferenceDigest, credential.TargetID)
+	fourth := makeItem(4, &third.GenerationReferenceDigest, credential.TargetID)
+	firstRequest := GenerationListRequest{Version: Version, RequestID: uuid.New(), Credential: credential,
+		AfterGeneration: 0, PageCount: 2, RequestedAtMilliseconds: 1_000}
+	firstPage := GenerationListPage{Version: Version, RequestID: firstRequest.RequestID, AfterGeneration: 0,
+		SnapshotHeadReferenceDigest: third.GenerationReferenceDigest,
+		SnapshotHeadCustodyReceipt:  third.CustodyReceipt, Items: []GenerationListItem{first, second}}
+	if err := firstPage.ValidateResponse(firstRequest); err != nil {
+		t.Fatalf("first pinned page rejected: %v", err)
+	}
+	secondRequest := GenerationListRequest{Version: Version, RequestID: uuid.New(), Credential: credential,
+		AfterGeneration: 2, AfterGenerationReferenceDigest: &second.GenerationReferenceDigest,
+		SnapshotHeadReferenceDigest: &third.GenerationReferenceDigest, PageCount: 2, RequestedAtMilliseconds: 1_000}
+	secondPage := GenerationListPage{Version: Version, RequestID: secondRequest.RequestID, AfterGeneration: 2,
+		AfterGenerationReferenceDigest: &second.GenerationReferenceDigest,
+		SnapshotHeadReferenceDigest:    third.GenerationReferenceDigest,
+		SnapshotHeadCustodyReceipt:     third.CustodyReceipt, Items: []GenerationListItem{third}}
+	if err := secondPage.ValidateResponse(secondRequest); err != nil {
+		t.Fatalf("successor pinned page rejected: %v", err)
+	}
+
+	// A valid fourth generation may become the service's current head after page
+	// one, but it cannot replace the head pinned by the successor request.
+	advancedPage := secondPage
+	advancedPage.SnapshotHeadReferenceDigest = fourth.GenerationReferenceDigest
+	advancedPage.SnapshotHeadCustodyReceipt = fourth.CustodyReceipt
+	if advancedPage.Validate() != nil {
+		t.Fatal("internally valid advanced page fixture rejected")
+	}
+	if advancedPage.ValidateResponse(secondRequest) == nil {
+		t.Fatal("concurrent current-head advance replaced pinned snapshot")
+	}
+
+	wrongPredecessor := secondRequest
+	wrongPredecessor.AfterGenerationReferenceDigest = &first.GenerationReferenceDigest
+	if secondPage.ValidateResponse(wrongPredecessor) == nil {
+		t.Fatal("wrong successor predecessor accepted")
+	}
+	wrongHead := secondRequest
+	wrongHead.SnapshotHeadReferenceDigest = &fourth.GenerationReferenceDigest
+	if secondPage.ValidateResponse(wrongHead) == nil {
+		t.Fatal("wrong successor head accepted")
+	}
+	omitted := firstPage
+	omitted.Items = []GenerationListItem{first}
+	if omitted.Validate() != nil || omitted.ValidateResponse(firstRequest) == nil {
+		t.Fatal("premature partial page was not distinguished from completion")
+	}
+	gapped := firstPage
+	gapped.Items = []GenerationListItem{first, third}
+	if gapped.Validate() == nil {
+		t.Fatal("gapped page accepted")
+	}
+	reordered := firstPage
+	reordered.Items = []GenerationListItem{second, first}
+	if reordered.Validate() == nil {
+		t.Fatal("reordered page accepted")
+	}
+	foreignSecond := makeItem(2, &first.GenerationReferenceDigest, uuid.New())
+	mixed := firstPage
+	mixed.Items = []GenerationListItem{first, foreignSecond}
+	if mixed.Validate() == nil {
+		t.Fatal("mixed target chain accepted")
 	}
 }
 
@@ -129,11 +271,17 @@ func TestAuthorizationTypesAndStrictCanonicalRequestDecoding(t *testing.T) {
 	credential := testCredential(Read)
 	read := ReadRequest{
 		Credential: credential, RequestID: uuid.New(),
-		RequestedAtMilliseconds: 1_000, Version: Version,
+		GenerationReferenceDigest: strings.Repeat("a", 64), MaximumByteCount: MaximumRangeByteCount,
+		RangeOffset: 0, RequestedAtMilliseconds: 1_000, Version: Version,
 	}
 	if read.Validate() != nil {
 		t.Fatal("read capability rejected")
 	}
+	read.MaximumByteCount = MaximumRangeByteCount + 1
+	if read.Validate() == nil {
+		t.Fatal("oversized range accepted")
+	}
+	read.MaximumByteCount = MaximumRangeByteCount
 	publish := PublishRequest{
 		Credential: credential, Generation: 1, RequestID: uuid.New(),
 		RequestedAtMilliseconds: 1_000, Version: Version,
@@ -176,6 +324,39 @@ func TestAuthorizationTypesAndStrictCanonicalRequestDecoding(t *testing.T) {
 	noncanonical := append(append([]byte(nil), canonical...), '\n')
 	if _, err := DecodeReadRequest(noncanonical); err == nil {
 		t.Fatal("noncanonical request accepted")
+	}
+
+	list := GenerationListRequest{Version: Version, RequestID: uuid.New(), Credential: credential,
+		AfterGeneration: 0, PageCount: MaximumGenerationPageCount, RequestedAtMilliseconds: 1_000}
+	if list.Validate() != nil {
+		t.Fatal("initial generation page request rejected")
+	}
+	list.AfterGeneration = 1
+	if list.Validate() == nil {
+		t.Fatal("unpinned successor generation page accepted")
+	}
+	afterReference, headReference := strings.Repeat("b", 64), strings.Repeat("c", 64)
+	list.AfterGenerationReferenceDigest = &afterReference
+	list.SnapshotHeadReferenceDigest = &headReference
+	if list.Validate() != nil {
+		t.Fatal("exact predecessor/head-pinned successor page rejected")
+	}
+	resource, err := DownloadRangeResourceID(credential, strings.Repeat("d", 64), 9, 17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseBackupBulkResourceID(resource)
+	if err != nil || parsed.Direction != serviceauthority.BulkDownload || parsed.Offset != 9 || parsed.ByteCount != 17 {
+		t.Fatalf("bulk resource=%+v err=%v", parsed, err)
+	}
+	if _, err := ParseBackupBulkResourceID(strings.Replace(resource, strings.Repeat("d", 64), strings.Repeat("D", 64), 1)); err == nil {
+		t.Fatal("noncanonical bulk resource digest accepted")
+	}
+	if _, err := ParseBackupBulkResourceID(strings.Replace(resource, ":9:17", ":09:17", 1)); err == nil {
+		t.Fatal("noncanonical bulk resource offset accepted")
+	}
+	if _, err := DownloadRangeResourceID(credential, strings.Repeat("d", 64), 0, MaximumRangeByteCount+1); err == nil {
+		t.Fatal("oversized bulk resource accepted")
 	}
 
 	admission := AccountAdmissionReference{

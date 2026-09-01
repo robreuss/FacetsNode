@@ -1262,9 +1262,49 @@ func (store *BackupCustodyStore) LoadRetentionByRequest(ctx context.Context, acc
 	return loadRetentionTx(ctx, store.pool, accountID, requestID)
 }
 
-func (store *BackupCustodyStore) ReadSnapshot(ctx context.Context, authorization backupcustody.ReadAuthorization, use backupcustody.CredentialUse, clock backupcustody.Clock, targetID uuid.UUID, requestedReference *string) (backupcustody.TargetRecord, backupcustody.GenerationRecord, error) {
+func (store *BackupCustodyStore) AuthorizeUploadSnapshot(
+	ctx context.Context,
+	authorization backupcustody.ReadAuthorization,
+	use backupcustody.CredentialUse,
+	clock backupcustody.Clock,
+	uploadID uuid.UUID,
+) (backupcustody.UploadRecord, error) {
+	if clock == nil || authorization.Validate() != nil || authorization.DeploymentID() != store.localDeploymentID || uploadID == uuid.Nil {
+		return backupcustody.UploadRecord{}, serviceauthority.ErrInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return backupcustody.UploadRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := store.lockReadAccount(ctx, tx, authorization); err != nil {
+		return backupcustody.UploadRecord{}, err
+	}
+	credentialAuthority, err := loadAcceptedCredentialAuthority(ctx, tx, use, true)
+	if err != nil || !credentialAuthority.Grant.Credential.Admits(backupcustody.Publish, clock.Now().UnixMilli()) {
+		if err != nil {
+			return backupcustody.UploadRecord{}, err
+		}
+		return backupcustody.UploadRecord{}, backupcustody.ErrUnauthorized
+	}
+	upload, err := loadUpload(ctx, tx, authorization.Scope().ScopeID, uploadID, false)
+	if err != nil || upload.Committed || upload.TargetID != credentialAuthority.Grant.Credential.TargetID ||
+		upload.BackupSetID != credentialAuthority.Grant.Credential.BackupSetID ||
+		!reflect.DeepEqual(upload.Request.Credential, credentialAuthority.Grant.Credential) {
+		if err != nil {
+			return backupcustody.UploadRecord{}, err
+		}
+		return backupcustody.UploadRecord{}, backupcustody.ErrUnauthorized
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return backupcustody.UploadRecord{}, err
+	}
+	return upload, nil
+}
+
+func (store *BackupCustodyStore) ReadSnapshot(ctx context.Context, authorization backupcustody.ReadAuthorization, use backupcustody.CredentialUse, clock backupcustody.Clock, targetID uuid.UUID, requestedReference string) (backupcustody.TargetRecord, backupcustody.GenerationRecord, error) {
 	if clock == nil || authorization.Validate() != nil || authorization.DeploymentID() != store.localDeploymentID || targetID == uuid.Nil ||
-		(requestedReference != nil && !canonicalHexDigest(*requestedReference)) {
+		!canonicalHexDigest(requestedReference) {
 		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, serviceauthority.ErrInvalid
 	}
 	tx, err := store.pool.Begin(ctx)
@@ -1287,14 +1327,7 @@ func (store *BackupCustodyStore) ReadSnapshot(ctx context.Context, authorization
 	if err != nil {
 		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, err
 	}
-	reference := requestedReference
-	if reference == nil {
-		reference = target.HeadReferenceDigest
-	}
-	if reference == nil {
-		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, backupcustody.ErrNotFound
-	}
-	generation, err := loadGeneration(ctx, tx, target.AccountID, *reference)
+	generation, err := loadGeneration(ctx, tx, target.AccountID, requestedReference)
 	if err != nil || generation.Generation.TargetID != target.TargetID || generation.Generation.BackupSetID != target.BackupSetID {
 		if err != nil {
 			return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, err
@@ -1305,6 +1338,97 @@ func (store *BackupCustodyStore) ReadSnapshot(ctx context.Context, authorization
 		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, err
 	}
 	return target, generation, nil
+}
+
+func (store *BackupCustodyStore) ListGenerationSnapshot(
+	ctx context.Context,
+	authorization backupcustody.ReadAuthorization,
+	use backupcustody.CredentialUse,
+	clock backupcustody.Clock,
+	request backupcustody.GenerationListRequest,
+) (backupcustody.TargetRecord, backupcustody.GenerationRecord, []backupcustody.GenerationRecord, error) {
+	if clock == nil || authorization.Validate() != nil || authorization.DeploymentID() != store.localDeploymentID ||
+		request.Validate() != nil || authorization.Scope().ScopeID != request.Credential.AccountID {
+		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, serviceauthority.ErrInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, err
+	}
+	defer tx.Rollback(ctx)
+	if err := store.lockReadAccount(ctx, tx, authorization); err != nil {
+		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, err
+	}
+	credentialAuthority, err := loadAcceptedCredentialAuthority(ctx, tx, use, true)
+	if err != nil || !reflect.DeepEqual(credentialAuthority.Grant.Credential, request.Credential) ||
+		!credentialAuthority.Grant.Credential.Admits(backupcustody.Read, clock.Now().UnixMilli()) {
+		if err != nil {
+			return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, err
+		}
+		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, backupcustody.ErrUnauthorized
+	}
+	target, err := loadTarget(ctx, tx, request.Credential.AccountID, request.Credential.TargetID, false)
+	if err != nil || target.BackupSetID != request.Credential.BackupSetID || target.HeadReferenceDigest == nil {
+		if err != nil {
+			return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, err
+		}
+		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, backupcustody.ErrNotFound
+	}
+	headReference := *target.HeadReferenceDigest
+	if request.SnapshotHeadReferenceDigest != nil {
+		headReference = *request.SnapshotHeadReferenceDigest
+	}
+	head, err := loadGeneration(ctx, tx, target.AccountID, headReference)
+	if err != nil || head.Generation.TargetID != target.TargetID || head.Generation.BackupSetID != target.BackupSetID ||
+		request.AfterGeneration >= head.Generation.Generation {
+		if err != nil {
+			return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, err
+		}
+		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, backupcustody.ErrNotFound
+	}
+	if request.AfterGenerationReferenceDigest != nil {
+		if request.AfterGeneration > math.MaxInt64 {
+			return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, serviceauthority.ErrInvalid
+		}
+		predecessor, err := loadGenerationByNumber(
+			ctx, tx, target.AccountID, target.TargetID, int64(request.AfterGeneration),
+		)
+		if err != nil || predecessor.GenerationReferenceDigest != *request.AfterGenerationReferenceDigest ||
+			predecessor.Generation.BackupSetID != target.BackupSetID ||
+			predecessor.Generation.Generation >= head.Generation.Generation {
+			if err != nil {
+				return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, err
+			}
+			return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, backupcustody.ErrNotFound
+		}
+	}
+	remaining := head.Generation.Generation - request.AfterGeneration
+	pageCount := uint64(request.PageCount)
+	if pageCount > remaining {
+		pageCount = remaining
+	}
+	items := make([]backupcustody.GenerationRecord, 0, pageCount)
+	for index := uint64(1); index <= pageCount; index++ {
+		generationNumber := request.AfterGeneration + index
+		if generationNumber > math.MaxInt64 {
+			return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, serviceauthority.ErrInvalid
+		}
+		item, err := loadGenerationByNumber(ctx, tx, target.AccountID, target.TargetID, int64(generationNumber))
+		if err != nil || item.Generation.BackupSetID != target.BackupSetID {
+			if err != nil {
+				return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, err
+			}
+			return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, serviceauthority.ErrInvalid
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, backupcustody.ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return backupcustody.TargetRecord{}, backupcustody.GenerationRecord{}, nil, err
+	}
+	return target, head, items, nil
 }
 
 func loadRetentionTx(ctx context.Context, q backupCustodyQuerier, accountID, requestID uuid.UUID) (backupcustody.RetentionRecord, error) {

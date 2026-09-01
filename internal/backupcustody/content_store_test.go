@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -182,5 +184,81 @@ func TestContentStoreRejectsTamperedImmutableObjectAndReconcilesPublishedOrphan(
 	}
 	if _, err := store.OpenObject(record, object); err == nil {
 		t.Fatal("tampered immutable object accepted")
+	}
+}
+
+func TestContentStoreRangeUsesHeldExactObjectAndDetectsPathSubstitution(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "custody")
+	store, err := OpenContentStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	contents := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	uploadID := uuid.New()
+	if err := store.PrepareUpload(uploadID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileAndAppend(uploadID, 0, contents, uint64(len(contents)), uint64(len(contents))); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	record := serviceauthority.BackupCustodyGenerationRecord{
+		Version: Version, AccountID: uuid.New(), TargetID: uuid.New(), BackupSetID: uuid.New(),
+		Generation: 1, UploadID: uploadID, OuterByteCount: uint64(len(contents)),
+		OuterDigest: base64.RawURLEncoding.EncodeToString(digest[:]),
+	}
+	path, err := store.Publish(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rangeReader, count, err := store.OpenObjectRange(record, path, 10, 9)
+	if err != nil || count != 9 {
+		t.Fatalf("range count=%d err=%v", count, err)
+	}
+	rangeBytes, err := io.ReadAll(rangeReader)
+	if err != nil || !bytes.Equal(rangeBytes, contents[10:19]) || rangeReader.Close() != nil {
+		t.Fatalf("range=%q err=%v", rangeBytes, err)
+	}
+	tailReader, count, err := store.OpenObjectRange(record, path, uint64(len(contents)-3), 10)
+	if err != nil || count != 3 {
+		t.Fatalf("tail count=%d err=%v", count, err)
+	}
+	if tail, err := io.ReadAll(tailReader); err != nil || !bytes.Equal(tail, contents[len(contents)-3:]) {
+		t.Fatalf("tail=%q err=%v", tail, err)
+	}
+	if err := tailReader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.OpenObjectRange(record, path, 0, MaximumRangeByteCount+1); err == nil {
+		t.Fatal("oversized range accepted")
+	}
+
+	held, _, err := store.OpenObjectRange(record, path, 4, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute := filepath.Join(root, path)
+	moved := absolute + ".moved"
+	if err := os.Rename(absolute, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absolute, bytes.Repeat([]byte{'x'}, len(contents)), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 8)
+	if _, err := io.ReadFull(held, buffer); err != nil || !bytes.Equal(buffer, contents[4:12]) {
+		t.Fatalf("held bytes=%q err=%v", buffer, err)
+	}
+	probe := make([]byte, 1)
+	if _, err := held.Read(probe); !errors.Is(err, serviceauthority.ErrInvalid) {
+		t.Fatalf("path substitution not detected: %v", err)
+	}
+	if err := held.Close(); !errors.Is(err, serviceauthority.ErrInvalid) {
+		t.Fatalf("close did not retain substitution error: %v", err)
 	}
 }

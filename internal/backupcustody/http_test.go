@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -370,6 +371,26 @@ func TestBackupHTTPUploadFinalizeReadAndRetentionVertical(t *testing.T) {
 	chunkRequest.Header.Set(HeaderChunkSHA256, digest)
 	setBackupHTTPAuthority(chunkRequest, harness.binding, serviceauthority.TrafficBulk)
 	setBackupTargetHeaders(t, chunkRequest, harness.credential)
+	uploadResource, err := UploadChunkResourceID(harness.credential.Reference, begin.UploadID, 0, uint64(len(wire)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongGrantRequest := chunkRequest.Clone(chunkRequest.Context())
+	wrongGrantRequest.Body = io.NopCloser(bytes.NewReader(wire))
+	wrongGrantRequest.ContentLength = int64(len(wire))
+	setBackupBulkGrant(
+		t, wrongGrantRequest, harness, serviceauthority.BulkUpload, uploadResource, uint64(len(wire)-1),
+	)
+	wrongGrantResponse := httptest.NewRecorder()
+	handler.Handler().ServeHTTP(wrongGrantResponse, wrongGrantRequest)
+	if wrongGrantResponse.Code != http.StatusUnauthorized || store.upload.CommittedBytes != 0 {
+		t.Fatalf("mismatched grant status=%d offset=%d", wrongGrantResponse.Code, store.upload.CommittedBytes)
+	}
+	uploadGrant := requestBackupBulkGrant(t, handler, harness, harness.credential, serviceauthority.BulkGrantRequest{
+		Version: serviceauthority.SchemaVersion, Direction: serviceauthority.BulkUpload,
+		RequiredByteCount: int64(len(wire)), ResourceID: uploadResource, RouteID: harness.binding.RouteID,
+	})
+	setBackupBulkGrantRecord(t, chunkRequest, uploadGrant, serviceauthority.BulkUpload, uploadResource)
 	chunkResponse := httptest.NewRecorder()
 	handler.Handler().ServeHTTP(chunkResponse, chunkRequest)
 	if chunkResponse.Code != http.StatusOK {
@@ -411,20 +432,52 @@ func TestBackupHTTPUploadFinalizeReadAndRetentionVertical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	listRequest := GenerationListRequest{Version: Version, RequestID: uuid.New(), Credential: harness.credential.Reference,
+		AfterGeneration: 0, PageCount: 1, RequestedAtMilliseconds: 1_100}
+	listBody, _ := json.Marshal(listRequest)
+	listHTTP := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/backup-accounts/"+harness.target.AccountID.String()+"/generations/list",
+		bytes.NewReader(listBody),
+	)
+	listHTTP.Header.Set("Content-Type", "application/json")
+	listHTTP.Header.Set("Authorization", "Bearer "+harness.credential.TransportBearer())
+	setBackupHTTPAuthority(listHTTP, harness.binding, serviceauthority.TrafficControl)
+	listResponse := httptest.NewRecorder()
+	handler.Handler().ServeHTTP(listResponse, listHTTP)
+	page, pageErr := DecodeGenerationListPage(listResponse.Body.Bytes())
+	if listResponse.Code != http.StatusOK || pageErr != nil || len(page.Items) != 1 ||
+		page.SnapshotHeadReferenceDigest != store.generation.GenerationReferenceDigest {
+		t.Fatalf("list status=%d body=%s err=%v", listResponse.Code, listResponse.Body.String(), pageErr)
+	}
 
 	readRequest := ReadRequest{
 		Version: Version, Credential: harness.credential.Reference,
 		RequestID: uuid.New(), RequestedAtMilliseconds: 1_100,
+		GenerationReferenceDigest: store.generation.GenerationReferenceDigest,
+		MaximumByteCount:          41, RangeOffset: 17,
 	}
-	readResponse := httptest.NewRecorder()
-	handler.Handler().ServeHTTP(
-		readResponse,
-		backupReadRequest(t, harness, readRequest, harness.credential.TransportBearer()),
+	readHTTP := backupReadRequest(t, harness, readRequest, harness.credential.TransportBearer())
+	downloadResource, err := DownloadRangeResourceID(
+		readRequest.Credential, readRequest.GenerationReferenceDigest, readRequest.RangeOffset, readRequest.MaximumByteCount,
 	)
-	if readResponse.Code != http.StatusOK || !bytes.Equal(readResponse.Body.Bytes(), wire) ||
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadGrant := requestBackupBulkGrant(t, handler, harness, harness.credential, serviceauthority.BulkGrantRequest{
+		Version: serviceauthority.SchemaVersion, Direction: serviceauthority.BulkDownload,
+		RequiredByteCount: int64(readRequest.MaximumByteCount), ResourceID: downloadResource, RouteID: harness.binding.RouteID,
+	})
+	setBackupBulkGrantRecord(t, readHTTP, downloadGrant, serviceauthority.BulkDownload, downloadResource)
+	readResponse := httptest.NewRecorder()
+	handler.Handler().ServeHTTP(readResponse, readHTTP)
+	if readResponse.Code != http.StatusPartialContent || !bytes.Equal(readResponse.Body.Bytes(), wire[17:58]) ||
 		readResponse.Header().Get(HeaderGenerationReference) != store.generation.GenerationReferenceDigest ||
 		readResponse.Header().Get(HeaderOuterDigest) != store.generation.Generation.OuterDigest ||
-		readResponse.Header().Get(HeaderCustodyReceipt) == "" {
+		readResponse.Header().Get(HeaderCustodyReceipt) == "" ||
+		readResponse.Header().Get("Content-Range") != fmt.Sprintf("bytes 17-57/%d", len(wire)) ||
+		readResponse.Header().Get(HeaderRangeOffset) != "17" ||
+		readResponse.Header().Get(HeaderRangeByteCount) != "41" {
 		t.Fatalf("read status=%d headers=%v bytes=%d", readResponse.Code, readResponse.Header(), readResponse.Body.Len())
 	}
 
@@ -457,15 +510,23 @@ func TestBackupHTTPDoesNotEnumerateMissingAuthenticatedObjects(t *testing.T) {
 	harness.coordinator.Store = store
 	handler, _ := newBackupHTTPTestHandlerFromHarness(t, &harness, traffic.DefaultLimits())
 	read := ReadRequest{
-		Version:                 Version,
-		Credential:              harness.credential.Reference,
-		RequestID:               uuid.New(),
-		RequestedAtMilliseconds: 1_100,
+		Version:                   Version,
+		Credential:                harness.credential.Reference,
+		RequestID:                 uuid.New(),
+		RequestedAtMilliseconds:   1_100,
+		GenerationReferenceDigest: strings.Repeat("a", 64),
+		MaximumByteCount:          1, RangeOffset: 0,
 	}
 	correct := backupReadRequest(t, harness, read, harness.credential.TransportBearer())
+	resource, err := DownloadRangeResourceID(read.Credential, read.GenerationReferenceDigest, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setBackupBulkGrant(t, correct, harness, serviceauthority.BulkDownload, resource, 1)
 	correctResponse := httptest.NewRecorder()
 	handler.Handler().ServeHTTP(correctResponse, correct)
 	wrong := backupReadRequest(t, harness, read, base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)))
+	setBackupBulkGrant(t, wrong, harness, serviceauthority.BulkDownload, resource, 1)
 	wrongResponse := httptest.NewRecorder()
 	handler.Handler().ServeHTTP(wrongResponse, wrong)
 	if correctResponse.Code != http.StatusUnauthorized || wrongResponse.Code != http.StatusUnauthorized ||
@@ -610,6 +671,73 @@ func setBackupTargetHeaders(t *testing.T, request *http.Request, credential Targ
 	request.Header.Set(HeaderTargetCredentialReference, base64.RawURLEncoding.EncodeToString(reference))
 }
 
+func setBackupBulkGrant(
+	t *testing.T,
+	request *http.Request,
+	harness coordinatorHarness,
+	direction serviceauthority.BulkDirection,
+	resourceID string,
+	byteCount uint64,
+) {
+	t.Helper()
+	grant, err := harness.coordinator.Signer.SignBulkTransferGrant(serviceauthority.BulkGrantPayload{
+		Version: serviceauthority.SchemaVersion, GrantID: uuid.New(), Scope: harness.binding.Scope,
+		AuthorityManifestDigest: harness.binding.AuthorityDigest, DeploymentID: harness.binding.DeploymentID,
+		RouteID: harness.binding.RouteID, ResourceID: resourceID, Direction: direction,
+		MaximumByteCount: int64(byteCount), NotBeforeMilliseconds: 1_000, ExpiresAtMilliseconds: 1_200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setBackupBulkGrantRecord(t, request, grant, direction, resourceID)
+}
+
+func setBackupBulkGrantRecord(
+	t *testing.T,
+	request *http.Request,
+	grant serviceauthority.BulkTransferGrant,
+	direction serviceauthority.BulkDirection,
+	resourceID string,
+) {
+	t.Helper()
+	encoded, err := json.Marshal(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set(serviceauthority.HeaderBulkTransferGrant, base64.RawURLEncoding.EncodeToString(encoded))
+	request.Header.Set(serviceauthority.HeaderBulkResourceID, resourceID)
+	request.Header.Set(serviceauthority.HeaderBulkDirection, string(direction))
+}
+
+func requestBackupBulkGrant(
+	t *testing.T,
+	handler *HTTPHandler,
+	harness coordinatorHarness,
+	credential TargetCredential,
+	value serviceauthority.BulkGrantRequest,
+) serviceauthority.BulkTransferGrant {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/backup-accounts/"+credential.Reference.AccountID.String()+"/bulk-transfer-grants",
+		bytes.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	setBackupHTTPAuthority(request, harness.binding, serviceauthority.TrafficControl)
+	setBackupTargetHeaders(t, request, credential)
+	response := httptest.NewRecorder()
+	handler.Handler().ServeHTTP(response, request)
+	var grant serviceauthority.BulkTransferGrant
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &grant) != nil {
+		t.Fatalf("bulk grant status=%d body=%s", response.Code, response.Body.String())
+	}
+	return grant
+}
+
 func backupBeginRequest(t *testing.T, harness coordinatorHarness, value PublishRequest) *http.Request {
 	t.Helper()
 	body, _ := json.Marshal(value)
@@ -635,6 +763,36 @@ type httpBeginStore struct {
 	reserved UploadRecord
 }
 
+func (store *httpBeginStore) AuthorizeUploadSnapshot(
+	_ context.Context,
+	authorization ReadAuthorization,
+	use CredentialUse,
+	_ Clock,
+	uploadID uuid.UUID,
+) (UploadRecord, error) {
+	if authorization.Validate() != nil || uploadID != store.upload.UploadID || store.upload.Committed ||
+		!reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) ||
+		use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
+		return UploadRecord{}, ErrUnauthorized
+	}
+	return store.upload, nil
+}
+
+func (store *httpBeginStore) ListGenerationSnapshot(
+	_ context.Context,
+	authorization ReadAuthorization,
+	use CredentialUse,
+	_ Clock,
+	request GenerationListRequest,
+) (TargetRecord, GenerationRecord, []GenerationRecord, error) {
+	if authorization.Validate() != nil || request.Validate() != nil || store.generation.ValidateStored() != nil ||
+		!reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) ||
+		use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
+		return TargetRecord{}, GenerationRecord{}, nil, ErrUnauthorized
+	}
+	return store.target, store.generation, []GenerationRecord{store.generation}, nil
+}
+
 func (store *httpBeginStore) ReserveUpload(_ context.Context, proposed UploadRecord, use CredentialUse, _ Clock, _ serviceauthority.MutationAuthorization) (UploadRecord, bool, error) {
 	if !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) || use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest {
 		return UploadRecord{}, false, ErrUnauthorized
@@ -656,11 +814,11 @@ func (store *httpBeginStore) ReadSnapshot(
 	use CredentialUse,
 	_ Clock,
 	targetID uuid.UUID,
-	reference *string,
+	reference string,
 ) (TargetRecord, GenerationRecord, error) {
 	if authorization.Validate() != nil || !reflect.DeepEqual(use.Reference, store.credentialAuthority.Grant.Credential) ||
 		use.AuthorizationDigest != store.credentialAuthority.Grant.AuthorizationDigest || targetID != store.target.TargetID ||
-		(reference != nil && *reference != store.generation.GenerationReferenceDigest) {
+		reference != store.generation.GenerationReferenceDigest {
 		return TargetRecord{}, GenerationRecord{}, ErrNotFound
 	}
 	return store.target, store.generation, nil
@@ -668,7 +826,7 @@ func (store *httpBeginStore) ReadSnapshot(
 
 type httpReadNotFoundStore struct{ faultingCoordinatorStore }
 
-func (*httpReadNotFoundStore) ReadSnapshot(context.Context, ReadAuthorization, CredentialUse, Clock, uuid.UUID, *string) (TargetRecord, GenerationRecord, error) {
+func (*httpReadNotFoundStore) ReadSnapshot(context.Context, ReadAuthorization, CredentialUse, Clock, uuid.UUID, string) (TargetRecord, GenerationRecord, error) {
 	return TargetRecord{}, GenerationRecord{}, ErrNotFound
 }
 

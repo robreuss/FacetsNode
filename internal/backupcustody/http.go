@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -28,6 +29,8 @@ const (
 	HeaderGenerationReference       = "X-Facets-Backup-Generation-Reference"
 	HeaderCustodyReceipt            = "X-Facets-Backup-Custody-Receipt"
 	HeaderOuterDigest               = "X-Facets-Backup-Outer-Digest"
+	HeaderRangeOffset               = "X-Facets-Backup-Range-Offset"
+	HeaderRangeByteCount            = "X-Facets-Backup-Range-Byte-Count"
 	maximumProvisionRequestBytes    = 2 * 1024 * 1024
 	maximumHTTPChunkBytes           = 64 * 1024 * 1024
 )
@@ -123,9 +126,11 @@ func (handler *HTTPHandler) Handler() http.Handler {
 	mux.Handle("POST /v1/backup-accounts/{accountID}/provision", handler.limited(handler.management, http.HandlerFunc(handler.handleProvisionAccount)))
 	mux.Handle("POST /v1/backup-accounts/{accountID}/control-commands", handler.limited(handler.management, http.HandlerFunc(handler.handleControlCommand)))
 	mux.Handle("POST /v1/backup-accounts/{accountID}/uploads", handler.limited(handler.management, http.HandlerFunc(handler.handleBeginUpload)))
+	mux.Handle("POST /v1/backup-accounts/{accountID}/bulk-transfer-grants", handler.limited(handler.management, http.HandlerFunc(handler.handleBulkTransferGrant)))
 	mux.Handle("PUT /v1/backup-accounts/{accountID}/uploads/{uploadID}/chunks", handler.limited(handler.storage, http.HandlerFunc(handler.handleUploadChunk)))
 	mux.Handle("POST /v1/backup-accounts/{accountID}/uploads/{uploadID}/finalize", handler.limited(handler.management, http.HandlerFunc(handler.handleFinalizeUpload)))
 	mux.Handle("POST /v1/backup-accounts/{accountID}/read", handler.limited(handler.storage, http.HandlerFunc(handler.handleRead)))
+	mux.Handle("POST /v1/backup-accounts/{accountID}/generations/list", handler.limited(handler.management, http.HandlerFunc(handler.handleListGenerations)))
 	mux.Handle("POST /v1/backup-accounts/{accountID}/retention-proofs", handler.limited(handler.management, http.HandlerFunc(handler.handleRetentionProof)))
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
@@ -354,6 +359,32 @@ func (handler *HTTPHandler) handleBeginUpload(writer http.ResponseWriter, reques
 	})
 }
 
+func (handler *HTTPHandler) handleBulkTransferGrant(writer http.ResponseWriter, request *http.Request) {
+	accountID, ok := pathUUID(request, "accountID")
+	var body serviceauthority.BulkGrantRequest
+	if !ok || decodeBoundedJSON(request, &body, MaximumRequestByteCount, true) != nil || body.Validate() != nil {
+		writeBackupError(writer, http.StatusBadRequest, "invalid_bulk_grant_request")
+		return
+	}
+	reference, credentialOK := targetReferenceHeaders(request, accountID)
+	credential, credentialErr := ParseTargetCredential(reference, bearerFromAuthorization(request))
+	binding, bindingErr := handler.binding(request, accountID, serviceauthority.TrafficControl)
+	if !credentialOK || credentialErr != nil {
+		writeBackupError(writer, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if bindingErr != nil {
+		writeBackupError(writer, http.StatusConflict, "stale_or_invalid_service_authority")
+		return
+	}
+	grant, err := handler.coordinator.IssueBulkTransferGrant(request.Context(), credential, body, binding)
+	if err != nil {
+		writeBackupOperationError(writer, err)
+		return
+	}
+	writeBackupCanonicalJSON(writer, http.StatusOK, grant, MaximumRequestByteCount)
+}
+
 func (handler *HTTPHandler) handleUploadChunk(writer http.ResponseWriter, request *http.Request) {
 	accountID, accountOK := pathUUID(request, "accountID")
 	uploadID, uploadOK := pathUUID(request, "uploadID")
@@ -380,12 +411,68 @@ func (handler *HTTPHandler) handleUploadChunk(writer http.ResponseWriter, reques
 		writeBackupError(writer, http.StatusConflict, "stale_or_invalid_service_authority")
 		return
 	}
+	resourceID, resourceErr := UploadChunkResourceID(reference, uploadID, offset, uint64(len(chunk)))
+	grant, grantErr := handler.authorityBindings.AuthorizeBulkTransfer(
+		binding, serviceauthority.RequestMutation, request.Method, request.Header, handler.now(), handler.deploymentSigner,
+	)
+	if resourceErr != nil || grantErr != nil || grant.ResourceID != resourceID ||
+		grant.MaximumByteCount != int64(len(chunk)) {
+		writeBackupError(writer, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	next, err := handler.coordinator.AppendUploadChunk(request.Context(), credential, binding, uploadID, offset, chunk, digest)
 	if err != nil {
 		writeBackupOperationError(writer, err)
 		return
 	}
 	writeBackupJSON(writer, http.StatusOK, map[string]uint64{"nextOffset": next})
+}
+
+func (handler *HTTPHandler) handleListGenerations(writer http.ResponseWriter, request *http.Request) {
+	accountID, ok := pathUUID(request, "accountID")
+	body, err := readBoundedBody(request, MaximumRequestByteCount, true)
+	if !ok || err != nil {
+		writeBackupError(writer, http.StatusBadRequest, "invalid_generation_list_request")
+		return
+	}
+	listRequest, err := DecodeGenerationListRequest(body)
+	if err != nil || listRequest.Credential.AccountID != accountID {
+		writeBackupError(writer, http.StatusBadRequest, "invalid_generation_list_request")
+		return
+	}
+	credential, credentialOK := targetCredential(request, listRequest.Credential)
+	binding, bindingErr := handler.binding(request, accountID, serviceauthority.TrafficControl)
+	if !credentialOK {
+		writeBackupError(writer, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if bindingErr != nil {
+		writeBackupError(writer, http.StatusConflict, "stale_or_invalid_service_authority")
+		return
+	}
+	result, err := handler.coordinator.ListGenerations(request.Context(), credential, listRequest, binding)
+	if err != nil {
+		writeBackupOperationError(writer, err)
+		return
+	}
+	items := make([]GenerationListItem, 0, len(result.Items))
+	for _, item := range result.Items {
+		items = append(items, GenerationListItem{
+			GenerationReferenceDigest: item.GenerationReferenceDigest,
+			CustodyReceipt:            item.CustodyReceipt,
+		})
+	}
+	page := GenerationListPage{
+		Version: Version, RequestID: listRequest.RequestID, AfterGeneration: listRequest.AfterGeneration,
+		AfterGenerationReferenceDigest: listRequest.AfterGenerationReferenceDigest,
+		SnapshotHeadReferenceDigest:    result.Head.GenerationReferenceDigest,
+		SnapshotHeadCustodyReceipt:     result.Head.CustodyReceipt, Items: items,
+	}
+	if page.ValidateResponse(listRequest) != nil {
+		writeBackupError(writer, http.StatusInternalServerError, "custody_unavailable")
+		return
+	}
+	writeBackupCanonicalJSON(writer, http.StatusOK, page, MaximumGenerationPageByteCount)
 }
 
 func (handler *HTTPHandler) handleFinalizeUpload(writer http.ResponseWriter, request *http.Request) {
@@ -468,6 +555,17 @@ func (handler *HTTPHandler) handleRead(writer http.ResponseWriter, request *http
 		writeBackupError(writer, http.StatusConflict, "stale_or_invalid_service_authority")
 		return
 	}
+	resourceID, resourceErr := DownloadRangeResourceID(
+		read.Credential, read.GenerationReferenceDigest, read.RangeOffset, read.MaximumByteCount,
+	)
+	grant, grantErr := handler.authorityBindings.AuthorizeBulkTransfer(
+		binding, serviceauthority.RequestRead, request.Method, request.Header, handler.now(), handler.deploymentSigner,
+	)
+	if resourceErr != nil || grantErr != nil || grant.ResourceID != resourceID ||
+		grant.MaximumByteCount != int64(read.MaximumByteCount) {
+		writeBackupError(writer, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	result, err := handler.coordinator.Read(request.Context(), credential, read, binding)
 	if err != nil {
 		writeBackupOperationError(writer, err)
@@ -488,11 +586,18 @@ func (handler *HTTPHandler) handleRead(writer http.ResponseWriter, request *http
 		return
 	}
 	writer.Header().Set("Content-Type", "application/octet-stream")
-	writer.Header().Set("Content-Length", strconv.FormatUint(result.Generation.Generation.OuterByteCount, 10))
+	writer.Header().Set("Accept-Ranges", "bytes")
+	writer.Header().Set("Content-Length", strconv.FormatUint(result.RangeByteCount, 10))
+	writer.Header().Set("Content-Range", fmt.Sprintf(
+		"bytes %d-%d/%d", result.RangeOffset, result.RangeOffset+result.RangeByteCount-1,
+		result.Generation.Generation.OuterByteCount,
+	))
 	writer.Header().Set(HeaderGenerationReference, result.Generation.GenerationReferenceDigest)
 	writer.Header().Set(HeaderCustodyReceipt, base64.RawURLEncoding.EncodeToString(receipt))
 	writer.Header().Set(HeaderOuterDigest, result.Generation.Generation.OuterDigest)
-	writer.WriteHeader(http.StatusOK)
+	writer.Header().Set(HeaderRangeOffset, strconv.FormatUint(result.RangeOffset, 10))
+	writer.Header().Set(HeaderRangeByteCount, strconv.FormatUint(result.RangeByteCount, 10))
+	writer.WriteHeader(http.StatusPartialContent)
 	_, _ = copyBackupStream(
 		writer, controller, result.Content, handler.streamIdlePeriod, handler.streamNow,
 	)
@@ -683,6 +788,18 @@ func writeBackupJSON(writer http.ResponseWriter, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(value)
+}
+
+func writeBackupCanonicalJSON(writer http.ResponseWriter, status int, value any, maximum int) {
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) == 0 || maximum <= 0 || len(encoded) > maximum {
+		writeBackupError(writer, http.StatusInternalServerError, "custody_unavailable")
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
+	writer.WriteHeader(status)
+	_, _ = writer.Write(encoded)
 }
 
 func writeBackupError(writer http.ResponseWriter, status int, code string) {

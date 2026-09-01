@@ -446,7 +446,7 @@ func (coordinator *Coordinator) Read(
 		return ReadResult{}, serviceauthority.ErrInvalid
 	}
 	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: request.Credential.AccountID}
-	if binding.Scope != scope {
+	if binding.Scope != scope || binding.TrafficClass != serviceauthority.TrafficBulk {
 		return ReadResult{}, ErrUnauthorized
 	}
 	lease, err := coordinator.Registry.AcquireMutationLease(ctx, scope)
@@ -471,11 +471,157 @@ func (coordinator *Coordinator) Read(
 		generation.Generation.BackupSetID != target.BackupSetID {
 		return ReadResult{}, ErrNotFound
 	}
-	file, err := coordinator.Content.OpenObject(generation.Generation, generation.ObjectPath)
+	file, rangeByteCount, err := coordinator.Content.OpenObjectRange(
+		generation.Generation, generation.ObjectPath, request.RangeOffset, request.MaximumByteCount,
+	)
 	if err != nil {
 		return ReadResult{}, err
 	}
-	return ReadResult{Generation: generation, Content: file}, nil
+	return ReadResult{Generation: generation, Content: file, RangeOffset: request.RangeOffset, RangeByteCount: rangeByteCount}, nil
+}
+
+func (coordinator *Coordinator) ListGenerations(
+	ctx context.Context,
+	credential TargetCredential,
+	request GenerationListRequest,
+	binding serviceauthority.RequestBinding,
+) (GenerationListResult, error) {
+	if coordinator.validate() != nil || request.Validate() != nil ||
+		!targetReferencesEqual(credential.Reference, request.Credential) {
+		return GenerationListResult{}, serviceauthority.ErrInvalid
+	}
+	use, err := credentialUse(credential)
+	if err != nil {
+		return GenerationListResult{}, serviceauthority.ErrInvalid
+	}
+	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: request.Credential.AccountID}
+	if binding.Scope != scope || binding.TrafficClass != serviceauthority.TrafficControl {
+		return GenerationListResult{}, ErrUnauthorized
+	}
+	lease, err := coordinator.Registry.AcquireMutationLease(ctx, scope)
+	if err != nil {
+		return GenerationListResult{}, err
+	}
+	defer lease.Release()
+	now := coordinator.Clock.Now()
+	if coordinator.Registry.AuthorizeRequestAt(binding, serviceauthority.RequestRead, now) != nil ||
+		!credential.Reference.Admits(Read, now.UnixMilli()) {
+		return GenerationListResult{}, ErrUnauthorized
+	}
+	authorization, err := newReadAuthorization(binding, now)
+	if err != nil {
+		return GenerationListResult{}, err
+	}
+	target, head, items, err := coordinator.Store.ListGenerationSnapshot(ctx, authorization, use, coordinator.Clock, request)
+	if err != nil {
+		return GenerationListResult{}, err
+	}
+	if head.ValidateStored() != nil || len(items) == 0 || head.Generation.TargetID != target.TargetID ||
+		head.Generation.BackupSetID != target.BackupSetID {
+		return GenerationListResult{}, serviceauthority.ErrInvalid
+	}
+	for _, item := range items {
+		if item.ValidateStored() != nil || item.Generation.TargetID != target.TargetID ||
+			item.Generation.BackupSetID != target.BackupSetID {
+			return GenerationListResult{}, serviceauthority.ErrInvalid
+		}
+	}
+	return GenerationListResult{Target: target, Head: head, Items: items}, nil
+}
+
+func (coordinator *Coordinator) IssueBulkTransferGrant(
+	ctx context.Context,
+	credential TargetCredential,
+	request serviceauthority.BulkGrantRequest,
+	binding serviceauthority.RequestBinding,
+) (serviceauthority.BulkTransferGrant, error) {
+	if coordinator.validate() != nil || request.Validate() != nil || request.RequiredByteCount <= 0 ||
+		uint64(request.RequiredByteCount) > MaximumRangeByteCount ||
+		binding.TrafficClass != serviceauthority.TrafficControl {
+		return serviceauthority.BulkTransferGrant{}, serviceauthority.ErrInvalid
+	}
+	resource, err := ParseBackupBulkResourceID(request.ResourceID)
+	credentialReference, credentialReferenceErr := credential.Reference.ReferenceDigest()
+	use, useErr := credentialUse(credential)
+	if err != nil || credentialReferenceErr != nil || useErr != nil || resource.Direction != request.Direction ||
+		resource.CredentialReferenceDigest != credentialReference || resource.ByteCount != uint64(request.RequiredByteCount) {
+		return serviceauthority.BulkTransferGrant{}, serviceauthority.ErrInvalid
+	}
+	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeBackupCustody, ScopeID: credential.Reference.AccountID}
+	if binding.Scope != scope {
+		return serviceauthority.BulkTransferGrant{}, ErrUnauthorized
+	}
+	lease, err := coordinator.Registry.AcquireMutationLease(ctx, scope)
+	if err != nil {
+		return serviceauthority.BulkTransferGrant{}, err
+	}
+	defer lease.Release()
+	now := coordinator.Clock.Now()
+	access := serviceauthority.RequestRead
+	requiredCapability := Read
+	if request.Direction == serviceauthority.BulkUpload {
+		access = serviceauthority.RequestMutation
+		requiredCapability = Publish
+	}
+	bulkBinding := binding
+	bulkBinding.RouteID = request.RouteID
+	bulkBinding.TrafficClass = serviceauthority.TrafficBulk
+	if coordinator.Registry.AuthorizeRequestAt(binding, access, now) != nil ||
+		coordinator.Registry.AuthorizeRequestAt(bulkBinding, access, now) != nil ||
+		!credential.Reference.Admits(requiredCapability, now.UnixMilli()) {
+		return serviceauthority.BulkTransferGrant{}, ErrUnauthorized
+	}
+	authorization, err := newReadAuthorization(binding, now)
+	if err != nil {
+		return serviceauthority.BulkTransferGrant{}, err
+	}
+	switch request.Direction {
+	case serviceauthority.BulkUpload:
+		upload, err := coordinator.Store.AuthorizeUploadSnapshot(ctx, authorization, use, coordinator.Clock, resource.UploadID)
+		if err != nil {
+			return serviceauthority.BulkTransferGrant{}, err
+		}
+		if upload.UploadID != resource.UploadID || upload.CommittedBytes != resource.Offset ||
+			resource.ByteCount > coordinator.MaximumChunkBytes ||
+			resource.ByteCount > coordinator.MaximumGenerationBytes ||
+			resource.Offset > coordinator.MaximumGenerationBytes-resource.ByteCount {
+			return serviceauthority.BulkTransferGrant{}, ErrConflict
+		}
+	case serviceauthority.BulkDownload:
+		_, generation, err := coordinator.Store.ReadSnapshot(
+			ctx, authorization, use, coordinator.Clock, credential.Reference.TargetID, resource.GenerationReferenceDigest,
+		)
+		if err != nil {
+			return serviceauthority.BulkTransferGrant{}, err
+		}
+		if resource.Offset >= generation.Generation.OuterByteCount ||
+			resource.ByteCount > generation.Generation.OuterByteCount-resource.Offset {
+			return serviceauthority.BulkTransferGrant{}, ErrConflict
+		}
+	default:
+		return serviceauthority.BulkTransferGrant{}, serviceauthority.ErrInvalid
+	}
+	freshNow := coordinator.Clock.Now()
+	if freshNow.Before(now) {
+		return serviceauthority.BulkTransferGrant{}, ErrClockRollback
+	}
+	if coordinator.Registry.AuthorizeRequestAt(binding, access, freshNow) != nil ||
+		coordinator.Registry.AuthorizeRequestAt(bulkBinding, access, freshNow) != nil ||
+		!credential.Reference.Admits(requiredCapability, freshNow.UnixMilli()) {
+		return serviceauthority.BulkTransferGrant{}, ErrUnauthorized
+	}
+	grantID := coordinator.NewID()
+	if grantID == uuid.Nil || freshNow.UnixMilli() > math.MaxInt64-serviceauthority.MaximumBulkGrantLifetime.Milliseconds() {
+		return serviceauthority.BulkTransferGrant{}, serviceauthority.ErrInvalid
+	}
+	payload := serviceauthority.BulkGrantPayload{
+		Version: serviceauthority.SchemaVersion, GrantID: grantID, Scope: scope,
+		AuthorityManifestDigest: binding.AuthorityDigest, DeploymentID: binding.DeploymentID,
+		RouteID: request.RouteID, ResourceID: request.ResourceID, Direction: request.Direction,
+		MaximumByteCount: request.RequiredByteCount, NotBeforeMilliseconds: freshNow.UnixMilli(),
+		ExpiresAtMilliseconds: freshNow.Add(serviceauthority.MaximumBulkGrantLifetime).UnixMilli(),
+	}
+	return coordinator.Signer.SignBulkTransferGrant(payload)
 }
 
 func (coordinator *Coordinator) authorizeMutation(ctx context.Context, accountID uuid.UUID, binding serviceauthority.RequestBinding) (*serviceauthority.ScopeLease, serviceauthority.MutationAuthorization, time.Time, error) {

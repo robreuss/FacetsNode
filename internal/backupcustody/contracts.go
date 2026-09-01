@@ -9,7 +9,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -19,6 +21,14 @@ import (
 const Version = 1
 
 const MaximumRequestByteCount = 32 * 1024
+
+const MaximumGenerationPageCount = 32
+
+const MaximumGenerationPageByteCount = 2 * 1024 * 1024
+
+const MaximumRangeByteCount uint64 = 64 * 1024 * 1024
+
+const targetCredentialReferenceDomain = "Facets backup custody target credential reference v1\x00"
 
 const (
 	outerMagic               = "facets.backup.outer.v1\x00"
@@ -93,6 +103,75 @@ func (reference TargetCredentialReference) Admits(capability Capability, at int6
 		}
 	}
 	return false
+}
+
+func (reference TargetCredentialReference) ReferenceDigest() (string, error) {
+	if reference.Validate() != nil {
+		return "", serviceauthority.ErrInvalid
+	}
+	encoded, err := json.Marshal(reference)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(append([]byte(targetCredentialReferenceDomain), encoded...))
+	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+type BackupBulkResource struct {
+	CredentialReferenceDigest string
+	Direction                 serviceauthority.BulkDirection
+	GenerationReferenceDigest string
+	UploadID                  uuid.UUID
+	Offset                    uint64
+	ByteCount                 uint64
+}
+
+func UploadChunkResourceID(reference TargetCredentialReference, uploadID uuid.UUID, offset, byteCount uint64) (string, error) {
+	credentialReference, err := reference.ReferenceDigest()
+	if err != nil || uploadID == uuid.Nil || byteCount == 0 || byteCount > MaximumRangeByteCount || offset > ^uint64(0)-byteCount {
+		return "", serviceauthority.ErrInvalid
+	}
+	return fmt.Sprintf("facets-backup-upload-chunk-v1:%s:%s:%d:%d", credentialReference, uploadID, offset, byteCount), nil
+}
+
+func DownloadRangeResourceID(reference TargetCredentialReference, generationReference string, offset, byteCount uint64) (string, error) {
+	credentialReference, err := reference.ReferenceDigest()
+	if err != nil || !validHexDigest(generationReference) || byteCount == 0 || byteCount > MaximumRangeByteCount || offset > ^uint64(0)-byteCount {
+		return "", serviceauthority.ErrInvalid
+	}
+	return fmt.Sprintf("facets-backup-download-range-v1:%s:%s:%d:%d", credentialReference, generationReference, offset, byteCount), nil
+}
+
+func ParseBackupBulkResourceID(value string) (BackupBulkResource, error) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 5 || !validHexDigest(parts[1]) {
+		return BackupBulkResource{}, serviceauthority.ErrInvalid
+	}
+	offset, offsetErr := strconv.ParseUint(parts[3], 10, 64)
+	count, countErr := strconv.ParseUint(parts[4], 10, 64)
+	resource := BackupBulkResource{CredentialReferenceDigest: parts[1], Offset: offset, ByteCount: count}
+	if offsetErr != nil || countErr != nil || strconv.FormatUint(offset, 10) != parts[3] ||
+		strconv.FormatUint(count, 10) != parts[4] || count == 0 || count > MaximumRangeByteCount ||
+		offset > ^uint64(0)-count {
+		return BackupBulkResource{}, serviceauthority.ErrInvalid
+	}
+	switch parts[0] {
+	case "facets-backup-upload-chunk-v1":
+		resource.Direction = serviceauthority.BulkUpload
+		resource.UploadID, offsetErr = uuid.Parse(parts[2])
+		if offsetErr != nil || resource.UploadID == uuid.Nil || resource.UploadID.String() != parts[2] {
+			return BackupBulkResource{}, serviceauthority.ErrInvalid
+		}
+	case "facets-backup-download-range-v1":
+		resource.Direction = serviceauthority.BulkDownload
+		resource.GenerationReferenceDigest = parts[2]
+		if !validHexDigest(resource.GenerationReferenceDigest) {
+			return BackupBulkResource{}, serviceauthority.ErrInvalid
+		}
+	default:
+		return BackupBulkResource{}, serviceauthority.ErrInvalid
+	}
+	return resource, nil
 }
 
 type PublishRequest struct {
@@ -190,7 +269,9 @@ func ComputeGenerationRecord(
 
 type ReadRequest struct {
 	Credential                TargetCredentialReference `json:"credential"`
-	GenerationReferenceDigest *string                   `json:"generationReferenceDigest,omitempty"`
+	GenerationReferenceDigest string                    `json:"generationReferenceDigest"`
+	MaximumByteCount          uint64                    `json:"maximumByteCount"`
+	RangeOffset               uint64                    `json:"rangeOffset"`
 	RequestID                 uuid.UUID                 `json:"requestID"`
 	RequestedAtMilliseconds   int64                     `json:"requestedAtMilliseconds"`
 	Version                   int                       `json:"version"`
@@ -199,7 +280,9 @@ type ReadRequest struct {
 func (request ReadRequest) Validate() error {
 	if request.Version != Version || request.RequestID == uuid.Nil ||
 		!request.Credential.Admits(Read, request.RequestedAtMilliseconds) ||
-		(request.GenerationReferenceDigest != nil && !validHexDigest(*request.GenerationReferenceDigest)) {
+		!validHexDigest(request.GenerationReferenceDigest) ||
+		request.MaximumByteCount == 0 || request.MaximumByteCount > MaximumRangeByteCount ||
+		request.RangeOffset > ^uint64(0)-request.MaximumByteCount {
 		return serviceauthority.ErrInvalid
 	}
 	return nil
@@ -212,6 +295,144 @@ func (request ReadRequest) Scope() (serviceauthority.Scope, error) {
 	return serviceauthority.Scope{
 		Kind: serviceauthority.ScopeBackupCustody, ScopeID: request.Credential.AccountID,
 	}, nil
+}
+
+type GenerationListRequest struct {
+	AfterGeneration                uint64                    `json:"afterGeneration"`
+	AfterGenerationReferenceDigest *string                   `json:"afterGenerationReferenceDigest,omitempty"`
+	Credential                     TargetCredentialReference `json:"credential"`
+	PageCount                      int                       `json:"pageCount"`
+	RequestID                      uuid.UUID                 `json:"requestID"`
+	RequestedAtMilliseconds        int64                     `json:"requestedAtMilliseconds"`
+	SnapshotHeadReferenceDigest    *string                   `json:"snapshotHeadReferenceDigest,omitempty"`
+	Version                        int                       `json:"version"`
+}
+
+func (request GenerationListRequest) Validate() error {
+	if request.Version != Version || request.RequestID == uuid.Nil ||
+		!request.Credential.Admits(Read, request.RequestedAtMilliseconds) ||
+		(request.AfterGeneration == 0) != (request.SnapshotHeadReferenceDigest == nil) ||
+		(request.AfterGeneration == 0) != (request.AfterGenerationReferenceDigest == nil) ||
+		(request.AfterGenerationReferenceDigest != nil && !validHexDigest(*request.AfterGenerationReferenceDigest)) ||
+		(request.SnapshotHeadReferenceDigest != nil && !validHexDigest(*request.SnapshotHeadReferenceDigest)) ||
+		request.PageCount <= 0 || request.PageCount > MaximumGenerationPageCount {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
+func (request GenerationListRequest) Scope() (serviceauthority.Scope, error) {
+	if request.Validate() != nil {
+		return serviceauthority.Scope{}, serviceauthority.ErrInvalid
+	}
+	return serviceauthority.Scope{
+		Kind: serviceauthority.ScopeBackupCustody, ScopeID: request.Credential.AccountID,
+	}, nil
+}
+
+type GenerationListItem struct {
+	CustodyReceipt            serviceauthority.BackupCustodyReceipt `json:"custodyReceipt"`
+	GenerationReferenceDigest string                                `json:"generationReferenceDigest"`
+}
+
+func (item GenerationListItem) Validate() error {
+	payload, err := item.CustodyReceipt.VerifiedPayload()
+	if err != nil {
+		return serviceauthority.ErrInvalid
+	}
+	reference, referenceErr := payload.Generation.ReferenceDigest()
+	if referenceErr != nil || payload.Kind != serviceauthority.BackupCustodyCommittedKind ||
+		!validHexDigest(item.GenerationReferenceDigest) || reference != item.GenerationReferenceDigest {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
+type GenerationListPage struct {
+	AfterGeneration                uint64                                `json:"afterGeneration"`
+	AfterGenerationReferenceDigest *string                               `json:"afterGenerationReferenceDigest,omitempty"`
+	Items                          []GenerationListItem                  `json:"items"`
+	RequestID                      uuid.UUID                             `json:"requestID"`
+	SnapshotHeadCustodyReceipt     serviceauthority.BackupCustodyReceipt `json:"snapshotHeadCustodyReceipt"`
+	SnapshotHeadReferenceDigest    string                                `json:"snapshotHeadReferenceDigest"`
+	Version                        int                                   `json:"version"`
+}
+
+func (page GenerationListPage) Validate() error {
+	head, err := page.SnapshotHeadCustodyReceipt.VerifiedPayload()
+	if err != nil {
+		return serviceauthority.ErrInvalid
+	}
+	headReference, referenceErr := head.Generation.ReferenceDigest()
+	if referenceErr != nil || page.Version != Version || page.RequestID == uuid.Nil ||
+		head.Kind != serviceauthority.BackupCustodyCommittedKind || !validHexDigest(page.SnapshotHeadReferenceDigest) ||
+		headReference != page.SnapshotHeadReferenceDigest || len(page.Items) == 0 ||
+		len(page.Items) > MaximumGenerationPageCount || page.AfterGeneration >= head.Generation.Generation {
+		return serviceauthority.ErrInvalid
+	}
+	previous := page.AfterGeneration
+	previousReference := page.AfterGenerationReferenceDigest
+	if (page.AfterGeneration == 0) != (previousReference == nil) ||
+		(previousReference != nil && !validHexDigest(*previousReference)) {
+		return serviceauthority.ErrInvalid
+	}
+	for _, item := range page.Items {
+		payload, itemErr := item.CustodyReceipt.VerifiedPayload()
+		if item.Validate() != nil || itemErr != nil || previous == ^uint64(0) ||
+			payload.Generation.AccountID != head.Generation.AccountID ||
+			payload.Generation.TargetID != head.Generation.TargetID ||
+			payload.Generation.BackupSetID != head.Generation.BackupSetID ||
+			payload.Generation.Generation != previous+1 ||
+			!sameOptionalString(payload.Generation.PredecessorReferenceDigest, previousReference) ||
+			payload.Generation.Generation > head.Generation.Generation {
+			return serviceauthority.ErrInvalid
+		}
+		previous = payload.Generation.Generation
+		reference := item.GenerationReferenceDigest
+		previousReference = &reference
+	}
+	if previous == head.Generation.Generation &&
+		(previousReference == nil || *previousReference != page.SnapshotHeadReferenceDigest) {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
+// ValidateResponse exact-binds a self-consistent page to the request that
+// elicited it. The initial response selects one signed head; every successor
+// response must preserve that head and echo the exact prior position. A page
+// must also be full unless it reaches the pinned head, preventing silent
+// omission from being confused with completion.
+func (page GenerationListPage) ValidateResponse(request GenerationListRequest) error {
+	if page.Validate() != nil || request.Validate() != nil || page.RequestID != request.RequestID ||
+		page.AfterGeneration != request.AfterGeneration ||
+		!sameOptionalString(page.AfterGenerationReferenceDigest, request.AfterGenerationReferenceDigest) ||
+		(request.SnapshotHeadReferenceDigest != nil &&
+			*request.SnapshotHeadReferenceDigest != page.SnapshotHeadReferenceDigest) {
+		return serviceauthority.ErrInvalid
+	}
+	head, err := page.SnapshotHeadCustodyReceipt.VerifiedPayload()
+	if err != nil || head.Generation.AccountID != request.Credential.AccountID ||
+		head.Generation.TargetID != request.Credential.TargetID ||
+		head.Generation.BackupSetID != request.Credential.BackupSetID {
+		return serviceauthority.ErrInvalid
+	}
+	remaining := head.Generation.Generation - request.AfterGeneration
+	expectedCount := uint64(request.PageCount)
+	if expectedCount > remaining {
+		expectedCount = remaining
+	}
+	if uint64(len(page.Items)) != expectedCount {
+		return serviceauthority.ErrInvalid
+	}
+	return nil
+}
+
+func sameOptionalString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 type RetentionProofRequest struct {
@@ -281,6 +502,22 @@ func DecodeReadRequest(input []byte) (ReadRequest, error) {
 	return value, nil
 }
 
+func DecodeGenerationListRequest(input []byte) (GenerationListRequest, error) {
+	var value GenerationListRequest
+	if decodeCanonical(input, &value) != nil || value.Validate() != nil {
+		return value, serviceauthority.ErrInvalid
+	}
+	return value, nil
+}
+
+func DecodeGenerationListPage(input []byte) (GenerationListPage, error) {
+	var value GenerationListPage
+	if decodeCanonicalBounded(input, &value, MaximumGenerationPageByteCount) != nil || value.Validate() != nil {
+		return value, serviceauthority.ErrInvalid
+	}
+	return value, nil
+}
+
 func DecodeRetentionProofRequest(input []byte) (RetentionProofRequest, error) {
 	var value RetentionProofRequest
 	if decodeCanonical(input, &value) != nil || value.Validate() != nil {
@@ -290,7 +527,11 @@ func DecodeRetentionProofRequest(input []byte) (RetentionProofRequest, error) {
 }
 
 func decodeCanonical(input []byte, target any) error {
-	if len(input) == 0 || len(input) > MaximumRequestByteCount {
+	return decodeCanonicalBounded(input, target, MaximumRequestByteCount)
+}
+
+func decodeCanonicalBounded(input []byte, target any, maximum int) error {
+	if len(input) == 0 || maximum <= 0 || len(input) > maximum {
 		return serviceauthority.ErrInvalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(input))
