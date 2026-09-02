@@ -20,4 +20,6 @@ type Store interface {
 	LookupJoinRequest(context.Context, relay.AdministrationCredential, string, int64) (JoinRequestSponsorPresentation, error)
 	StoreJoinRequestBootstrap(context.Context, relay.AdministrationCredential, JoinBootstrapEnvelope, int64) (relay.Acceptance, error)
 	FetchJoinRequestBootstrap(context.Context, JoinRequestCredential, int64) (JoinBootstrapEnvelope, error)
+	PublishDiscoveryProfile(context.Context, relay.TenantCredential, DiscoveryProfile) error
+	ListDiscoveryProfiles(context.Context) ([]DiscoveryProfile, error)
 }

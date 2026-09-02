@@ -2,6 +2,8 @@ package devicesync_test
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -286,6 +288,39 @@ func TestMemoryStoreReportsContentBlindPrincipalStatus(t *testing.T) {
 	wrong.Token = testToken(0x7f)
 	if _, err := store.GetPrincipalStatus(ctx, wrong); !relay.ErrorHasCode(err, relay.CodeUnauthorized) {
 		t.Fatalf("wrong principal credential err=%v", err)
+	}
+}
+
+func TestMemoryStorePublishesDiscoverableSyncGroupForAuthorizedPrincipal(t *testing.T) {
+	relayStore := relay.NewMemoryStore()
+	store := devicesync.NewMemoryStore(relayStore)
+	principal := bootstrapMemoryPrincipal(t, store, 8_000)
+	profile := devicesync.DiscoveryProfile{
+		Version:             devicesync.SchemaVersion,
+		PrincipalID:         principal.PrincipalID,
+		SetDiscriminator:    strings.Repeat("a", 32),
+		DisplayName:         "Rob's Devices",
+		Revision:            2,
+		UpdatedMilliseconds: 8_100,
+	}
+	credential := relay.TenantCredential{
+		TenantID: principal.PrincipalID,
+		Token:    testToken(0x10),
+	}
+	if err := store.PublishDiscoveryProfile(context.Background(), credential, profile); err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := store.ListDiscoveryProfiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(profiles, []devicesync.DiscoveryProfile{profile}) {
+		t.Fatalf("profiles=%+v", profiles)
+	}
+	wrong := profile
+	wrong.PrincipalID = uuid.New()
+	if err := store.PublishDiscoveryProfile(context.Background(), credential, wrong); !devicesync.ErrorHasCode(err, devicesync.CodeWrongScope) {
+		t.Fatalf("wrong principal err=%v", err)
 	}
 }
 

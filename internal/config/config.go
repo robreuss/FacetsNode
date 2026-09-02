@@ -27,6 +27,7 @@ type Config struct {
 	ManagedKeyEncryptionKey         []byte
 	ComputeCapabilitySigningSeed    []byte
 	PublicURL                       string
+	FacetsBoxServiceEndpoints       map[string]string
 	BlobRoot                        string
 	BlobUploadTTL                   time.Duration
 	BlobOrphanGrace                 time.Duration
@@ -103,15 +104,25 @@ func Load(service Service) (Config, error) {
 		}
 	}
 	configuration := Config{
-		Service:                         service,
-		ListenAddress:                   environment(prefix+"_LISTEN_ADDR", ":8080"),
-		DatabaseURL:                     os.Getenv(prefix + "_DATABASE_URL"),
-		ShutdownPeriod:                  10 * time.Second,
-		CleanupPeriod:                   time.Minute,
-		TransferPeriod:                  10 * time.Minute,
-		DatabaseConns:                   10,
-		OperatorToken:                   os.Getenv(prefix + "_OPERATOR_TOKEN"),
-		PublicURL:                       os.Getenv(prefix + "_PUBLIC_URL"),
+		Service:        service,
+		ListenAddress:  environment(prefix+"_LISTEN_ADDR", ":8080"),
+		DatabaseURL:    os.Getenv(prefix + "_DATABASE_URL"),
+		ShutdownPeriod: 10 * time.Second,
+		CleanupPeriod:  time.Minute,
+		TransferPeriod: 10 * time.Minute,
+		DatabaseConns:  10,
+		OperatorToken:  os.Getenv(prefix + "_OPERATOR_TOKEN"),
+		PublicURL:      os.Getenv(prefix + "_PUBLIC_URL"),
+		FacetsBoxServiceEndpoints: map[string]string{
+			"device-sync": strings.TrimSpace(
+				os.Getenv("FACETS_BOX_DEVICE_SYNC_URL"),
+			),
+			"shared-spaces": strings.TrimSpace(
+				os.Getenv("FACETS_BOX_SHARED_SPACES_URL"),
+			),
+			"backup":  strings.TrimSpace(os.Getenv("FACETS_BOX_BACKUP_URL")),
+			"compute": strings.TrimSpace(os.Getenv("FACETS_BOX_COMPUTE_URL")),
+		},
 		BlobRoot:                        environment(prefix+"_BLOB_ROOT", defaultBlobRoot),
 		BlobUploadTTL:                   7 * 24 * time.Hour,
 		BlobOrphanGrace:                 24 * time.Hour,

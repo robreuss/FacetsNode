@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +28,9 @@ const maximumRequestByteCount = ((rendezvous.MaximumCiphertextByteCount + 2) / 3
 
 type Server struct {
 	serviceIdentity                     string
+	publicURL                           string
+	boxID                               uuid.UUID
+	facetsBoxServices                   []facetsBoxServiceDescriptor
 	store                               rendezvous.Store
 	relayStore                          relay.Store
 	deviceSyncStore                     devicesync.Store
@@ -71,6 +76,38 @@ func (s *Server) SetServiceIdentity(identity string) {
 	}
 }
 
+func (s *Server) SetFacetsBoxPublicURL(publicURL string) {
+	s.publicURL = strings.TrimRight(strings.TrimSpace(publicURL), "/")
+}
+
+func (s *Server) SetFacetsBoxServiceEndpoints(endpoints map[string]string) {
+	services := make([]facetsBoxServiceDescriptor, 0, len(endpoints))
+	for kind, endpoint := range endpoints {
+		kind = strings.TrimSpace(kind)
+		endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+		if endpoint == "" {
+			continue
+		}
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			panic("invalid Facets Box service endpoint")
+		}
+		switch kind {
+		case "device-sync", "shared-spaces", "backup", "compute":
+		default:
+			panic("unsupported Facets Box service kind")
+		}
+		services = append(services, facetsBoxServiceDescriptor{
+			Kind: kind, Endpoint: endpoint,
+		})
+	}
+	slices.SortFunc(services, func(left, right facetsBoxServiceDescriptor) int {
+		return strings.Compare(left.Kind, right.Kind)
+	})
+	s.facetsBoxServices = services
+}
+
 func (s *Server) SetOnionIngressToken(token []byte) error {
 	if len(token) != 32 {
 		return errors.New("onion ingress token must contain exactly 32 bytes")
@@ -96,6 +133,7 @@ func (s *Server) SetServiceAuthorityDeployment(
 		panic("invalid service authority deployment")
 	}
 	s.deploymentSigner = signer
+	s.boxID = signer.DeploymentID()
 	s.serviceAuthorityBindings = bindings
 	s.serviceAuthorityScopeKind = scopeKind
 }
@@ -194,6 +232,7 @@ func (s *Server) Handler() http.Handler {
 	registerUnbound("GET /livez", traffic.SurfaceManagement, s.handleLive)
 	registerUnbound("GET /readyz", traffic.SurfaceManagement, s.handleReady)
 	registerUnbound("GET /metrics", traffic.SurfaceManagement, s.handleMetrics)
+	registerUnbound("GET /.well-known/facets-box", traffic.SurfaceManagement, s.handleFacetsBoxManifest)
 	if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
 		registerUnbound(
 			"POST /v1/service-deployment/bootstrap-proof",
@@ -468,6 +507,12 @@ func (s *Server) Handler() http.Handler {
 			traffic.SurfaceManagement,
 			read,
 			s.handleGetDeviceSyncPrincipalStatus,
+		)
+		register(
+			"PUT /v1/device-sync/principals/{principalID}/discovery-profile",
+			traffic.SurfaceManagement,
+			mutation,
+			s.handlePublishDeviceSyncDiscoveryProfile,
 		)
 		register(
 			"POST /v1/device-sync/principals/{principalID}/devices/{deviceID}/revocation",

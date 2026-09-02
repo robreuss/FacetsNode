@@ -16,6 +16,23 @@ account admission. It fixes the principal's relay capacity independently of the
 claimant; a later commercial ledger will decide which plan to issue, renew,
 change, or revoke without becoming a content or key authority.
 
+## One Facets Box URL
+
+A client configures one Facets Box URL and reads its bounded capability
+manifest at `/.well-known/facets-box` relative to that URL. The manifest lists
+the Device Sync, Shared Spaces, Backup, and Compute endpoints actually exposed
+by that Box, plus its discoverable Device Sync groups. The app uses the listed
+Device Sync endpoint for code-only enrollment; users do not transfer an
+invitation between devices.
+
+Each service always advertises its own public URL. A Box that exposes additional
+services configures their client-visible HTTPS endpoints with
+`FACETS_BOX_DEVICE_SYNC_URL`, `FACETS_BOX_SHARED_SPACES_URL`,
+`FACETS_BOX_BACKUP_URL`, and `FACETS_BOX_COMPUTE_URL`. This supports one reverse
+proxy URL with paths such as `/facetsbox/devicesync` and
+`/facetsbox/shared-spaces`, while still allowing independently hosted service
+origins.
+
 ## Authority boundary
 
 One Device Sync principal maps to one isolated relay tenant. Its protected

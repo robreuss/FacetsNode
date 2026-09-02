@@ -188,6 +188,26 @@ func Main(service config.Service) {
 		os.Exit(1)
 	}
 	api.SetServiceIdentity(string(service))
+	api.SetFacetsBoxPublicURL(configuration.PublicURL)
+	boxServices := make(
+		map[string]string,
+		len(configuration.FacetsBoxServiceEndpoints)+1,
+	)
+	for kind, endpoint := range configuration.FacetsBoxServiceEndpoints {
+		if endpoint != "" {
+			boxServices[kind] = endpoint
+		}
+	}
+	currentBoxServiceKind := map[config.Service]string{
+		config.DeviceSync:    "device-sync",
+		config.SharedSpaces:  "shared-spaces",
+		config.BackupCustody: "backup",
+		config.ComputePool:   "compute",
+	}[service]
+	if boxServices[currentBoxServiceKind] == "" {
+		boxServices[currentBoxServiceKind] = configuration.PublicURL
+	}
+	api.SetFacetsBoxServiceEndpoints(boxServices)
 	if len(configuration.OnionIngressToken) != 0 {
 		if err := api.SetOnionIngressToken(configuration.OnionIngressToken); err != nil {
 			logger.Error("onion ingress configuration rejected", "error", err)

@@ -53,6 +53,7 @@ type MemoryStore struct {
 	revokedDevices            map[uuid.UUID]map[uuid.UUID]int64
 	joinRequests              map[uuid.UUID]JoinRequest
 	joinRequestRetry          map[uuid.UUID]uuid.UUID
+	discoveryProfiles         map[uuid.UUID]DiscoveryProfile
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
@@ -70,7 +71,53 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		revokedDevices:            make(map[uuid.UUID]map[uuid.UUID]int64),
 		joinRequests:              make(map[uuid.UUID]JoinRequest),
 		joinRequestRetry:          make(map[uuid.UUID]uuid.UUID),
+		discoveryProfiles:         make(map[uuid.UUID]DiscoveryProfile),
 	}
+}
+
+func (s *MemoryStore) PublishDiscoveryProfile(
+	ctx context.Context,
+	credential relay.TenantCredential,
+	profile DiscoveryProfile,
+) error {
+	if err := profile.Validate(); err != nil {
+		return err
+	}
+	if credential.TenantID != profile.PrincipalID {
+		return NewProtocolError(CodeWrongScope, "discovery profile belongs to another principal")
+	}
+	if _, err := s.relay.GetTenantStatus(ctx, credential); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, found := s.principals[profile.PrincipalID]; !found {
+		return NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
+	}
+	if existing, found := s.discoveryProfiles[profile.PrincipalID]; found &&
+		profile.Revision < existing.Revision {
+		return NewProtocolError(CodePrincipalCollision, "discovery profile revision moved backwards")
+	}
+	s.discoveryProfiles[profile.PrincipalID] = profile
+	return nil
+}
+
+func (s *MemoryStore) ListDiscoveryProfiles(
+	_ context.Context,
+) ([]DiscoveryProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	profiles := make([]DiscoveryProfile, 0, len(s.discoveryProfiles))
+	for _, profile := range s.discoveryProfiles {
+		profiles = append(profiles, profile)
+	}
+	sort.Slice(profiles, func(i, j int) bool {
+		if profiles[i].DisplayName != profiles[j].DisplayName {
+			return profiles[i].DisplayName < profiles[j].DisplayName
+		}
+		return profiles[i].SetDiscriminator < profiles[j].SetDiscriminator
+	})
+	return profiles, nil
 }
 
 func (s *MemoryStore) CreateJoinRequest(
