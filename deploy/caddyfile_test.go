@@ -14,6 +14,7 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 	patterns := caddyPathMatcherPatterns(t, string(contents), "@application")
 
 	for _, requestPath := range []string{
+		"/.well-known/facets-box",
 		"/v1/service-deployment/proof",
 		"/v1/service-deployment/bootstrap-proof",
 		"/v1/pairing/routes",
@@ -78,6 +79,9 @@ func TestOnionIngressDeniesSharedSpaceAdmissionIssuanceBeforeWildcard(t *testing
 		t.Fatal("onion ingress exposes Shared Space admission issuance through the public wildcard")
 	}
 	patterns := caddyPathMatcherPatterns(t, text, "@application")
+	if !matchesAnyCaddyPathPattern("/.well-known/facets-box", patterns) {
+		t.Fatal("onion ingress does not route Facets Box discovery")
+	}
 	claimPath := "/v1/shared-spaces/provisioning-admissions/" +
 		"11111111-1111-4111-8111-111111111111/claim"
 	if !matchesAnyCaddyPathPattern(claimPath, patterns) {
