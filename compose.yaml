@@ -18,6 +18,23 @@ services:
     networks:
       - private
 
+  box-postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: facets_box_controller
+      POSTGRES_USER: facets_box_controller
+      POSTGRES_PASSWORD: ${FACETS_BOX_CONTROLLER_POSTGRES_PASSWORD:?Set FACETS_BOX_CONTROLLER_POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U facets_box_controller -d facets_box_controller"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+    volumes:
+      - facets-box-controller-postgres:/var/lib/postgresql/data
+    networks:
+      - controller-private
+
   server:
     build:
       context: .
@@ -30,6 +47,7 @@ services:
       FACETS_DEVICE_SYNC_LISTEN_ADDR: :8080
       FACETS_DEVICE_SYNC_OPERATOR_TOKEN: ${FACETS_DEVICE_SYNC_OPERATOR_TOKEN:?Set FACETS_DEVICE_SYNC_OPERATOR_TOKEN in .env}
       FACETS_DEVICE_SYNC_PUBLIC_URL: ${FACETS_DEVICE_SYNC_PUBLIC_URL:?Set FACETS_DEVICE_SYNC_PUBLIC_URL in .env}
+      FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN: ${FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN:?Set FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN in .env}
       FACETS_DEVICE_SYNC_DEPLOYMENT_ID: ${FACETS_DEVICE_SYNC_DEPLOYMENT_ID:?Set the nonzero deployment UUID in .env}
       FACETS_DEVICE_SYNC_DEPLOYMENT_SIGNING_KEY_FILE: /run/secrets/facets-device-sync/deployment-signing-key
       FACETS_DEVICE_SYNC_DEPLOYMENT_ROUTE_POLICY_FILE: /etc/facets-device-sync/service-authority/deployment-routes.json
@@ -89,12 +107,56 @@ services:
       - 127.0.0.1:${FACETS_DEVICE_SYNC_MANAGEMENT_PORT:-8080}:8080
     networks:
       - private
-      - edge
+      - service-control
+      - ingress-control
+
+  controller:
+    build:
+      context: .
+      target: box-controller
+      args:
+        FACETS_SERVER_SOURCE_REVISION: ${FACETS_SERVER_SOURCE_REVISION:-unknown}
+        FACETS_SERVER_SOURCE_TREE: ${FACETS_SERVER_SOURCE_TREE:-unknown}
+    environment:
+      FACETS_BOX_CONTROLLER_DATABASE_URL: postgres://facets_box_controller:${FACETS_BOX_CONTROLLER_POSTGRES_PASSWORD:?Set FACETS_BOX_CONTROLLER_POSTGRES_PASSWORD in .env}@box-postgres:5432/facets_box_controller?sslmode=disable
+      FACETS_BOX_CONTROLLER_LISTEN_ADDR: :8081
+      FACETS_BOX_PUBLIC_URL: ${FACETS_BOX_PUBLIC_URL:?Set the single public Facets Box URL in .env}
+      FACETS_BOX_DISPLAY_NAME: ${FACETS_BOX_DISPLAY_NAME:-Facets Box}
+      FACETS_BOX_IDENTITY_KEY_FILE: /var/lib/facets-box-controller/identity-key
+      FACETS_BOX_DEVICE_SYNC_PRIVATE_URL: http://server:8080
+      FACETS_BOX_DEVICE_SYNC_URL: ${FACETS_BOX_DEVICE_SYNC_URL:?Set the public Device Sync capability URL in .env}
+      FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN: ${FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN:?Set FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN in .env}
+    depends_on:
+      box-postgres:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/facets-box-controller", "healthcheck", "http://127.0.0.1:8081/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    volumes:
+      - facets-box-controller-state:/var/lib/facets-box-controller
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - controller-private
+      - service-control
+      - ingress-control
 
   ingress:
     image: caddy:2.10.2-alpine
     depends_on:
       server:
+        condition: service_healthy
+      controller:
         condition: service_healthy
     restart: unless-stopped
     read_only: true
@@ -115,12 +177,21 @@ services:
       - ${FACETS_DEVICE_SYNC_HTTPS_PORT:-8443}:8443
     networks:
       - edge
+      - ingress-control
 
 networks:
   private:
+    internal: true
+  controller-private:
+    internal: true
+  service-control:
+    internal: true
+  ingress-control:
     internal: true
   edge:
 
 volumes:
   facets-device-sync-postgres:
   facets-device-sync-blobs:
+  facets-box-controller-postgres:
+  facets-box-controller-state:

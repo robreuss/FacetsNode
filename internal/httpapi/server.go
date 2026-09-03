@@ -52,6 +52,9 @@ type Server struct {
 	onionIngressTokenDigest             [32]byte
 	onionIngressEnabled                 bool
 	now                                 func() time.Time
+	boxControllerTokenDigest            [32]byte
+	boxControllerEnabled                bool
+	deviceSyncAccountBootstrapIssuer    func(context.Context, time.Duration, time.Time) (devicesync.IssuedAccountBootstrap, error)
 }
 
 func New(store rendezvous.Store, logger *slog.Logger) *Server {
@@ -156,6 +159,25 @@ func (s *Server) SetDeviceSyncStore(store devicesync.Store) {
 	}
 	s.deviceSyncStore = store
 	s.deviceSyncMutationFenceStore = mutationFenceStore
+}
+
+// SetDeviceSyncBoxControllerAuthority exposes only two loopback/private-network
+// operations to the separately isolated Box controller: enumerate public group
+// profiles and ask Device Sync to mint a one-time account admission. The
+// controller never receives the deployment signing key or database authority.
+func (s *Server) SetDeviceSyncBoxControllerAuthority(
+	token []byte,
+	issuer func(context.Context, time.Duration, time.Time) (devicesync.IssuedAccountBootstrap, error),
+) {
+	if len(token) != 32 || issuer == nil || s.deviceSyncStore == nil {
+		panic("invalid Device Sync Box controller authority")
+	}
+	s.boxControllerTokenDigest = sha256.Sum256(append(
+		[]byte("facets-device-sync-box-controller-v1\x00"),
+		token...,
+	))
+	s.boxControllerEnabled = true
+	s.deviceSyncAccountBootstrapIssuer = issuer
 }
 
 // SetSharedSpacesStore enables the product-level Shared Spaces authority
@@ -480,6 +502,18 @@ func (s *Server) Handler() http.Handler {
 		}
 	}
 	if s.deviceSyncStore != nil {
+		if s.boxControllerEnabled {
+			registerUnbound(
+				"GET /internal/box-controller/device-sync/groups",
+				traffic.SurfaceManagement,
+				s.handleBoxControllerDeviceSyncGroups,
+			)
+			registerUnbound(
+				"POST /internal/box-controller/device-sync/account-admissions",
+				traffic.SurfaceManagement,
+				s.handleBoxControllerDeviceSyncAccountAdmission,
+			)
+		}
 		if s.operatorProvisioningOn {
 			register(
 				"POST /v1/device-sync/account-admissions",

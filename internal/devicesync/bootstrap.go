@@ -166,9 +166,18 @@ func IssueAccountBootstrap(
 func normalizeServiceEndpoint(raw string) (string, error) {
 	endpoint, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || endpoint.Host == "" || endpoint.User != nil ||
-		endpoint.RawQuery != "" || endpoint.Fragment != "" ||
-		(endpoint.Path != "" && endpoint.Path != "/") {
+		endpoint.RawQuery != "" || endpoint.Fragment != "" {
 		return "", fmt.Errorf("Device Sync service endpoint is invalid")
+	}
+	cleanPath := strings.TrimSuffix(endpoint.EscapedPath(), "/")
+	if cleanPath != "" && (cleanPath[0] != '/' || strings.Contains(strings.ToLower(cleanPath), "%2f") ||
+		strings.Contains(strings.ToLower(cleanPath), "%5c")) {
+		return "", fmt.Errorf("Device Sync service endpoint path is invalid")
+	}
+	for _, component := range strings.Split(strings.TrimPrefix(endpoint.Path, "/"), "/") {
+		if component == "." || component == ".." {
+			return "", fmt.Errorf("Device Sync service endpoint path is invalid")
+		}
 	}
 	if endpoint.Scheme != "https" {
 		host := endpoint.Hostname()
@@ -178,6 +187,7 @@ func normalizeServiceEndpoint(raw string) (string, error) {
 			return "", fmt.Errorf("Device Sync service endpoint must use HTTPS except on loopback")
 		}
 	}
-	endpoint.Path = ""
+	endpoint.Path = cleanPath
+	endpoint.RawPath = ""
 	return strings.TrimSuffix(endpoint.String(), "/"), nil
 }

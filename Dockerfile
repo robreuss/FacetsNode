@@ -23,9 +23,12 @@ RUN for value in "$FACETS_SERVER_SOURCE_REVISION" "$FACETS_SERVER_SOURCE_TREE"; 
         -o /out/facets-compute-pool-server ./cmd/facets-compute-pool-server && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
         -o /out/facets-backup-custody-server ./cmd/facets-backup-custody-server && \
-    mkdir -p /out/blobs /out/backup-custody/custody && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+        -o /out/facets-box-controller ./cmd/facets-box-controller && \
+    mkdir -p /out/blobs /out/backup-custody/custody /out/box-controller && \
     chmod 0700 /out/backup-custody /out/backup-custody/custody && \
-    chown -R 65532:65532 /out/blobs /out/backup-custody
+    chmod 0700 /out/box-controller && \
+    chown -R 65532:65532 /out/blobs /out/backup-custody /out/box-controller
 
 FROM scratch AS device-sync
 ARG FACETS_SERVER_SOURCE_REVISION
@@ -78,3 +81,16 @@ COPY --chown=65532:65532 --from=build /out/backup-custody /var/lib/facets-backup
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/facets-backup-custody-server"]
+
+FROM scratch AS box-controller
+ARG FACETS_SERVER_SOURCE_REVISION
+ARG FACETS_SERVER_SOURCE_TREE
+LABEL org.opencontainers.image.title="Facets Box Controller" \
+      org.opencontainers.image.revision="$FACETS_SERVER_SOURCE_REVISION" \
+      org.opencontainers.image.source-tree="$FACETS_SERVER_SOURCE_TREE"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/facets-box-controller /facets-box-controller
+COPY --chown=65532:65532 --from=build /out/box-controller /var/lib/facets-box-controller
+USER 65532:65532
+EXPOSE 8081
+ENTRYPOINT ["/facets-box-controller"]

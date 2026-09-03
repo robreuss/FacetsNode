@@ -18,6 +18,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/computepool"
 	"github.com/robreuss/FacetsNode/internal/config"
+	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/httpapi"
 	"github.com/robreuss/FacetsNode/internal/keycustody"
 	"github.com/robreuss/FacetsNode/internal/migrationcoordinator"
@@ -231,10 +232,11 @@ func Main(service config.Service) {
 			logger.Error("deployment signing custody rejected", "error", err)
 			os.Exit(1)
 		}
-		if _, err := serviceauthority.LoadDeploymentOfferTemplate(
+		deploymentTemplate, err := serviceauthority.LoadDeploymentOfferTemplate(
 			configuration.DeploymentRoutePolicyFile,
 			deploymentSigner,
-		); err != nil {
+		)
+		if err != nil {
 			logger.Error("deployment route policy rejected", "error", err)
 			os.Exit(1)
 		}
@@ -386,6 +388,35 @@ func Main(service config.Service) {
 			}
 		}
 		api.SetServiceAuthorityDeployment(deploymentSigner, bindings, scopeKind)
+		if service == config.DeviceSync && len(configuration.BoxControllerToken) != 0 {
+			api.SetDeviceSyncBoxControllerAuthority(
+				configuration.BoxControllerToken,
+				func(
+					ctx context.Context,
+					lifetime time.Duration,
+					now time.Time,
+				) (devicesync.IssuedAccountBootstrap, error) {
+					expiresAt := now.Add(lifetime)
+					offer, err := deploymentTemplate.SignOffer(
+						deploymentSigner,
+						now,
+						expiresAt,
+					)
+					if err != nil {
+						return devicesync.IssuedAccountBootstrap{}, err
+					}
+					return devicesync.IssueAccountBootstrap(
+						ctx,
+						relayStore,
+						configuration.PublicURL,
+						offer,
+						lifetime,
+						now,
+						nil,
+					)
+				},
+			)
+		}
 		logger.Info(
 			"Facets deployment authentication enabled",
 			"deployment_id", configuration.DeploymentID,

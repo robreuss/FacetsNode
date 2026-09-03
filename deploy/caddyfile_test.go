@@ -63,6 +63,26 @@ func TestPublicIngressRoutesOnlyApplicationProtocolFamilies(t *testing.T) {
 	}
 }
 
+func TestSingleFacetsBoxPathRoutesControllerAndDeviceSyncSeparately(t *testing.T) {
+	contents, err := os.ReadFile("Caddyfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(contents)
+	deviceIndex := strings.Index(text, "handle_path /facetsbox/device-sync/*")
+	controllerIndex := strings.Index(text, "handle_path /facetsbox/*")
+	if deviceIndex < 0 || controllerIndex < 0 || deviceIndex >= controllerIndex {
+		t.Fatal("Device Sync subpath must precede the Box controller wildcard")
+	}
+	if !strings.Contains(text[deviceIndex:controllerIndex], "reverse_proxy server:8080") ||
+		!strings.Contains(text[controllerIndex:], "reverse_proxy controller:8081") {
+		t.Fatal("single Box URL does not preserve controller/service isolation")
+	}
+	if strings.Contains(text, "/internal/box-controller") {
+		t.Fatal("private controller-to-service API is exposed by ingress")
+	}
+}
+
 func TestOnionIngressDeniesSharedSpaceAdmissionIssuanceBeforeWildcard(t *testing.T) {
 	contents, err := os.ReadFile("onion/Caddyfile")
 	if err != nil {

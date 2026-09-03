@@ -52,6 +52,7 @@ type Config struct {
 	DeploymentRoutePolicyFile       string
 	ServiceAuthorityBindingsFile    string
 	OnionIngressToken               []byte
+	BoxControllerToken              []byte
 }
 
 type Service string
@@ -201,6 +202,18 @@ func Load(service Service) (Config, error) {
 		)
 		if err != nil {
 			return Config{}, err
+		}
+	}
+	if service == DeviceSync {
+		controllerTokenName := prefix + "_BOX_CONTROLLER_TOKEN"
+		if encoded := os.Getenv(controllerTokenName); encoded != "" {
+			configuration.BoxControllerToken, err = decodeSecret32(
+				controllerTokenName,
+				encoded,
+			)
+			if err != nil {
+				return Config{}, err
+			}
 		}
 	}
 	if configuration.DatabaseURL == "" {

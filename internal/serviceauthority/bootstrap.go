@@ -109,7 +109,7 @@ func (route TransportRoute) Validate() error {
 	parsed, err := url.Parse(route.Endpoint)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
-		(parsed.Path != "" && parsed.Path != "/") || route.RouteID == uuid.Nil ||
+		!canonicalServicePath(parsed) || route.RouteID == uuid.Nil ||
 		parsed.String() != route.Endpoint {
 		return ErrInvalid
 	}
@@ -148,6 +148,21 @@ func (route TransportRoute) Validate() error {
 		return ErrInvalid
 	}
 	return nil
+}
+
+func canonicalServicePath(endpoint *url.URL) bool {
+	path := endpoint.EscapedPath()
+	if path == "/" || strings.HasSuffix(path, "/") ||
+		strings.Contains(strings.ToLower(path), "%2f") ||
+		strings.Contains(strings.ToLower(path), "%5c") {
+		return false
+	}
+	for _, component := range strings.Split(strings.TrimPrefix(endpoint.Path, "/"), "/") {
+		if component == "." || component == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func (policy TransportPolicy) Validate(descriptor DeploymentDescriptor) error {

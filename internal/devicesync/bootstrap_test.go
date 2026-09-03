@@ -59,7 +59,7 @@ func TestIssueAccountBootstrapRejectsUnsafeEndpointAndLifetime(t *testing.T) {
 		lifetime time.Duration
 	}{
 		{endpoint: "http://sync.example.test", lifetime: 15 * time.Minute},
-		{endpoint: "https://sync.example.test/path", lifetime: 15 * time.Minute},
+		{endpoint: "https://sync.example.test/path/../private", lifetime: 15 * time.Minute},
 		{endpoint: "https://sync.example.test", lifetime: time.Minute},
 	} {
 		if _, err := devicesync.IssueAccountBootstrap(
@@ -70,6 +70,23 @@ func TestIssueAccountBootstrapRejectsUnsafeEndpointAndLifetime(t *testing.T) {
 		); err == nil {
 			t.Fatalf("endpoint=%q lifetime=%s was accepted", testCase.endpoint, testCase.lifetime)
 		}
+	}
+}
+
+func TestIssueAccountBootstrapAcceptsCanonicalServiceSubpath(t *testing.T) {
+	store := devicesync.NewMemoryStore(relay.NewMemoryStore())
+	now := time.UnixMilli(1_900_000_000_000)
+	endpoint := "https://box.example.test/facetsbox/device-sync"
+	issued, err := devicesync.IssueAccountBootstrap(
+		context.Background(), store, endpoint+"/",
+		testDeploymentOffer(t, endpoint, now, 15*time.Minute),
+		15*time.Minute, now, bytes.NewReader(bytes.Repeat([]byte{0x6c}, 64)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.Bootstrap.ServiceEndpoint != endpoint {
+		t.Fatalf("service endpoint %q", issued.Bootstrap.ServiceEndpoint)
 	}
 }
 

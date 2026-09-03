@@ -59,20 +59,6 @@ func (s *Server) handleFacetsBoxManifest(writer http.ResponseWriter, request *ht
 		Services:         services,
 		DeviceSyncGroups: []facetsBoxDeviceSyncGroup{},
 	}
-	if s.deviceSyncStore != nil {
-		profiles, err := s.deviceSyncStore.ListDiscoveryProfiles(request.Context())
-		if err != nil {
-			s.writeError(writer, err)
-			return
-		}
-		for _, profile := range profiles {
-			manifest.DeviceSyncGroups = append(manifest.DeviceSyncGroups, facetsBoxDeviceSyncGroup{
-				SetDiscriminator: profile.SetDiscriminator,
-				DisplayName:      profile.DisplayName,
-				Revision:         profile.Revision,
-			})
-		}
-	}
 	writeJSON(writer, http.StatusOK, manifest)
 }
 

@@ -157,7 +157,42 @@ func TestDockerfilePublishesAllServiceImages(t *testing.T) {
 		"COPY --from=build /out/facets-backup-custody-server /facets-backup-custody-server",
 		"COPY --chown=65532:65532 --from=build /out/backup-custody /var/lib/facets-backup-custody",
 		"ENTRYPOINT [\"/facets-backup-custody-server\"]",
+		"FROM scratch AS box-controller",
+		"ENTRYPOINT [\"/facets-box-controller\"]",
 	})
+}
+
+func TestBoxControllerHasIndependentDatabaseAndNoServiceSigningAuthority(t *testing.T) {
+	compose := readDeploymentFile(t, "../compose.yaml")
+	start := strings.Index(compose, "  controller:\n")
+	if start < 0 {
+		t.Fatal("Box controller service block missing")
+	}
+	relativeEnd := strings.Index(compose[start+1:], "\n  ingress:\n")
+	if relativeEnd < 0 {
+		t.Fatal("Box controller service block is not bounded")
+	}
+	block := compose[start : start+1+relativeEnd]
+	assertContainsAll(t, "Box controller", block, []string{
+		"target: box-controller",
+		"FACETS_BOX_CONTROLLER_DATABASE_URL:",
+		"FACETS_BOX_IDENTITY_KEY_FILE:",
+		"FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN:",
+		"facets-box-controller-state:/var/lib/facets-box-controller",
+		"- controller-private",
+		"- service-control",
+	})
+	for _, forbidden := range []string{
+		"FACETS_DEVICE_SYNC_DATABASE_URL",
+		"DEPLOYMENT_SIGNING_KEY",
+		"OPERATOR_TOKEN",
+		"docker.sock",
+		"BACKUP_CUSTODY_ROOT",
+	} {
+		if strings.Contains(block, forbidden) {
+			t.Errorf("Box controller received forbidden authority %q", forbidden)
+		}
+	}
 }
 
 func readDeploymentFile(t *testing.T, path string) string {
