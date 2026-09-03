@@ -388,6 +388,9 @@ func Main(service config.Service) {
 			}
 		}
 		api.SetServiceAuthorityDeployment(deploymentSigner, bindings, scopeKind)
+		if service == config.DeviceSync {
+			api.SetDeviceSyncStore(relayStore)
+		}
 		if service == config.DeviceSync && len(configuration.BoxControllerToken) != 0 {
 			api.SetDeviceSyncBoxControllerAuthority(
 				configuration.BoxControllerToken,
@@ -422,9 +425,6 @@ func Main(service config.Service) {
 			"deployment_id", configuration.DeploymentID,
 			"signing_key_fingerprint", deploymentSigner.SigningKeyFingerprint(),
 		)
-	}
-	if service == config.DeviceSync {
-		api.SetDeviceSyncStore(relayStore)
 	}
 	if service == config.SharedSpaces {
 		managedContentKeys, err := keycustody.NewManagedContentKeys(
