@@ -360,10 +360,15 @@ func (service *Service) handleCreateConnectionRequest(writer http.ResponseWriter
 		return
 	}
 	now := service.now()
+	expiresAt := time.UnixMilli(input.ExpiresAtMillis)
+	maximumExpiresAt := now.Add(ConnectionRequestLifetime)
+	if expiresAt.After(maximumExpiresAt) {
+		expiresAt = maximumExpiresAt
+	}
 	connection := ConnectionRequest{
 		RequestID: input.RequestID, Intent: input.Intent,
 		GroupName: normalizedDisplayName(input.GroupName), DeviceName: normalizedDisplayName(input.DeviceName),
-		CreatedAt: now, ExpiresAt: time.UnixMilli(input.ExpiresAtMillis),
+		CreatedAt: now, ExpiresAt: expiresAt,
 	}
 	copy(connection.PollTokenDigest[:], poll)
 	copy(connection.ClientPublicKey[:], publicKey)

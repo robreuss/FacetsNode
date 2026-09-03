@@ -137,6 +137,44 @@ func TestClaimEncryptsFirstDeviceBootstrapAndNeverPublishesGroups(t *testing.T) 
 	}
 }
 
+func TestConnectionRequestExpiryIsCappedToTheControllerClock(t *testing.T) {
+	withFastArgon(t)
+	now := time.Unix(1_800_000_000, 500_000_000).UTC()
+	store := initializedMemoryStore(t, "FIRST-BOX-CODE")
+	service := makeTestService(t, store, &testDeviceSyncController{}, now)
+	clientPrivate, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pollDigest, err := RandomToken(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := uuid.New()
+	createBody, _ := json.Marshal(createConnectionRequestBody{
+		Version: SchemaVersion, RequestID: requestID,
+		PollTokenDigest: base64.RawURLEncoding.EncodeToString(pollDigest[:]),
+		ClientPublicKey: base64.RawURLEncoding.EncodeToString(clientPrivate.PublicKey().Bytes()),
+		Intent:          ConnectionIntentCreateFirstGroup, GroupName: "Rob's devices", DeviceName: "Mac",
+		// The client is 500 ms ahead and asks for the documented ten-minute lifetime.
+		ExpiresAtMillis: now.Add(ConnectionRequestLifetime + 500*time.Millisecond).UnixMilli(),
+	})
+	create := httptest.NewRequest(http.MethodPost, "/v1/connection-requests", bytes.NewReader(createBody))
+	create.Header.Set("Content-Type", "application/json")
+	created := httptest.NewRecorder()
+	service.Handler().ServeHTTP(created, create)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status %d: %s", created.Code, created.Body.String())
+	}
+	stored, err := store.ConnectionRequest(context.Background(), requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CreatedAt != now || stored.ExpiresAt != now.Add(ConnectionRequestLifetime) {
+		t.Fatalf("controller did not enforce its own lifetime: created=%s expires=%s", stored.CreatedAt, stored.ExpiresAt)
+	}
+}
+
 func TestOwnerLoginThrottlesAndPasswordChangeRevokesSessionsAndGrants(t *testing.T) {
 	withFastArgon(t)
 	now := time.Unix(1_800_000_000, 0).UTC()
