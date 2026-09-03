@@ -69,7 +69,7 @@ func TestSingleFacetsBoxPathRoutesControllerAndDeviceSyncSeparately(t *testing.T
 		t.Fatal(err)
 	}
 	text := string(contents)
-	deviceIndex := strings.Index(text, "handle_path /facetsbox/device-sync/*")
+	deviceIndex := strings.Index(text, "handle @deviceSyncApplication")
 	controllerIndex := strings.Index(text, "handle_path /facetsbox/*")
 	if deviceIndex < 0 || controllerIndex < 0 || deviceIndex >= controllerIndex {
 		t.Fatal("Device Sync subpath must precede the Box controller wildcard")
@@ -80,6 +80,23 @@ func TestSingleFacetsBoxPathRoutesControllerAndDeviceSyncSeparately(t *testing.T
 	}
 	if strings.Contains(text, "/internal/box-controller") {
 		t.Fatal("private controller-to-service API is exposed by ingress")
+	}
+	patterns := caddyPathMatcherPatterns(t, text, "@deviceSyncApplication")
+	if !matchesAnyCaddyPathPattern(
+		"/facetsbox/device-sync/v1/device-sync/join-requests/"+
+			"11111111-1111-4111-8111-111111111111",
+		patterns,
+	) {
+		t.Fatal("Device Sync application routes are not available beneath the Box URL")
+	}
+	for _, privatePath := range []string{
+		"/facetsbox/device-sync/readyz",
+		"/facetsbox/device-sync/internal/box-controller/device-sync/groups",
+		"/facetsbox/device-sync/internal/box-controller/device-sync/account-admissions",
+	} {
+		if matchesAnyCaddyPathPattern(privatePath, patterns) {
+			t.Errorf("private Device Sync path %q is publicly routed", privatePath)
+		}
 	}
 }
 
