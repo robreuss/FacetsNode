@@ -197,6 +197,26 @@ func TestBoxControllerHasIndependentDatabaseAndNoServiceSigningAuthority(t *test
 	}
 }
 
+func TestBoxDiscoveryReceivesOnlyThePublicTLSCertificate(t *testing.T) {
+	compose := readDeploymentFile(t, "../compose.yaml")
+	start := strings.Index(compose, "  discovery:\n")
+	if start < 0 {
+		t.Fatal("Box discovery service block missing")
+	}
+	relativeEnd := strings.Index(compose[start+1:], "\n  ingress:\n")
+	if relativeEnd < 0 {
+		t.Fatal("Box discovery service block is not bounded")
+	}
+	block := compose[start : start+1+relativeEnd]
+	assertContainsAll(t, "Box discovery", block, []string{
+		"FACETS_BOX_DISCOVERY_CA_FILE: /etc/facets-box/tls/server.crt",
+		"/server.crt:/etc/facets-box/tls/server.crt:ro",
+	})
+	if strings.Contains(block, ":/etc/facets-box/tls:ro") || strings.Contains(block, "server.key") {
+		t.Fatal("Box discovery must not receive the ingress TLS private key or directory")
+	}
+}
+
 func readDeploymentFile(t *testing.T, path string) string {
 	t.Helper()
 	contents, err := os.ReadFile(path)

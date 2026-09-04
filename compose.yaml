@@ -168,7 +168,9 @@ services:
     tmpfs:
       - /tmp:size=4m,mode=1777
     volumes:
-      - ${FACETS_DEVICE_SYNC_TLS_DIRECTORY:-./deploy/tls}:/etc/facets-box/tls:ro
+      # Discovery needs the public certificate only. Never place the ingress
+      # private key in the discovery container, even read-only.
+      - ${FACETS_DEVICE_SYNC_TLS_DIRECTORY:-./deploy/tls}/server.crt:/etc/facets-box/tls/server.crt:ro
     cap_drop:
       - ALL
     security_opt:
