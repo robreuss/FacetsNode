@@ -90,6 +90,7 @@ func (service *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/connection-invitations/redeem", service.handleRedeemConnectionInvitation)
 	mux.HandleFunc("GET /v1/connection-requests/{requestID}", service.handlePollConnectionRequest)
 	mux.HandleFunc("GET /v1/profile", service.handleProfile)
+	mux.HandleFunc("GET /v1/services/device-sync/groups", service.handleDeviceSyncGroups)
 	mux.HandleFunc("POST /v1/services/device-sync/account-admissions", service.handleDeviceSyncAccountAdmission)
 	return securityHeaders(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.ContentLength > MaximumRequestBytes {
@@ -605,6 +606,50 @@ func (service *Service) handleProfile(writer http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(writer, http.StatusOK, profile)
+}
+
+func (service *Service) handleDeviceSyncGroups(writer http.ResponseWriter, request *http.Request) {
+	if _, err := service.authorizeGrant(request); err != nil {
+		http.Error(writer, "Connection grant rejected.", http.StatusUnauthorized)
+		return
+	}
+	if !service.hasService("device-sync") {
+		http.Error(writer, "Device Sync is not configured.", http.StatusServiceUnavailable)
+		return
+	}
+	groups, err := service.deviceSync.Groups(request.Context())
+	if err != nil {
+		service.internalError(writer, request, "device_sync_groups", err)
+		return
+	}
+	if groups == nil {
+		groups = []DeviceSyncGroup{}
+	}
+	if len(groups) > 256 {
+		service.internalError(writer, request, "device_sync_groups", errors.New("Device Sync group response is invalid"))
+		return
+	}
+	seen := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		if err := group.Validate(); err != nil {
+			service.internalError(writer, request, "device_sync_groups", err)
+			return
+		}
+		if _, exists := seen[group.SetDiscriminator]; exists {
+			service.internalError(writer, request, "device_sync_groups", errors.New("Device Sync group response is invalid"))
+			return
+		}
+		seen[group.SetDiscriminator] = struct{}{}
+	}
+	state, err := service.store.State(request.Context())
+	if err != nil {
+		service.internalError(writer, request, "device_sync_groups", err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		BoxID  uuid.UUID         `json:"boxID"`
+		Groups []DeviceSyncGroup `json:"groups"`
+	}{BoxID: state.BoxID, Groups: groups})
 }
 
 func (service *Service) handleDeviceSyncAccountAdmission(writer http.ResponseWriter, request *http.Request) {

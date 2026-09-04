@@ -226,6 +226,28 @@ func TestClaimConnectsExactInstallationAndOwnerInvitationConnectsSecond(t *testi
 		t.Fatalf("unauthorized bootstrap was not rejected: %d, count %d", unauthorizedAdmission.Code, deviceSync.issueCount)
 	}
 
+	groupsRequest := httptest.NewRequest(http.MethodGet, "/v1/services/device-sync/groups", nil)
+	groupsRequest.Header.Set("Authorization", "Bearer "+payload.GrantToken)
+	groupsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(groupsResponse, groupsRequest)
+	if groupsResponse.Code != http.StatusOK {
+		t.Fatalf("member group catalog status %d: %s", groupsResponse.Code, groupsResponse.Body.String())
+	}
+	var groupCatalog struct {
+		BoxID  uuid.UUID         `json:"boxID"`
+		Groups []DeviceSyncGroup `json:"groups"`
+	}
+	if err := json.Unmarshal(groupsResponse.Body.Bytes(), &groupCatalog); err != nil ||
+		groupCatalog.BoxID != state.BoxID || len(groupCatalog.Groups) != 1 ||
+		groupCatalog.Groups[0] != deviceSync.groups[0] {
+		t.Fatalf("unexpected member group catalog: %+v, %v", groupCatalog, err)
+	}
+	unauthorizedGroups := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedGroups, httptest.NewRequest(http.MethodGet, "/v1/services/device-sync/groups", nil))
+	if unauthorizedGroups.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized group catalog was not rejected: %d", unauthorizedGroups.Code)
+	}
+
 	manifestResponse := httptest.NewRecorder()
 	handler.ServeHTTP(manifestResponse, httptest.NewRequest(http.MethodGet, "/.well-known/facets-box", nil))
 	var manifest SignedPublicManifest
@@ -236,7 +258,10 @@ func TestClaimConnectsExactInstallationAndOwnerInvitationConnectsSecond(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(manifestBytes, []byte("deviceSyncGroups")) || bytes.Contains(manifestBytes, []byte("device-sync-secret")) {
+	if bytes.Contains(manifestBytes, []byte("deviceSyncGroups")) ||
+		bytes.Contains(manifestBytes, []byte(deviceSync.groups[0].DisplayName)) ||
+		bytes.Contains(manifestBytes, []byte(deviceSync.groups[0].SetDiscriminator)) ||
+		bytes.Contains(manifestBytes, []byte("device-sync-secret")) {
 		t.Fatal("public manifest disclosed private service data")
 	}
 	var publicPayload PublicManifestPayload
