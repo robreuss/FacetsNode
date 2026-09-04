@@ -125,6 +125,7 @@ services:
       FACETS_BOX_IDENTITY_KEY_FILE: /var/lib/facets-box-controller/identity-key
       FACETS_BOX_DEVICE_SYNC_PRIVATE_URL: http://server:8080
       FACETS_BOX_DEVICE_SYNC_URL: ${FACETS_BOX_DEVICE_SYNC_URL:?Set the public Device Sync capability URL in .env}
+      FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN: ${FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN:?Set FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN in .env}
     depends_on:
       box-postgres:
         condition: service_healthy

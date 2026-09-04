@@ -179,13 +179,13 @@ func TestBoxControllerHasIndependentDatabaseAndNoServiceSigningAuthority(t *test
 		"target: box-controller",
 		"FACETS_BOX_CONTROLLER_DATABASE_URL:",
 		"FACETS_BOX_IDENTITY_KEY_FILE:",
+		"FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN:",
 		"facets-box-controller-state:/var/lib/facets-box-controller",
 		"- controller-private",
 		"- service-control",
 	})
 	for _, forbidden := range []string{
 		"FACETS_DEVICE_SYNC_DATABASE_URL",
-		"FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN",
 		"DEPLOYMENT_SIGNING_KEY",
 		"OPERATOR_TOKEN",
 		"docker.sock",

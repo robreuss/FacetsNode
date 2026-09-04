@@ -31,6 +31,7 @@ type configuration struct {
 	displayName          string
 	identityKeyFile      string
 	deviceSyncPrivateURL string
+	deviceSyncToken      string
 	deviceSyncPublicURL  string
 }
 
@@ -74,7 +75,7 @@ func main() {
 		fatal("Box has not been initialized", err)
 	}
 	deviceSync, err := boxcontrol.NewDeviceSyncHTTPClient(
-		config.deviceSyncPrivateURL, nil,
+		config.deviceSyncPrivateURL, config.deviceSyncToken, nil,
 	)
 	if err != nil {
 		fatal("Device Sync controller channel rejected", err)
@@ -124,10 +125,11 @@ func loadConfiguration() (configuration, error) {
 		displayName:          environment("FACETS_BOX_DISPLAY_NAME", "Facets Box"),
 		identityKeyFile:      environment("FACETS_BOX_IDENTITY_KEY_FILE", "/var/lib/facets-box-controller/identity-key"),
 		deviceSyncPrivateURL: environment("FACETS_BOX_DEVICE_SYNC_PRIVATE_URL", "http://server:8080"),
+		deviceSyncToken:      os.Getenv("FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN"),
 		deviceSyncPublicURL:  os.Getenv("FACETS_BOX_DEVICE_SYNC_URL"),
 	}
-	if config.databaseURL == "" || config.publicURL == "" || config.deviceSyncPublicURL == "" {
-		return configuration{}, errors.New("database, public URL, and Device Sync URL are required")
+	if config.databaseURL == "" || config.publicURL == "" || config.deviceSyncToken == "" || config.deviceSyncPublicURL == "" {
+		return configuration{}, errors.New("database, public URL, Device Sync URL, and controller token are required")
 	}
 	return config, nil
 }

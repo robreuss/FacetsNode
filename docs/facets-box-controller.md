@@ -9,11 +9,14 @@ Docker socket, or generic service-command capability.
 
 Device Sync is registered beneath the same URL at
 `/facetsbox/device-sync`, but Device Sync membership is not part of Box claim or
-Box membership. The controller can health-check the private service endpoint;
-it holds no Device Sync signing key or membership authority. The public signed
+Box membership. A Box member may discover Sync Groups and ask the Device Sync
+service to issue a one-time bootstrap for a new, isolated group. The controller
+uses one narrowly scoped private capability for those two operations; Device
+Sync still signs the admission and the controller receives no signing key or
+authority to add a device to an existing group. The public signed
 Box manifest contains only the Box identity, claimed state, display name, and
 service kinds/endpoints. A scoped member grant is required for the authenticated
-service-status profile.
+service-status and Sync Group profile.
 
 ## First initialization
 

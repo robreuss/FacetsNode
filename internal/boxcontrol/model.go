@@ -62,6 +62,20 @@ type DeviceSyncGroup struct {
 	Revision         uint64 `json:"revision"`
 }
 
+func (group DeviceSyncGroup) Validate() error {
+	if len(group.SetDiscriminator) != 32 || group.Revision == 0 ||
+		normalizedDisplayName(group.DisplayName) != group.DisplayName ||
+		len(group.DisplayName) > 128 {
+		return errors.New("Device Sync group is invalid")
+	}
+	for _, value := range []byte(group.SetDiscriminator) {
+		if !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')) {
+			return errors.New("Device Sync group is invalid")
+		}
+	}
+	return nil
+}
+
 type PublicManifestPayload struct {
 	Version     int                 `json:"version"`
 	BoxID       uuid.UUID           `json:"boxID"`
@@ -91,10 +105,11 @@ type AuthenticatedService struct {
 }
 
 type AuthenticatedProfile struct {
-	Version     int                    `json:"version"`
-	BoxID       uuid.UUID              `json:"boxID"`
-	DisplayName string                 `json:"displayName"`
-	Services    []AuthenticatedService `json:"services"`
+	Version          int                    `json:"version"`
+	BoxID            uuid.UUID              `json:"boxID"`
+	DisplayName      string                 `json:"displayName"`
+	Services         []AuthenticatedService `json:"services"`
+	DeviceSyncGroups []DeviceSyncGroup      `json:"deviceSyncGroups"`
 }
 
 type ConnectionRequest struct {

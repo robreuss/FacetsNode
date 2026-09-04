@@ -61,6 +61,11 @@ func TestClaimAndMemberApprovalRemainSeparate(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store := initializedMemoryStore(t, "FIRST-BOX-CODE")
 	deviceSync := &testDeviceSyncController{
+		groups: []DeviceSyncGroup{{
+			SetDiscriminator: "0123456789abcdef0123456789abcdef",
+			DisplayName:      "Rob's devices",
+			Revision:         1,
+		}},
 		bootstrap: json.RawMessage(`{"version":1,"authorizationToken":"device-sync-secret"}`),
 	}
 	service := makeTestService(t, store, deviceSync, now)
@@ -170,6 +175,30 @@ func TestClaimAndMemberApprovalRemainSeparate(t *testing.T) {
 	}
 	if len(payload.Profile.Services) != 6 || payload.Profile.Services[2].Kind != "device-sync" || payload.Profile.Services[2].Status != ServiceAvailable {
 		t.Fatalf("authenticated service catalog is incomplete: %+v", payload.Profile.Services)
+	}
+	if len(payload.Profile.DeviceSyncGroups) != 1 || payload.Profile.DeviceSyncGroups[0].DisplayName != "Rob's devices" {
+		t.Fatalf("authenticated Sync Group catalog is incomplete: %+v", payload.Profile.DeviceSyncGroups)
+	}
+
+	admission := httptest.NewRequest(http.MethodPost, "/v1/services/device-sync/account-admissions", strings.NewReader("{}"))
+	admission.Header.Set("Authorization", "Bearer "+payload.GrantToken)
+	admission.Header.Set("Content-Type", "application/json")
+	issued := httptest.NewRecorder()
+	handler.ServeHTTP(issued, admission)
+	if issued.Code != http.StatusCreated || deviceSync.issueCount != 1 {
+		t.Fatalf("member bootstrap status %d, count %d: %s", issued.Code, deviceSync.issueCount, issued.Body.String())
+	}
+	var issuedBody struct {
+		BoxID     uuid.UUID       `json:"boxID"`
+		Bootstrap json.RawMessage `json:"bootstrap"`
+	}
+	if err := json.Unmarshal(issued.Body.Bytes(), &issuedBody); err != nil || issuedBody.BoxID != state.BoxID || !bytes.Equal(issuedBody.Bootstrap, deviceSync.bootstrap) {
+		t.Fatalf("unexpected member bootstrap: %+v, %v", issuedBody, err)
+	}
+	unauthorizedAdmission := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedAdmission, httptest.NewRequest(http.MethodPost, "/v1/services/device-sync/account-admissions", strings.NewReader("{}")))
+	if unauthorizedAdmission.Code != http.StatusUnauthorized || deviceSync.issueCount != 1 {
+		t.Fatalf("unauthorized bootstrap was not rejected: %d, count %d", unauthorizedAdmission.Code, deviceSync.issueCount)
 	}
 
 	manifestResponse := httptest.NewRecorder()

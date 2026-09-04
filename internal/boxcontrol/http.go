@@ -89,6 +89,7 @@ func (service *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/connection-requests", service.handleCreateConnectionRequest)
 	mux.HandleFunc("GET /v1/connection-requests/{requestID}", service.handlePollConnectionRequest)
 	mux.HandleFunc("GET /v1/profile", service.handleProfile)
+	mux.HandleFunc("POST /v1/services/device-sync/account-admissions", service.handleDeviceSyncAccountAdmission)
 	return securityHeaders(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.ContentLength > MaximumRequestBytes {
 			http.Error(writer, "Request is too large.", http.StatusRequestEntityTooLarge)
@@ -479,6 +480,31 @@ func (service *Service) handleProfile(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusOK, profile)
 }
 
+func (service *Service) handleDeviceSyncAccountAdmission(writer http.ResponseWriter, request *http.Request) {
+	if _, err := service.authorizeGrant(request); err != nil {
+		http.Error(writer, "Connection grant rejected.", http.StatusUnauthorized)
+		return
+	}
+	if !service.hasService("device-sync") {
+		http.Error(writer, "Device Sync is not configured.", http.StatusServiceUnavailable)
+		return
+	}
+	bootstrap, err := service.deviceSync.IssueAccountBootstrap(request.Context())
+	if err != nil {
+		service.internalError(writer, request, "device_sync_account_admission", err)
+		return
+	}
+	state, err := service.store.State(request.Context())
+	if err != nil {
+		service.internalError(writer, request, "device_sync_account_admission", err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, struct {
+		BoxID     uuid.UUID       `json:"boxID"`
+		Bootstrap json.RawMessage `json:"bootstrap"`
+	}{BoxID: state.BoxID, Bootstrap: bootstrap})
+}
+
 func (service *Service) approveConnection(ctx context.Context, requestID uuid.UUID) error {
 	service.approvalMu.Lock()
 	defer service.approvalMu.Unlock()
@@ -539,6 +565,15 @@ func (service *Service) profile(ctx context.Context) (AuthenticatedProfile, erro
 	healthContext, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	deviceSyncHealthy := service.deviceSync.Healthy(healthContext) == nil
+	groups := []DeviceSyncGroup{}
+	if deviceSyncHealthy {
+		var groupErr error
+		groups, groupErr = service.deviceSync.Groups(healthContext)
+		if groupErr != nil {
+			deviceSyncHealthy = false
+			groups = []DeviceSyncGroup{}
+		}
+	}
 	serviceKinds := []string{"backup", "compute", "device-sync", "edge", "post", "shared-spaces"}
 	statuses := make([]AuthenticatedService, 0, len(serviceKinds))
 	for _, kind := range serviceKinds {
@@ -555,8 +590,17 @@ func (service *Service) profile(ctx context.Context) (AuthenticatedProfile, erro
 	}
 	return AuthenticatedProfile{
 		Version: SchemaVersion, BoxID: state.BoxID, DisplayName: displayName,
-		Services: statuses,
+		Services: statuses, DeviceSyncGroups: groups,
 	}, nil
+}
+
+func (service *Service) hasService(kind string) bool {
+	for _, descriptor := range service.services {
+		if descriptor.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func (service *Service) randomApprovalCode() (string, error) {
