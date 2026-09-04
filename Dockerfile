@@ -25,6 +25,8 @@ RUN for value in "$FACETS_SERVER_SOURCE_REVISION" "$FACETS_SERVER_SOURCE_TREE"; 
         -o /out/facets-backup-custody-server ./cmd/facets-backup-custody-server && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
         -o /out/facets-box-controller ./cmd/facets-box-controller && \
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+		-o /out/facets-box-discovery ./cmd/facets-box-discovery && \
     mkdir -p /out/blobs /out/backup-custody/custody /out/box-controller && \
     chmod 0700 /out/backup-custody /out/backup-custody/custody && \
     chmod 0700 /out/box-controller && \
@@ -94,3 +96,14 @@ COPY --chown=65532:65532 --from=build /out/box-controller /var/lib/facets-box-co
 USER 65532:65532
 EXPOSE 8081
 ENTRYPOINT ["/facets-box-controller"]
+
+FROM scratch AS box-discovery
+ARG FACETS_SERVER_SOURCE_REVISION
+ARG FACETS_SERVER_SOURCE_TREE
+LABEL org.opencontainers.image.title="Facets Box Discovery" \
+      org.opencontainers.image.revision="$FACETS_SERVER_SOURCE_REVISION" \
+      org.opencontainers.image.source-tree="$FACETS_SERVER_SOURCE_TREE"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/facets-box-discovery /facets-box-discovery
+USER 65532:65532
+ENTRYPOINT ["/facets-box-discovery"]

@@ -29,6 +29,7 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			box_id uuid NOT NULL UNIQUE,
 			activation_verifier text NOT NULL,
 			owner_verifier text NOT NULL DEFAULT '',
+			display_name text NOT NULL DEFAULT '',
 			claimed_at timestamptz
 		)`,
 		`CREATE TABLE IF NOT EXISTS web_sessions (
@@ -57,8 +58,7 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			request_id uuid PRIMARY KEY,
 			poll_token_digest bytea NOT NULL CHECK (octet_length(poll_token_digest) = 32),
 			client_public_key bytea NOT NULL CHECK (octet_length(client_public_key) = 32),
-			intent text NOT NULL CHECK (octet_length(intent) BETWEEN 1 AND 64),
-			group_name text NOT NULL CHECK (octet_length(group_name) <= 512),
+			approval_code_digest bytea NOT NULL UNIQUE CHECK (octet_length(approval_code_digest) = 32),
 			device_name text NOT NULL CHECK (octet_length(device_name) BETWEEN 1 AND 1024),
 			created_at timestamptz NOT NULL,
 			expires_at timestamptz NOT NULL,
@@ -97,9 +97,9 @@ func (store *PostgresStore) State(ctx context.Context) (State, error) {
 	var state State
 	var claimedAt *time.Time
 	err := store.pool.QueryRow(ctx, `
-		SELECT box_id, activation_verifier, owner_verifier, claimed_at
+		SELECT box_id, activation_verifier, owner_verifier, display_name, claimed_at
 		FROM box_state WHERE id = TRUE`).Scan(
-		&state.BoxID, &state.ActivationVerifier, &state.OwnerVerifier, &claimedAt,
+		&state.BoxID, &state.ActivationVerifier, &state.OwnerVerifier, &state.DisplayName, &claimedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return State{}, ErrNotInitialized
@@ -117,13 +117,14 @@ func (store *PostgresStore) Claim(
 	ctx context.Context,
 	activationVerifier string,
 	ownerVerifier string,
+	displayName string,
 	now time.Time,
 ) error {
 	result, err := store.pool.Exec(ctx, `
 		UPDATE box_state
-		SET activation_verifier = '', owner_verifier = $2, claimed_at = $3
+		SET activation_verifier = '', owner_verifier = $2, display_name = $3, claimed_at = $4
 		WHERE id = TRUE AND owner_verifier = '' AND activation_verifier = $1`,
-		activationVerifier, ownerVerifier, now)
+		activationVerifier, ownerVerifier, displayName, now)
 	if err != nil {
 		return err
 	}
@@ -333,27 +334,59 @@ func (store *PostgresStore) RevokeAllGrants(ctx context.Context, now time.Time) 
 }
 
 func (store *PostgresStore) CreateConnectionRequest(ctx context.Context, request ConnectionRequest) error {
-	_, err := store.pool.Exec(ctx, `
-		INSERT INTO connection_requests (request_id, poll_token_digest, client_public_key, intent, group_name, device_name, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, request.RequestID, request.PollTokenDigest[:], request.ClientPublicKey[:], request.Intent, request.GroupName, request.DeviceName, request.CreatedAt, request.ExpiresAt)
-	return err
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM connection_requests WHERE approval_code_digest = $1 AND expires_at <= $2`, request.ApprovalCodeDigest[:], request.CreatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO connection_requests (request_id, poll_token_digest, approval_code_digest, client_public_key, device_name, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, request.RequestID, request.PollTokenDigest[:], request.ApprovalCodeDigest[:], request.ClientPublicKey[:], request.DeviceName, request.CreatedAt, request.ExpiresAt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (store *PostgresStore) ConnectionRequest(ctx context.Context, requestID uuid.UUID) (ConnectionRequest, error) {
 	var request ConnectionRequest
-	var poll, publicKey []byte
+	var poll, approvalCode, publicKey []byte
 	err := store.pool.QueryRow(ctx, `
-		SELECT request_id, poll_token_digest, client_public_key, intent, group_name, device_name, created_at, expires_at, encrypted_result
+		SELECT request_id, poll_token_digest, approval_code_digest, client_public_key, device_name, created_at, expires_at, encrypted_result
 		FROM connection_requests WHERE request_id = $1`, requestID).Scan(
-		&request.RequestID, &poll, &publicKey, &request.Intent, &request.GroupName, &request.DeviceName, &request.CreatedAt, &request.ExpiresAt, &request.EncryptedResult,
+		&request.RequestID, &poll, &approvalCode, &publicKey, &request.DeviceName, &request.CreatedAt, &request.ExpiresAt, &request.EncryptedResult,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ConnectionRequest{}, ErrInvalidCredential
 	}
-	if err != nil || len(poll) != 32 || len(publicKey) != 32 {
+	if err != nil || len(poll) != 32 || len(approvalCode) != 32 || len(publicKey) != 32 {
 		return ConnectionRequest{}, err
 	}
 	copy(request.PollTokenDigest[:], poll)
+	copy(request.ApprovalCodeDigest[:], approvalCode)
+	copy(request.ClientPublicKey[:], publicKey)
+	return request, nil
+}
+
+func (store *PostgresStore) ConnectionRequestByApprovalCode(ctx context.Context, digest [32]byte, now time.Time) (ConnectionRequest, error) {
+	var request ConnectionRequest
+	var poll, approvalCode, publicKey []byte
+	err := store.pool.QueryRow(ctx, `
+		SELECT request_id, poll_token_digest, approval_code_digest, client_public_key, device_name, created_at, expires_at, encrypted_result
+		FROM connection_requests
+		WHERE approval_code_digest = $1 AND expires_at > $2 AND octet_length(encrypted_result) = 0`, digest[:], now).Scan(
+		&request.RequestID, &poll, &approvalCode, &publicKey, &request.DeviceName, &request.CreatedAt, &request.ExpiresAt, &request.EncryptedResult,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ConnectionRequest{}, ErrInvalidCredential
+	}
+	if err != nil || len(poll) != 32 || len(approvalCode) != 32 || len(publicKey) != 32 {
+		return ConnectionRequest{}, err
+	}
+	copy(request.PollTokenDigest[:], poll)
+	copy(request.ApprovalCodeDigest[:], approvalCode)
 	copy(request.ClientPublicKey[:], publicKey)
 	return request, nil
 }

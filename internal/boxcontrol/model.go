@@ -29,6 +29,7 @@ const (
 	WebSessionMaximumLifetime = 12 * time.Hour
 	ConnectionGrantLifetime   = 180 * 24 * time.Hour
 	MaximumRequestBytes       = 32 * 1024
+	ApprovalCodeDigits        = 6
 )
 
 var (
@@ -44,6 +45,7 @@ type State struct {
 	BoxID              uuid.UUID
 	ActivationVerifier string
 	OwnerVerifier      string
+	DisplayName        string
 	ClaimedAt          time.Time
 }
 
@@ -64,6 +66,7 @@ type PublicManifestPayload struct {
 	Version     int                 `json:"version"`
 	BoxID       uuid.UUID           `json:"boxID"`
 	DisplayName string              `json:"displayName"`
+	Claimed     bool                `json:"claimed"`
 	PublicKey   string              `json:"publicKey"`
 	Services    []ServiceDescriptor `json:"services"`
 }
@@ -73,31 +76,36 @@ type SignedPublicManifest struct {
 	Signature string `json:"signature"`
 }
 
-type AuthenticatedProfile struct {
-	Version          int                 `json:"version"`
-	BoxID            uuid.UUID           `json:"boxID"`
-	DisplayName      string              `json:"displayName"`
-	Services         []ServiceDescriptor `json:"services"`
-	DeviceSyncGroups []DeviceSyncGroup   `json:"deviceSyncGroups"`
-}
-
-type ConnectionIntent string
+type ServiceAvailability string
 
 const (
-	ConnectionIntentConnect          ConnectionIntent = "connect"
-	ConnectionIntentCreateFirstGroup ConnectionIntent = "create_first_device_sync_group"
+	ServiceAvailable     ServiceAvailability = "available"
+	ServiceUnavailable   ServiceAvailability = "unavailable"
+	ServiceNotConfigured ServiceAvailability = "not_configured"
 )
 
+type AuthenticatedService struct {
+	Kind     string              `json:"kind"`
+	Endpoint string              `json:"endpoint,omitempty"`
+	Status   ServiceAvailability `json:"status"`
+}
+
+type AuthenticatedProfile struct {
+	Version     int                    `json:"version"`
+	BoxID       uuid.UUID              `json:"boxID"`
+	DisplayName string                 `json:"displayName"`
+	Services    []AuthenticatedService `json:"services"`
+}
+
 type ConnectionRequest struct {
-	RequestID       uuid.UUID
-	PollTokenDigest [32]byte
-	ClientPublicKey [32]byte
-	Intent          ConnectionIntent
-	GroupName       string
-	DeviceName      string
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
-	EncryptedResult []byte
+	RequestID          uuid.UUID
+	PollTokenDigest    [32]byte
+	ApprovalCodeDigest [32]byte
+	ClientPublicKey    [32]byte
+	DeviceName         string
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	EncryptedResult    []byte
 }
 
 func (request ConnectionRequest) Validate(now time.Time) error {
@@ -107,24 +115,42 @@ func (request ConnectionRequest) Validate(now time.Time) error {
 		!request.ExpiresAt.After(now) {
 		return ErrRequestExpired
 	}
-	switch request.Intent {
-	case ConnectionIntentConnect:
-		if request.GroupName != "" {
-			return errors.New("connect request cannot name a new group")
-		}
-	case ConnectionIntentCreateFirstGroup:
-		name := normalizedDisplayName(request.GroupName)
-		if name == "" || name != request.GroupName || len(name) > 128 {
-			return errors.New("Sync Group name is invalid")
-		}
-	default:
-		return errors.New("connection intent is invalid")
-	}
 	deviceName := normalizedDisplayName(request.DeviceName)
 	if deviceName == "" || deviceName != request.DeviceName || len(deviceName) > 256 {
 		return errors.New("device name is invalid")
 	}
 	return nil
+}
+
+func NormalizeBoxDisplayName(value string) (string, error) {
+	value = normalizedDisplayName(value)
+	if value == "" || len(value) > 128 || strings.IndexFunc(value, func(value rune) bool {
+		return unicode.IsControl(value) || value == '\x00'
+	}) >= 0 {
+		return "", errors.New("Box name is invalid")
+	}
+	return value, nil
+}
+
+func NormalizeApprovalCode(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if len(value) != ApprovalCodeDigits {
+		return "", errors.New("connection code must contain six digits")
+	}
+	for _, digit := range []byte(value) {
+		if digit < '0' || digit > '9' {
+			return "", errors.New("connection code must contain six digits")
+		}
+	}
+	return value, nil
+}
+
+func ApprovalCodeDigest(value string) ([32]byte, error) {
+	value, err := NormalizeApprovalCode(value)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256([]byte("facets-box-connection-code-v1\x00" + value)), nil
 }
 
 type WebSession struct {

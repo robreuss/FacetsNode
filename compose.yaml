@@ -125,7 +125,6 @@ services:
       FACETS_BOX_IDENTITY_KEY_FILE: /var/lib/facets-box-controller/identity-key
       FACETS_BOX_DEVICE_SYNC_PRIVATE_URL: http://server:8080
       FACETS_BOX_DEVICE_SYNC_URL: ${FACETS_BOX_DEVICE_SYNC_URL:?Set the public Device Sync capability URL in .env}
-      FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN: ${FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN:?Set FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN in .env}
     depends_on:
       box-postgres:
         condition: service_healthy
@@ -150,6 +149,31 @@ services:
       - controller-private
       - service-control
       - ingress-control
+
+  discovery:
+    build:
+      context: .
+      target: box-discovery
+      args:
+        FACETS_SERVER_SOURCE_REVISION: ${FACETS_SERVER_SOURCE_REVISION:-unknown}
+        FACETS_SERVER_SOURCE_TREE: ${FACETS_SERVER_SOURCE_TREE:-unknown}
+    environment:
+      FACETS_BOX_PUBLIC_URL: ${FACETS_BOX_PUBLIC_URL:?Set the single public Facets Box URL in .env}
+      FACETS_BOX_DISCOVERY_CA_FILE: /etc/facets-box/tls/server.crt
+    depends_on:
+      controller:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=4m,mode=1777
+    volumes:
+      - ${FACETS_DEVICE_SYNC_TLS_DIRECTORY:-./deploy/tls}:/etc/facets-box/tls:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    network_mode: host
 
   ingress:
     image: caddy:2.10.2-alpine

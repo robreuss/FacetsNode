@@ -8,26 +8,27 @@ credential, deployment signing key, content key, backup-decryption authority,
 Docker socket, or generic service-command capability.
 
 Device Sync is registered beneath the same URL at
-`/facetsbox/device-sync`. The controller reaches two private Device Sync
-operations on an internal Docker network: list published Sync Group profiles
-and issue one one-time account admission. Device Sync signs that admission
-itself. The public signed Box manifest contains service kinds and endpoints but
-never group names; a scoped app-connection grant is required for the profile
-that includes groups.
+`/facetsbox/device-sync`, but Device Sync membership is not part of Box claim or
+Box membership. The controller can health-check the private service endpoint;
+it holds no Device Sync signing key or membership authority. The public signed
+Box manifest contains only the Box identity, claimed state, display name, and
+service kinds/endpoints. A scoped member grant is required for the authenticated
+service-status profile.
 
 ## First initialization
 
-1. Configure independent random values for
-   `FACETS_BOX_CONTROLLER_POSTGRES_PASSWORD` and
-   `FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN`.
+1. Configure an independent random value for
+   `FACETS_BOX_CONTROLLER_POSTGRES_PASSWORD`.
 2. Configure `FACETS_BOX_PUBLIC_URL` and `FACETS_BOX_DEVICE_SYNC_URL` with the
    single public base and Device Sync subpath.
 3. Start both PostgreSQL services, then run the controller image once with the
    `initialize` command. It creates a distinct Ed25519 Box identity and prints
    a single activation code. Only an Argon2id verifier is retained.
 4. Start the full Compose project. The first Box Web session presents the
-   activation code and a new 15–128 character Box Owner password. Successful
-   claim consumes the activation verifier.
+   activation code, a Box display name, and a new 15–128 character Box Owner
+   password. Successful claim consumes the activation verifier and opens the
+   complete management dashboard. Claim creates no app grant or Device Sync
+   group.
 
 The Box Owner password is normalized Unicode and accepts spaces and password
 manager paste. There are no composition rules or periodic expiry. Common
@@ -37,13 +38,27 @@ cookies plus CSRF tokens and bounded idle/absolute lifetimes.
 
 ## App connection
 
-Facets creates a short-lived request with an ephemeral X25519 key and opens the
-approval page inside its pinned Box Web view. Claim or Box Owner login approves
-the request. The controller returns the connection grant and optional first
-Device Sync admission only through a ChaCha20-Poly1305 envelope bound to that
-request. Neither value appears in the URL, clipboard, Web history, or audit
-log. The app stores the connection grant in platform-protected storage and
-uses it only for service and Sync Group discovery.
+Facets creates a ten-minute request with an ephemeral X25519 key and displays a
+single-use six-digit code. A signed-in Box Owner enters that code in the Box
+dashboard. Codes are unique among active requests, throttled on failure, and
+never appear in URLs, clipboard data, Web history, or logs. The controller
+returns a member grant only through a ChaCha20-Poly1305 envelope bound to the
+exact request. The app stores the device-bound grant in platform-protected
+storage and uses it only for the generic authenticated service profile. The
+grant cannot administer the Box or enroll the installation in any service.
+
+## Nearby discovery and multiple Boxes
+
+The separate `facets-box-discovery` sidecar verifies the controller's signed
+public manifest and advertises `_facets-box._tcp` over Bonjour. Its bounded TXT
+record contains protocol version, Box ID, display name, public HTTPS URL,
+identity-key fingerprint, claimed state, and service kinds. It receives no Box
+database credential, owner session, member grant, or service-private state.
+
+Clients key saved Boxes and protected grants by Box ID. The URL is a locator,
+not identity: a changed identity at a known locator is rejected. Multiple Boxes
+may share a display name and remain distinguishable by location and identity
+suffix. Manual HTTPS URL entry remains the hosted/remote fallback.
 
 Changing the Box Owner password atomically revokes all Web sessions and app
 connection grants. It does not alter Device Sync principal membership. Trusted

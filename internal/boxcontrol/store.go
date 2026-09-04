@@ -13,7 +13,7 @@ import (
 type Store interface {
 	Initialize(context.Context, State) error
 	State(context.Context) (State, error)
-	Claim(context.Context, string, string, time.Time) error
+	Claim(context.Context, string, string, string, time.Time) error
 	ChangeOwnerPassword(context.Context, string, time.Time) error
 	CreateWebSession(context.Context, WebSession) error
 	WebSession(context.Context, [32]byte, time.Time) (WebSession, error)
@@ -30,6 +30,7 @@ type Store interface {
 	RevokeAllGrants(context.Context, time.Time) error
 	CreateConnectionRequest(context.Context, ConnectionRequest) error
 	ConnectionRequest(context.Context, uuid.UUID) (ConnectionRequest, error)
+	ConnectionRequestByApprovalCode(context.Context, [32]byte, time.Time) (ConnectionRequest, error)
 	CompleteConnectionRequest(context.Context, uuid.UUID, []byte) error
 	AppendAudit(context.Context, AuditEvent) error
 	RecentAudit(context.Context, int) ([]AuditEvent, error)
@@ -78,6 +79,7 @@ func (store *MemoryStore) Claim(
 	_ context.Context,
 	activationVerifier string,
 	ownerVerifier string,
+	displayName string,
 	now time.Time,
 ) error {
 	store.mu.Lock()
@@ -93,6 +95,7 @@ func (store *MemoryStore) Claim(
 	}
 	store.state.OwnerVerifier = ownerVerifier
 	store.state.ActivationVerifier = ""
+	store.state.DisplayName = displayName
 	store.state.ClaimedAt = now
 	return nil
 }
@@ -256,6 +259,14 @@ func (store *MemoryStore) CreateConnectionRequest(_ context.Context, request Con
 	if _, present := store.requests[request.RequestID]; present {
 		return errors.New("connection request collision")
 	}
+	for id, existing := range store.requests {
+		if existing.ApprovalCodeDigest == request.ApprovalCodeDigest {
+			if existing.ExpiresAt.After(request.CreatedAt) {
+				return errors.New("connection code collision")
+			}
+			delete(store.requests, id)
+		}
+	}
 	store.requests[request.RequestID] = request
 	return nil
 }
@@ -269,6 +280,22 @@ func (store *MemoryStore) ConnectionRequest(_ context.Context, requestID uuid.UU
 	}
 	request.EncryptedResult = append([]byte(nil), request.EncryptedResult...)
 	return request, nil
+}
+
+func (store *MemoryStore) ConnectionRequestByApprovalCode(
+	_ context.Context,
+	digest [32]byte,
+	now time.Time,
+) (ConnectionRequest, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, request := range store.requests {
+		if request.ApprovalCodeDigest == digest && request.ExpiresAt.After(now) && len(request.EncryptedResult) == 0 {
+			request.EncryptedResult = append([]byte(nil), request.EncryptedResult...)
+			return request, nil
+		}
+	}
+	return ConnectionRequest{}, ErrInvalidCredential
 }
 
 func (store *MemoryStore) CompleteConnectionRequest(

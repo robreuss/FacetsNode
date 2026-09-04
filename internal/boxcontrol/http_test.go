@@ -31,6 +31,18 @@ type testDeviceSyncController struct {
 	issueCount  int
 }
 
+type failingConnectionCompletionStore struct {
+	Store
+}
+
+func (store failingConnectionCompletionStore) CompleteConnectionRequest(
+	context.Context,
+	uuid.UUID,
+	[]byte,
+) error {
+	return errors.New("injected connection completion failure")
+}
+
 func (controller *testDeviceSyncController) Groups(context.Context) ([]DeviceSyncGroup, error) {
 	return append([]DeviceSyncGroup(nil), controller.groups...), nil
 }
@@ -44,7 +56,7 @@ func (controller *testDeviceSyncController) Healthy(context.Context) error {
 	return controller.healthError
 }
 
-func TestClaimEncryptsFirstDeviceBootstrapAndNeverPublishesGroups(t *testing.T) {
+func TestClaimAndMemberApprovalRemainSeparate(t *testing.T) {
 	withFastArgon(t)
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store := initializedMemoryStore(t, "FIRST-BOX-CODE")
@@ -53,6 +65,33 @@ func TestClaimEncryptsFirstDeviceBootstrapAndNeverPublishesGroups(t *testing.T) 
 	}
 	service := makeTestService(t, store, deviceSync, now)
 	handler := service.Handler()
+
+	home := httptest.NewRecorder()
+	handler.ServeHTTP(home, httptest.NewRequest(http.MethodGet, "/", nil))
+	csrfCookie := cookieNamed(t, home.Result().Cookies(), "facets_box_csrf")
+	form := url.Values{
+		"csrf": {csrfCookie.Value}, "display_name": {"Rob's Home Box"},
+		"activation_code": {"FIRST-BOX-CODE"}, "password": {"a memorable private facets owner phrase"},
+	}
+	claim := httptest.NewRequest(http.MethodPost, "/claim", strings.NewReader(form.Encode()))
+	claim.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	claim.AddCookie(csrfCookie)
+	claimed := httptest.NewRecorder()
+	handler.ServeHTTP(claimed, claim)
+	if claimed.Code != http.StatusSeeOther {
+		t.Fatalf("claim status %d: %s", claimed.Code, claimed.Body.String())
+	}
+	state, err := store.State(context.Background())
+	if err != nil || !state.Claimed() || state.DisplayName != "Rob's Home Box" || state.ActivationVerifier != "" || strings.Contains(state.OwnerVerifier, "memorable") {
+		t.Fatalf("unexpected claimed state: %+v, %v", state, err)
+	}
+	if deviceSync.issueCount != 0 {
+		t.Fatalf("issued %d bootstraps", deviceSync.issueCount)
+	}
+	if grants, err := store.ListGrants(context.Background()); err != nil || len(grants) != 0 {
+		t.Fatalf("claim created a member grant: %+v, %v", grants, err)
+	}
+
 	clientPrivate, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +105,7 @@ func TestClaimEncryptsFirstDeviceBootstrapAndNeverPublishesGroups(t *testing.T) 
 		Version: SchemaVersion, RequestID: requestID,
 		PollTokenDigest: base64.RawURLEncoding.EncodeToString(pollDigest[:]),
 		ClientPublicKey: base64.RawURLEncoding.EncodeToString(clientPrivate.PublicKey().Bytes()),
-		Intent:          ConnectionIntentCreateFirstGroup, GroupName: "Rob's devices", DeviceName: "Mac",
+		DeviceName:      "iPad Pro",
 		ExpiresAtMillis: now.Add(5 * time.Minute).UnixMilli(),
 	})
 	create := httptest.NewRequest(http.MethodPost, "/v1/connection-requests", bytes.NewReader(createBody))
@@ -76,32 +115,49 @@ func TestClaimEncryptsFirstDeviceBootstrapAndNeverPublishesGroups(t *testing.T) 
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status %d: %s", created.Code, created.Body.String())
 	}
-
-	home := httptest.NewRecorder()
-	handler.ServeHTTP(home, httptest.NewRequest(http.MethodGet, "/?connection_request="+requestID.String(), nil))
-	csrfCookie := cookieNamed(t, home.Result().Cookies(), "facets_box_csrf")
-	form := url.Values{
-		"csrf": {csrfCookie.Value}, "connection_request": {requestID.String()},
-		"activation_code": {"FIRST-BOX-CODE"}, "password": {"a memorable private facets owner phrase"},
+	var createdBody struct {
+		ApprovalCode string `json:"approvalCode"`
 	}
-	claim := httptest.NewRequest(http.MethodPost, "/claim", strings.NewReader(form.Encode()))
-	claim.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	claim.AddCookie(csrfCookie)
-	claimed := httptest.NewRecorder()
-	handler.ServeHTTP(claimed, claim)
-	if claimed.Code != http.StatusSeeOther {
-		t.Fatalf("claim status %d: %s", claimed.Code, claimed.Body.String())
+	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil {
+		t.Fatal(err)
 	}
-	state, err := store.State(context.Background())
-	if err != nil || !state.Claimed() || state.ActivationVerifier != "" || strings.Contains(state.OwnerVerifier, "memorable") {
-		t.Fatalf("unexpected claimed state: %+v, %v", state, err)
+	if _, err := NormalizeApprovalCode(createdBody.ApprovalCode); err != nil {
+		t.Fatalf("invalid approval code %q: %v", createdBody.ApprovalCode, err)
 	}
-	if deviceSync.issueCount != 1 {
-		t.Fatalf("issued %d bootstraps", deviceSync.issueCount)
-	}
-	deviceSync.groups = []DeviceSyncGroup{{SetDiscriminator: strings.Repeat("a", 32), DisplayName: "Private devices", Revision: 1}}
 
 	poll := httptest.NewRequest(http.MethodGet, "/v1/connection-requests/"+requestID.String(), nil)
+	poll.Header.Set("Authorization", "Bearer "+pollToken)
+	pending := httptest.NewRecorder()
+	handler.ServeHTTP(pending, poll)
+	if pending.Code != http.StatusAccepted {
+		t.Fatalf("claim unexpectedly approved member request: %d", pending.Code)
+	}
+
+	sessionCookie := cookieNamed(t, claimed.Result().Cookies(), "facets_box_session")
+	ownerCSRF := cookieNamed(t, claimed.Result().Cookies(), "facets_box_csrf")
+	approvalForm := url.Values{
+		"csrf": {ownerCSRF.Value}, "connection_code": {createdBody.ApprovalCode},
+	}
+	approval := httptest.NewRequest(http.MethodPost, "/connections/approve", strings.NewReader(approvalForm.Encode()))
+	approval.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	approval.AddCookie(sessionCookie)
+	approval.AddCookie(ownerCSRF)
+	approved := httptest.NewRecorder()
+	handler.ServeHTTP(approved, approval)
+	if approved.Code != http.StatusSeeOther {
+		t.Fatalf("approval status %d: %s", approved.Code, approved.Body.String())
+	}
+	replayRequest := httptest.NewRequest(http.MethodPost, "/connections/approve", strings.NewReader(approvalForm.Encode()))
+	replayRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	replayRequest.AddCookie(sessionCookie)
+	replayRequest.AddCookie(ownerCSRF)
+	replay := httptest.NewRecorder()
+	handler.ServeHTTP(replay, replayRequest)
+	if replay.Code != http.StatusSeeOther || !strings.Contains(replay.Header().Get("Location"), "error=") {
+		t.Fatalf("used code replay was not rejected: %d %s", replay.Code, replay.Header().Get("Location"))
+	}
+
+	poll = httptest.NewRequest(http.MethodGet, "/v1/connection-requests/"+requestID.String(), nil)
 	poll.Header.Set("Authorization", "Bearer "+pollToken)
 	polled := httptest.NewRecorder()
 	handler.ServeHTTP(polled, poll)
@@ -109,8 +165,11 @@ func TestClaimEncryptsFirstDeviceBootstrapAndNeverPublishesGroups(t *testing.T) 
 		t.Fatalf("poll status %d", polled.Code)
 	}
 	payload := openConnectionResult(t, requestID, clientPrivate, polled.Body.Bytes())
-	if payload.BoxID != state.BoxID || payload.GrantToken == "" || !bytes.Contains(payload.DeviceSyncBootstrap, []byte("device-sync-secret")) {
+	if payload.BoxID != state.BoxID || payload.GrantToken == "" || payload.Profile.DisplayName != "Rob's Home Box" {
 		t.Fatalf("unexpected handoff: %+v", payload)
+	}
+	if len(payload.Profile.Services) != 6 || payload.Profile.Services[2].Kind != "device-sync" || payload.Profile.Services[2].Status != ServiceAvailable {
+		t.Fatalf("authenticated service catalog is incomplete: %+v", payload.Profile.Services)
 	}
 
 	manifestResponse := httptest.NewRecorder()
@@ -123,8 +182,8 @@ func TestClaimEncryptsFirstDeviceBootstrapAndNeverPublishesGroups(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(manifestBytes, []byte("Private devices")) || bytes.Contains(manifestBytes, []byte("deviceSyncGroups")) {
-		t.Fatal("public manifest disclosed private Sync Group data")
+	if bytes.Contains(manifestBytes, []byte("deviceSyncGroups")) || bytes.Contains(manifestBytes, []byte("device-sync-secret")) {
+		t.Fatal("public manifest disclosed private service data")
 	}
 	var publicPayload PublicManifestPayload
 	if err := json.Unmarshal(manifestBytes, &publicPayload); err != nil {
@@ -135,12 +194,23 @@ func TestClaimEncryptsFirstDeviceBootstrapAndNeverPublishesGroups(t *testing.T) 
 	if !ed25519.Verify(publicKey, manifestBytes, signature) {
 		t.Fatal("manifest signature rejected")
 	}
+	if !publicPayload.Claimed || publicPayload.DisplayName != "Rob's Home Box" {
+		t.Fatalf("manifest did not publish claimed Box name: %+v", publicPayload)
+	}
 }
 
 func TestConnectionRequestExpiryIsCappedToTheControllerClock(t *testing.T) {
 	withFastArgon(t)
 	now := time.Unix(1_800_000_000, 500_000_000).UTC()
 	store := initializedMemoryStore(t, "FIRST-BOX-CODE")
+	state, _ := store.State(context.Background())
+	owner, err := hashSecret("a memorable owner passphrase", rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Claim(context.Background(), state.ActivationVerifier, owner, "Home Box", now); err != nil {
+		t.Fatal(err)
+	}
 	service := makeTestService(t, store, &testDeviceSyncController{}, now)
 	clientPrivate, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -155,7 +225,7 @@ func TestConnectionRequestExpiryIsCappedToTheControllerClock(t *testing.T) {
 		Version: SchemaVersion, RequestID: requestID,
 		PollTokenDigest: base64.RawURLEncoding.EncodeToString(pollDigest[:]),
 		ClientPublicKey: base64.RawURLEncoding.EncodeToString(clientPrivate.PublicKey().Bytes()),
-		Intent:          ConnectionIntentCreateFirstGroup, GroupName: "Rob's devices", DeviceName: "Mac",
+		DeviceName:      "Mac",
 		// The client is 500 ms ahead and asks for the documented ten-minute lifetime.
 		ExpiresAtMillis: now.Add(ConnectionRequestLifetime + 500*time.Millisecond).UnixMilli(),
 	})
@@ -175,6 +245,82 @@ func TestConnectionRequestExpiryIsCappedToTheControllerClock(t *testing.T) {
 	}
 }
 
+func TestApprovalFailureIsReportedAndDoesNotLeaveAnActiveGrant(t *testing.T) {
+	withFastArgon(t)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	baseStore := initializedMemoryStore(t, "APPROVAL-FAILURE-CODE")
+	state, _ := baseStore.State(context.Background())
+	owner, err := hashSecret("a memorable approval failure password", rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := baseStore.Claim(context.Background(), state.ActivationVerifier, owner, "Home Box", now); err != nil {
+		t.Fatal(err)
+	}
+	clientPrivate, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pollDigest, err := RandomToken(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codeDigest, err := ApprovalCodeDigest("123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := uuid.New()
+	connection := ConnectionRequest{
+		RequestID:          requestID,
+		PollTokenDigest:    pollDigest,
+		ApprovalCodeDigest: codeDigest,
+		DeviceName:         "iPad Pro",
+		CreatedAt:          now,
+		ExpiresAt:          now.Add(time.Minute),
+	}
+	copy(connection.ClientPublicKey[:], clientPrivate.PublicKey().Bytes())
+	if err := baseStore.CreateConnectionRequest(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	service := makeTestService(
+		t,
+		failingConnectionCompletionStore{Store: baseStore},
+		&testDeviceSyncController{},
+		now,
+	)
+
+	if err := service.approveConnection(context.Background(), requestID); err == nil {
+		t.Fatal("approval reported success after the durable handoff write failed")
+	}
+	grants, err := baseStore.ListGrants(context.Background())
+	if err != nil || len(grants) != 1 || grants[0].RevokedAt.IsZero() {
+		t.Fatalf("failed approval left an active grant: %+v, %v", grants, err)
+	}
+	stored, err := baseStore.ConnectionRequest(context.Background(), requestID)
+	if err != nil || len(stored.EncryptedResult) != 0 {
+		t.Fatalf("failed approval published a result: %+v, %v", stored, err)
+	}
+}
+
+func TestUnclaimedBoxRejectsMemberRequests(t *testing.T) {
+	withFastArgon(t)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	store := initializedMemoryStore(t, "UNCLAIMED-BOX-CODE")
+	service := makeTestService(t, store, &testDeviceSyncController{}, now)
+	request := httptest.NewRequest(http.MethodPost, "/v1/connection-requests", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	service.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("unclaimed request status %d", response.Code)
+	}
+	if grants, err := store.ListGrants(context.Background()); err != nil || len(grants) != 0 {
+		t.Fatalf("unclaimed request changed grants: %+v, %v", grants, err)
+	}
+}
+
 func TestOwnerLoginThrottlesAndPasswordChangeRevokesSessionsAndGrants(t *testing.T) {
 	withFastArgon(t)
 	now := time.Unix(1_800_000_000, 0).UTC()
@@ -184,7 +330,7 @@ func TestOwnerLoginThrottlesAndPasswordChangeRevokesSessionsAndGrants(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Claim(context.Background(), state.ActivationVerifier, owner, now); err != nil {
+	if err := store.Claim(context.Background(), state.ActivationVerifier, owner, "Home Box", now); err != nil {
 		t.Fatal(err)
 	}
 	service := makeTestService(t, store, &testDeviceSyncController{}, now)
@@ -249,7 +395,7 @@ func TestCSRFRejectsCrossOriginClaimAndConnectionPollIsNotAnOwnerSession(t *test
 	store := initializedMemoryStore(t, "THIRD-BOX-CODE")
 	service := makeTestService(t, store, &testDeviceSyncController{}, now)
 	handler := service.Handler()
-	form := url.Values{"csrf": {"wrong"}, "activation_code": {"THIRD-BOX-CODE"}, "password": {"a sufficiently long owner passphrase"}}
+	form := url.Values{"csrf": {"wrong"}, "activation_code": {"THIRD-BOX-CODE"}, "display_name": {"Home Box"}, "password": {"a sufficiently long owner passphrase"}}
 	claim := httptest.NewRequest(http.MethodPost, "/claim", strings.NewReader(form.Encode()))
 	claim.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	claim.AddCookie(&http.Cookie{Name: "facets_box_csrf", Value: "different"})

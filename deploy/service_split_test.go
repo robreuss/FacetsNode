@@ -159,6 +159,8 @@ func TestDockerfilePublishesAllServiceImages(t *testing.T) {
 		"ENTRYPOINT [\"/facets-backup-custody-server\"]",
 		"FROM scratch AS box-controller",
 		"ENTRYPOINT [\"/facets-box-controller\"]",
+		"FROM scratch AS box-discovery",
+		"ENTRYPOINT [\"/facets-box-discovery\"]",
 	})
 }
 
@@ -168,7 +170,7 @@ func TestBoxControllerHasIndependentDatabaseAndNoServiceSigningAuthority(t *test
 	if start < 0 {
 		t.Fatal("Box controller service block missing")
 	}
-	relativeEnd := strings.Index(compose[start+1:], "\n  ingress:\n")
+	relativeEnd := strings.Index(compose[start+1:], "\n  discovery:\n")
 	if relativeEnd < 0 {
 		t.Fatal("Box controller service block is not bounded")
 	}
@@ -177,13 +179,13 @@ func TestBoxControllerHasIndependentDatabaseAndNoServiceSigningAuthority(t *test
 		"target: box-controller",
 		"FACETS_BOX_CONTROLLER_DATABASE_URL:",
 		"FACETS_BOX_IDENTITY_KEY_FILE:",
-		"FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN:",
 		"facets-box-controller-state:/var/lib/facets-box-controller",
 		"- controller-private",
 		"- service-control",
 	})
 	for _, forbidden := range []string{
 		"FACETS_DEVICE_SYNC_DATABASE_URL",
+		"FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN",
 		"DEPLOYMENT_SIGNING_KEY",
 		"OPERATOR_TOKEN",
 		"docker.sock",

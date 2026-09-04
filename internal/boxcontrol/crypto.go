@@ -22,11 +22,10 @@ type SealedConnectionResult struct {
 }
 
 type ConnectionResultPayload struct {
-	Version             int                  `json:"version"`
-	BoxID               uuid.UUID            `json:"boxID"`
-	GrantToken          string               `json:"grantToken"`
-	Profile             AuthenticatedProfile `json:"profile"`
-	DeviceSyncBootstrap json.RawMessage      `json:"deviceSyncBootstrap,omitempty"`
+	Version    int                  `json:"version"`
+	BoxID      uuid.UUID            `json:"boxID"`
+	GrantToken string               `json:"grantToken"`
+	Profile    AuthenticatedProfile `json:"profile"`
 }
 
 func sealConnectionResult(
