@@ -54,6 +54,15 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			expires_at timestamptz NOT NULL,
 			revoked_at timestamptz
 		)`,
+		`CREATE TABLE IF NOT EXISTS connection_invitations (
+			invitation_id uuid PRIMARY KEY,
+			approval_code_digest bytea NOT NULL UNIQUE CHECK (octet_length(approval_code_digest) = 32),
+			created_at timestamptz NOT NULL,
+			expires_at timestamptz NOT NULL,
+			redeemed_request_id uuid,
+			redeemed_at timestamptz,
+			CHECK ((redeemed_request_id IS NULL) = (redeemed_at IS NULL))
+		)`,
 		`CREATE TABLE IF NOT EXISTS connection_requests (
 			request_id uuid PRIMARY KEY,
 			poll_token_digest bytea NOT NULL CHECK (octet_length(poll_token_digest) = 32),
@@ -62,8 +71,10 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			device_name text NOT NULL CHECK (octet_length(device_name) BETWEEN 1 AND 1024),
 			created_at timestamptz NOT NULL,
 			expires_at timestamptz NOT NULL,
+			authorized_at timestamptz,
 			encrypted_result bytea NOT NULL DEFAULT ''::bytea CHECK (octet_length(encrypted_result) <= 1048576)
 		)`,
+		`ALTER TABLE connection_requests ADD COLUMN IF NOT EXISTS authorized_at timestamptz`,
 		`CREATE TABLE IF NOT EXISTS audit_events (
 			sequence bigserial PRIMARY KEY,
 			occurred_at timestamptz NOT NULL,
@@ -139,6 +150,55 @@ func (store *PostgresStore) Claim(
 		return ErrInvalidCredential
 	}
 	return nil
+}
+
+func (store *PostgresStore) ClaimAndAuthorizeConnection(
+	ctx context.Context,
+	activationVerifier string,
+	ownerVerifier string,
+	displayName string,
+	requestID uuid.UUID,
+	now time.Time,
+) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	claimDigest := claimRequestDigest(requestID)
+	result, err := tx.Exec(ctx, `
+		UPDATE connection_requests
+		SET authorized_at = $3
+		WHERE request_id = $1 AND approval_code_digest = $2
+		  AND expires_at > $3 AND authorized_at IS NULL
+		  AND octet_length(encrypted_result) = 0`,
+		requestID, claimDigest[:], now)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrInvalidCredential
+	}
+	result, err = tx.Exec(ctx, `
+		UPDATE box_state
+		SET activation_verifier = '', owner_verifier = $2, display_name = $3, claimed_at = $4
+		WHERE id = TRUE AND owner_verifier = '' AND activation_verifier = $1`,
+		activationVerifier, ownerVerifier, displayName, now)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		var claimed bool
+		if scanErr := tx.QueryRow(ctx, `
+			SELECT owner_verifier <> '' FROM box_state WHERE id = TRUE`).Scan(&claimed); scanErr != nil {
+			return scanErr
+		}
+		if claimed {
+			return ErrAlreadyClaimed
+		}
+		return ErrInvalidCredential
+	}
+	return tx.Commit(ctx)
 }
 
 func (store *PostgresStore) ChangeOwnerPassword(ctx context.Context, verifier string, now time.Time) error {
@@ -333,6 +393,79 @@ func (store *PostgresStore) RevokeAllGrants(ctx context.Context, now time.Time) 
 	return err
 }
 
+func (store *PostgresStore) CreateConnectionInvitation(
+	ctx context.Context,
+	invitation ConnectionInvitation,
+) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM connection_invitations
+		WHERE approval_code_digest = $1 AND (expires_at <= $2 OR redeemed_at IS NOT NULL)`,
+		invitation.ApprovalCodeDigest[:], invitation.CreatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO connection_invitations
+			(invitation_id, approval_code_digest, created_at, expires_at)
+		VALUES ($1, $2, $3, $4)`, invitation.InvitationID,
+		invitation.ApprovalCodeDigest[:], invitation.CreatedAt,
+		invitation.ExpiresAt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (store *PostgresStore) RedeemConnectionInvitation(
+	ctx context.Context,
+	digest [32]byte,
+	request ConnectionRequest,
+	now time.Time,
+) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var invitationID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT invitation_id FROM connection_invitations
+		WHERE approval_code_digest = $1 AND expires_at > $2
+		  AND redeemed_at IS NULL
+		FOR UPDATE`, digest[:], now).Scan(&invitationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrInvalidCredential
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO connection_requests
+			(request_id, poll_token_digest, approval_code_digest,
+			 client_public_key, device_name, created_at, expires_at, authorized_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, request.RequestID,
+		request.PollTokenDigest[:], request.ApprovalCodeDigest[:],
+		request.ClientPublicKey[:], request.DeviceName, request.CreatedAt,
+		request.ExpiresAt, now); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE connection_invitations
+		SET redeemed_request_id = $2, redeemed_at = $3
+		WHERE invitation_id = $1 AND redeemed_at IS NULL`, invitationID,
+		request.RequestID, now)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrRequestReplay
+	}
+	return tx.Commit(ctx)
+}
+
 func (store *PostgresStore) CreateConnectionRequest(ctx context.Context, request ConnectionRequest) error {
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
@@ -343,8 +476,8 @@ func (store *PostgresStore) CreateConnectionRequest(ctx context.Context, request
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO connection_requests (request_id, poll_token_digest, approval_code_digest, client_public_key, device_name, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, request.RequestID, request.PollTokenDigest[:], request.ApprovalCodeDigest[:], request.ClientPublicKey[:], request.DeviceName, request.CreatedAt, request.ExpiresAt); err != nil {
+		INSERT INTO connection_requests (request_id, poll_token_digest, approval_code_digest, client_public_key, device_name, created_at, expires_at, authorized_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)`, request.RequestID, request.PollTokenDigest[:], request.ApprovalCodeDigest[:], request.ClientPublicKey[:], request.DeviceName, request.CreatedAt, request.ExpiresAt); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -353,10 +486,11 @@ func (store *PostgresStore) CreateConnectionRequest(ctx context.Context, request
 func (store *PostgresStore) ConnectionRequest(ctx context.Context, requestID uuid.UUID) (ConnectionRequest, error) {
 	var request ConnectionRequest
 	var poll, approvalCode, publicKey []byte
+	var authorizedAt *time.Time
 	err := store.pool.QueryRow(ctx, `
-		SELECT request_id, poll_token_digest, approval_code_digest, client_public_key, device_name, created_at, expires_at, encrypted_result
+		SELECT request_id, poll_token_digest, approval_code_digest, client_public_key, device_name, created_at, expires_at, authorized_at, encrypted_result
 		FROM connection_requests WHERE request_id = $1`, requestID).Scan(
-		&request.RequestID, &poll, &approvalCode, &publicKey, &request.DeviceName, &request.CreatedAt, &request.ExpiresAt, &request.EncryptedResult,
+		&request.RequestID, &poll, &approvalCode, &publicKey, &request.DeviceName, &request.CreatedAt, &request.ExpiresAt, &authorizedAt, &request.EncryptedResult,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ConnectionRequest{}, ErrInvalidCredential
@@ -367,34 +501,17 @@ func (store *PostgresStore) ConnectionRequest(ctx context.Context, requestID uui
 	copy(request.PollTokenDigest[:], poll)
 	copy(request.ApprovalCodeDigest[:], approvalCode)
 	copy(request.ClientPublicKey[:], publicKey)
-	return request, nil
-}
-
-func (store *PostgresStore) ConnectionRequestByApprovalCode(ctx context.Context, digest [32]byte, now time.Time) (ConnectionRequest, error) {
-	var request ConnectionRequest
-	var poll, approvalCode, publicKey []byte
-	err := store.pool.QueryRow(ctx, `
-		SELECT request_id, poll_token_digest, approval_code_digest, client_public_key, device_name, created_at, expires_at, encrypted_result
-		FROM connection_requests
-		WHERE approval_code_digest = $1 AND expires_at > $2 AND octet_length(encrypted_result) = 0`, digest[:], now).Scan(
-		&request.RequestID, &poll, &approvalCode, &publicKey, &request.DeviceName, &request.CreatedAt, &request.ExpiresAt, &request.EncryptedResult,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ConnectionRequest{}, ErrInvalidCredential
+	if authorizedAt != nil {
+		request.AuthorizedAt = *authorizedAt
 	}
-	if err != nil || len(poll) != 32 || len(approvalCode) != 32 || len(publicKey) != 32 {
-		return ConnectionRequest{}, err
-	}
-	copy(request.PollTokenDigest[:], poll)
-	copy(request.ApprovalCodeDigest[:], approvalCode)
-	copy(request.ClientPublicKey[:], publicKey)
 	return request, nil
 }
 
 func (store *PostgresStore) CompleteConnectionRequest(ctx context.Context, requestID uuid.UUID, result []byte) error {
 	command, err := store.pool.Exec(ctx, `
 		UPDATE connection_requests SET encrypted_result = $2
-		WHERE request_id = $1 AND octet_length(encrypted_result) = 0`, requestID, result)
+		WHERE request_id = $1 AND authorized_at IS NOT NULL
+		  AND octet_length(encrypted_result) = 0`, requestID, result)
 	if err != nil {
 		return err
 	}

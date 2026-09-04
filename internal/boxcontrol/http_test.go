@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -56,7 +57,7 @@ func (controller *testDeviceSyncController) Healthy(context.Context) error {
 	return controller.healthError
 }
 
-func TestClaimAndMemberApprovalRemainSeparate(t *testing.T) {
+func TestClaimConnectsExactInstallationAndOwnerInvitationConnectsSecond(t *testing.T) {
 	withFastArgon(t)
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store := initializedMemoryStore(t, "FIRST-BOX-CODE")
@@ -71,12 +72,39 @@ func TestClaimAndMemberApprovalRemainSeparate(t *testing.T) {
 	service := makeTestService(t, store, deviceSync, now)
 	handler := service.Handler()
 
+	claimPrivate, claimPollToken, claimBody := testConnectionRequest(
+		t, now, "Rob's Mac mini",
+	)
+	claimRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/claim-connection-requests",
+		bytes.NewReader(claimBody),
+	)
+	claimRequest.Header.Set("Content-Type", "application/json")
+	claimCreated := httptest.NewRecorder()
+	handler.ServeHTTP(claimCreated, claimRequest)
+	if claimCreated.Code != http.StatusCreated {
+		t.Fatalf("claim connection request status %d: %s", claimCreated.Code, claimCreated.Body.String())
+	}
+	var claimInput createConnectionRequestBody
+	if err := json.Unmarshal(claimBody, &claimInput); err != nil {
+		t.Fatal(err)
+	}
+
 	home := httptest.NewRecorder()
-	handler.ServeHTTP(home, httptest.NewRequest(http.MethodGet, "/", nil))
+	handler.ServeHTTP(home, httptest.NewRequest(
+		http.MethodGet, "/?claim_request_id="+claimInput.RequestID.String(), nil,
+	))
+	if !strings.Contains(home.Body.String(), "This will also connect") ||
+		!strings.Contains(home.Body.String(), "Rob&#39;s Mac mini") {
+		t.Fatalf("claim page omitted exact installation: %s", home.Body.String())
+	}
 	csrfCookie := cookieNamed(t, home.Result().Cookies(), "facets_box_csrf")
 	form := url.Values{
 		"csrf": {csrfCookie.Value}, "display_name": {"Rob's Home Box"},
 		"activation_code": {"FIRST-BOX-CODE"}, "password": {"a memorable private facets owner phrase"},
+		"password_confirmation": {"a memorable private facets owner phrase"},
+		"claim_request_id":      {claimInput.RequestID.String()},
 	}
 	claim := httptest.NewRequest(http.MethodPost, "/claim", strings.NewReader(form.Encode()))
 	claim.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -93,91 +121,88 @@ func TestClaimAndMemberApprovalRemainSeparate(t *testing.T) {
 	if deviceSync.issueCount != 0 {
 		t.Fatalf("issued %d bootstraps", deviceSync.issueCount)
 	}
-	if grants, err := store.ListGrants(context.Background()); err != nil || len(grants) != 0 {
-		t.Fatalf("claim created a member grant: %+v, %v", grants, err)
+	if grants, err := store.ListGrants(context.Background()); err != nil || len(grants) != 1 || grants[0].DeviceName != "Rob's Mac mini" {
+		t.Fatalf("claim did not connect exact installation: %+v, %v", grants, err)
 	}
-
-	clientPrivate, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
+	claimPoll := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/connection-requests/"+claimInput.RequestID.String(),
+		nil,
+	)
+	claimPoll.Header.Set("Authorization", "Bearer "+claimPollToken)
+	claimPolled := httptest.NewRecorder()
+	handler.ServeHTTP(claimPolled, claimPoll)
+	if claimPolled.Code != http.StatusOK {
+		t.Fatalf("claim connection poll status %d: %s", claimPolled.Code, claimPolled.Body.String())
 	}
-	pollToken, pollDigest, err := RandomToken(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestID := uuid.New()
-	createBody, _ := json.Marshal(createConnectionRequestBody{
-		Version: SchemaVersion, RequestID: requestID,
-		PollTokenDigest: base64.RawURLEncoding.EncodeToString(pollDigest[:]),
-		ClientPublicKey: base64.RawURLEncoding.EncodeToString(clientPrivate.PublicKey().Bytes()),
-		DeviceName:      "iPad Pro",
-		ExpiresAtMillis: now.Add(5 * time.Minute).UnixMilli(),
-	})
-	create := httptest.NewRequest(http.MethodPost, "/v1/connection-requests", bytes.NewReader(createBody))
-	create.Header.Set("Content-Type", "application/json")
-	created := httptest.NewRecorder()
-	handler.ServeHTTP(created, create)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create status %d: %s", created.Code, created.Body.String())
-	}
-	var createdBody struct {
-		ApprovalCode string `json:"approvalCode"`
-	}
-	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NormalizeApprovalCode(createdBody.ApprovalCode); err != nil {
-		t.Fatalf("invalid approval code %q: %v", createdBody.ApprovalCode, err)
-	}
-
-	poll := httptest.NewRequest(http.MethodGet, "/v1/connection-requests/"+requestID.String(), nil)
-	poll.Header.Set("Authorization", "Bearer "+pollToken)
-	pending := httptest.NewRecorder()
-	handler.ServeHTTP(pending, poll)
-	if pending.Code != http.StatusAccepted {
-		t.Fatalf("claim unexpectedly approved member request: %d", pending.Code)
+	claimPayload := openConnectionResult(
+		t, claimInput.RequestID, claimPrivate, claimPolled.Body.Bytes(),
+	)
+	if claimPayload.BoxID != state.BoxID || claimPayload.Profile.DisplayName != "Rob's Home Box" {
+		t.Fatalf("unexpected claiming installation handoff: %+v", claimPayload)
 	}
 
 	sessionCookie := cookieNamed(t, claimed.Result().Cookies(), "facets_box_session")
 	ownerCSRF := cookieNamed(t, claimed.Result().Cookies(), "facets_box_csrf")
-	approvalForm := url.Values{
-		"csrf": {ownerCSRF.Value}, "connection_code": {createdBody.ApprovalCode},
+	authorize := httptest.NewRequest(http.MethodGet, "/authorize-device", nil)
+	authorize.AddCookie(sessionCookie)
+	authorize.AddCookie(ownerCSRF)
+	authorizationPage := httptest.NewRecorder()
+	handler.ServeHTTP(authorizationPage, authorize)
+	if authorizationPage.Code != http.StatusOK {
+		t.Fatalf("authorize page status %d: %s", authorizationPage.Code, authorizationPage.Body.String())
 	}
-	approval := httptest.NewRequest(http.MethodPost, "/connections/approve", strings.NewReader(approvalForm.Encode()))
-	approval.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	approval.AddCookie(sessionCookie)
-	approval.AddCookie(ownerCSRF)
-	approved := httptest.NewRecorder()
-	handler.ServeHTTP(approved, approval)
-	if approved.Code != http.StatusSeeOther {
-		t.Fatalf("approval status %d: %s", approved.Code, approved.Body.String())
+	match := regexp.MustCompile(`<p class="pin">([0-9]{6})</p>`).FindStringSubmatch(authorizationPage.Body.String())
+	if len(match) != 2 {
+		t.Fatalf("authorization page omitted six-digit code: %s", authorizationPage.Body.String())
 	}
-	replayRequest := httptest.NewRequest(http.MethodPost, "/connections/approve", strings.NewReader(approvalForm.Encode()))
-	replayRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	replayRequest.AddCookie(sessionCookie)
-	replayRequest.AddCookie(ownerCSRF)
-	replay := httptest.NewRecorder()
-	handler.ServeHTTP(replay, replayRequest)
-	if replay.Code != http.StatusSeeOther || !strings.Contains(replay.Header().Get("Location"), "error=") {
-		t.Fatalf("used code replay was not rejected: %d %s", replay.Code, replay.Header().Get("Location"))
+	authorizationCode := match[1]
+
+	clientPrivate, pollToken, secondBody := testConnectionRequest(t, now, "iPad Pro")
+	var secondInput createConnectionRequestBody
+	if err := json.Unmarshal(secondBody, &secondInput); err != nil {
+		t.Fatal(err)
+	}
+	secondInput.AuthorizationCode = authorizationCode
+	secondBody, _ = json.Marshal(secondInput)
+	redeem := httptest.NewRequest(http.MethodPost, "/v1/connection-invitations/redeem", bytes.NewReader(secondBody))
+	redeem.Header.Set("Content-Type", "application/json")
+	redeemed := httptest.NewRecorder()
+	handler.ServeHTTP(redeemed, redeem)
+	if redeemed.Code != http.StatusCreated {
+		t.Fatalf("redeem status %d: %s", redeemed.Code, redeemed.Body.String())
 	}
 
-	poll = httptest.NewRequest(http.MethodGet, "/v1/connection-requests/"+requestID.String(), nil)
+	poll := httptest.NewRequest(http.MethodGet, "/v1/connection-requests/"+secondInput.RequestID.String(), nil)
 	poll.Header.Set("Authorization", "Bearer "+pollToken)
 	polled := httptest.NewRecorder()
 	handler.ServeHTTP(polled, poll)
 	if polled.Code != http.StatusOK {
 		t.Fatalf("poll status %d", polled.Code)
 	}
-	payload := openConnectionResult(t, requestID, clientPrivate, polled.Body.Bytes())
+	payload := openConnectionResult(t, secondInput.RequestID, clientPrivate, polled.Body.Bytes())
 	if payload.BoxID != state.BoxID || payload.GrantToken == "" || payload.Profile.DisplayName != "Rob's Home Box" {
 		t.Fatalf("unexpected handoff: %+v", payload)
 	}
 	if len(payload.Profile.Services) != 6 || payload.Profile.Services[2].Kind != "device-sync" || payload.Profile.Services[2].Status != ServiceAvailable {
 		t.Fatalf("authenticated service catalog is incomplete: %+v", payload.Profile.Services)
 	}
-	if len(payload.Profile.DeviceSyncGroups) != 1 || payload.Profile.DeviceSyncGroups[0].DisplayName != "Rob's devices" {
-		t.Fatalf("authenticated Sync Group catalog is incomplete: %+v", payload.Profile.DeviceSyncGroups)
+	_, _, replayBody := testConnectionRequest(t, now, "Replay device")
+	var replayInput createConnectionRequestBody
+	if err := json.Unmarshal(replayBody, &replayInput); err != nil {
+		t.Fatal(err)
+	}
+	replayInput.AuthorizationCode = authorizationCode
+	replayBody, _ = json.Marshal(replayInput)
+	replayRequest := httptest.NewRequest(http.MethodPost, "/v1/connection-invitations/redeem", bytes.NewReader(replayBody))
+	replayRequest.Header.Set("Content-Type", "application/json")
+	replay := httptest.NewRecorder()
+	handler.ServeHTTP(replay, replayRequest)
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("used code replay status %d: %s", replay.Code, replay.Body.String())
+	}
+	if grants, err := store.ListGrants(context.Background()); err != nil || len(grants) != 2 {
+		t.Fatalf("code replay changed grants: %+v, %v", grants, err)
 	}
 
 	admission := httptest.NewRequest(http.MethodPost, "/v1/services/device-sync/account-admissions", strings.NewReader("{}"))
@@ -232,14 +257,6 @@ func TestConnectionRequestExpiryIsCappedToTheControllerClock(t *testing.T) {
 	withFastArgon(t)
 	now := time.Unix(1_800_000_000, 500_000_000).UTC()
 	store := initializedMemoryStore(t, "FIRST-BOX-CODE")
-	state, _ := store.State(context.Background())
-	owner, err := hashSecret("a memorable owner passphrase", rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Claim(context.Background(), state.ActivationVerifier, owner, "Home Box", now); err != nil {
-		t.Fatal(err)
-	}
 	service := makeTestService(t, store, &testDeviceSyncController{}, now)
 	clientPrivate, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -258,7 +275,7 @@ func TestConnectionRequestExpiryIsCappedToTheControllerClock(t *testing.T) {
 		// The client is 500 ms ahead and asks for the documented ten-minute lifetime.
 		ExpiresAtMillis: now.Add(ConnectionRequestLifetime + 500*time.Millisecond).UnixMilli(),
 	})
-	create := httptest.NewRequest(http.MethodPost, "/v1/connection-requests", bytes.NewReader(createBody))
+	create := httptest.NewRequest(http.MethodPost, "/v1/claim-connection-requests", bytes.NewReader(createBody))
 	create.Header.Set("Content-Type", "application/json")
 	created := httptest.NewRecorder()
 	service.Handler().ServeHTTP(created, create)
@@ -306,6 +323,7 @@ func TestApprovalFailureIsReportedAndDoesNotLeaveAnActiveGrant(t *testing.T) {
 		DeviceName:         "iPad Pro",
 		CreatedAt:          now,
 		ExpiresAt:          now.Add(time.Minute),
+		AuthorizedAt:       now,
 	}
 	copy(connection.ClientPublicKey[:], clientPrivate.PublicKey().Bytes())
 	if err := baseStore.CreateConnectionRequest(context.Background(), connection); err != nil {
@@ -331,12 +349,12 @@ func TestApprovalFailureIsReportedAndDoesNotLeaveAnActiveGrant(t *testing.T) {
 	}
 }
 
-func TestUnclaimedBoxRejectsMemberRequests(t *testing.T) {
+func TestUnclaimedBoxRejectsInvitationRedemption(t *testing.T) {
 	withFastArgon(t)
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store := initializedMemoryStore(t, "UNCLAIMED-BOX-CODE")
 	service := makeTestService(t, store, &testDeviceSyncController{}, now)
-	request := httptest.NewRequest(http.MethodPost, "/v1/connection-requests", strings.NewReader(`{}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/connection-invitations/redeem", strings.NewReader(`{}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 
@@ -348,6 +366,33 @@ func TestUnclaimedBoxRejectsMemberRequests(t *testing.T) {
 	if grants, err := store.ListGrants(context.Background()); err != nil || len(grants) != 0 {
 		t.Fatalf("unclaimed request changed grants: %+v, %v", grants, err)
 	}
+}
+
+func testConnectionRequest(
+	t *testing.T,
+	now time.Time,
+	deviceName string,
+) (*ecdh.PrivateKey, string, []byte) {
+	t.Helper()
+	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollToken, pollDigest, err := RandomToken(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(createConnectionRequestBody{
+		Version: SchemaVersion, RequestID: uuid.New(),
+		PollTokenDigest: base64.RawURLEncoding.EncodeToString(pollDigest[:]),
+		ClientPublicKey: base64.RawURLEncoding.EncodeToString(privateKey.PublicKey().Bytes()),
+		DeviceName:      deviceName,
+		ExpiresAtMillis: now.Add(5 * time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return privateKey, pollToken, body
 }
 
 func TestOwnerLoginThrottlesAndPasswordChangeRevokesSessionsAndGrants(t *testing.T) {

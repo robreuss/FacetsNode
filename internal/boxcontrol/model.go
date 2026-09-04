@@ -105,11 +105,10 @@ type AuthenticatedService struct {
 }
 
 type AuthenticatedProfile struct {
-	Version          int                    `json:"version"`
-	BoxID            uuid.UUID              `json:"boxID"`
-	DisplayName      string                 `json:"displayName"`
-	Services         []AuthenticatedService `json:"services"`
-	DeviceSyncGroups []DeviceSyncGroup      `json:"deviceSyncGroups"`
+	Version     int                    `json:"version"`
+	BoxID       uuid.UUID              `json:"boxID"`
+	DisplayName string                 `json:"displayName"`
+	Services    []AuthenticatedService `json:"services"`
 }
 
 type ConnectionRequest struct {
@@ -120,7 +119,30 @@ type ConnectionRequest struct {
 	DeviceName         string
 	CreatedAt          time.Time
 	ExpiresAt          time.Time
+	AuthorizedAt       time.Time
 	EncryptedResult    []byte
+}
+
+type ConnectionInvitation struct {
+	InvitationID       uuid.UUID
+	ApprovalCodeDigest [32]byte
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	RedeemedRequestID  uuid.UUID
+	RedeemedAt         time.Time
+}
+
+func (invitation ConnectionInvitation) Validate(now time.Time) error {
+	if invitation.InvitationID == uuid.Nil || invitation.CreatedAt.IsZero() ||
+		!invitation.ExpiresAt.After(invitation.CreatedAt) ||
+		invitation.ExpiresAt.Sub(invitation.CreatedAt) > ConnectionRequestLifetime ||
+		!invitation.ExpiresAt.After(now) {
+		return ErrRequestExpired
+	}
+	if (invitation.RedeemedRequestID == uuid.Nil) != invitation.RedeemedAt.IsZero() {
+		return errors.New("connection invitation redemption is invalid")
+	}
+	return nil
 }
 
 func (request ConnectionRequest) Validate(now time.Time) error {
@@ -133,6 +155,10 @@ func (request ConnectionRequest) Validate(now time.Time) error {
 	deviceName := normalizedDisplayName(request.DeviceName)
 	if deviceName == "" || deviceName != request.DeviceName || len(deviceName) > 256 {
 		return errors.New("device name is invalid")
+	}
+	if !request.AuthorizedAt.IsZero() &&
+		(request.AuthorizedAt.Before(request.CreatedAt) || request.AuthorizedAt.After(request.ExpiresAt)) {
+		return errors.New("connection request authorization is invalid")
 	}
 	return nil
 }

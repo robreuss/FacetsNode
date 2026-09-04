@@ -84,9 +84,10 @@ func (service *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /login", service.handleLogin)
 	mux.HandleFunc("POST /logout", service.handleLogout)
 	mux.HandleFunc("POST /password", service.handlePasswordChange)
-	mux.HandleFunc("POST /connections/approve", service.handleConnectionApproval)
+	mux.HandleFunc("GET /authorize-device", service.handleAuthorizeDevice)
 	mux.HandleFunc("POST /grants/{grantID}/revoke", service.handleGrantRevocation)
-	mux.HandleFunc("POST /v1/connection-requests", service.handleCreateConnectionRequest)
+	mux.HandleFunc("POST /v1/claim-connection-requests", service.handleCreateClaimConnectionRequest)
+	mux.HandleFunc("POST /v1/connection-invitations/redeem", service.handleRedeemConnectionInvitation)
 	mux.HandleFunc("GET /v1/connection-requests/{requestID}", service.handlePollConnectionRequest)
 	mux.HandleFunc("GET /v1/profile", service.handleProfile)
 	mux.HandleFunc("POST /v1/services/device-sync/account-admissions", service.handleDeviceSyncAccountAdmission)
@@ -156,21 +157,25 @@ type pageModel struct {
 	Audit             []AuditEvent
 	DeviceSyncHealthy bool
 	Error             string
-	Approved          bool
+	ReturnTo          string
+	ClaimRequestID    string
+	ClaimDeviceName   string
+	InvitationCode    string
+	InvitationExpires string
 }
 
 var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Facets Box Management</title><style>
-:root{color-scheme:dark light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{max-width:860px;margin:0 auto;padding:32px 20px;background:#15191f;color:#edf2f7}header{padding:8px 2px 14px}section{background:#20262e;border:1px solid #38414d;border-radius:14px;padding:20px;margin:18px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.card{margin:0}input,button{font:inherit;padding:10px 12px;border-radius:9px;border:1px solid #596575}input{width:min(100%,520px);box-sizing:border-box;background:#11151a;color:inherit}button{background:#147efb;color:white;border:0;font-weight:650}.quiet{color:#aeb8c4}.good{color:#72d68b}.bad{color:#ff7979}code{word-break:break-all}.identity{font-size:.88rem}</style></head><body>
+:root{color-scheme:dark light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{max-width:860px;margin:0 auto;padding:32px 20px;background:#15191f;color:#edf2f7}header{padding:8px 2px 14px}section{background:#20262e;border:1px solid #38414d;border-radius:14px;padding:20px;margin:18px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.card{margin:0}input,button,.button{font:inherit;padding:10px 12px;border-radius:9px;border:1px solid #596575}input{width:min(100%,520px);box-sizing:border-box;background:#11151a;color:inherit}button,.button{display:inline-block;background:#147efb;color:white;border:0;font-weight:650;text-decoration:none}.quiet{color:#aeb8c4}.good{color:#72d68b}.bad{color:#ff7979}.pin{font-size:2rem;font-weight:750;letter-spacing:.28em}code{word-break:break-all}.identity{font-size:.88rem}</style></head><body>
 <header><h1>Facets Box Management</h1><p class="quiet">Configure this Box and its services. This interface never decrypts Space content.</p></header>
 {{if .Error}}<p class="bad">{{.Error}}</p>{{end}}
-{{if not .Claimed}}<section><h2>Claim this Facets Box</h2><p>Enter the one-time activation code shown by the Box console, name the Box, and choose the shared Box Owner password.</p><form method="post" action="claim"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input name="activation_code" autocomplete="one-time-code" placeholder="One-time activation code" required></p><p><input name="display_name" autocomplete="organization" maxlength="128" placeholder="Box name, for example Home Box" required></p><p><input type="password" name="password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New Box Owner password" required></p><button>Claim Facets Box</button></form></section>
-{{else if not .Authenticated}}<section><h2>{{.DisplayName}}</h2><p>Enter the Box Owner password to manage this Box. Facets installations request their own separate member access.</p><form method="post" action="login"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input type="password" name="password" autocomplete="current-password" maxlength="128" required></p><button>Sign in</button></form></section>
+{{if not .Claimed}}<section><h2>Claim this Facets Box</h2><p>Enter the one-time activation code shown by the Box console, name the Box, and choose the shared Box Owner password.</p>{{if .ClaimDeviceName}}<p class="quiet">This will also connect <strong>{{.ClaimDeviceName}}</strong> to the Box.</p>{{end}}<form method="post" action="claim"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .ClaimRequestID}}<input type="hidden" name="claim_request_id" value="{{.ClaimRequestID}}">{{end}}<p><input name="activation_code" autocomplete="one-time-code" placeholder="One-time activation code" required></p><p><input name="display_name" autocomplete="organization" maxlength="128" value="{{.DisplayName}}" placeholder="Box name, for example Home Box" required></p><p><input type="password" name="password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New Box Owner password" required></p><p><input type="password" name="password_confirmation" autocomplete="new-password" minlength="15" maxlength="128" placeholder="Confirm Box Owner password" required></p><button>Claim and connect</button></form></section>
+{{else if not .Authenticated}}<section><h2>{{.DisplayName}}</h2><p>Enter the Box Owner password to continue.</p><form method="post" action="login{{if .ReturnTo}}?return_to={{.ReturnTo}}{{end}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input type="password" name="password" autocomplete="current-password" maxlength="128" required></p><button>Sign in</button></form></section>
 {{else}}
-{{if .Approved}}<section><h2 class="good">Facets installation approved</h2><p>The requesting installation can now discover this Box's services. No service membership was granted.</p></section>{{end}}
+{{if .InvitationCode}}<section><h2>Authorize another device</h2><p class="pin">{{.InvitationCode}}</p><p>Use this code to add another Facets device. It expires {{.InvitationExpires}}.</p></section>{{end}}
 <section><h2>{{.DisplayName}}</h2><p class="identity"><strong>Address:</strong> {{.PublicURL}}<br><strong>Box identity:</strong> <code>{{.BoxID}}</code><br><strong>Controller uptime:</strong> {{.Uptime}}</p></section>
-<section><h2>Approve a Facets installation</h2><p>Enter the six-digit code displayed by Facets. This grants service discovery, not Box administration or membership in any service.</p><form method="post" action="connections/approve"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input name="connection_code" inputmode="numeric" autocomplete="one-time-code" minlength="6" maxlength="6" pattern="[0-9]{6}" placeholder="Six-digit code" required></p><button>Approve connection</button></form></section>
+<section><h2>Device access</h2><p>Create a time-limited code for another Facets installation. The code grants service discovery, not Box administration or membership in any service.</p><a class="button" href="authorize-device">Authorize another device</a></section>
 <section><h2>Services</h2><div class="grid"><section class="card"><h3>Device Sync</h3>{{if .DeviceSyncHealthy}}<p class="good">Available</p>{{else}}<p class="bad">Unavailable</p>{{end}}</section><section class="card"><h3>Shared Spaces</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Backup</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Edge</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Post</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Compute</h3><p class="quiet">Not configured</p></section></div></section>
 <section><h2>Connected Facets installations</h2>{{range .Grants}}<p>{{.DeviceName}} <span class="quiet">last seen {{.LastSeenAt.Format "2006-01-02 15:04 MST"}}</span> {{if .RevokedAt.IsZero}}<form style="display:inline" method="post" action="grants/{{.GrantID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke</button></form>{{else}}<span class="quiet">revoked</span>{{end}}</p>{{else}}<p class="quiet">No app connections yet.</p>{{end}}</section>
 <section><h2>Change Box Owner password</h2><form method="post" action="password"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input type="password" name="current_password" autocomplete="current-password" placeholder="Current password" required></p><p><input type="password" name="new_password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New password" required></p><button>Change and revoke all connections</button></form></section>
@@ -202,9 +207,59 @@ func (service *Service) handleHome(writer http.ResponseWriter, request *http.Req
 		PublicURL: service.publicBaseURL, Uptime: service.uptimeDescription(),
 	}
 	model.Error = request.URL.Query().Get("error")
-	model.Approved = request.URL.Query().Get("approved") == "1"
+	if !state.Claimed() {
+		if requestID, parseErr := uuid.Parse(request.URL.Query().Get("claim_request_id")); parseErr == nil {
+			if connection, requestErr := service.store.ConnectionRequest(request.Context(), requestID); requestErr == nil &&
+				connection.ApprovalCodeDigest == claimRequestDigest(requestID) &&
+				connection.ExpiresAt.After(service.now()) && len(connection.EncryptedResult) == 0 {
+				model.ClaimRequestID = requestID.String()
+				model.ClaimDeviceName = connection.DeviceName
+			}
+		}
+	}
 	if authenticated {
 		_ = service.store.TouchWebSession(request.Context(), session.TokenDigest, service.now())
+		model.Grants, _ = service.store.ListGrants(request.Context())
+		model.Audit, _ = service.store.RecentAudit(request.Context(), 20)
+		healthContext, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+		defer cancel()
+		model.DeviceSyncHealthy = service.deviceSync.Healthy(healthContext) == nil
+	}
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := homeTemplate.Execute(writer, model); err != nil {
+		service.logger.Error("render Box UI failed", "error_type", fmt.Sprintf("%T", err))
+	}
+}
+
+func (service *Service) handleAuthorizeDevice(writer http.ResponseWriter, request *http.Request) {
+	state, err := service.store.State(request.Context())
+	if err != nil || !state.Claimed() {
+		http.Error(writer, "Facets Box has not been claimed.", http.StatusConflict)
+		return
+	}
+	csrf, session, authenticated := service.webContext(request)
+	if csrf == "" && !authenticated {
+		csrf = service.ensurePreauthCSRF(writer, request)
+	}
+	displayName := state.DisplayName
+	if displayName == "" {
+		displayName = service.displayName
+	}
+	model := pageModel{
+		Claimed: true, Authenticated: authenticated, CSRF: csrf,
+		DisplayName: displayName, BoxID: state.BoxID.String(),
+		PublicURL: service.publicBaseURL, Uptime: service.uptimeDescription(),
+		ReturnTo: "authorize-device",
+	}
+	if authenticated {
+		_ = service.store.TouchWebSession(request.Context(), session.TokenDigest, service.now())
+		code, invitation, createErr := service.createConnectionInvitation(request.Context())
+		if createErr != nil {
+			service.internalError(writer, request, "connection_invitation", createErr)
+			return
+		}
+		model.InvitationCode = code
+		model.InvitationExpires = invitation.ExpiresAt.Format("at 3:04 PM")
 		model.Grants, _ = service.store.ListGrants(request.Context())
 		model.Audit, _ = service.store.RecentAudit(request.Context(), 20)
 		healthContext, cancel := context.WithTimeout(request.Context(), 2*time.Second)
@@ -230,9 +285,25 @@ func (service *Service) handleClaim(writer http.ResponseWriter, request *http.Re
 	activation := strings.TrimSpace(request.FormValue("activation_code"))
 	displayName, nameErr := NormalizeBoxDisplayName(request.FormValue("display_name"))
 	password, err := normalizeOwnerPassword(request.FormValue("password"))
-	if err != nil || nameErr != nil || !verifySecret(state.ActivationVerifier, activation) {
+	confirmation := normPasswordForVerification(request.FormValue("password_confirmation"))
+	var claimRequestID uuid.UUID
+	claimRequestText := request.FormValue("claim_request_id")
+	var connectionErr error
+	if claimRequestText != "" {
+		claimRequestID, connectionErr = uuid.Parse(claimRequestText)
+		if connectionErr == nil {
+			var connection ConnectionRequest
+			connection, connectionErr = service.store.ConnectionRequest(request.Context(), claimRequestID)
+			if connectionErr == nil && (connection.ApprovalCodeDigest != claimRequestDigest(claimRequestID) ||
+				!connection.ExpiresAt.After(service.now()) || len(connection.EncryptedResult) != 0) {
+				connectionErr = ErrInvalidCredential
+			}
+		}
+	}
+	if err != nil || nameErr != nil || connectionErr != nil || password != confirmation ||
+		!verifySecret(state.ActivationVerifier, activation) {
 		service.audit(request.Context(), "box_claim", "rejected")
-		service.renderRedirectError(writer, request, errOrCredential(errors.Join(err, nameErr)))
+		service.renderRedirectError(writer, request, errOrCredential(errors.Join(err, nameErr, connectionErr)))
 		return
 	}
 	verifier, err := hashSecret(password, service.random)
@@ -240,9 +311,25 @@ func (service *Service) handleClaim(writer http.ResponseWriter, request *http.Re
 		service.internalError(writer, request, "box_claim", err)
 		return
 	}
-	if err := service.store.Claim(request.Context(), state.ActivationVerifier, verifier, displayName, service.now()); err != nil {
+	if claimRequestID != uuid.Nil {
+		err = service.store.ClaimAndAuthorizeConnection(
+			request.Context(), state.ActivationVerifier, verifier,
+			displayName, claimRequestID, service.now(),
+		)
+	} else {
+		err = service.store.Claim(
+			request.Context(), state.ActivationVerifier, verifier,
+			displayName, service.now(),
+		)
+	}
+	if err != nil {
 		service.internalError(writer, request, "box_claim", err)
 		return
+	}
+	if claimRequestID != uuid.Nil {
+		if approvalErr := service.approveConnection(request.Context(), claimRequestID); approvalErr != nil {
+			service.logger.Error("complete claiming installation connection failed", "error_type", fmt.Sprintf("%T", approvalErr))
+		}
 	}
 	_, _, err = service.issueWebSession(writer, request)
 	if err != nil {
@@ -287,38 +374,12 @@ func (service *Service) handleLogin(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	service.audit(request.Context(), "owner_login", "accepted")
+	returnTo := request.URL.Query().Get("return_to")
+	if returnTo == "authorize-device" {
+		http.Redirect(writer, request, service.cookiePath+"/authorize-device", http.StatusSeeOther)
+		return
+	}
 	http.Redirect(writer, request, service.cookiePath+"/", http.StatusSeeOther)
-}
-
-func (service *Service) handleConnectionApproval(writer http.ResponseWriter, request *http.Request) {
-	_, session, authenticated := service.webContext(request)
-	if !authenticated || !service.validateCSRF(request, &session) || request.ParseForm() != nil {
-		http.Error(writer, "Request rejected.", http.StatusBadRequest)
-		return
-	}
-	key := "connection-approval:" + base64.RawURLEncoding.EncodeToString(session.TokenDigest[:])
-	now := service.now()
-	throttle, err := service.store.LoginThrottle(request.Context(), key)
-	if err != nil || (!throttle.BlockedUntil.IsZero() && throttle.BlockedUntil.After(now)) {
-		http.Error(writer, "Connection approval is temporarily unavailable.", http.StatusTooManyRequests)
-		return
-	}
-	digest, err := ApprovalCodeDigest(request.FormValue("connection_code"))
-	if err != nil {
-		service.recordLoginFailure(request.Context(), key, throttle, now)
-		service.audit(request.Context(), "connection_request", "approval_rejected")
-		service.renderRedirectError(writer, request, errors.New("The connection code is invalid or expired."))
-		return
-	}
-	connection, err := service.store.ConnectionRequestByApprovalCode(request.Context(), digest, now)
-	if err != nil || service.approveConnection(request.Context(), connection.RequestID) != nil {
-		service.recordLoginFailure(request.Context(), key, throttle, now)
-		service.audit(request.Context(), "connection_request", "approval_rejected")
-		service.renderRedirectError(writer, request, errors.New("The connection code is invalid or expired."))
-		return
-	}
-	_ = service.store.ClearLoginFailures(request.Context(), key)
-	http.Redirect(writer, request, service.cookiePath+"/?approved=1", http.StatusSeeOther)
 }
 
 func (service *Service) handleLogout(writer http.ResponseWriter, request *http.Request) {
@@ -372,18 +433,19 @@ func (service *Service) handleGrantRevocation(writer http.ResponseWriter, reques
 }
 
 type createConnectionRequestBody struct {
-	Version         int       `json:"version"`
-	RequestID       uuid.UUID `json:"requestID"`
-	PollTokenDigest string    `json:"pollTokenDigest"`
-	ClientPublicKey string    `json:"clientPublicKey"`
-	DeviceName      string    `json:"deviceName"`
-	ExpiresAtMillis int64     `json:"expiresAtMilliseconds"`
+	Version           int       `json:"version"`
+	RequestID         uuid.UUID `json:"requestID"`
+	PollTokenDigest   string    `json:"pollTokenDigest"`
+	ClientPublicKey   string    `json:"clientPublicKey"`
+	DeviceName        string    `json:"deviceName"`
+	ExpiresAtMillis   int64     `json:"expiresAtMilliseconds"`
+	AuthorizationCode string    `json:"authorizationCode"`
 }
 
-func (service *Service) handleCreateConnectionRequest(writer http.ResponseWriter, request *http.Request) {
+func (service *Service) handleCreateClaimConnectionRequest(writer http.ResponseWriter, request *http.Request) {
 	state, stateErr := service.store.State(request.Context())
-	if stateErr != nil || !state.Claimed() {
-		http.Error(writer, "Facets Box has not been claimed.", http.StatusConflict)
+	if stateErr != nil || state.Claimed() {
+		http.Error(writer, "Facets Box is already claimed.", http.StatusConflict)
 		return
 	}
 	var input createConnectionRequestBody
@@ -391,15 +453,66 @@ func (service *Service) handleCreateConnectionRequest(writer http.ResponseWriter
 		http.Error(writer, "Connection request is invalid.", http.StatusBadRequest)
 		return
 	}
-	poll, err := base64.RawURLEncoding.Strict().DecodeString(input.PollTokenDigest)
-	if err != nil || len(poll) != 32 || base64.RawURLEncoding.EncodeToString(poll) != input.PollTokenDigest {
+	connection, err := service.connectionRequest(input, claimRequestDigest(input.RequestID))
+	if err != nil || service.store.CreateConnectionRequest(request.Context(), connection) != nil {
 		http.Error(writer, "Connection request is invalid.", http.StatusBadRequest)
 		return
 	}
-	publicKey, err := base64.RawURLEncoding.Strict().DecodeString(input.ClientPublicKey)
-	if err != nil || len(publicKey) != 32 || base64.RawURLEncoding.EncodeToString(publicKey) != input.ClientPublicKey {
+	service.audit(request.Context(), "claim_connection_request", "created")
+	writeJSON(writer, http.StatusCreated, struct {
+		ExpiresAtMillis int64 `json:"expiresAtMilliseconds"`
+	}{ExpiresAtMillis: connection.ExpiresAt.UnixMilli()})
+}
+
+func (service *Service) handleRedeemConnectionInvitation(writer http.ResponseWriter, request *http.Request) {
+	state, stateErr := service.store.State(request.Context())
+	if stateErr != nil || !state.Claimed() {
+		http.Error(writer, "Facets Box has not been claimed.", http.StatusConflict)
+		return
+	}
+	key := "connection-invitation:" + service.loginKey(request)
+	now := service.now()
+	throttle, err := service.store.LoginThrottle(request.Context(), key)
+	if err != nil || (!throttle.BlockedUntil.IsZero() && throttle.BlockedUntil.After(now)) {
+		http.Error(writer, "Connection authorization is temporarily unavailable.", http.StatusTooManyRequests)
+		return
+	}
+	var input createConnectionRequestBody
+	if err := decodeJSON(request, &input); err != nil || input.Version != SchemaVersion {
 		http.Error(writer, "Connection request is invalid.", http.StatusBadRequest)
 		return
+	}
+	codeDigest, err := ApprovalCodeDigest(input.AuthorizationCode)
+	connection, connectionErr := service.connectionRequest(input, codeDigest)
+	if err != nil || connectionErr != nil ||
+		service.store.RedeemConnectionInvitation(request.Context(), codeDigest, connection, now) != nil {
+		service.recordLoginFailure(request.Context(), key, throttle, now)
+		service.audit(request.Context(), "connection_invitation", "rejected")
+		http.Error(writer, "The authorization code is invalid or expired.", http.StatusUnauthorized)
+		return
+	}
+	_ = service.store.ClearLoginFailures(request.Context(), key)
+	if err := service.approveConnection(request.Context(), connection.RequestID); err != nil {
+		service.internalError(writer, request, "connection_invitation", err)
+		return
+	}
+	service.audit(request.Context(), "connection_invitation", "redeemed")
+	writeJSON(writer, http.StatusCreated, struct {
+		ExpiresAtMillis int64 `json:"expiresAtMilliseconds"`
+	}{ExpiresAtMillis: connection.ExpiresAt.UnixMilli()})
+}
+
+func (service *Service) connectionRequest(
+	input createConnectionRequestBody,
+	approvalCodeDigest [32]byte,
+) (ConnectionRequest, error) {
+	poll, err := base64.RawURLEncoding.Strict().DecodeString(input.PollTokenDigest)
+	if err != nil || len(poll) != 32 || base64.RawURLEncoding.EncodeToString(poll) != input.PollTokenDigest {
+		return ConnectionRequest{}, errors.New("poll token digest is invalid")
+	}
+	publicKey, err := base64.RawURLEncoding.Strict().DecodeString(input.ClientPublicKey)
+	if err != nil || len(publicKey) != 32 || base64.RawURLEncoding.EncodeToString(publicKey) != input.ClientPublicKey {
+		return ConnectionRequest{}, errors.New("client public key is invalid")
 	}
 	now := service.now()
 	expiresAt := time.UnixMilli(input.ExpiresAtMillis)
@@ -407,42 +520,49 @@ func (service *Service) handleCreateConnectionRequest(writer http.ResponseWriter
 	if expiresAt.After(maximumExpiresAt) {
 		expiresAt = maximumExpiresAt
 	}
-	var connection ConnectionRequest
-	var approvalCode string
+	connection := ConnectionRequest{
+		RequestID: input.RequestID, ApprovalCodeDigest: approvalCodeDigest,
+		DeviceName: normalizedDisplayName(input.DeviceName), CreatedAt: now,
+		ExpiresAt: expiresAt,
+	}
+	copy(connection.PollTokenDigest[:], poll)
+	copy(connection.ClientPublicKey[:], publicKey)
+	if err := connection.Validate(now); err != nil {
+		return ConnectionRequest{}, err
+	}
+	return connection, nil
+}
+
+func claimRequestDigest(requestID uuid.UUID) [32]byte {
+	return sha256.Sum256([]byte("facets-box-claim-request-v1\x00" + requestID.String()))
+}
+
+func (service *Service) createConnectionInvitation(
+	ctx context.Context,
+) (string, ConnectionInvitation, error) {
 	for attempt := 0; attempt < 32; attempt++ {
-		approvalCode, err = service.randomApprovalCode()
+		code, err := service.randomApprovalCode()
 		if err != nil {
-			break
+			return "", ConnectionInvitation{}, err
 		}
-		codeDigest, digestErr := ApprovalCodeDigest(approvalCode)
-		if digestErr != nil {
-			err = digestErr
-			break
+		digest, err := ApprovalCodeDigest(code)
+		if err != nil {
+			return "", ConnectionInvitation{}, err
 		}
-		connection = ConnectionRequest{
-			RequestID: input.RequestID, ApprovalCodeDigest: codeDigest,
-			DeviceName: normalizedDisplayName(input.DeviceName), CreatedAt: now, ExpiresAt: expiresAt,
+		now := service.now()
+		invitation := ConnectionInvitation{
+			InvitationID: uuid.New(), ApprovalCodeDigest: digest,
+			CreatedAt: now, ExpiresAt: now.Add(ConnectionRequestLifetime),
 		}
-		copy(connection.PollTokenDigest[:], poll)
-		copy(connection.ClientPublicKey[:], publicKey)
-		if validationErr := connection.Validate(now); validationErr != nil {
-			err = validationErr
-			break
+		if err := invitation.Validate(now); err != nil {
+			return "", ConnectionInvitation{}, err
 		}
-		err = service.store.CreateConnectionRequest(request.Context(), connection)
-		if err == nil {
-			break
+		if err := service.store.CreateConnectionInvitation(ctx, invitation); err == nil {
+			service.audit(ctx, "connection_invitation", "created")
+			return code, invitation, nil
 		}
 	}
-	if err != nil {
-		http.Error(writer, "Connection request is invalid.", http.StatusBadRequest)
-		return
-	}
-	service.audit(request.Context(), "connection_request", "created")
-	writeJSON(writer, http.StatusCreated, struct {
-		ApprovalCode    string `json:"approvalCode"`
-		ExpiresAtMillis int64  `json:"expiresAtMilliseconds"`
-	}{ApprovalCode: approvalCode, ExpiresAtMillis: connection.ExpiresAt.UnixMilli()})
+	return "", ConnectionInvitation{}, errors.New("connection code allocation failed")
 }
 
 func (service *Service) handlePollConnectionRequest(writer http.ResponseWriter, request *http.Request) {
@@ -459,8 +579,15 @@ func (service *Service) handlePollConnectionRequest(writer http.ResponseWriter, 
 		return
 	}
 	if len(connection.EncryptedResult) == 0 {
-		writer.WriteHeader(http.StatusAccepted)
-		return
+		state, stateErr := service.store.State(request.Context())
+		if stateErr == nil && state.Claimed() && !connection.AuthorizedAt.IsZero() {
+			_ = service.approveConnection(request.Context(), requestID)
+			connection, storeErr = service.store.ConnectionRequest(request.Context(), requestID)
+		}
+		if storeErr != nil || len(connection.EncryptedResult) == 0 {
+			writer.WriteHeader(http.StatusAccepted)
+			return
+		}
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
@@ -515,6 +642,9 @@ func (service *Service) approveConnection(ctx context.Context, requestID uuid.UU
 	if !connection.ExpiresAt.After(service.now()) {
 		return ErrRequestExpired
 	}
+	if connection.AuthorizedAt.IsZero() {
+		return ErrInvalidCredential
+	}
 	if len(connection.EncryptedResult) != 0 {
 		return nil
 	}
@@ -565,15 +695,6 @@ func (service *Service) profile(ctx context.Context) (AuthenticatedProfile, erro
 	healthContext, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	deviceSyncHealthy := service.deviceSync.Healthy(healthContext) == nil
-	groups := []DeviceSyncGroup{}
-	if deviceSyncHealthy {
-		var groupErr error
-		groups, groupErr = service.deviceSync.Groups(healthContext)
-		if groupErr != nil {
-			deviceSyncHealthy = false
-			groups = []DeviceSyncGroup{}
-		}
-	}
 	serviceKinds := []string{"backup", "compute", "device-sync", "edge", "post", "shared-spaces"}
 	statuses := make([]AuthenticatedService, 0, len(serviceKinds))
 	for _, kind := range serviceKinds {
@@ -590,7 +711,7 @@ func (service *Service) profile(ctx context.Context) (AuthenticatedProfile, erro
 	}
 	return AuthenticatedProfile{
 		Version: SchemaVersion, BoxID: state.BoxID, DisplayName: displayName,
-		Services: statuses, DeviceSyncGroups: groups,
+		Services: statuses,
 	}, nil
 }
 

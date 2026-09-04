@@ -14,6 +14,7 @@ type Store interface {
 	Initialize(context.Context, State) error
 	State(context.Context) (State, error)
 	Claim(context.Context, string, string, string, time.Time) error
+	ClaimAndAuthorizeConnection(context.Context, string, string, string, uuid.UUID, time.Time) error
 	ChangeOwnerPassword(context.Context, string, time.Time) error
 	CreateWebSession(context.Context, WebSession) error
 	WebSession(context.Context, [32]byte, time.Time) (WebSession, error)
@@ -28,31 +29,92 @@ type Store interface {
 	ListGrants(context.Context) ([]ConnectionGrant, error)
 	RevokeGrant(context.Context, uuid.UUID, time.Time) error
 	RevokeAllGrants(context.Context, time.Time) error
+	CreateConnectionInvitation(context.Context, ConnectionInvitation) error
+	RedeemConnectionInvitation(context.Context, [32]byte, ConnectionRequest, time.Time) error
 	CreateConnectionRequest(context.Context, ConnectionRequest) error
 	ConnectionRequest(context.Context, uuid.UUID) (ConnectionRequest, error)
-	ConnectionRequestByApprovalCode(context.Context, [32]byte, time.Time) (ConnectionRequest, error)
 	CompleteConnectionRequest(context.Context, uuid.UUID, []byte) error
 	AppendAudit(context.Context, AuditEvent) error
 	RecentAudit(context.Context, int) ([]AuditEvent, error)
 }
 
 type MemoryStore struct {
-	mu       sync.Mutex
-	state    *State
-	sessions map[[32]byte]WebSession
-	grants   map[uuid.UUID]ConnectionGrant
-	requests map[uuid.UUID]ConnectionRequest
-	throttle map[string]LoginThrottle
-	audit    []AuditEvent
+	mu          sync.Mutex
+	state       *State
+	sessions    map[[32]byte]WebSession
+	grants      map[uuid.UUID]ConnectionGrant
+	invitations map[uuid.UUID]ConnectionInvitation
+	requests    map[uuid.UUID]ConnectionRequest
+	throttle    map[string]LoginThrottle
+	audit       []AuditEvent
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		sessions: make(map[[32]byte]WebSession),
-		grants:   make(map[uuid.UUID]ConnectionGrant),
-		requests: make(map[uuid.UUID]ConnectionRequest),
-		throttle: make(map[string]LoginThrottle),
+		sessions:    make(map[[32]byte]WebSession),
+		grants:      make(map[uuid.UUID]ConnectionGrant),
+		invitations: make(map[uuid.UUID]ConnectionInvitation),
+		requests:    make(map[uuid.UUID]ConnectionRequest),
+		throttle:    make(map[string]LoginThrottle),
 	}
+}
+
+func (store *MemoryStore) CreateConnectionInvitation(
+	_ context.Context,
+	invitation ConnectionInvitation,
+) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, present := store.invitations[invitation.InvitationID]; present {
+		return errors.New("connection invitation collision")
+	}
+	for id, existing := range store.invitations {
+		if existing.ApprovalCodeDigest == invitation.ApprovalCodeDigest {
+			if existing.ExpiresAt.After(invitation.CreatedAt) && existing.RedeemedAt.IsZero() {
+				return errors.New("connection code collision")
+			}
+			delete(store.invitations, id)
+		}
+	}
+	store.invitations[invitation.InvitationID] = invitation
+	return nil
+}
+
+func (store *MemoryStore) RedeemConnectionInvitation(
+	_ context.Context,
+	digest [32]byte,
+	request ConnectionRequest,
+	now time.Time,
+) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var invitationID uuid.UUID
+	var invitation ConnectionInvitation
+	for id, candidate := range store.invitations {
+		if candidate.ApprovalCodeDigest == digest {
+			invitationID = id
+			invitation = candidate
+			break
+		}
+	}
+	if invitationID == uuid.Nil || !invitation.ExpiresAt.After(now) ||
+		!invitation.RedeemedAt.IsZero() {
+		return ErrInvalidCredential
+	}
+	if _, present := store.requests[request.RequestID]; present {
+		return errors.New("connection request collision")
+	}
+	for _, existing := range store.requests {
+		if existing.ApprovalCodeDigest == request.ApprovalCodeDigest {
+			return errors.New("connection request collision")
+		}
+	}
+	invitation.RedeemedRequestID = request.RequestID
+	invitation.RedeemedAt = now
+	request.AuthorizedAt = now
+	store.invitations[invitationID] = invitation
+	store.requests[request.RequestID] = request
+	return nil
 }
 
 func (store *MemoryStore) Initialize(_ context.Context, state State) error {
@@ -97,6 +159,40 @@ func (store *MemoryStore) Claim(
 	store.state.ActivationVerifier = ""
 	store.state.DisplayName = displayName
 	store.state.ClaimedAt = now
+	return nil
+}
+
+func (store *MemoryStore) ClaimAndAuthorizeConnection(
+	_ context.Context,
+	activationVerifier string,
+	ownerVerifier string,
+	displayName string,
+	requestID uuid.UUID,
+	now time.Time,
+) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.state == nil {
+		return ErrNotInitialized
+	}
+	if store.state.Claimed() {
+		return ErrAlreadyClaimed
+	}
+	if store.state.ActivationVerifier != activationVerifier {
+		return ErrInvalidCredential
+	}
+	connection, present := store.requests[requestID]
+	if !present || connection.ApprovalCodeDigest != claimRequestDigest(requestID) ||
+		!connection.ExpiresAt.After(now) || !connection.AuthorizedAt.IsZero() ||
+		len(connection.EncryptedResult) != 0 {
+		return ErrInvalidCredential
+	}
+	store.state.OwnerVerifier = ownerVerifier
+	store.state.ActivationVerifier = ""
+	store.state.DisplayName = displayName
+	store.state.ClaimedAt = now
+	connection.AuthorizedAt = now
+	store.requests[requestID] = connection
 	return nil
 }
 
@@ -282,22 +378,6 @@ func (store *MemoryStore) ConnectionRequest(_ context.Context, requestID uuid.UU
 	return request, nil
 }
 
-func (store *MemoryStore) ConnectionRequestByApprovalCode(
-	_ context.Context,
-	digest [32]byte,
-	now time.Time,
-) (ConnectionRequest, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	for _, request := range store.requests {
-		if request.ApprovalCodeDigest == digest && request.ExpiresAt.After(now) && len(request.EncryptedResult) == 0 {
-			request.EncryptedResult = append([]byte(nil), request.EncryptedResult...)
-			return request, nil
-		}
-	}
-	return ConnectionRequest{}, ErrInvalidCredential
-}
-
 func (store *MemoryStore) CompleteConnectionRequest(
 	_ context.Context,
 	requestID uuid.UUID,
@@ -306,7 +386,7 @@ func (store *MemoryStore) CompleteConnectionRequest(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	request, present := store.requests[requestID]
-	if !present {
+	if !present || request.AuthorizedAt.IsZero() {
 		return ErrInvalidCredential
 	}
 	if len(request.EncryptedResult) != 0 {
