@@ -74,6 +74,9 @@ func TestSingleFacetsBoxPathRoutesControllerAndDeviceSyncSeparately(t *testing.T
 	if deviceIndex < 0 || controllerIndex < 0 || deviceIndex >= controllerIndex {
 		t.Fatal("Device Sync subpath must precede the Box controller wildcard")
 	}
+	if !strings.Contains(text, "handle /facetsbox {\n\t\t\tredir * /facetsbox/ 308") {
+		t.Fatal("the exact Box base URL must redirect to the controller root")
+	}
 	if !strings.Contains(text[deviceIndex:controllerIndex], "reverse_proxy server:8080") ||
 		!strings.Contains(text[controllerIndex:], "reverse_proxy controller:8081") {
 		t.Fatal("single Box URL does not preserve controller/service isolation")

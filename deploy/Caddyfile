@@ -13,7 +13,7 @@
 			reverse_proxy server:8080
 		}
 		handle /facetsbox {
-			redir /facetsbox/ 308
+			redir * /facetsbox/ 308
 		}
 		handle_path /facetsbox/* {
 			reverse_proxy controller:8081
