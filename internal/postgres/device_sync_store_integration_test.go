@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -333,6 +334,45 @@ func TestPostgresDeviceSyncSpaceAndRelayDomainCommitAtomically(t *testing.T) {
 		ctx, authority.TenantCredential, lastDevice, now+5,
 	); !devicesync.ErrorHasCode(err, devicesync.CodeLastDevice) {
 		t.Fatalf("last Device Sync device revocation error=%v", err)
+	}
+	profile := devicesync.DiscoveryProfile{
+		Version: devicesync.SchemaVersion, PrincipalID: principalID,
+		SetDiscriminator: strings.Repeat("d", 32), DisplayName: "Final Group",
+		Revision: 1, UpdatedMilliseconds: now + 5,
+	}
+	if err := store.PublishDiscoveryProfile(ctx, authority.TenantCredential, profile); err != nil {
+		t.Fatal(err)
+	}
+	lastDevice.RetirePrincipal = true
+	retired, err := store.RevokeDevice(
+		ctx, authority.TenantCredential, lastDevice, now+6,
+	)
+	if err != nil || retired.Acceptance != relay.AcceptanceAccepted || len(retired.Memberships) != 2 {
+		t.Fatalf("retire final Device Sync device=%+v err=%v", retired, err)
+	}
+	retriedRetirement, err := restartedStore.RevokeDevice(
+		ctx, authority.TenantCredential, lastDevice, now+7,
+	)
+	if err != nil || retriedRetirement.Acceptance != relay.AcceptanceDuplicate ||
+		retriedRetirement.RevokedAtMilliseconds != now+6 {
+		t.Fatalf("retry Device Sync principal retirement=%+v err=%v", retriedRetirement, err)
+	}
+	profiles, err := store.ListDiscoveryProfiles(ctx)
+	if err != nil || len(profiles) != 0 {
+		t.Fatalf("retired Device Sync principal remains discoverable: %+v err=%v", profiles, err)
+	}
+	if _, err := restartedStore.GetPrincipalStatus(ctx, authority.TenantCredential); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
+		t.Fatalf("retired Device Sync principal status err=%v", err)
+	}
+	var retirementCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM device_sync_principal_retirements
+		WHERE principal_id=$1 AND retry_id=$2 AND device_id=$3
+	`, principalID, lastDevice.RetryID, initialDeviceID).Scan(&retirementCount); err != nil {
+		t.Fatal(err)
+	}
+	if retirementCount != 1 {
+		t.Fatalf("Device Sync principal retirement count=%d", retirementCount)
 	}
 }
 

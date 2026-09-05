@@ -43,23 +43,23 @@ func (s *RelayStore) RevokeDevice(
 	if err := tenant.Authorize(credential); err != nil {
 		return devicesync.DeviceRevocationResult{}, err
 	}
-	if _, err := loadDeviceSyncPrincipalAuthority(ctx, tx, revocation.PrincipalID, "FOR UPDATE"); err != nil {
-		return devicesync.DeviceRevocationResult{}, err
-	}
-
 	var existingVersion int
 	var existingDeviceID uuid.UUID
 	var existingRevokedAt int64
+	var existingRetired bool
 	err = tx.QueryRow(ctx, `
-		SELECT version,device_id,revoked_at_milliseconds
-		FROM device_sync_device_revocations
-		WHERE principal_id=$1 AND retry_id=$2
-		FOR UPDATE
+		SELECT r.version,r.device_id,r.revoked_at_milliseconds,
+			EXISTS (SELECT 1 FROM device_sync_principal_retirements p
+				WHERE p.principal_id=r.principal_id AND p.retry_id=r.retry_id)
+		FROM device_sync_device_revocations r
+		WHERE r.principal_id=$1 AND r.retry_id=$2
+		FOR UPDATE OF r
 	`, revocation.PrincipalID, revocation.RetryID).Scan(
-		&existingVersion, &existingDeviceID, &existingRevokedAt,
+		&existingVersion, &existingDeviceID, &existingRevokedAt, &existingRetired,
 	)
 	if err == nil {
-		if existingVersion != revocation.Version || existingDeviceID != revocation.DeviceID {
+		if existingVersion != revocation.Version || existingDeviceID != revocation.DeviceID ||
+			existingRetired != revocation.RetirePrincipal {
 			return devicesync.DeviceRevocationResult{}, devicesync.NewProtocolError(
 				devicesync.CodeDeviceCollision, "device revocation retry ID was reused",
 			)
@@ -78,6 +78,9 @@ func (s *RelayStore) RevokeDevice(
 	}
 	if err != pgx.ErrNoRows {
 		return devicesync.DeviceRevocationResult{}, fmt.Errorf("load Device Sync device revocation: %w", err)
+	}
+	if _, err := loadDeviceSyncPrincipalAuthority(ctx, tx, revocation.PrincipalID, "FOR UPDATE"); err != nil {
+		return devicesync.DeviceRevocationResult{}, err
 	}
 
 	var priorRetryID uuid.UUID
@@ -129,7 +132,12 @@ func (s *RelayStore) RevokeDevice(
 	`, revocation.PrincipalID).Scan(&activeDeviceCount); err != nil {
 		return devicesync.DeviceRevocationResult{}, fmt.Errorf("count active Device Sync devices: %w", err)
 	}
-	if activeDeviceCount <= 1 {
+	if revocation.RetirePrincipal && activeDeviceCount != 1 {
+		return devicesync.DeviceRevocationResult{}, devicesync.NewProtocolError(
+			devicesync.CodeLastDevice, "principal retirement requires exactly one active device",
+		)
+	}
+	if activeDeviceCount <= 1 && !revocation.RetirePrincipal {
 		return devicesync.DeviceRevocationResult{}, devicesync.NewProtocolError(
 			devicesync.CodeLastDevice, "last active device cannot be revoked without key recovery",
 		)
@@ -182,6 +190,21 @@ func (s *RelayStore) RevokeDevice(
 		revocation.Version, nowMilliseconds); err != nil {
 		return devicesync.DeviceRevocationResult{}, fmt.Errorf("insert Device Sync device revocation: %w", err)
 	}
+	if revocation.RetirePrincipal {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO device_sync_principal_retirements (
+				principal_id,retry_id,device_id,version,retired_at_milliseconds
+			) VALUES ($1,$2,$3,$4,$5)
+		`, revocation.PrincipalID, revocation.RetryID, revocation.DeviceID,
+			revocation.Version, nowMilliseconds); err != nil {
+			return devicesync.DeviceRevocationResult{}, fmt.Errorf("retire Device Sync principal: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM device_sync_discovery_profiles WHERE principal_id=$1
+		`, revocation.PrincipalID); err != nil {
+			return devicesync.DeviceRevocationResult{}, fmt.Errorf("unpublish retired Device Sync principal: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return devicesync.DeviceRevocationResult{}, fmt.Errorf("commit Device Sync device revocation: %w", err)
 	}
@@ -211,20 +234,14 @@ func (s *RelayStore) GetPrincipalStatus(
 	if err := tenant.Authorize(credential); err != nil {
 		return devicesync.PrincipalStatus{}, err
 	}
+	principal, err := loadDeviceSyncPrincipalAuthority(ctx, tx, credential.TenantID, "")
+	if err != nil {
+		return devicesync.PrincipalStatus{}, err
+	}
 	status := devicesync.PrincipalStatus{
 		Version: devicesync.SchemaVersion, PrincipalID: credential.TenantID,
-		Devices: []devicesync.DeviceStatus{}, Spaces: []devicesync.SpaceStatus{},
-	}
-	if err := tx.QueryRow(ctx, `
-		SELECT control_domain_id
-		FROM device_sync_principals
-		WHERE principal_id=$1 AND tenant_id=$1
-	`, credential.TenantID).Scan(&status.ControlDomainID); err == pgx.ErrNoRows {
-		return devicesync.PrincipalStatus{}, devicesync.NewProtocolError(
-			devicesync.CodeUnauthorized, "Device Sync principal was not found",
-		)
-	} else if err != nil {
-		return devicesync.PrincipalStatus{}, fmt.Errorf("load Device Sync principal status: %w", err)
+		ControlDomainID: principal.controlDomainID,
+		Devices:         []devicesync.DeviceStatus{}, Spaces: []devicesync.SpaceStatus{},
 	}
 	deviceRows, err := tx.Query(ctx, `
 		SELECT d.device_id,m.subscription_id,d.control_member_id,
@@ -704,6 +721,9 @@ func (s *RelayStore) ClaimDeviceAdmission(
 	if err != nil {
 		return devicesync.DeviceAdmissionClaimResult{}, err
 	}
+	if _, err := loadDeviceSyncPrincipalAuthority(ctx, tx, record.principalID, "FOR UPDATE"); err != nil {
+		return devicesync.DeviceAdmissionClaimResult{}, err
+	}
 	if claim.PrincipalID != record.principalID || claim.DeviceID != record.deviceID {
 		return devicesync.DeviceAdmissionClaimResult{}, devicesync.NewProtocolError(
 			devicesync.CodeWrongScope, "device claim belongs to another admission",
@@ -906,7 +926,11 @@ func loadDeviceSyncPrincipalAuthority(
 		JOIN relay_subscriptions s
 		  ON s.tenant_id=m.tenant_id AND s.domain_id=m.domain_id
 		 AND s.subscription_id=m.subscription_id
-		WHERE p.principal_id=$1`
+		WHERE p.principal_id=$1
+		  AND NOT EXISTS (
+			SELECT 1 FROM device_sync_principal_retirements r
+			WHERE r.principal_id=p.principal_id
+		  )`
 	if lock != "" {
 		query += " " + lock + " OF p"
 	}
@@ -1159,6 +1183,9 @@ func (s *RelayStore) ClaimSpaceDeviceAdmission(
 	if err != nil {
 		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
 	}
+	if _, err := loadDeviceSyncPrincipalAuthority(ctx, tx, record.principalID, "FOR UPDATE"); err != nil {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
+	}
 	if claim.PrincipalID != record.principalID || claim.SpaceID != record.spaceID ||
 		claim.DeviceID != record.deviceID {
 		return devicesync.SpaceDeviceAdmissionClaimResult{}, devicesync.NewProtocolError(
@@ -1232,8 +1259,12 @@ func loadDeviceSyncSpaceAuthority(
 	var authority deviceSyncSpaceAuthority
 	query := `
 		SELECT principal_id,space_id,domain_id,subscription_id
-		FROM device_sync_spaces
-		WHERE principal_id=$1 AND space_id=$2`
+		FROM device_sync_spaces s
+		WHERE principal_id=$1 AND space_id=$2
+		  AND NOT EXISTS (
+			SELECT 1 FROM device_sync_principal_retirements r
+			WHERE r.principal_id=s.principal_id
+		  )`
 	if lock != "" {
 		query += " " + lock
 	}

@@ -304,6 +304,47 @@ func TestDeviceSyncSpaceDataPlaneCarriesOpaqueCheckpointTailAndBlob(t *testing.T
 	)
 	requireStatus(t, lastDeviceResponse, http.StatusConflict)
 	_ = lastDeviceResponse.Body.Close()
+
+	lastDevice.RetirePrincipal = true
+	retirement := performRelayJSON(
+		t, handler, http.MethodPost,
+		"/v1/device-sync/principals/"+principalID.String()+"/devices/"+
+			initialDeviceID.String()+"/revocation",
+		lastDevice, relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, retirement, http.StatusCreated)
+	var retirementResult devicesync.DeviceRevocationResult
+	if err := json.NewDecoder(retirement.Body).Decode(&retirementResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = retirement.Body.Close()
+	if retirementResult.Acceptance != relay.AcceptanceAccepted ||
+		retirementResult.DeviceID != initialDeviceID || len(retirementResult.Memberships) != 2 {
+		t.Fatalf("unexpected Spaces Sync retirement: %+v", retirementResult)
+	}
+	retirementRetry := performRelayJSON(
+		t, handler, http.MethodPost,
+		"/v1/device-sync/principals/"+principalID.String()+"/devices/"+
+			initialDeviceID.String()+"/revocation",
+		lastDevice, relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, retirementRetry, http.StatusOK)
+	var retirementRetryResult devicesync.DeviceRevocationResult
+	if err := json.NewDecoder(retirementRetry.Body).Decode(&retirementRetryResult); err != nil {
+		t.Fatal(err)
+	}
+	_ = retirementRetry.Body.Close()
+	if retirementRetryResult.Acceptance != relay.AcceptanceDuplicate ||
+		!reflect.DeepEqual(retirementRetryResult.Memberships, retirementResult.Memberships) {
+		t.Fatalf("retirement retry changed result: %+v", retirementRetryResult)
+	}
+	retiredStatus := performRelayJSON(
+		t, handler, http.MethodGet,
+		"/v1/device-sync/principals/"+principalID.String()+"/status", nil,
+		relayTestToken(tenantSeed), uuid.Nil,
+	)
+	requireStatus(t, retiredStatus, http.StatusUnauthorized)
+	_ = retiredStatus.Body.Close()
 }
 
 func principalDeviceIsRevoked(status devicesync.PrincipalStatus, deviceID uuid.UUID) bool {

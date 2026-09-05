@@ -51,6 +51,7 @@ type MemoryStore struct {
 	deviceRevocationRequests  map[uuid.UUID]DeviceRevocation
 	deviceRevocations         map[uuid.UUID]DeviceRevocationResult
 	revokedDevices            map[uuid.UUID]map[uuid.UUID]int64
+	retiredPrincipals         map[uuid.UUID]DeviceRevocationResult
 	joinRequests              map[uuid.UUID]JoinRequest
 	joinRequestRetry          map[uuid.UUID]uuid.UUID
 	discoveryProfiles         map[uuid.UUID]DiscoveryProfile
@@ -69,6 +70,7 @@ func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 		deviceRevocationRequests:  make(map[uuid.UUID]DeviceRevocation),
 		deviceRevocations:         make(map[uuid.UUID]DeviceRevocationResult),
 		revokedDevices:            make(map[uuid.UUID]map[uuid.UUID]int64),
+		retiredPrincipals:         make(map[uuid.UUID]DeviceRevocationResult),
 		joinRequests:              make(map[uuid.UUID]JoinRequest),
 		joinRequestRetry:          make(map[uuid.UUID]uuid.UUID),
 		discoveryProfiles:         make(map[uuid.UUID]DiscoveryProfile),
@@ -91,6 +93,9 @@ func (s *MemoryStore) PublishDiscoveryProfile(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, retired := s.retiredPrincipals[profile.PrincipalID]; retired {
+		return NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
+	}
 	if _, found := s.principals[profile.PrincipalID]; !found {
 		return NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
 	}
@@ -108,7 +113,10 @@ func (s *MemoryStore) ListDiscoveryProfiles(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	profiles := make([]DiscoveryProfile, 0, len(s.discoveryProfiles))
-	for _, profile := range s.discoveryProfiles {
+	for principalID, profile := range s.discoveryProfiles {
+		if _, retired := s.retiredPrincipals[principalID]; retired {
+			continue
+		}
 		profiles = append(profiles, profile)
 	}
 	sort.Slice(profiles, func(i, j int) bool {
@@ -188,6 +196,9 @@ func (s *MemoryStore) LookupJoinRequest(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, retired := s.retiredPrincipals[credential.TenantID]; retired {
+		return JoinRequestSponsorPresentation{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
+	}
 	principal, found := s.principals[credential.TenantID]
 	if !found {
 		return JoinRequestSponsorPresentation{}, NewProtocolError(
@@ -451,6 +462,9 @@ func (s *MemoryStore) CreateDeviceAdmission(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, retired := s.retiredPrincipals[admission.PrincipalID]; retired {
+		return DeviceAdmissionCreateResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
+	}
 	principal, found := s.principals[admission.PrincipalID]
 	if !found {
 		return DeviceAdmissionCreateResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
@@ -513,6 +527,9 @@ func (s *MemoryStore) ClaimDeviceAdmission(
 	record, found := s.deviceAdmissions[credential.AdmissionID]
 	if !found {
 		return DeviceAdmissionClaimResult{}, NewProtocolError(CodeAdmissionNotFound, "device admission was not found")
+	}
+	if _, retired := s.retiredPrincipals[record.admission.PrincipalID]; retired {
+		return DeviceAdmissionClaimResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
 	}
 	if credential.PrincipalID != record.admission.PrincipalID ||
 		claim.PrincipalID != record.admission.PrincipalID ||
@@ -583,10 +600,6 @@ func (s *MemoryStore) RevokeDevice(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	principal, found := s.principals[revocation.PrincipalID]
-	if !found {
-		return DeviceRevocationResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
-	}
 	if existing, found := s.deviceRevocations[revocation.RetryID]; found {
 		if s.deviceRevocationRequests[revocation.RetryID] == revocation {
 			existing.Acceptance = relay.AcceptanceDuplicate
@@ -594,6 +607,13 @@ func (s *MemoryStore) RevokeDevice(
 			return existing, nil
 		}
 		return DeviceRevocationResult{}, NewProtocolError(CodeDeviceCollision, "device revocation retry ID was reused")
+	}
+	if _, retired := s.retiredPrincipals[revocation.PrincipalID]; retired {
+		return DeviceRevocationResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
+	}
+	principal, found := s.principals[revocation.PrincipalID]
+	if !found {
+		return DeviceRevocationResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
 	}
 	if revoked := s.revokedDevices[revocation.PrincipalID]; revoked != nil {
 		if _, found := revoked[revocation.DeviceID]; found {
@@ -610,7 +630,10 @@ func (s *MemoryStore) RevokeDevice(
 		}
 	}
 	activeDeviceCount -= len(s.revokedDevices[revocation.PrincipalID])
-	if activeDeviceCount <= 1 {
+	if revocation.RetirePrincipal && activeDeviceCount != 1 {
+		return DeviceRevocationResult{}, NewProtocolError(CodeLastDevice, "principal retirement requires exactly one active device")
+	}
+	if activeDeviceCount <= 1 && !revocation.RetirePrincipal {
 		return DeviceRevocationResult{}, NewProtocolError(CodeLastDevice, "last active device cannot be revoked without key recovery")
 	}
 	targets := make([]relay.TenantMembershipRevocationItem, 0, len(s.spaces)+1)
@@ -680,6 +703,10 @@ func (s *MemoryStore) RevokeDevice(
 	}
 	s.deviceRevocationRequests[revocation.RetryID] = revocation
 	s.deviceRevocations[revocation.RetryID] = result
+	if revocation.RetirePrincipal {
+		s.retiredPrincipals[revocation.PrincipalID] = result
+		delete(s.discoveryProfiles, revocation.PrincipalID)
+	}
 	return result, nil
 }
 
@@ -700,6 +727,9 @@ func (s *MemoryStore) ProvisionSpace(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, retired := s.retiredPrincipals[provisioning.PrincipalID]; retired {
+		return SpaceProvisioningResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
+	}
 	if _, found := s.principals[provisioning.PrincipalID]; !found {
 		return SpaceProvisioningResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")
 	}
@@ -751,6 +781,9 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, retired := s.retiredPrincipals[admission.PrincipalID]; retired {
+		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
+	}
 	if _, found := s.principalDevice(admission.PrincipalID, admission.DeviceID); !found {
 		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(
 			CodeUnauthorized, "Space device is not enrolled in the Device Sync principal",
@@ -828,6 +861,9 @@ func (s *MemoryStore) ClaimSpaceDeviceAdmission(
 	if !found {
 		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeAdmissionNotFound, "Space device admission was not found")
 	}
+	if _, retired := s.retiredPrincipals[record.admission.PrincipalID]; retired {
+		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
+	}
 	if credential.PrincipalID != record.admission.PrincipalID ||
 		credential.SpaceID != record.admission.SpaceID ||
 		claim.PrincipalID != record.admission.PrincipalID ||
@@ -884,6 +920,9 @@ func (s *MemoryStore) GetPrincipalStatus(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, retired := s.retiredPrincipals[credential.TenantID]; retired {
+		return PrincipalStatus{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
+	}
 	principal, found := s.principals[credential.TenantID]
 	if !found {
 		return PrincipalStatus{}, NewProtocolError(CodeUnauthorized, "Device Sync principal was not found")

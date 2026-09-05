@@ -347,10 +347,11 @@ type SpaceDeviceAdmissionClaimResult struct {
 // account credential authorizes the product operation; content keys never
 // enter the service.
 type DeviceRevocation struct {
-	Version     int       `json:"version"`
-	RetryID     uuid.UUID `json:"retryID"`
-	PrincipalID uuid.UUID `json:"principalID"`
-	DeviceID    uuid.UUID `json:"deviceID"`
+	Version         int       `json:"version"`
+	RetryID         uuid.UUID `json:"retryID"`
+	PrincipalID     uuid.UUID `json:"principalID"`
+	DeviceID        uuid.UUID `json:"deviceID"`
+	RetirePrincipal bool      `json:"retirePrincipal,omitempty"`
 }
 
 func (r DeviceRevocation) Validate() error {

@@ -370,6 +370,7 @@ var deviceSyncMigrationTableSpecs = []deviceSyncMigrationTableSpec{
 
 var deviceSyncMigrationExcludedTables = map[string]string{
 	"device_sync_scope_enforcement":          "deployment authority and write fencing are installed separately",
+	"device_sync_principal_retirements":      "terminal local retirement cannot be migrated into an active destination",
 	"device_sync_migration_exports":          "source-side migration evidence is not logical Device Sync state",
 	"device_sync_migration_imports":          "target-side migration evidence is not logical Device Sync state",
 	"device_sync_migration_rollback_imports": "reverse-import evidence is not logical Device Sync state",

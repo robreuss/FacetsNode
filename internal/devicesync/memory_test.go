@@ -409,6 +409,31 @@ func TestMemoryStoreRevokesDeviceAcrossPrincipalAndSpaceAtomically(t *testing.T)
 	}, 0, 1, 6_800); err != nil {
 		t.Fatalf("failed last-device revocation fenced the surviving device: %v", err)
 	}
+	profile := devicesync.DiscoveryProfile{
+		Version: devicesync.SchemaVersion, PrincipalID: principal.PrincipalID,
+		SetDiscriminator: strings.Repeat("b", 32), DisplayName: "Final Group",
+		Revision: 1, UpdatedMilliseconds: 6_900,
+	}
+	if err := store.PublishDiscoveryProfile(ctx, credential, profile); err != nil {
+		t.Fatal(err)
+	}
+	retirement := initialRevocation
+	retirement.RetirePrincipal = true
+	retired, err := store.RevokeDevice(ctx, credential, retirement, 7_000)
+	if err != nil || retired.Acceptance != relay.AcceptanceAccepted || len(retired.Memberships) != 2 {
+		t.Fatalf("retire final Device Sync device=%+v err=%v", retired, err)
+	}
+	retirementRetry, err := store.RevokeDevice(ctx, credential, retirement, 7_100)
+	if err != nil || retirementRetry.Acceptance != relay.AcceptanceDuplicate || retirementRetry.RevokedAtMilliseconds != 7_000 {
+		t.Fatalf("retry final retirement=%+v err=%v", retirementRetry, err)
+	}
+	profiles, err := store.ListDiscoveryProfiles(ctx)
+	if err != nil || len(profiles) != 0 {
+		t.Fatalf("retired principal remains discoverable: %+v err=%v", profiles, err)
+	}
+	if _, err := store.GetPrincipalStatus(ctx, credential); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
+		t.Fatalf("retired principal status err=%v", err)
+	}
 }
 
 func deviceRevokedAt(devices []devicesync.DeviceStatus, deviceID uuid.UUID) *int64 {
