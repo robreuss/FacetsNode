@@ -23,6 +23,11 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	spacesSyncProductName  = "Spaces Sync"
+	groupSpacesProductName = "Group Spaces"
+)
+
 type Service struct {
 	store         Store
 	deviceSync    DeviceSyncController
@@ -163,6 +168,8 @@ type pageModel struct {
 	ClaimDeviceName   string
 	InvitationCode    string
 	InvitationExpires string
+	SpacesSyncName    string
+	GroupSpacesName   string
 }
 
 var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
@@ -177,7 +184,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 {{if .InvitationCode}}<section><h2>Authorize another device</h2><p class="pin">{{.InvitationCode}}</p><p>Use this code to add another Facets device. It expires {{.InvitationExpires}}.</p></section>{{end}}
 <section><h2>{{.DisplayName}}</h2><p class="identity"><strong>Address:</strong> {{.PublicURL}}<br><strong>Box identity:</strong> <code>{{.BoxID}}</code><br><strong>Controller uptime:</strong> {{.Uptime}}</p></section>
 <section><h2>Device access</h2><p>Create a time-limited code for another Facets installation. The code grants service discovery, not Box administration or membership in any service.</p><a class="button" href="authorize-device">Authorize another device</a></section>
-<section><h2>Services</h2><div class="grid"><section class="card"><h3>Device Sync</h3>{{if .DeviceSyncHealthy}}<p class="good">Available</p>{{else}}<p class="bad">Unavailable</p>{{end}}</section><section class="card"><h3>Shared Spaces</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Backup</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Edge</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Post</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Compute</h3><p class="quiet">Not configured</p></section></div></section>
+<section><h2>Services</h2><div class="grid"><section class="card"><h3>{{.SpacesSyncName}}</h3>{{if .DeviceSyncHealthy}}<p class="good">Available</p>{{else}}<p class="bad">Unavailable</p>{{end}}</section><section class="card"><h3>{{.GroupSpacesName}}</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Backup</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Edge</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Post</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Compute</h3><p class="quiet">Not configured</p></section></div></section>
 <section><h2>Connected Facets installations</h2>{{range .Grants}}<p>{{.DeviceName}} <span class="quiet">last seen {{.LastSeenAt.Format "2006-01-02 15:04 MST"}}</span> {{if .RevokedAt.IsZero}}<form style="display:inline" method="post" action="grants/{{.GrantID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke</button></form>{{else}}<span class="quiet">revoked</span>{{end}}</p>{{else}}<p class="quiet">No app connections yet.</p>{{end}}</section>
 <section><h2>Change Box Owner password</h2><form method="post" action="password"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input type="password" name="current_password" autocomplete="current-password" placeholder="Current password" required></p><p><input type="password" name="new_password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New password" required></p><button>Change and revoke all connections</button></form></section>
 <section><h2>Recent activity</h2>{{range .Audit}}<p><code>{{.OccurredAt.Format "2006-01-02 15:04 MST"}}</code> {{.Kind}} — {{.Outcome}}</p>{{else}}<p class="quiet">No activity yet.</p>{{end}}</section>
@@ -206,6 +213,7 @@ func (service *Service) handleHome(writer http.ResponseWriter, request *http.Req
 		Claimed: state.Claimed(), Authenticated: authenticated, CSRF: csrf,
 		DisplayName: displayName, BoxID: state.BoxID.String(),
 		PublicURL: service.publicBaseURL, Uptime: service.uptimeDescription(),
+		SpacesSyncName: spacesSyncProductName, GroupSpacesName: groupSpacesProductName,
 	}
 	model.Error = request.URL.Query().Get("error")
 	if !state.Claimed() {
@@ -250,7 +258,8 @@ func (service *Service) handleAuthorizeDevice(writer http.ResponseWriter, reques
 		Claimed: true, Authenticated: authenticated, CSRF: csrf,
 		DisplayName: displayName, BoxID: state.BoxID.String(),
 		PublicURL: service.publicBaseURL, Uptime: service.uptimeDescription(),
-		ReturnTo: "authorize-device",
+		ReturnTo: "authorize-device", SpacesSyncName: spacesSyncProductName,
+		GroupSpacesName: groupSpacesProductName,
 	}
 	if authenticated {
 		_ = service.store.TouchWebSession(request.Context(), session.TokenDigest, service.now())
@@ -614,7 +623,7 @@ func (service *Service) handleDeviceSyncGroups(writer http.ResponseWriter, reque
 		return
 	}
 	if !service.hasService("device-sync") {
-		http.Error(writer, "Device Sync is not configured.", http.StatusServiceUnavailable)
+		http.Error(writer, spacesSyncProductName+" is not configured.", http.StatusServiceUnavailable)
 		return
 	}
 	groups, err := service.deviceSync.Groups(request.Context())
@@ -658,7 +667,7 @@ func (service *Service) handleDeviceSyncAccountAdmission(writer http.ResponseWri
 		return
 	}
 	if !service.hasService("device-sync") {
-		http.Error(writer, "Device Sync is not configured.", http.StatusServiceUnavailable)
+		http.Error(writer, spacesSyncProductName+" is not configured.", http.StatusServiceUnavailable)
 		return
 	}
 	bootstrap, err := service.deviceSync.IssueAccountBootstrap(request.Context())

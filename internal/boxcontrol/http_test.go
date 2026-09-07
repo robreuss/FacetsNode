@@ -152,6 +152,12 @@ func TestClaimConnectsExactInstallationAndOwnerInvitationConnectsSecond(t *testi
 	if authorizationPage.Code != http.StatusOK {
 		t.Fatalf("authorize page status %d: %s", authorizationPage.Code, authorizationPage.Body.String())
 	}
+	if body := authorizationPage.Body.String(); !strings.Contains(body, ">"+spacesSyncProductName+"</h3>") ||
+		!strings.Contains(body, ">"+groupSpacesProductName+"</h3>") ||
+		strings.Contains(body, ">Device Sync</h3>") ||
+		strings.Contains(body, ">Shared Spaces</h3>") {
+		t.Fatalf("dashboard used stale service product names: %s", body)
+	}
 	match := regexp.MustCompile(`<p class="pin">([0-9]{6})</p>`).FindStringSubmatch(authorizationPage.Body.String())
 	if len(match) != 2 {
 		t.Fatalf("authorization page omitted six-digit code: %s", authorizationPage.Body.String())
