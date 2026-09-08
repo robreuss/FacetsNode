@@ -152,24 +152,25 @@ func (service *Service) handleManifest(writer http.ResponseWriter, request *http
 }
 
 type pageModel struct {
-	Claimed           bool
-	Authenticated     bool
-	CSRF              string
-	DisplayName       string
-	BoxID             string
-	PublicURL         string
-	Uptime            string
-	Grants            []ConnectionGrant
-	Audit             []AuditEvent
-	DeviceSyncHealthy bool
-	Error             string
-	ReturnTo          string
-	ClaimRequestID    string
-	ClaimDeviceName   string
-	InvitationCode    string
-	InvitationExpires string
-	SpacesSyncName    string
-	GroupSpacesName   string
+	Claimed                    bool
+	Authenticated              bool
+	CSRF                       string
+	DisplayName                string
+	BoxID                      string
+	PublicURL                  string
+	Uptime                     string
+	Grants                     []ConnectionGrant
+	Audit                      []AuditEvent
+	DeviceSyncHealthy          bool
+	Error                      string
+	ReturnTo                   string
+	ClaimRequestID             string
+	ClaimDeviceName            string
+	ClaimConnectionUnavailable bool
+	InvitationCode             string
+	InvitationExpires          string
+	SpacesSyncName             string
+	GroupSpacesName            string
 }
 
 var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
@@ -178,7 +179,9 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 :root{color-scheme:dark light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{max-width:860px;margin:0 auto;padding:32px 20px;background:#15191f;color:#edf2f7}header{padding:8px 2px 14px}section{background:#20262e;border:1px solid #38414d;border-radius:14px;padding:20px;margin:18px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.card{margin:0}input,button,.button{font:inherit;padding:10px 12px;border-radius:9px;border:1px solid #596575}input{width:min(100%,520px);box-sizing:border-box;background:#11151a;color:inherit}button,.button{display:inline-block;background:#147efb;color:white;border:0;font-weight:650;text-decoration:none}.quiet{color:#aeb8c4}.good{color:#72d68b}.bad{color:#ff7979}.pin{font-size:2rem;font-weight:750;letter-spacing:.28em}code{word-break:break-all}.identity{font-size:.88rem}</style></head><body>
 <header><h1>Facets Box Management</h1><p class="quiet">Configure this Box and its services. This interface never decrypts Space content.</p></header>
 {{if .Error}}<p class="bad">{{.Error}}</p>{{end}}
-{{if not .Claimed}}<section><h2>Claim this Facets Box</h2><p>Enter the one-time activation code shown by the Box console, name the Box, and choose the shared Box Owner password.</p>{{if .ClaimDeviceName}}<p class="quiet">This will also connect <strong>{{.ClaimDeviceName}}</strong> to the Box.</p>{{end}}<form method="post" action="claim"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .ClaimRequestID}}<input type="hidden" name="claim_request_id" value="{{.ClaimRequestID}}">{{end}}<p><input name="activation_code" autocomplete="one-time-code" placeholder="One-time activation code" required></p><p><input name="display_name" autocomplete="organization" maxlength="128" value="{{.DisplayName}}" placeholder="Box name, for example Home Box" required></p><p><input type="password" name="password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New Box Owner password" required></p><p><input type="password" name="password_confirmation" autocomplete="new-password" minlength="15" maxlength="128" placeholder="Confirm Box Owner password" required></p><button>Claim and connect</button></form></section>
+{{if not .Claimed}}<section><h2>Claim this Facets Box</h2>
+{{if .ClaimConnectionUnavailable}}<p class="bad">This installation's setup request has expired or is no longer available.</p><p>Close this page and start Box setup again in Facets. The Box has not been claimed; you can use the same activation code.</p>
+{{else}}<p>Enter the one-time activation code shown by the Box console, name the Box, and choose the shared Box Owner password.</p>{{if .ClaimDeviceName}}<p class="quiet">This will also connect <strong>{{.ClaimDeviceName}}</strong> to the Box.</p>{{end}}<form method="post" action="claim"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .ClaimRequestID}}<input type="hidden" name="claim_request_id" value="{{.ClaimRequestID}}">{{end}}<p><input name="activation_code" autocomplete="one-time-code" placeholder="One-time activation code" required></p><p><input name="display_name" autocomplete="organization" maxlength="128" value="{{.DisplayName}}" placeholder="Box name, for example Home Box" required></p><p><input type="password" name="password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New Box Owner password" required></p><p><input type="password" name="password_confirmation" autocomplete="new-password" minlength="15" maxlength="128" placeholder="Confirm Box Owner password" required></p><button>{{if .ClaimRequestID}}Claim and connect{{else}}Claim Box{{end}}</button></form>{{end}}</section>
 {{else if not .Authenticated}}<section><h2>{{.DisplayName}}</h2><p>Enter the Box Owner password to continue.</p><form method="post" action="login{{if .ReturnTo}}?return_to={{.ReturnTo}}{{end}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input type="password" name="password" autocomplete="current-password" maxlength="128" required></p><button>Sign in</button></form></section>
 {{else}}
 {{if .InvitationCode}}<section><h2>Authorize another device</h2><p class="pin">{{.InvitationCode}}</p><p>Use this code to add another Facets device. It expires {{.InvitationExpires}}.</p></section>{{end}}
@@ -216,13 +219,16 @@ func (service *Service) handleHome(writer http.ResponseWriter, request *http.Req
 		SpacesSyncName: spacesSyncProductName, GroupSpacesName: groupSpacesProductName,
 	}
 	model.Error = request.URL.Query().Get("error")
-	if !state.Claimed() {
+	if !state.Claimed() && request.URL.Query().Has("claim_request_id") {
+		// A failed or expired in-app setup must not become a standalone claim.
+		model.ClaimConnectionUnavailable = true
 		if requestID, parseErr := uuid.Parse(request.URL.Query().Get("claim_request_id")); parseErr == nil {
 			if connection, requestErr := service.store.ConnectionRequest(request.Context(), requestID); requestErr == nil &&
 				connection.ApprovalCodeDigest == claimRequestDigest(requestID) &&
 				connection.ExpiresAt.After(service.now()) && len(connection.EncryptedResult) == 0 {
 				model.ClaimRequestID = requestID.String()
 				model.ClaimDeviceName = connection.DeviceName
+				model.ClaimConnectionUnavailable = false
 			}
 		}
 	}
@@ -299,8 +305,11 @@ func (service *Service) handleClaim(writer http.ResponseWriter, request *http.Re
 	var claimRequestID uuid.UUID
 	claimRequestText := request.FormValue("claim_request_id")
 	var connectionErr error
-	if claimRequestText != "" {
+	if _, hasConnection := request.PostForm["claim_request_id"]; hasConnection {
 		claimRequestID, connectionErr = uuid.Parse(claimRequestText)
+		if connectionErr == nil && claimRequestID == uuid.Nil {
+			connectionErr = ErrInvalidCredential
+		}
 		if connectionErr == nil {
 			var connection ConnectionRequest
 			connection, connectionErr = service.store.ConnectionRequest(request.Context(), claimRequestID)
@@ -313,7 +322,17 @@ func (service *Service) handleClaim(writer http.ResponseWriter, request *http.Re
 	if err != nil || nameErr != nil || connectionErr != nil || password != confirmation ||
 		!verifySecret(state.ActivationVerifier, activation) {
 		service.audit(request.Context(), "box_claim", "rejected")
-		service.renderRedirectError(writer, request, errOrCredential(errors.Join(err, nameErr, connectionErr)))
+		query := url.Values{"error": {errOrCredential(errors.Join(err, nameErr, connectionErr)).Error()}}
+		if _, hasConnection := request.PostForm["claim_request_id"]; hasConnection {
+			// Preserve only a bounded request identifier, never credentials or form data.
+			requestID, parseErr := uuid.Parse(claimRequestText)
+			if parseErr == nil && requestID != uuid.Nil {
+				query.Set("claim_request_id", requestID.String())
+			} else {
+				query.Set("claim_request_id", "invalid")
+			}
+		}
+		http.Redirect(writer, request, service.cookiePath+"/?"+query.Encode(), http.StatusSeeOther)
 		return
 	}
 	verifier, err := hashSecret(password, service.random)
