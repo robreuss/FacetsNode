@@ -76,6 +76,74 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, oldAdmission, 3500); err != nil {
 				t.Fatal(err)
 			}
+			// Cancel before any claim, then race fresh preparations. Only the
+			// inactive unclaimed Device Sync binding may be retired; the relay
+			// records must remain to reject late bearer/retry use.
+			retiredCredential, retiredAdmission := oldCredential, oldAdmission
+			_, activePendingCollision := makeAdmission(3510)
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, activePendingCollision, 3510); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
+				t.Fatalf("active pending admission displaced=%v", err)
+			}
+			if _, err := s.ChangeSubscriptionStatus(ctx, admin, retiredAdmission.SubscriptionID, relay.SubscriptionStatusChangeRequest{RetryID: uuid.New(), Status: inactive, ChangedAtMilliseconds: 3520}); err != nil {
+				t.Fatal(err)
+			}
+			wrongAdmin := admin
+			wrongAdmin.Token = postgresRelayToken(99)
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, wrongAdmin, activePendingCollision, 3530); err == nil {
+				t.Fatal("unauthenticated pending replacement accepted")
+			}
+			pendingCredentials := make([]devicesync.SpaceDeviceAdmissionCredential, 2)
+			pendingAdmissions := make([]devicesync.SpaceDeviceAdmission, 2)
+			pendingErrors := make([]error, 2)
+			var pendingWG sync.WaitGroup
+			for i := range pendingCredentials {
+				pendingCredentials[i], pendingAdmissions[i] = makeAdmission(3530)
+			}
+			for i := range pendingAdmissions {
+				pendingWG.Add(1)
+				go func(i int) {
+					defer pendingWG.Done()
+					_, pendingErrors[i] = s.CreateSpaceDeviceAdmission(ctx, admin, pendingAdmissions[i], 3530)
+				}(i)
+			}
+			pendingWG.Wait()
+			pendingWinner := -1
+			for i, err := range pendingErrors {
+				if err == nil {
+					if pendingWinner >= 0 {
+						t.Fatal("two cancelled pending replacements won")
+					}
+					pendingWinner = i
+				} else if !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
+					t.Fatal(err)
+				}
+			}
+			if pendingWinner < 0 {
+				t.Fatal("no cancelled pending replacement won")
+			}
+			if _, err := s.ClaimSpaceDeviceAdmission(ctx, retiredCredential, oldClaim, 3600); !devicesync.ErrorHasCode(err, devicesync.CodeAdmissionNotFound) {
+				t.Fatalf("retired binding claim=%v", err)
+			}
+			if _, err := s.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{TenantID: principal, DomainID: admin.DomainID, AdmissionID: retiredCredential.AdmissionID, Token: retiredCredential.Token}, oldClaim.RelayClaim, 3600); err == nil {
+				t.Fatal("retired relay admission revived")
+			}
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, retiredAdmission, 3600); err == nil {
+				t.Fatal("old retry revived retired binding")
+			}
+			var bindingCount, relayAdmissionCount int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM device_sync_space_device_admissions WHERE principal_id=$1 AND space_id=$2 AND admission_id=$3`, principal, space.SpaceID, retiredCredential.AdmissionID).Scan(&bindingCount); err != nil {
+				t.Fatal(err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM relay_member_admissions WHERE tenant_id=$1 AND domain_id=$2 AND admission_id=$3 AND claimed_at_milliseconds IS NULL`, principal, admin.DomainID, retiredCredential.AdmissionID).Scan(&relayAdmissionCount); err != nil {
+				t.Fatal(err)
+			}
+			if bindingCount != 0 || relayAdmissionCount != 1 {
+				t.Fatalf("retired binding=%d relay tombstone=%d", bindingCount, relayAdmissionCount)
+			}
+			if retiredSub, err := s.GetSubscription(ctx, admin, retiredAdmission.SubscriptionID); err != nil || retiredSub.Status != inactive {
+				t.Fatalf("retired subscription=%+v err=%v", retiredSub, err)
+			}
+			oldCredential, oldAdmission = pendingCredentials[pendingWinner], pendingAdmissions[pendingWinner]
 			if _, err := s.ClaimSpaceDeviceAdmission(ctx, oldCredential, oldClaim, 3600); err != nil {
 				t.Fatal(err)
 			}
@@ -150,6 +218,13 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 			}
 			if _, err := s.ClaimSpaceDeviceAdmission(ctx, oldCredential, oldClaim, 3600); err == nil {
 				t.Fatal("superseded claim replay accepted")
+			}
+			var claimedHistory int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM device_sync_space_device_admissions WHERE principal_id=$1 AND space_id=$2 AND admission_id=$3 AND claimed_at_milliseconds IS NOT NULL`, principal, space.SpaceID, oldCredential.AdmissionID).Scan(&claimedHistory); err != nil {
+				t.Fatal(err)
+			}
+			if claimedHistory != 1 {
+				t.Fatal("claimed admission history was deleted")
 			}
 			oldSub, err := s.GetSubscription(ctx, admin, oldAdmission.SubscriptionID)
 			if err != nil || oldSub.Status != inactive {

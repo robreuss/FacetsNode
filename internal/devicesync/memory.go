@@ -826,11 +826,21 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 			return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device is already active in the Space")
 		}
 	}
-	for _, existing := range s.spaceDeviceAdmissions {
+	var retiredPendingAdmissions []uuid.UUID
+	for admissionID, existing := range s.spaceDeviceAdmissions {
 		if existing.admission.PrincipalID == admission.PrincipalID &&
 			existing.admission.SpaceID == admission.SpaceID &&
 			existing.admission.DeviceID == admission.DeviceID && existing.result == nil {
-			return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device already has another pending Space admission")
+			previous, err := s.relay.GetSubscription(ctx, credential, existing.admission.SubscriptionID)
+			if err != nil {
+				return SpaceDeviceAdmissionCreateResult{}, err
+			}
+			if previous.Status != relay.SubscriptionRevoked && previous.Status != relay.SubscriptionRebootstrapRequired {
+				return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device already has another pending Space admission")
+			}
+			// Retire only the unclaimed Device Sync binding. The inactive relay
+			// subscription/admission remain as tombstones rejecting late claims.
+			retiredPendingAdmissions = append(retiredPendingAdmissions, admissionID)
 		}
 	}
 	if _, err := s.relay.CreateSubscription(ctx, credential, relay.SubscriptionCreateRequest{
@@ -845,6 +855,11 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 	)
 	if err != nil {
 		return SpaceDeviceAdmissionCreateResult{}, err
+	}
+	for _, admissionID := range retiredPendingAdmissions {
+		previous := s.spaceDeviceAdmissions[admissionID]
+		delete(s.spaceDeviceAdmissionRetry, previous.admission.RetryID)
+		delete(s.spaceDeviceAdmissions, admissionID)
 	}
 	s.spaceDeviceAdmissions[admission.RelayAdmission.AdmissionID] = memorySpaceDeviceAdmission{admission: admission}
 	s.spaceDeviceAdmissionRetry[admission.RetryID] = admission.RelayAdmission.AdmissionID

@@ -1090,6 +1090,34 @@ func (s *RelayStore) CreateSpaceDeviceAdmission(
 	if err != nil {
 		return devicesync.SpaceDeviceAdmissionCreateResult{}, err
 	}
+	if found && existing.claimedAtMilliseconds == nil && existing.claimedMemberID == nil &&
+		existing.principalID == admission.PrincipalID && existing.spaceID == admission.SpaceID &&
+		existing.deviceID == admission.DeviceID && existing.domainID == admission.RelayAdmission.DomainID &&
+		existing.admissionID != admission.RelayAdmission.AdmissionID && existing.retryID != admission.RetryID {
+		previousStatus, err := loadSubscriptionStatus(ctx, tx, existing.principalID, existing.domainID, existing.subscriptionID, "FOR UPDATE")
+		if err != nil {
+			return devicesync.SpaceDeviceAdmissionCreateResult{}, err
+		}
+		if previousStatus == relay.SubscriptionRevoked || previousStatus == relay.SubscriptionRebootstrapRequired {
+			// Remove only this exact unclaimed, inactive Device Sync binding.
+			// Keep relay admission/subscription history so old credentials and
+			// retry identifiers cannot claim or revive the retired transport.
+			retired, err := tx.Exec(ctx, `
+				DELETE FROM device_sync_space_device_admissions
+				WHERE principal_id=$1 AND space_id=$2 AND device_id=$3
+				  AND domain_id=$4 AND subscription_id=$5 AND admission_id=$6
+				  AND retry_id=$7 AND claimed_at_milliseconds IS NULL AND claimed_member_id IS NULL
+			`, existing.principalID, existing.spaceID, existing.deviceID, existing.domainID,
+				existing.subscriptionID, existing.admissionID, existing.retryID)
+			if err != nil {
+				return devicesync.SpaceDeviceAdmissionCreateResult{}, fmt.Errorf("retire inactive pending Space admission: %w", err)
+			}
+			if retired.RowsAffected() != 1 {
+				return devicesync.SpaceDeviceAdmissionCreateResult{}, devicesync.NewProtocolError(devicesync.CodeDeviceCollision, "pending Space admission changed during replacement")
+			}
+			found = false
+		}
+	}
 	if found {
 		if !deviceSyncSpaceDeviceAdmissionCreationEqual(existing, admission) {
 			if existing.deviceID == admission.DeviceID {
@@ -1375,6 +1403,7 @@ func loadDeviceSyncSpaceDeviceAdmissionForCreation(
 			admission_id=$3 OR retry_id=$4 OR
 			(device_id=$5 AND claimed_at_milliseconds IS NULL)
 		)
+		ORDER BY (admission_id=$3 OR retry_id=$4) DESC
 		FOR UPDATE
 	`, admission.PrincipalID, admission.SpaceID,
 		admission.RelayAdmission.AdmissionID, admission.RetryID,

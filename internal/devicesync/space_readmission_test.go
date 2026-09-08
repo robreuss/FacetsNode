@@ -191,3 +191,82 @@ func readmissionClaim(t *testing.T, space devicesync.SpaceProvisioning, device u
 	return devicesync.SpaceDeviceAdmissionClaim{Version: devicesync.SchemaVersion, PrincipalID: space.PrincipalID, SpaceID: space.SpaceID, DeviceID: device,
 		RelayClaim: relay.MemberAdmissionClaim{MemberID: device, AuthorizationDigest: testDigest(t, relay.Credential{TenantID: space.PrincipalID, DomainID: space.Domain.Registration.DomainID, MemberID: device, Token: testToken(token)})}, ClaimedAtMilliseconds: now}
 }
+
+func TestMemorySpacePendingCancellationAllowsOnlyFreshFirstWinner(t *testing.T) {
+	for _, inactive := range []relay.SubscriptionStatus{relay.SubscriptionRevoked, relay.SubscriptionRebootstrapRequired} {
+		t.Run(string(inactive), func(t *testing.T) {
+			ctx := context.Background()
+			r := relay.NewMemoryStore()
+			s := devicesync.NewMemoryStore(r)
+			principal := bootstrapMemoryPrincipal(t, s, 3000)
+			device := enrollMemoryDevice(t, s, principal, 3200)
+			tenant, space := testSpaceProvisioning(t, principal, 3400)
+			if _, err := s.ProvisionSpace(ctx, tenant, space, 3400); err != nil {
+				t.Fatal(err)
+			}
+			admin := relay.AdministrationCredential{TenantID: space.PrincipalID, DomainID: space.Domain.Registration.DomainID, Token: testToken(0x41)}
+			retiredCredential, retired := testSpaceDeviceAdmission(t, space, device, 3500)
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, retired, 3500); err != nil {
+				t.Fatal(err)
+			}
+			_, competing := testSpaceDeviceAdmission(t, space, device, 3510)
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, competing, 3510); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
+				t.Fatalf("active pending admission was displaced: %v", err)
+			}
+			if _, err := r.ChangeSubscriptionStatus(ctx, admin, retired.SubscriptionID, relay.SubscriptionStatusChangeRequest{RetryID: uuid.New(), Status: inactive, ChangedAtMilliseconds: 3520}); err != nil {
+				t.Fatal(err)
+			}
+			wrongAdmin := admin
+			wrongAdmin.Token = testToken(0x99)
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, wrongAdmin, competing, 3530); err == nil {
+				t.Fatal("unauthenticated pending replacement accepted")
+			}
+			credentials := make([]devicesync.SpaceDeviceAdmissionCredential, 2)
+			admissions := make([]devicesync.SpaceDeviceAdmission, 2)
+			for i := range credentials {
+				credentials[i], admissions[i] = testSpaceDeviceAdmission(t, space, device, 3530)
+			}
+			var wg sync.WaitGroup
+			errors := make([]error, 2)
+			for i := range admissions {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					_, errors[i] = s.CreateSpaceDeviceAdmission(ctx, admin, admissions[i], 3530)
+				}(i)
+			}
+			wg.Wait()
+			winner := -1
+			for i, err := range errors {
+				if err == nil {
+					if winner >= 0 {
+						t.Fatal("two cancelled-admission replacements won")
+					}
+					winner = i
+				} else if !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
+					t.Fatal(err)
+				}
+			}
+			if winner < 0 {
+				t.Fatal("no pending replacement won")
+			}
+			claim := readmissionClaim(t, space, device, 0x74, 3600)
+			if _, err := s.ClaimSpaceDeviceAdmission(ctx, retiredCredential, claim, 3600); !devicesync.ErrorHasCode(err, devicesync.CodeAdmissionNotFound) {
+				t.Fatalf("retired binding claim: %v", err)
+			}
+			if _, err := r.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{TenantID: space.PrincipalID, DomainID: admin.DomainID, AdmissionID: retiredCredential.AdmissionID, Token: retiredCredential.Token}, claim.RelayClaim, 3600); err == nil {
+				t.Fatal("retired relay admission revived")
+			}
+			if old, err := r.GetSubscription(ctx, admin, retired.SubscriptionID); err != nil || old.Status != inactive {
+				t.Fatalf("retired subscription tombstone=%+v err=%v", old, err)
+			}
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, retired, 3600); err == nil {
+				t.Fatal("old retry revived retired binding")
+			}
+			result, err := s.ClaimSpaceDeviceAdmission(ctx, credentials[winner], claim, 3600)
+			if err != nil || result.Member.SubscriptionID != admissions[winner].SubscriptionID {
+				t.Fatalf("replacement claim=%+v err=%v", result, err)
+			}
+		})
+	}
+}
