@@ -513,10 +513,42 @@ func (s *RelayStore) claimSubscriptionAdmissionTx(
 	claim relay.MemberAdmissionClaim,
 	nowMilliseconds int64,
 ) (relay.SubscriptionAdmissionClaimResult, error) {
+	return s.claimSubscriptionAdmissionReplacingTx(ctx, tx, credential, claim, uuid.Nil, nowMilliseconds)
+}
+
+func (s *RelayStore) ClaimSubscriptionAdmissionReplacingInactiveMembership(
+	ctx context.Context, credential relay.AdmissionCredential, claim relay.MemberAdmissionClaim,
+	previousSubscriptionID uuid.UUID, nowMilliseconds int64,
+) (relay.SubscriptionAdmissionClaimResult, error) {
+	if err := claim.Validate(); err != nil {
+		return relay.SubscriptionAdmissionClaimResult{}, err
+	}
+	if previousSubscriptionID == uuid.Nil {
+		return relay.SubscriptionAdmissionClaimResult{}, relay.NewProtocolError(relay.CodeInvalidSubscription, "replacement subscription is missing")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return relay.SubscriptionAdmissionClaimResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.claimSubscriptionAdmissionReplacingTx(ctx, tx, credential, claim, previousSubscriptionID, nowMilliseconds)
+	if err != nil {
+		return relay.SubscriptionAdmissionClaimResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return relay.SubscriptionAdmissionClaimResult{}, err
+	}
+	return result, nil
+}
+
+func (s *RelayStore) claimSubscriptionAdmissionReplacingTx(
+	ctx context.Context, tx pgx.Tx, credential relay.AdmissionCredential,
+	claim relay.MemberAdmissionClaim, previousSubscriptionID uuid.UUID, nowMilliseconds int64,
+) (relay.SubscriptionAdmissionClaimResult, error) {
 	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
 		return relay.SubscriptionAdmissionClaimResult{}, err
 	}
-	if _, _, _, _, _, _, err := loadRelayDomain(ctx, tx, credential.TenantID, credential.DomainID, "FOR SHARE"); err != nil {
+	if _, _, _, _, _, _, err := loadRelayDomain(ctx, tx, credential.TenantID, credential.DomainID, "FOR UPDATE"); err != nil {
 		return relay.SubscriptionAdmissionClaimResult{}, err
 	}
 	admission, found, err := loadRelayAdmission(ctx, tx, credential.TenantID, credential.DomainID, credential.AdmissionID, "FOR UPDATE")
@@ -538,7 +570,20 @@ func (s *RelayStore) claimSubscriptionAdmissionTx(
 		if err != nil {
 			return relay.SubscriptionAdmissionClaimResult{}, err
 		}
-		if found && member.MemberID == claim.MemberID && member.AuthorizationDigest == claim.AuthorizationDigest {
+		var currentSubscriptionID uuid.UUID
+		if found {
+			if err := tx.QueryRow(ctx, `SELECT subscription_id FROM relay_members WHERE tenant_id=$1 AND domain_id=$2 AND member_id=$3`, credential.TenantID, credential.DomainID, member.MemberID).Scan(&currentSubscriptionID); err != nil {
+				return relay.SubscriptionAdmissionClaimResult{}, err
+			}
+		}
+		status, err := loadSubscriptionStatus(ctx, tx, credential.TenantID, credential.DomainID, subscriptionID, "FOR SHARE")
+		if err != nil {
+			return relay.SubscriptionAdmissionClaimResult{}, err
+		}
+		if found && currentSubscriptionID == subscriptionID && status == relay.SubscriptionActive &&
+			member.RevokedAtMilliseconds == nil &&
+			(member.ExpiresAtMilliseconds == nil || nowMilliseconds < *member.ExpiresAtMilliseconds) &&
+			member.MemberID == claim.MemberID && member.AuthorizationDigest == claim.AuthorizationDigest {
 			return relay.SubscriptionAdmissionClaimResult{Acceptance: relay.AcceptanceDuplicate, Member: relay.SubscriptionMemberRegistration{SubscriptionID: subscriptionID, MemberRegistration: member}}, nil
 		}
 		return relay.SubscriptionAdmissionClaimResult{}, relay.NewProtocolError(relay.CodeAdmissionClaimed, "admission was already claimed")
@@ -557,8 +602,48 @@ func (s *RelayStore) claimSubscriptionAdmissionTx(
 	if err = member.Validate(); err != nil {
 		return relay.SubscriptionAdmissionClaimResult{}, err
 	}
-	if err = insertRelayMemberWithSubscription(ctx, tx, member, subscriptionID); err != nil {
-		return relay.SubscriptionAdmissionClaimResult{}, err
+	if previousSubscriptionID == uuid.Nil {
+		if err = insertRelayMemberWithSubscription(ctx, tx, member, subscriptionID); err != nil {
+			return relay.SubscriptionAdmissionClaimResult{}, err
+		}
+	} else {
+		if subscriptionID == previousSubscriptionID {
+			return relay.SubscriptionAdmissionClaimResult{}, relay.NewProtocolError(relay.CodeMemberCollision, "replacement needs a fresh subscription")
+		}
+		priorStatus, err := loadSubscriptionStatus(ctx, tx, credential.TenantID, credential.DomainID, previousSubscriptionID, "FOR UPDATE")
+		if err != nil {
+			return relay.SubscriptionAdmissionClaimResult{}, err
+		}
+		if priorStatus != relay.SubscriptionRevoked && priorStatus != relay.SubscriptionRebootstrapRequired {
+			return relay.SubscriptionAdmissionClaimResult{}, relay.NewProtocolError(relay.CodeMemberCollision, "previous subscription is still active")
+		}
+		var activeOthers int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM relay_members
+			WHERE tenant_id=$1 AND domain_id=$2 AND member_id<>$3
+			 AND created_at_milliseconds <= $4
+			 AND (revoked_at_milliseconds IS NULL OR revoked_at_milliseconds>$4)
+			 AND (expires_at_milliseconds IS NULL OR expires_at_milliseconds>$4)`,
+			member.TenantID, member.DomainID, member.MemberID, nowMilliseconds).Scan(&activeOthers); err != nil {
+			return relay.SubscriptionAdmissionClaimResult{}, err
+		}
+		if activeOthers >= relay.MaximumActiveMemberCountPerDomain {
+			return relay.SubscriptionAdmissionClaimResult{}, relay.NewProtocolError(relay.CodeDomainFull, "domain reached its active member limit")
+		}
+		changed, err := tx.Exec(ctx, `
+			UPDATE relay_members SET subscription_id=$4,version=$5,authorization_digest=$6,
+				capabilities=$7,created_at_milliseconds=$8,expires_at_milliseconds=$9,
+				revoked_at_milliseconds=NULL
+			WHERE tenant_id=$1 AND domain_id=$2 AND member_id=$3
+			  AND subscription_id=$10 AND authorization_digest<>$6
+		`, member.TenantID, member.DomainID, member.MemberID, subscriptionID, member.Version,
+			member.AuthorizationDigest, capabilityStrings(member.Capabilities), member.CreatedAtMilliseconds,
+			member.ExpiresAtMilliseconds, previousSubscriptionID)
+		if err != nil {
+			return relay.SubscriptionAdmissionClaimResult{}, err
+		}
+		if changed.RowsAffected() != 1 {
+			return relay.SubscriptionAdmissionClaimResult{}, relay.NewProtocolError(relay.CodeMemberCollision, "inactive membership changed before replacement")
+		}
 	}
 	_, err = tx.Exec(ctx, `UPDATE relay_member_admissions SET claimed_at_milliseconds=$4,claimed_member_id=$5,updated_at=now() WHERE tenant_id=$1 AND domain_id=$2 AND admission_id=$3`, admission.TenantID, admission.DomainID, admission.AdmissionID, nowMilliseconds, member.MemberID)
 	if err != nil {
@@ -757,8 +842,8 @@ func (s *RelayStore) revokeTenantMembershipsTx(
 		if loadErr != nil {
 			return relay.TenantMembershipRevocationResult{}, loadErr
 		}
-		if !found || subscription.Status == relay.SubscriptionRevoked {
-			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeSubscriptionNotFound, "active revocation subscription was not found")
+		if !found {
+			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeSubscriptionNotFound, "revocation subscription was not found")
 		}
 		if member.RevokedAtMilliseconds != nil {
 			return relay.TenantMembershipRevocationResult{}, relay.NewProtocolError(relay.CodeMemberRevoked, "revocation member was already revoked")

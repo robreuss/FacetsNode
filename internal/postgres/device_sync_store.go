@@ -1036,6 +1036,14 @@ func (s *RelayStore) CreateSpaceDeviceAdmission(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Serialize membership replacement against group revocation with the same
+	// tenant -> principal -> Space lock order.
+	if _, err := loadRelayTenant(ctx, tx, admission.PrincipalID, "FOR SHARE"); err != nil {
+		return devicesync.SpaceDeviceAdmissionCreateResult{}, err
+	}
+	if _, err := loadDeviceSyncPrincipalAuthority(ctx, tx, admission.PrincipalID, "FOR UPDATE"); err != nil {
+		return devicesync.SpaceDeviceAdmissionCreateResult{}, err
+	}
 	space, err := loadDeviceSyncSpaceAuthority(
 		ctx, tx, admission.PrincipalID, admission.SpaceID, "FOR UPDATE",
 	)
@@ -1050,6 +1058,13 @@ func (s *RelayStore) CreateSpaceDeviceAdmission(
 		return devicesync.SpaceDeviceAdmissionCreateResult{}, devicesync.NewProtocolError(
 			devicesync.CodeWrongScope, "Space device admission belongs to another Space domain",
 		)
+	}
+	domain, _, _, _, _, _, err := loadRelayDomain(ctx, tx, admission.PrincipalID, space.domainID, "FOR UPDATE")
+	if err != nil {
+		return devicesync.SpaceDeviceAdmissionCreateResult{}, err
+	}
+	if err := domain.Authorize(credential); err != nil {
+		return devicesync.SpaceDeviceAdmissionCreateResult{}, err
 	}
 	var enrolled bool
 	if err := tx.QueryRow(ctx, `
@@ -1104,19 +1119,23 @@ func (s *RelayStore) CreateSpaceDeviceAdmission(
 			Acceptance: relayResult.Acceptance, Admission: admission,
 		}, nil
 	}
-	var admitted bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM device_sync_space_devices
-			WHERE principal_id=$1 AND space_id=$2 AND device_id=$3
-		)
-	`, admission.PrincipalID, admission.SpaceID, admission.DeviceID).Scan(&admitted); err != nil {
+	var previousSubscriptionID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT subscription_id FROM device_sync_space_devices
+		WHERE principal_id=$1 AND space_id=$2 AND device_id=$3 FOR UPDATE
+	`, admission.PrincipalID, admission.SpaceID, admission.DeviceID).Scan(&previousSubscriptionID)
+	if err != nil && err != pgx.ErrNoRows {
 		return devicesync.SpaceDeviceAdmissionCreateResult{}, fmt.Errorf("check admitted Device Sync Space device: %w", err)
 	}
-	if admitted {
-		return devicesync.SpaceDeviceAdmissionCreateResult{}, devicesync.NewProtocolError(
-			devicesync.CodeDeviceCollision, "device is already admitted to the Space",
-		)
+	if err == nil {
+		previousStatus, err := loadSubscriptionStatus(ctx, tx, admission.PrincipalID, space.domainID, previousSubscriptionID, "FOR UPDATE")
+		if err != nil {
+			return devicesync.SpaceDeviceAdmissionCreateResult{}, err
+		}
+		if previousSubscriptionID == space.subscriptionID ||
+			(previousStatus != relay.SubscriptionRevoked && previousStatus != relay.SubscriptionRebootstrapRequired) {
+			return devicesync.SpaceDeviceAdmissionCreateResult{}, devicesync.NewProtocolError(devicesync.CodeDeviceCollision, "device is already active in the Space")
+		}
 	}
 	if _, err := s.createSubscriptionTx(ctx, tx, credential, relay.SubscriptionCreateRequest{
 		RetryID:               admission.RetryID,
@@ -1177,13 +1196,21 @@ func (s *RelayStore) ClaimSpaceDeviceAdmission(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Match group revocation's lock order before locking an admission or member.
+	if _, err := loadRelayTenant(ctx, tx, credential.PrincipalID, "FOR SHARE"); err != nil {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
+	}
+	if _, err := loadDeviceSyncPrincipalAuthority(ctx, tx, credential.PrincipalID, "FOR UPDATE"); err != nil {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
+	}
+	space, err := loadDeviceSyncSpaceAuthority(ctx, tx, credential.PrincipalID, credential.SpaceID, "FOR UPDATE")
+	if err != nil {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
+	}
 	record, err := loadDeviceSyncSpaceDeviceAdmissionForClaim(
 		ctx, tx, credential.PrincipalID, credential.SpaceID, credential.AdmissionID,
 	)
 	if err != nil {
-		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
-	}
-	if _, err := loadDeviceSyncPrincipalAuthority(ctx, tx, record.principalID, "FOR UPDATE"); err != nil {
 		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
 	}
 	if claim.PrincipalID != record.principalID || claim.SpaceID != record.spaceID ||
@@ -1192,13 +1219,41 @@ func (s *RelayStore) ClaimSpaceDeviceAdmission(
 			devicesync.CodeWrongScope, "Space device claim belongs to another admission",
 		)
 	}
-	relayResult, err := s.claimSubscriptionAdmissionTx(
+	var enrolled bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM device_sync_devices d JOIN relay_members m
+		 ON m.tenant_id=d.tenant_id AND m.domain_id=d.control_domain_id AND m.member_id=d.control_member_id
+		WHERE d.principal_id=$1 AND d.device_id=$2 AND m.revoked_at_milliseconds IS NULL
+	)`, record.principalID, record.deviceID).Scan(&enrolled); err != nil {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
+	}
+	if !enrolled {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, devicesync.NewProtocolError(devicesync.CodeUnauthorized, "Space device is no longer enrolled in the principal")
+	}
+	var previousSubscriptionID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT subscription_id FROM device_sync_space_devices
+		WHERE principal_id=$1 AND space_id=$2 AND device_id=$3 FOR UPDATE`,
+		record.principalID, record.spaceID, record.deviceID).Scan(&previousSubscriptionID)
+	if err != nil && err != pgx.ErrNoRows {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, err
+	}
+	replacementSubscriptionID := previousSubscriptionID
+	if record.claimedAtMilliseconds != nil {
+		if previousSubscriptionID != record.subscriptionID {
+			return devicesync.SpaceDeviceAdmissionClaimResult{}, devicesync.NewProtocolError(devicesync.CodeAdmissionClaimed, "Space device admission was superseded")
+		}
+		replacementSubscriptionID = uuid.Nil
+	} else if previousSubscriptionID == space.subscriptionID {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, devicesync.NewProtocolError(devicesync.CodeDeviceCollision, "origin membership cannot be replaced")
+	}
+	relayResult, err := s.claimSubscriptionAdmissionReplacingTx(
 		ctx, tx,
 		relay.AdmissionCredential{
 			TenantID: record.principalID, DomainID: record.domainID,
 			AdmissionID: credential.AdmissionID, Token: credential.Token,
 		},
 		claim.RelayClaim,
+		replacementSubscriptionID,
 		nowMilliseconds,
 	)
 	if err != nil {
@@ -1218,15 +1273,23 @@ func (s *RelayStore) ClaimSpaceDeviceAdmission(
 			devicesync.CodeAdmissionClaimed, "Space device relay admission was already claimed",
 		)
 	}
-	if _, err := tx.Exec(ctx, `
+	changed, err := tx.Exec(ctx, `
 		INSERT INTO device_sync_space_devices (
 			principal_id,space_id,device_id,domain_id,subscription_id,
 			member_id,created_at_milliseconds
 		) VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (principal_id,space_id,device_id) DO UPDATE
+		SET subscription_id=EXCLUDED.subscription_id,member_id=EXCLUDED.member_id,
+			created_at_milliseconds=EXCLUDED.created_at_milliseconds
+		WHERE device_sync_space_devices.subscription_id=$8
 	`, claim.PrincipalID, claim.SpaceID, claim.DeviceID, record.domainID,
 		record.subscriptionID, relayResult.Member.MemberRegistration.MemberID,
-		nowMilliseconds); err != nil {
+		nowMilliseconds, previousSubscriptionID)
+	if err != nil {
 		return devicesync.SpaceDeviceAdmissionClaimResult{}, fmt.Errorf("insert admitted Device Sync Space device: %w", err)
+	}
+	if changed.RowsAffected() != 1 {
+		return devicesync.SpaceDeviceAdmissionClaimResult{}, devicesync.NewProtocolError(devicesync.CodeDeviceCollision, "Space membership changed before replacement")
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE device_sync_space_device_admissions

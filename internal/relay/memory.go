@@ -673,10 +673,27 @@ func (s *MemoryStore) CreateAdmission(
 }
 
 func (s *MemoryStore) ClaimSubscriptionAdmission(
-	_ context.Context,
+	ctx context.Context,
 	credential AdmissionCredential,
 	claim MemberAdmissionClaim,
 	nowMilliseconds int64,
+) (SubscriptionAdmissionClaimResult, error) {
+	return s.claimSubscriptionAdmission(ctx, credential, claim, uuid.Nil, nowMilliseconds)
+}
+
+func (s *MemoryStore) ClaimSubscriptionAdmissionReplacingInactiveMembership(
+	ctx context.Context, credential AdmissionCredential, claim MemberAdmissionClaim,
+	previousSubscriptionID uuid.UUID, nowMilliseconds int64,
+) (SubscriptionAdmissionClaimResult, error) {
+	if previousSubscriptionID == uuid.Nil {
+		return SubscriptionAdmissionClaimResult{}, protocolError(CodeInvalidSubscription, "replacement subscription is missing")
+	}
+	return s.claimSubscriptionAdmission(ctx, credential, claim, previousSubscriptionID, nowMilliseconds)
+}
+
+func (s *MemoryStore) claimSubscriptionAdmission(
+	_ context.Context, credential AdmissionCredential, claim MemberAdmissionClaim,
+	previousSubscriptionID uuid.UUID, nowMilliseconds int64,
 ) (SubscriptionAdmissionClaimResult, error) {
 	if err := claim.Validate(); err != nil {
 		return SubscriptionAdmissionClaimResult{}, err
@@ -696,8 +713,11 @@ func (s *MemoryStore) ClaimSubscriptionAdmission(
 	}
 	if admission.ClaimedMemberID != nil {
 		member := domain.members[*admission.ClaimedMemberID]
+		subscription := domain.subscriptions[domain.admissionSubscriptions[admission.AdmissionID]]
 		if *admission.ClaimedMemberID == claim.MemberID &&
-			member.AuthorizationDigest == claim.AuthorizationDigest {
+			member.AuthorizationDigest == claim.AuthorizationDigest &&
+			subscription.Status == SubscriptionActive && memberActiveAt(member, nowMilliseconds) &&
+			domain.memberSubscriptions[member.MemberID] == domain.admissionSubscriptions[admission.AdmissionID] {
 			return SubscriptionAdmissionClaimResult{
 				Acceptance: AcceptanceDuplicate,
 				Member: SubscriptionMemberRegistration{
@@ -711,11 +731,34 @@ func (s *MemoryStore) ClaimSubscriptionAdmission(
 	if err := admission.RequireActive(nowMilliseconds); err != nil {
 		return SubscriptionAdmissionClaimResult{}, err
 	}
-	if _, exists := domain.members[claim.MemberID]; exists {
-		return SubscriptionAdmissionClaimResult{}, protocolError(CodeMemberCollision, "member ID was reused")
+	subscriptionID := domain.admissionSubscriptions[admission.AdmissionID]
+	if subscription, found := domain.subscriptions[subscriptionID]; !found || subscription.Status != SubscriptionActive {
+		return SubscriptionAdmissionClaimResult{}, protocolError(CodeInvalidSubscription, "subscription is not active")
 	}
-	if err := ensureMemberCapacity(domain.members, nowMilliseconds); err != nil {
-		return SubscriptionAdmissionClaimResult{}, err
+	if previousSubscriptionID != uuid.Nil {
+		previous, exists := domain.members[claim.MemberID]
+		previousSubscription, found := domain.subscriptions[previousSubscriptionID]
+		if !exists || !found || domain.memberSubscriptions[claim.MemberID] != previousSubscriptionID ||
+			subscriptionID == previousSubscriptionID || previous.AuthorizationDigest == claim.AuthorizationDigest ||
+			(previousSubscription.Status != SubscriptionRevoked && previousSubscription.Status != SubscriptionRebootstrapRequired) {
+			return SubscriptionAdmissionClaimResult{}, protocolError(CodeMemberCollision, "inactive membership changed before replacement")
+		}
+		activeOthers := 0
+		for id, existing := range domain.members {
+			if id != claim.MemberID && memberActiveAt(existing, nowMilliseconds) {
+				activeOthers++
+			}
+		}
+		if activeOthers >= MaximumActiveMemberCountPerDomain {
+			return SubscriptionAdmissionClaimResult{}, protocolError(CodeDomainFull, "domain reached its active member limit")
+		}
+	} else {
+		if _, exists := domain.members[claim.MemberID]; exists {
+			return SubscriptionAdmissionClaimResult{}, protocolError(CodeMemberCollision, "member ID was reused")
+		}
+		if err := ensureMemberCapacity(domain.members, nowMilliseconds); err != nil {
+			return SubscriptionAdmissionClaimResult{}, err
+		}
 	}
 	member := MemberRegistration{
 		Version:               SchemaVersion,
@@ -735,7 +778,6 @@ func (s *MemoryStore) ClaimSubscriptionAdmission(
 	admission.ClaimedAtMilliseconds = &claimedAt
 	admission.ClaimedMemberID = &claimedMemberID
 	domain.members[member.MemberID] = member
-	subscriptionID := domain.admissionSubscriptions[admission.AdmissionID]
 	domain.memberSubscriptions[member.MemberID] = subscriptionID
 	domain.admissions[admission.AdmissionID] = admission
 	return SubscriptionAdmissionClaimResult{
@@ -1693,8 +1735,8 @@ func (s *MemoryStore) RevokeTenantMemberships(
 		if !memberFound || domain.memberSubscriptions[target.MemberID] != target.SubscriptionID {
 			return TenantMembershipRevocationResult{}, protocolError(CodeMemberNotFound, "revocation member was not found")
 		}
-		if !subscriptionFound || subscription.Status == SubscriptionRevoked {
-			return TenantMembershipRevocationResult{}, protocolError(CodeSubscriptionNotFound, "active revocation subscription was not found")
+		if !subscriptionFound {
+			return TenantMembershipRevocationResult{}, protocolError(CodeSubscriptionNotFound, "revocation subscription was not found")
 		}
 		if member.RevokedAtMilliseconds != nil {
 			return TenantMembershipRevocationResult{}, protocolError(CodeMemberRevoked, "revocation member was already revoked")

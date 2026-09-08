@@ -28,7 +28,7 @@ type memoryDeviceAdmission struct {
 type memorySpace struct {
 	provisioning SpaceProvisioning
 	result       relay.DomainProvisioningResult
-	devices      map[uuid.UUID]bool
+	devices      map[uuid.UUID]uuid.UUID // exact current Space subscription by device
 }
 
 type memorySpaceDeviceAdmission struct {
@@ -657,7 +657,7 @@ func (s *MemoryStore) RevokeDevice(
 		}
 	}
 	for _, space := range s.spaces {
-		if space.provisioning.PrincipalID != revocation.PrincipalID || !space.devices[revocation.DeviceID] {
+		if space.provisioning.PrincipalID != revocation.PrincipalID || space.devices[revocation.DeviceID] == uuid.Nil {
 			continue
 		}
 		if revocation.DeviceID == space.provisioning.InitialDeviceID {
@@ -671,7 +671,8 @@ func (s *MemoryStore) RevokeDevice(
 		for _, record := range s.spaceDeviceAdmissions {
 			if record.result != nil && record.admission.PrincipalID == revocation.PrincipalID &&
 				record.admission.SpaceID == space.provisioning.SpaceID &&
-				record.admission.DeviceID == revocation.DeviceID {
+				record.admission.DeviceID == revocation.DeviceID &&
+				record.result.Member.SubscriptionID == space.devices[revocation.DeviceID] {
 				targets = append(targets, relay.TenantMembershipRevocationItem{
 					DomainID:       record.admission.RelayAdmission.DomainID,
 					SubscriptionID: record.result.Member.SubscriptionID,
@@ -758,7 +759,7 @@ func (s *MemoryStore) ProvisionSpace(
 	}
 	s.spaces[provisioning.SpaceID] = memorySpace{
 		provisioning: provisioning, result: relayResult,
-		devices: map[uuid.UUID]bool{provisioning.InitialDeviceID: true},
+		devices: map[uuid.UUID]uuid.UUID{provisioning.InitialDeviceID: provisioning.Domain.Subscription.SubscriptionID},
 	}
 	s.spaceRetry[provisioning.RetryID] = provisioning.SpaceID
 	return spaceProvisioningResult(provisioning, relayResult, relay.AcceptanceAccepted), nil
@@ -815,8 +816,15 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 		}
 		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionCollision, "Space device admission ID was reused")
 	}
-	if space.devices[admission.DeviceID] {
-		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device is already admitted to the Space")
+	if previousSubscriptionID := space.devices[admission.DeviceID]; previousSubscriptionID != uuid.Nil {
+		previous, err := s.relay.GetSubscription(ctx, credential, previousSubscriptionID)
+		if err != nil {
+			return SpaceDeviceAdmissionCreateResult{}, err
+		}
+		if admission.DeviceID == space.provisioning.InitialDeviceID ||
+			(previous.Status != relay.SubscriptionRevoked && previous.Status != relay.SubscriptionRebootstrapRequired) {
+			return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device is already active in the Space")
+		}
 	}
 	for _, existing := range s.spaceDeviceAdmissions {
 		if existing.admission.PrincipalID == admission.PrincipalID &&
@@ -864,6 +872,9 @@ func (s *MemoryStore) ClaimSpaceDeviceAdmission(
 	if _, retired := s.retiredPrincipals[record.admission.PrincipalID]; retired {
 		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeUnauthorized, "Device Sync principal is retired")
 	}
+	if _, enrolled := s.principalDevice(record.admission.PrincipalID, record.admission.DeviceID); !enrolled {
+		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeUnauthorized, "Space device is no longer enrolled in the principal")
+	}
 	if credential.PrincipalID != record.admission.PrincipalID ||
 		credential.SpaceID != record.admission.SpaceID ||
 		claim.PrincipalID != record.admission.PrincipalID ||
@@ -871,24 +882,42 @@ func (s *MemoryStore) ClaimSpaceDeviceAdmission(
 		claim.DeviceID != record.admission.DeviceID {
 		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeWrongScope, "Space device claim belongs to another admission")
 	}
+	relayCredential := relay.AdmissionCredential{
+		TenantID: record.admission.PrincipalID, DomainID: record.admission.RelayAdmission.DomainID,
+		AdmissionID: credential.AdmissionID, Token: credential.Token,
+	}
 	if record.result != nil {
 		if record.result.DeviceID == claim.DeviceID &&
-			record.result.Member.MemberRegistration.AuthorizationDigest == claim.RelayClaim.AuthorizationDigest {
+			record.result.Member.MemberRegistration.AuthorizationDigest == claim.RelayClaim.AuthorizationDigest &&
+			s.spaces[claim.SpaceID].devices[claim.DeviceID] == record.result.Member.SubscriptionID {
+			// Verify the bearer again and require the exact original subscription to
+			// remain active. A historical claim must not roll a device back after renewal.
+			if _, err := s.relay.ClaimSubscriptionAdmission(ctx, relayCredential, claim.RelayClaim, nowMilliseconds); err != nil {
+				return SpaceDeviceAdmissionClaimResult{}, err
+			}
 			duplicate := *record.result
 			duplicate.Acceptance = relay.AcceptanceDuplicate
 			return duplicate, nil
 		}
 		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeAdmissionClaimed, "Space device admission was already claimed")
 	}
-	relayResult, err := s.relay.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{
-		TenantID: record.admission.PrincipalID, DomainID: record.admission.RelayAdmission.DomainID,
-		AdmissionID: credential.AdmissionID, Token: credential.Token,
-	}, claim.RelayClaim, nowMilliseconds)
+	space := s.spaces[claim.SpaceID]
+	var relayResult relay.SubscriptionAdmissionClaimResult
+	var err error
+	if previousSubscriptionID := space.devices[claim.DeviceID]; previousSubscriptionID != uuid.Nil {
+		if claim.DeviceID == space.provisioning.InitialDeviceID {
+			return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeDeviceCollision, "origin membership cannot be replaced")
+		}
+		relayResult, err = s.relay.ClaimSubscriptionAdmissionReplacingInactiveMembership(
+			ctx, relayCredential, claim.RelayClaim, previousSubscriptionID, nowMilliseconds,
+		)
+	} else {
+		relayResult, err = s.relay.ClaimSubscriptionAdmission(ctx, relayCredential, claim.RelayClaim, nowMilliseconds)
+	}
 	if err != nil {
 		return SpaceDeviceAdmissionClaimResult{}, err
 	}
-	space := s.spaces[claim.SpaceID]
-	space.devices[claim.DeviceID] = true
+	space.devices[claim.DeviceID] = relayResult.Member.SubscriptionID
 	s.spaces[claim.SpaceID] = space
 	result := SpaceDeviceAdmissionClaimResult{
 		Acceptance: relayResult.Acceptance, PrincipalID: claim.PrincipalID,
@@ -970,7 +999,8 @@ func (s *MemoryStore) GetPrincipalStatus(
 		}
 		for _, record := range s.spaceDeviceAdmissions {
 			if record.result == nil || record.admission.PrincipalID != credential.TenantID ||
-				record.admission.SpaceID != space.provisioning.SpaceID {
+				record.admission.SpaceID != space.provisioning.SpaceID ||
+				record.result.Member.SubscriptionID != space.devices[record.admission.DeviceID] {
 				continue
 			}
 			spaceStatus.Devices = append(spaceStatus.Devices, SpaceDeviceStatus{

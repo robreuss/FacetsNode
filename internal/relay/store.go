@@ -111,6 +111,11 @@ type Store interface {
 		claim MemberAdmissionClaim,
 		nowMilliseconds int64,
 	) (SubscriptionAdmissionClaimResult, error)
+	// Internal service boundary: replace only this exact inactive subscription's
+	// member using a fresh admission and credential. It is not an HTTP un-revoke.
+	ClaimSubscriptionAdmissionReplacingInactiveMembership(
+		context.Context, AdmissionCredential, MemberAdmissionClaim, uuid.UUID, int64,
+	) (SubscriptionAdmissionClaimResult, error)
 	RevokeAdmission(
 		ctx context.Context,
 		credential AdministrationCredential,
