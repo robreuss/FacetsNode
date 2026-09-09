@@ -30,6 +30,29 @@ validation container. These checks are explicitly distinct from service runtime
 and Spaces Sync acceptance. Prepared Linux import, offline onion identity and
 resumable controller-initialization functions are not yet wired into service boot.
 
-Remaining Stage 2 gates: complete a service-kit build, signed service release assembly/installation, first Box initialization and private activation-code handling, controller-only pinned HTTPS administration, and existing-service health/persistence checks. Before service-bearing updates are accepted, prove bounded candidate startup, withheld ingress/background activity, and consistent database/system/data rollback. The existing cleanup timers have no initial tick; a longer cleanup period is only a bounded-lifetime constraint, not a general read-only service mode.
+`runtime-15` built and exported an accepted six-image kit including an actual
+network-disabled Tor identity creation/restart test. SHA-256 of the exported kit:
+`71cb77f4ac6d1513c1be00d55caf0d400de4283f9f9566fe2398537d0a4569b1`.
+The test removed only its uniquely named disposable containers/volume. The
+retained appliance disk UUID/sentinel survived another clean stop/cold boot.
+Onion continuity records now bind both key files and the checksum-verified
+hostname. Interrupted initialization containers are reconciled only after
+matching their name, image and installation/operation ownership labels.
+
+The next build gate runs the existing recipes with disposable project names,
+databases and identities, with Tor stopped and no published ports. It exercises
+controller initialization/claim over verified HTTPS on its private Unix socket,
+and container recreation with retained volumes. That code is cross-compiled;
+its live acceptance is not yet established. The named `openManagement` stream
+also requires a matching active release record and can only reach the fixed
+controller-only Unix socket. No current foundation image creates that record.
+
+Remaining Stage 2 gates: signed service release installation, installed Box
+initialization/claim and private activation-code UI, controller-only pinned HTTPS
+administration through the host, and installed-service health/persistence checks.
+Before service-bearing updates are accepted, prove bounded candidate startup,
+withheld ingress/background activity, and consistent database/system/data
+rollback. The existing cleanup timers have no initial tick; a longer cleanup
+period is not a general read-only service mode.
 
 No Proxmox deployment or Spaces Sync task is accessed by these scripts.

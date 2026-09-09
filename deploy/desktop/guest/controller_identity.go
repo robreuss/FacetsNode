@@ -17,7 +17,7 @@ type controllerIdentity struct {
 }
 
 func readControllerKey(path string) (ed25519.PrivateKey, error) {
-	b, e := os.ReadFile(path)
+	b, e := boundedIdentityFile(path, 256)
 	if e != nil {
 		return nil, e
 	}
