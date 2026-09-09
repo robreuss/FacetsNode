@@ -18,7 +18,7 @@ func TestServiceEnvironmentKeepsDeploymentsIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d["FACETS_DEVICE_SYNC_POSTGRES_PASSWORD"] == g["FACETS_SHARED_SPACES_POSTGRES_PASSWORD"] || d["FACETS_DEVICE_SYNC_DEPLOYMENT_ID"] == g["FACETS_SHARED_SPACES_DEPLOYMENT_ID"] || d["FBD_CLEANUP_PERIOD"] != "24h" {
+	if d["FACETS_DEVICE_SYNC_POSTGRES_PASSWORD"] == g["FACETS_SHARED_SPACES_POSTGRES_PASSWORD"] || d["FACETS_DEVICE_SYNC_DEPLOYMENT_ID"] == g["FACETS_SHARED_SPACES_DEPLOYMENT_ID"] || d["FBD_CANDIDATE_MAINTENANCE"] != "true" || g["FBD_CANDIDATE_MAINTENANCE"] != "true" {
 		t.Fatal("deployment isolation or candidate setting lost")
 	}
 	if d["FACETS_BOX_DEVICE_SYNC_URL"] != identity.DeviceSync.Endpoint {
@@ -31,6 +31,10 @@ func TestServiceEnvironmentKeepsDeploymentsIndependent(t *testing.T) {
 	}
 	if _, exists := g["FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN"]; exists {
 		t.Fatal("controller authority leaked into Group Spaces")
+	}
+	activeDevice, activeGroup, err := serviceEnvironment("/srv/facets-box-data", "/opt/fbd/service-kit", identity, images, false)
+	if err != nil || activeDevice["FBD_CANDIDATE_MAINTENANCE"] != "false" || activeGroup["FBD_CANDIDATE_MAINTENANCE"] != "false" {
+		t.Fatal("normal service restart did not clear candidate fence")
 	}
 	images["tor"] = "tor:latest"
 	if _, _, err := serviceEnvironment("/srv", "/opt", identity, images, false); err == nil {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -13,12 +14,7 @@ const deviceProject = "fbd-device-sync"
 const sharedProject = "fbd-shared-spaces"
 
 func serviceEnvironment(root, kit string, identity applianceIdentity, images map[string]string, candidate bool) (map[string]string, map[string]string, error) {
-	common := map[string]string{"FBD_RECIPE_DIRECTORY": filepath.Join(kit, "recipes"), "FBD_CLEANUP_PERIOD": "1m"}
-	if candidate {
-		// This defers the existing periodic cleanup loops beyond the separately
-		// enforced candidate lifetime. It is NOT a database read-only mode.
-		common["FBD_CLEANUP_PERIOD"] = "24h"
-	}
+	common := map[string]string{"FBD_RECIPE_DIRECTORY": filepath.Join(kit, "recipes"), "FBD_CANDIDATE_MAINTENANCE": strconv.FormatBool(candidate)}
 	for _, name := range imageNames {
 		image := images[name]
 		if !strings.HasPrefix(image, "sha256:") || !validHex(strings.TrimPrefix(image, "sha256:"), 32) {

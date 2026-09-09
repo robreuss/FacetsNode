@@ -11,7 +11,7 @@ services:
     restart: "no"
     ports: !reset []
     environment:
-      FACETS_SHARED_SPACES_CLEANUP_PERIOD: ${FBD_CLEANUP_PERIOD:-1m}
+      FACETS_SHARED_SPACES_CANDIDATE_MAINTENANCE: ${FBD_CANDIDATE_MAINTENANCE:?explicit serving mode required}
       FACETS_SHARED_SPACES_DEPLOYMENT_ID: ${FACETS_SHARED_SPACES_DEPLOYMENT_ID:?}
       FACETS_SHARED_SPACES_DEPLOYMENT_SIGNING_KEY_FILE: /run/secrets/facets-shared-spaces/deployment-signing-key
       FACETS_SHARED_SPACES_DEPLOYMENT_ROUTE_POLICY_FILE: /etc/facets-shared-spaces/service-authority/deployment-routes.json

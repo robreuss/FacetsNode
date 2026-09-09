@@ -108,4 +108,12 @@ func TestCandidateHealthProbeRequiresExplicitModeAndHealthyDatabase(t *testing.T
 			s.Close()
 		}
 	}
+	falseClaim := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(servingModeHeader, "candidate")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer falseClaim.Close()
+	if checkHealth(falseClaim.URL+"/readyz", true) {
+		t.Fatal("mode marker without an application fence was accepted")
+	}
 }

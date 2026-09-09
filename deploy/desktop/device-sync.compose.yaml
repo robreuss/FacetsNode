@@ -15,7 +15,7 @@ services:
     restart: "no"
     ports: !reset []
     environment:
-      FACETS_DEVICE_SYNC_CLEANUP_PERIOD: ${FBD_CLEANUP_PERIOD:-1m}
+      FACETS_DEVICE_SYNC_CANDIDATE_MAINTENANCE: ${FBD_CANDIDATE_MAINTENANCE:?explicit serving mode required}
     # The generic onion overlay drops service-control, breaking Box enrollment.
     networks: !override [private, service-control, onion-application]
   controller:

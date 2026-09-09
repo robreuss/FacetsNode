@@ -116,7 +116,24 @@ func validateBuiltServiceRuntime(ctx context.Context, work string, images map[st
 	if err != nil {
 		return fmt.Errorf("fixture controller initialization: %w", err)
 	}
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
+		// Two fenced starts prove recreation, then a normal restart proves that
+		// activation clears the fence on these same images and retained volumes.
+		if attempt == 2 {
+			d, g, err = serviceEnvironment(root, kit, id, images, false)
+			if err != nil {
+				return err
+			}
+			for name, env := range map[string]map[string]string{"device-sync": d, "shared-spaces": g} {
+				b, e := encodeEnvironment(env)
+				if e != nil {
+					return e
+				}
+				if e = os.WriteFile(filepath.Join(root, name+".env"), b, 0600); e != nil {
+					return e
+				}
+			}
+		}
 		for _, kind := range []string{deviceProject, sharedProject} {
 			services := []string{"server"}
 			if kind == deviceProject {
@@ -127,6 +144,9 @@ func validateBuiltServiceRuntime(ctx context.Context, work string, images map[st
 			if _, err = command(kind, args...); err != nil {
 				return fmt.Errorf("fixture %s service readiness: %w", kind, err)
 			}
+			if err = probeServiceMode(ctx, kind, projects[kind], kit, root, attempt < 2); err != nil {
+				return err
+			}
 		}
 		retained, e := initializeControllerAt(ctx, id, images["box-controller"], projects[deviceProject], kit, root, root)
 		if e != nil || retained != first {
@@ -135,7 +155,7 @@ func validateBuiltServiceRuntime(ctx context.Context, work string, images map[st
 		if err = validateFixtureControllerHTTPS(ctx, root, id, attempt == 0); err != nil {
 			return err
 		}
-		if attempt == 0 {
+		if attempt < 2 {
 			for _, kind := range []string{deviceProject, sharedProject} {
 				if _, err = command(kind, "stop", "--timeout", "10"); err != nil {
 					return err
@@ -153,6 +173,29 @@ func validateBuiltServiceRuntime(ctx context.Context, work string, images map[st
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// The selected existing server binary must affirm the candidate fence at its
+// real readiness endpoint. Ignored environment variables/old images fail closed.
+// All command, container, URL and filesystem choices are appliance constants.
+func probeServiceMode(ctx context.Context, kind, project, kit, root string, candidate bool) error {
+	name := "device-sync"
+	if kind == sharedProject {
+		name = "shared-spaces"
+	} else if kind != deviceProject {
+		return errors.New("unknown service mode probe")
+	}
+	command := func(operation string) error {
+		_, e := composeCommandNamed(ctx, kind, project, kit, root, "exec", "-T", "server", "/facets-"+name+"-server", operation, "http://127.0.0.1:8080/readyz")
+		return e
+	}
+	if command("healthcheck") != nil {
+		return errors.New("service readiness probe failed")
+	}
+	if (command("candidate-healthcheck") == nil) != candidate {
+		return fmt.Errorf("%s did not confirm the required serving mode", name)
 	}
 	return nil
 }

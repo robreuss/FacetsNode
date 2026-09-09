@@ -697,10 +697,44 @@ func healthcheck(url string) {
 
 func checkHealth(url string, candidate bool) bool {
 	client := http.Client{Timeout: 2 * time.Second}
+	if candidate {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 	response, err := client.Get(url)
 	if err != nil {
 		return false
 	}
 	defer response.Body.Close()
-	return response.StatusCode == http.StatusOK && (!candidate || response.Header.Get(servingModeHeader) == "candidate")
+	if response.StatusCode != http.StatusOK || (candidate && response.Header.Get(servingModeHeader) != "candidate") {
+		return false
+	}
+	if candidate {
+		// Probe dispatch as well as readiness against this exact local service.
+		// This catches an image reporting a mode marker but still serving routes.
+		for _, probe := range []struct{ method, path, upgrade string }{
+			{http.MethodGet, "/", ""},
+			{http.MethodPost, "/v1/candidate-fence-probe", ""},
+			{http.MethodGet, "/v1/relay/stream", "websocket"},
+		} {
+			target := *response.Request.URL
+			target.Path, target.RawPath, target.RawQuery = probe.path, "", ""
+			r, err := http.NewRequest(probe.method, target.String(), nil)
+			if err != nil {
+				return false
+			}
+			if probe.upgrade != "" {
+				r.Header.Set("Connection", "Upgrade")
+				r.Header.Set("Upgrade", probe.upgrade)
+			}
+			result, err := client.Do(r)
+			if err != nil {
+				return false
+			}
+			result.Body.Close()
+			if result.StatusCode != http.StatusServiceUnavailable || result.Header.Get(servingModeHeader) != "candidate" {
+				return false
+			}
+		}
+	}
+	return true
 }
