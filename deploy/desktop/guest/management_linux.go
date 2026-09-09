@@ -15,6 +15,12 @@ import (
 var managementSlots = make(chan struct{}, 4)
 
 func openManagement(c configuration) (net.Conn, error) {
+	// A reinstalled candidate can have the same release ID as a previously active
+	// release. Its seed's pending flag still fences all management writes until
+	// the explicit activation transaction clears that flag in guest state.
+	if c.ActivationPending || len(c.ServiceImages) != len(imageNames) {
+		return nil, errors.New("controller management is not activated")
+	}
 	if _, err := status(c); err != nil {
 		return nil, err
 	}
