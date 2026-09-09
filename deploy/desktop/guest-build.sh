@@ -2,6 +2,7 @@
 # Called only with an appliance-created staging directory and authenticated
 # commit/tree identifiers. This builds the existing recipes, never deploys them.
 set -euo pipefail
+trap 'printf "Service build stopped at recipe line %s (status %s).\n" "$LINENO" "$?" >&2' ERR
 [[ $# == 3 && $1 == /srv/facets-box-data/staging/build-* && $2 =~ ^[0-9a-f]{40}$ && $3 =~ ^[0-9a-f]{40}$ ]] || exit 64
 build_root=$1
 revision=$2
@@ -37,11 +38,18 @@ for name in device-sync box-controller shared-spaces tor postgres caddy; do
   [[ $(docker image inspect --format '{{.Architecture}}' "$ref") == arm64 ]]
   # Use the pinned Docker CLI for daemon operations. Skopeo handles portable
   # archives/layouts, so its bundled Docker API client version is irrelevant.
-  docker image save --output "$build_root/export-$name.tar" "$ref"
+  docker image save --platform linux/arm64 --output "$build_root/export-$name.tar" "$ref"
+  archive_config=$(tar -xOf "$build_root/export-$name.tar" manifest.json | jq -er 'select(length == 1) | .[0].Config')
+  [[ $archive_config =~ ^blobs/sha256/[0-9a-f]{64}$ || $archive_config =~ ^[0-9a-f]{64}\.json$ ]]
+  exported_config="sha256:$(tar -xOf "$build_root/export-$name.tar" "$archive_config" | sha256sum | cut -d ' ' -f 1)"
   skopeo copy "docker-archive:$build_root/export-$name.tar" "oci:$kit/images/$name:release"
   digest=$(jq -r '.manifests[0].digest' "$kit/images/$name/index.json")
   config=$(jq -r '.config.digest' "$kit/images/$name/blobs/sha256/${digest#sha256:}")
-  [[ $config == "$(docker image inspect --format '{{.Id}}' "$ref")" ]]
+  # Docker's containerd image store reports the image target (manifest/index)
+  # as .Id. Bind the OCI configuration to the saved configuration bytes, not
+  # that unrelated identifier. Log only content digests, never configuration.
+  printf 'Verified export %s: daemon-target=%s exported-config=%s OCI-config=%s\n' "$name" "$(docker image inspect --format '{{.Id}}' "$ref")" "$exported_config" "$config"
+  [[ $config == "$exported_config" ]]
   jq --arg name "$name" --arg digest "$digest" --arg config "$config" --arg ref "$ref" '. + {($name):{digest:$digest,config:$config,reference:$ref}}' "$kit/images.json" > "$kit/images.json.new"
   mv "$kit/images.json.new" "$kit/images.json"
 done
