@@ -35,7 +35,10 @@ for name in device-sync box-controller shared-spaces tor postgres caddy; do
   ref="fbd-build/$name:$revision"
   case $name in postgres) ref=postgres:17.6-bookworm;; caddy) ref=caddy:2.10.2-alpine;; esac
   [[ $(docker image inspect --format '{{.Architecture}}' "$ref") == arm64 ]]
-  skopeo copy "docker-daemon:$ref" "oci:$kit/images/$name:release"
+  # Use the pinned Docker CLI for daemon operations. Skopeo handles portable
+  # archives/layouts, so its bundled Docker API client version is irrelevant.
+  docker image save --output "$build_root/export-$name.tar" "$ref"
+  skopeo copy "docker-archive:$build_root/export-$name.tar" "oci:$kit/images/$name:release"
   digest=$(jq -r '.manifests[0].digest' "$kit/images/$name/index.json")
   config=$(jq -r '.config.digest' "$kit/images/$name/blobs/sha256/${digest#sha256:}")
   [[ $config == "$(docker image inspect --format '{{.Id}}' "$ref")" ]]

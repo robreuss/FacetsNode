@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
@@ -137,8 +138,19 @@ func prepareRuntimeKit(c configuration) error {
 	}
 	defer run("/usr/bin/umount", "/run/fbd-seed")
 	sum, size, e := fileHash("/run/fbd-seed/runtimeKit.tar")
-	if e != nil || sum != expected || size > 512*1024*1024 {
-		return errors.New("runtime kit verification failed")
+	if e != nil {
+		entries, _ := os.ReadDir("/run/fbd-seed")
+		names := []string{}
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		return fmt.Errorf("runtime kit unreadable (%v); seed filenames: %v", e, names)
+	}
+	if sum != expected {
+		return errors.New("runtime kit content hash mismatch")
+	}
+	if size > 512*1024*1024 {
+		return errors.New("runtime kit exceeds size budget")
 	}
 	source, e := os.Open("/run/fbd-seed/runtimeKit.tar")
 	if e != nil {
@@ -206,6 +218,19 @@ func startServiceBuild(c configuration) error {
 		stopContext, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		_ = boundedCommand(stopContext, "/usr/bin/docker", "buildx", "stop", "fbd-builder").Run()
 		stopCancel()
+		if err == nil {
+			var produced serviceRelease
+			b, readErr := os.ReadFile(filepath.Join(work, "kit/service-release.json"))
+			if readErr != nil || json.Unmarshal(b, &produced) != nil {
+				err = errors.New("build release record unavailable")
+			} else {
+				expected := map[string]string{}
+				for name, image := range produced.Images {
+					expected[name] = image.Digest
+				}
+				_, err = verifyServiceKit(filepath.Join(work, "kit"), expected)
+			}
+		}
 		runtimeJob.Lock()
 		defer runtimeJob.Unlock()
 		runtimeJob.state.State = "succeeded"
