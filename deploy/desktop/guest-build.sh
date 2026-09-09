@@ -42,12 +42,23 @@ for name in device-sync box-controller shared-spaces tor postgres caddy; do
   # Docker 29's containerd export includes OCI layout plus a legacy Docker
   # compatibility record. Reading it as docker-archive rewrites configuration
   # JSON; consume the native OCI layout and require digest preservation.
-  skopeo inspect --raw "oci-archive:$build_root/export-$name.tar" > "$build_root/manifest-$name.json"
-  exported_manifest="sha256:$(sha256sum "$build_root/manifest-$name.json" | cut -d ' ' -f 1)"
-  skopeo copy --preserve-digests "oci-archive:$build_root/export-$name.tar" "oci:$kit/images/$name:release"
+  daemon_manifest=$(docker image inspect --platform linux/arm64 --format '{{.Id}}' "$ref")
+  [[ $daemon_manifest =~ ^sha256:[0-9a-f]{64}$ ]]
+  exported="$build_root/export-$name"
+  install -d -m 0700 "$exported"
+  # This archive was just produced by the pinned Docker CLI. Do not accept
+  # caller-supplied archive paths here. Some pulled images export several index
+  # entries even with --platform; select the inspected ARM64 manifest exactly.
+  tar -xf "$build_root/export-$name.tar" -C "$exported"
+  manifest="$exported/blobs/sha256/${daemon_manifest#sha256:}"
+  exported_manifest="sha256:$(sha256sum "$manifest" | cut -d ' ' -f 1)"
+  [[ $exported_manifest == "$daemon_manifest" ]]
+  jq -e '.schemaVersion == 2 and (.config.digest | startswith("sha256:")) and (.layers | type == "array")' "$manifest" >/dev/null
+  jq -n --arg digest "$daemon_manifest" --arg mediaType "$(jq -r '.mediaType' "$manifest")" --argjson size "$(stat -c %s "$manifest")" \
+    '{schemaVersion:2,manifests:[{mediaType:$mediaType,digest:$digest,size:$size,annotations:{"org.opencontainers.image.ref.name":"release"}}]}' > "$exported/index.json"
+  skopeo copy --preserve-digests "oci:$exported:release" "oci:$kit/images/$name:release"
   digest=$(jq -r '.manifests[0].digest' "$kit/images/$name/index.json")
   config=$(jq -r '.config.digest' "$kit/images/$name/blobs/sha256/${digest#sha256:}")
-  daemon_manifest=$(docker image inspect --platform linux/arm64 --format '{{.Id}}' "$ref")
   printf 'Verified export %s: daemon-manifest=%s exported-manifest=%s OCI-manifest=%s\n' "$name" "$daemon_manifest" "$exported_manifest" "$digest"
   [[ $digest == "$exported_manifest" && $digest == "$daemon_manifest" ]]
   jq --arg name "$name" --arg digest "$digest" --arg config "$config" --arg ref "$ref" '. + {($name):{digest:$digest,config:$config,reference:$ref}}' "$kit/images.json" > "$kit/images.json.new"
