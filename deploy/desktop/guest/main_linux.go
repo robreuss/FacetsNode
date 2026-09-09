@@ -198,16 +198,21 @@ func serve(c configuration) error {
 			file.Close()
 			continue
 		}
-		for id, expiry := range seen {
-			if time.Now().After(expiry) {
-				delete(seen, id)
+		// Read-only bulk transfers do not grow the mutation replay cache. Bound
+		// that cache as well as its lifetime, even for an authenticated local peer.
+		mutating := r.Operation != "status" && r.Operation != "artifactInfo" && r.Operation != "artifactRead"
+		if mutating {
+			for id, expiry := range seen {
+				if time.Now().After(expiry) {
+					delete(seen, id)
+				}
 			}
+			if _, exists := seen[r.ID]; exists || len(seen) >= 8192 {
+				file.Close()
+				continue
+			}
+			seen[r.ID] = time.Now().Add(10 * time.Minute)
 		}
-		if _, exists := seen[r.ID]; exists {
-			file.Close()
-			continue
-		}
-		seen[r.ID] = time.Now().Add(10 * time.Minute)
 		h, err := status(c)
 		reply := response{ID: r.ID, Status: h}
 		if err != nil {
