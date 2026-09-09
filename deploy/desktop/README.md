@@ -10,7 +10,7 @@ The data disk is a separate raw image with an ext4 filesystem whose UUID is the 
 
 `guest-runtime.sh` pins Docker Engine/CLI 29.8.0, containerd 2.3.5, Compose 5.5.1 and Buildx 0.31.1. Developer preparation uses authenticated official repositories and exports the complete downloaded dependency set with package versions and hashes. A prepared `runtimeKit.tar` can be passed to the artifact builder using `FBD_RUNTIME_KIT`. It is signed with the release, carried on the read-only seed and hash-verified before extraction. Offline installation uses dpkg unpack/configure, not repository access. Ordinary installation does not need Docker Desktop, Homebrew or Linux commands.
 
-`fbd-data.service` mounts and checks the identified ext4 data disk; Docker, containerd and socket activation require that unit, and both daemons recheck identity before starting. Their durable roots are `/srv/facets-box-data/docker` and `/srv/facets-box-data/containerd`. The guest health channel remains available when storage initialization fails. No containers are automatically deployed by runtime preparation.
+`fbd-data.service` mounts and checks the identified ext4 data disk; Docker and containerd require that unit, and both daemons recheck identity before starting. The early Unix socket does not start a daemon without these checks and is not exposed to workloads. Their durable roots are `/srv/facets-box-data/docker` and `/srv/facets-box-data/containerd`. The guest health channel remains available when storage initialization fails. No containers are automatically deployed by runtime preparation.
 
 The host CLI exports an explicitly selected committed source archive. The guest verifies its authenticated hash, bounded size, contiguous chunks and safe archive entries, including Git's specific PAX commit metadata. A separate build operation uses the existing Dockerfile targets and Tor recipe. It has a 45-minute deadline, a 3-CPU/6-GiB builder, bounded private output, and does not install its result. OCI layout artifacts record their manifest digests separately from configuration IDs. The verifier binds the selected OCI index, manifest, architecture, configuration and layer hashes. Full service-kit build/runtime acceptance is still being completed.
 
@@ -107,16 +107,18 @@ which could drop the data-mount startup job. Guest `5fa185c` removes the early
 `docker.socket` dependency on the ordinary storage service; the daemons retain
 their storage dependency and `check-storage` preflight. Runtime preparation now
 also runs `systemd-analyze verify` before daemon startup. `services-3` with this
-guest activated successfully against the retained data disk; repeat cold-boot
-acceptance is in progress. The failed boot created no replacement storage.
+guest activated successfully against the retained data disk; two subsequent cold
+boots passed with retained identities and no ordering cycle. The failed boot
+created no replacement storage.
 
 The host's explicit public connection export returned authenticated trust material.
 The existing Facets embedded Tor route probe reached the installed controller's
 `/facetsbox/.well-known/facets-box` through its onion address with the expected
 SPKI pin and HTTP 200. An initial request timed out before a warm retry passed.
-This is not yet authenticated client Sync acceptance. Native WebKit administration
-still requires live TLS-challenge diagnosis; the exported certificate passes the
-host's standalone certificate/SPKI, hostname and validity checks.
+This is not yet authenticated client Sync acceptance. The helper subsequently
+displayed the existing controller claim page through pinned native WebKit/private
+virtio administration, with an onion-only ATS exception and unchanged certificate,
+hostname, expiry and navigation checks. The persistent Box remains unclaimed.
 
 No Proxmox deployment or Spaces Sync task is accessed by these scripts.
 
@@ -145,3 +147,14 @@ recheck retained identities and readiness. Do not restore a snapshot after a
 candidate was authorized to accept client writes. Keep the test source revision,
 signed artifact hashes, log and disk comparisons together; test-tag unit tests
 and cross-compilation alone are not runtime acceptance.
+
+Runtime acceptance subsequently passed with source `d700ac3`, test candidate
+`acceptance-db-rollback-1`, unchanged service kit 6 and signed helper `8dbff9c0`.
+The private failure log confirmed the committed database probe; the helper
+restored `services-3` before activation. With the helper quit and exclusive
+installation/data leases held, all five disk/metadata files hash-matched the
+pre-update snapshot, including the full 80 GiB data disk. The host README records
+source/artifact/data hashes and the stopped verifier command. A separate actual
+checkpoint restore also passed service startup and orderly shutdown with no
+virtual network adapter. Neither test published a duplicate service identity or
+modified Proxmox; neither is authenticated client Sync acceptance.
