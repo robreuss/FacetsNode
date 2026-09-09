@@ -56,6 +56,7 @@ TOML
 systemctl unmask --runtime docker.service docker.socket containerd.service
 trap - EXIT
 systemctl daemon-reload
+systemd-analyze --man=no verify fbd-data.service fbd-guest.service docker.service docker.socket containerd.service
 systemctl enable --now containerd.service docker.service
 [[ $(docker info --format '{{.DockerRootDir}}') == /srv/facets-box-data/docker ]]
 [[ $(docker version --format '{{.Server.Version}}') == 29.8.0 ]]

@@ -28,7 +28,7 @@ cat > /etc/systemd/system/fbd-data.service <<'UNIT'
 [Unit]
 Description=Facets Box identified persistent storage
 After=local-fs.target
-Before=fbd-guest.service docker.service containerd.service docker.socket
+Before=fbd-guest.service docker.service containerd.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
@@ -56,7 +56,11 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 UNIT
-for unit in docker.service containerd.service docker.socket; do
+# Socket units precede sockets.target/basic.target, while this ordinary storage
+# service follows basic.target. Ordering docker.socket after storage creates a
+# boot cycle. The early root-only Unix socket can exist without starting a
+# runtime; both daemons still require identified storage and recheck it below.
+for unit in docker.service containerd.service; do
   install -d "/etc/systemd/system/$unit.d"
   cat > "/etc/systemd/system/$unit.d/fbd-storage.conf" <<'UNIT'
 [Unit]
