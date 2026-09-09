@@ -12,6 +12,14 @@ services:
     ports: !reset []
     environment:
       FACETS_SHARED_SPACES_CLEANUP_PERIOD: ${FBD_CLEANUP_PERIOD:-1m}
+      FACETS_SHARED_SPACES_DEPLOYMENT_ID: ${FACETS_SHARED_SPACES_DEPLOYMENT_ID:?}
+      FACETS_SHARED_SPACES_DEPLOYMENT_SIGNING_KEY_FILE: /run/secrets/facets-shared-spaces/deployment-signing-key
+      FACETS_SHARED_SPACES_DEPLOYMENT_ROUTE_POLICY_FILE: /etc/facets-shared-spaces/service-authority/deployment-routes.json
+      FACETS_SHARED_SPACES_SERVICE_AUTHORITY_BINDINGS_FILE: /var/lib/facets-shared-spaces/service-authority/bindings.json
+    volumes:
+      - ${FACETS_SHARED_SPACES_AUTHORITY_KEY_DIRECTORY:?}:/run/secrets/facets-shared-spaces:ro
+      - ${FACETS_SHARED_SPACES_AUTHORITY_POLICY_DIRECTORY:?}:/etc/facets-shared-spaces/service-authority:ro
+      - ${FACETS_SHARED_SPACES_AUTHORITY_STATE_DIRECTORY:?}:/var/lib/facets-shared-spaces/service-authority
   ingress:
     profiles: [desktop-disabled]
     restart: "no"

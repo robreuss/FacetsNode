@@ -25,13 +25,16 @@ const dataRoot = "/srv/facets-box-data"
 const dataDevice = "/dev/disk/by-id/virtio-fbd-data"
 
 type configuration struct {
-	InstallationID    string            `json:"installationID"`
-	DataID            string            `json:"dataID"`
-	ReleaseID         string            `json:"releaseID"`
-	Key               []byte            `json:"key"`
-	ActivationPending bool              `json:"activationPending"`
-	AllowFormat       bool              `json:"allowFormat"`
-	Artifacts         map[string]string `json:"artifacts"`
+	InstallationID        string            `json:"installationID"`
+	DataID                string            `json:"dataID"`
+	ReleaseID             string            `json:"releaseID"`
+	Key                   []byte            `json:"key"`
+	ActivationPending     bool              `json:"activationPending"`
+	AllowFormat           bool              `json:"allowFormat"`
+	Artifacts             map[string]string `json:"artifacts"`
+	ServiceImages         map[string]string `json:"serviceImages"`
+	ServiceSourceRevision string            `json:"serviceSourceRevision"`
+	ServiceSourceTree     string            `json:"serviceSourceTree"`
 }
 
 func load() (configuration, error) {
@@ -235,6 +238,11 @@ func serve(c configuration) error {
 			if err != nil || jobRunning() {
 				reply.Error = "artifact transfer unavailable"
 			} else {
+				if r.Operation == "artifactInfo" && r.Artifact != nil && r.Artifact.Kind == "applianceLog" {
+					if captureApplianceLog() != nil {
+						reply.Error = "appliance log unavailable"
+					}
+				}
 				transferred, transferErr := transfer(dataRoot+"/staging", r)
 				if transferErr != nil {
 					reply.Error = "artifact transfer rejected"

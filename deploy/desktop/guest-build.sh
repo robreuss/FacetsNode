@@ -39,17 +39,17 @@ for name in device-sync box-controller shared-spaces tor postgres caddy; do
   # Use the pinned Docker CLI for daemon operations. Skopeo handles portable
   # archives/layouts, so its bundled Docker API client version is irrelevant.
   docker image save --platform linux/arm64 --output "$build_root/export-$name.tar" "$ref"
-  archive_config=$(tar -xOf "$build_root/export-$name.tar" manifest.json | jq -er 'select(length == 1) | .[0].Config')
-  [[ $archive_config =~ ^blobs/sha256/[0-9a-f]{64}$ || $archive_config =~ ^[0-9a-f]{64}\.json$ ]]
-  exported_config="sha256:$(tar -xOf "$build_root/export-$name.tar" "$archive_config" | sha256sum | cut -d ' ' -f 1)"
-  skopeo copy "docker-archive:$build_root/export-$name.tar" "oci:$kit/images/$name:release"
+  # Docker 29's containerd export includes OCI layout plus a legacy Docker
+  # compatibility record. Reading it as docker-archive rewrites configuration
+  # JSON; consume the native OCI layout and require digest preservation.
+  skopeo inspect --raw "oci-archive:$build_root/export-$name.tar" > "$build_root/manifest-$name.json"
+  exported_manifest="sha256:$(sha256sum "$build_root/manifest-$name.json" | cut -d ' ' -f 1)"
+  skopeo copy --preserve-digests "oci-archive:$build_root/export-$name.tar" "oci:$kit/images/$name:release"
   digest=$(jq -r '.manifests[0].digest' "$kit/images/$name/index.json")
   config=$(jq -r '.config.digest' "$kit/images/$name/blobs/sha256/${digest#sha256:}")
-  # Docker's containerd image store reports the image target (manifest/index)
-  # as .Id. Bind the OCI configuration to the saved configuration bytes, not
-  # that unrelated identifier. Log only content digests, never configuration.
-  printf 'Verified export %s: daemon-target=%s exported-config=%s OCI-config=%s\n' "$name" "$(docker image inspect --format '{{.Id}}' "$ref")" "$exported_config" "$config"
-  [[ $config == "$exported_config" ]]
+  daemon_manifest=$(docker image inspect --platform linux/arm64 --format '{{.Id}}' "$ref")
+  printf 'Verified export %s: daemon-manifest=%s exported-manifest=%s OCI-manifest=%s\n' "$name" "$daemon_manifest" "$exported_manifest" "$digest"
+  [[ $digest == "$exported_manifest" && $digest == "$daemon_manifest" ]]
   jq --arg name "$name" --arg digest "$digest" --arg config "$config" --arg ref "$ref" '. + {($name):{digest:$digest,config:$config,reference:$ref}}' "$kit/images.json" > "$kit/images.json.new"
   mv "$kit/images.json.new" "$kit/images.json"
 done

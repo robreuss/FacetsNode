@@ -48,7 +48,7 @@ func fileHash(path string) (string, int64, error) {
 // is writable only by appliance infrastructure, not by any workload container.
 func artifactPath(root, kind string) (string, error) {
 	switch kind {
-	case "source", "runtimeKit", "serviceKit", "buildLog":
+	case "source", "runtimeKit", "serviceKit", "buildLog", "applianceLog":
 		return filepath.Join(root, kind+".tar"), nil
 	default:
 		return "", errors.New("unknown artifact kind")
