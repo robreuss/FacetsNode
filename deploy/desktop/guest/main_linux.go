@@ -22,6 +22,7 @@ import (
 )
 
 const dataRoot = "/srv/facets-box-data"
+const dataDevice = "/dev/disk/by-id/virtio-fbd-data"
 
 type configuration struct {
 	InstallationID    string `json:"installationID"`
@@ -61,11 +62,11 @@ func run(name string, args ...string) error {
 	return nil
 }
 func diskUUID() string {
-	data, _ := exec.Command("/usr/sbin/blkid", "-s", "UUID", "-o", "value", "/dev/vdb").Output()
+	data, _ := exec.Command("/usr/sbin/blkid", "-s", "UUID", "-o", "value", dataDevice).Output()
 	return strings.TrimSpace(string(data))
 }
 func prepare(c configuration) error {
-	if _, err := os.Stat("/dev/vdb"); err != nil {
+	if _, err := os.Stat(dataDevice); err != nil {
 		return errors.New("storage unavailable")
 	}
 	if diskUUID() == "" {
@@ -76,11 +77,11 @@ func prepare(c configuration) error {
 			return errors.New("refusing to replace initialized storage")
 		}
 		// wipefs recognizes more signatures than blkid's UUID query; never format an unknown nonempty filesystem.
-		signatures, err := exec.Command("/usr/sbin/wipefs", "--no-act", "--noheadings", "--output", "TYPE", "/dev/vdb").Output()
+		signatures, err := exec.Command("/usr/sbin/wipefs", "--no-act", "--noheadings", "--output", "TYPE", dataDevice).Output()
 		if err != nil || strings.TrimSpace(string(signatures)) != "" {
 			return errors.New("unrecognized data disk")
 		}
-		if err = run("/usr/sbin/mkfs.ext4", "-q", "-U", c.DataID, "-L", "facets-data", "/dev/vdb"); err != nil {
+		if err = run("/usr/sbin/mkfs.ext4", "-q", "-U", c.DataID, "-L", "facets-data", dataDevice); err != nil {
 			return err
 		}
 	}
@@ -91,20 +92,20 @@ func prepare(c configuration) error {
 		return err
 	}
 	// This runs before mounting and before any workload runtime. Corrected filesystems return 1.
-	command := exec.Command("/usr/sbin/e2fsck", "-p", "/dev/vdb")
+	command := exec.Command("/usr/sbin/e2fsck", "-p", dataDevice)
 	if err := command.Run(); err != nil {
 		var e *exec.ExitError
 		if !errors.As(err, &e) || e.ExitCode() != 1 {
 			return errors.New("data filesystem needs repair")
 		}
 	}
-	if err := run("/usr/sbin/resize2fs", "/dev/vdb"); err != nil {
+	if err := run("/usr/sbin/resize2fs", dataDevice); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(dataRoot, 0700); err != nil {
 		return err
 	}
-	if err := run("/usr/bin/mount", "-t", "ext4", "-o", "nodev,nosuid", "/dev/vdb", dataRoot); err != nil {
+	if err := run("/usr/bin/mount", "-t", "ext4", "-o", "nodev,nosuid", dataDevice, dataRoot); err != nil {
 		return err
 	}
 	identity := dataRoot + "/installation-id"
@@ -218,6 +219,10 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "FBD guest: appliance infrastructure unavailable:", err)
+		if console, openErr := os.OpenFile("/dev/hvc0", os.O_WRONLY, 0); openErr == nil {
+			fmt.Fprintln(console, "FBD guest: appliance infrastructure unavailable:", err)
+			console.Close()
+		}
 		os.Exit(1)
 	}
 }
