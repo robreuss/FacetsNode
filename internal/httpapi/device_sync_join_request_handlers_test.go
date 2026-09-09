@@ -135,6 +135,35 @@ func TestDeviceSyncJoinRequestDeliversOnlyCandidateEncryptedBootstrap(t *testing
 	)
 	requireStatus(t, conflict, http.StatusConflict)
 	_ = conflict.Body.Close()
+
+	cancelPath := "/v1/device-sync/join-requests/" + requestID.String()
+	wrongCancel := performRelayJSON(t, handler, http.MethodDelete, cancelPath, nil, relayTestToken(116), uuid.Nil)
+	requireStatus(t, wrongCancel, http.StatusUnauthorized)
+	_ = wrongCancel.Body.Close()
+	// Even a sponsor does not own the candidate's cancellation capability.
+	sponsorCancel := performRelayJSON(t, handler, http.MethodDelete, cancelPath, nil, controlDomain.AdministrationCredential.AuthorizationToken, uuid.Nil)
+	requireStatus(t, sponsorCancel, http.StatusUnauthorized)
+	_ = sponsorCancel.Body.Close()
+	for attempt := 0; attempt < 2; attempt++ {
+		cancel := performRelayJSON(t, handler, http.MethodDelete, cancelPath, nil, pollingToken, uuid.Nil)
+		requireStatus(t, cancel, http.StatusOK)
+		_ = cancel.Body.Close()
+	}
+	for _, check := range []struct {
+		method, path, token string
+		body                any
+	}{
+		{http.MethodGet, lookupPath, controlDomain.AdministrationCredential.AuthorizationToken, nil},
+		{http.MethodGet, fetchPath, pollingToken, nil},
+		{http.MethodPut, storePath, controlDomain.AdministrationCredential.AuthorizationToken, deviceSyncJoinBootstrapInput{JoinBootstrapEnvelope: envelope}},
+	} {
+		result := performRelayJSON(t, handler, check.method, check.path, check.body, check.token, uuid.Nil)
+		requireStatus(t, result, http.StatusNotFound)
+		_ = result.Body.Close()
+	}
+	resurrect := performRelayJSON(t, handler, http.MethodPost, "/v1/device-sync/join-requests", createInput, "", uuid.Nil)
+	requireStatus(t, resurrect, http.StatusConflict)
+	_ = resurrect.Body.Close()
 }
 
 func TestDeviceSyncJoinRequestMemoryStoreRejectsActivePINCollision(t *testing.T) {

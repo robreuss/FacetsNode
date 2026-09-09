@@ -165,7 +165,7 @@ func (s *MemoryStore) CreateJoinRequest(
 		)
 	}
 	for _, existing := range s.joinRequests {
-		if existing.PINAuthorizationDigest == request.PINAuthorizationDigest &&
+		if !existing.Cancelled && existing.PINAuthorizationDigest == request.PINAuthorizationDigest &&
 			existing.ExpiresAtMilliseconds > nowMilliseconds {
 			return JoinRequestCreateResult{}, NewProtocolError(
 				CodeJoinRequestCollision, "join request PIN is already active",
@@ -211,7 +211,7 @@ func (s *MemoryStore) LookupJoinRequest(
 		)
 	}
 	for _, request := range s.joinRequests {
-		if !request.MatchesPIN(pin) {
+		if request.Cancelled || request.ExpiresAtMilliseconds <= nowMilliseconds || !request.MatchesPIN(pin) {
 			continue
 		}
 		if err := request.RequireActive(nowMilliseconds); err != nil {
@@ -272,6 +272,21 @@ func (s *MemoryStore) StoreJoinRequestBootstrap(
 	request.Bootstrap = &bootstrap
 	s.joinRequests[request.RequestID] = request
 	return relay.AcceptanceAccepted, nil
+}
+
+func (s *MemoryStore) CancelJoinRequest(_ context.Context, credential JoinRequestCredential) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	request, found := s.joinRequests[credential.RequestID]
+	if !found {
+		return NewProtocolError(CodeJoinRequestNotFound, "join request was not found")
+	}
+	if err := request.VerifyPollingCredential(credential); err != nil {
+		return err
+	}
+	request.Cancelled = true
+	s.joinRequests[credential.RequestID] = request
+	return nil
 }
 
 func (s *MemoryStore) FetchJoinRequestBootstrap(

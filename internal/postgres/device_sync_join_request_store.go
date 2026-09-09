@@ -45,7 +45,7 @@ func (s *RelayStore) CreateJoinRequest(
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM device_sync_join_requests
-			WHERE pin_authorization_digest=$1 AND expires_at_milliseconds>$2
+			WHERE pin_authorization_digest=$1 AND expires_at_milliseconds>$2 AND NOT cancelled
 		)
 	`, request.PINAuthorizationDigest, nowMilliseconds).Scan(&collision); err != nil {
 		return devicesync.JoinRequestCreateResult{}, fmt.Errorf("check Device Sync join request PIN: %w", err)
@@ -169,6 +169,28 @@ func (s *RelayStore) StoreJoinRequestBootstrap(
 	return relay.AcceptanceAccepted, nil
 }
 
+func (s *RelayStore) CancelJoinRequest(ctx context.Context, credential devicesync.JoinRequestCredential) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin join cancellation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	request, found, err := loadDeviceSyncJoinRequestForWrite(ctx, tx, credential.RequestID, uuid.Nil)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return devicesync.NewProtocolError(devicesync.CodeJoinRequestNotFound, "join request was not found")
+	}
+	if err := request.VerifyPollingCredential(credential); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE device_sync_join_requests SET cancelled=TRUE WHERE request_id=$1`, credential.RequestID); err != nil {
+		return fmt.Errorf("cancel join request: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *RelayStore) FetchJoinRequestBootstrap(
 	ctx context.Context,
 	credential devicesync.JoinRequestCredential,
@@ -264,7 +286,7 @@ func loadDeviceSyncJoinRequestByPINDigest(
 	nowMilliseconds int64,
 	lock string,
 ) (devicesync.JoinRequest, bool, error) {
-	query := `WHERE pin_authorization_digest=$1 AND expires_at_milliseconds>$2 ORDER BY created_at_milliseconds DESC LIMIT 1`
+	query := `WHERE pin_authorization_digest=$1 AND expires_at_milliseconds>$2 AND NOT cancelled ORDER BY created_at_milliseconds DESC LIMIT 1`
 	if lock != "" {
 		query += " " + lock
 	}
@@ -278,14 +300,14 @@ func loadDeviceSyncJoinRequest(ctx context.Context, tx pgx.Tx, suffix string, ar
 	err := tx.QueryRow(ctx, `
 		SELECT version,retry_id,request_id,candidate_device_id,candidate_bootstrap_public_key,
 			polling_authorization_digest,pin_authorization_digest,created_at_milliseconds,
-			expires_at_milliseconds,principal_id,bootstrap
+			expires_at_milliseconds,principal_id,bootstrap,cancelled
 		FROM device_sync_join_requests `+suffix,
 		arguments...,
 	).Scan(
 		&request.Version, &request.RetryID, &request.RequestID, &request.CandidateDeviceID,
 		&request.CandidateBootstrapPublicKey, &request.PollingAuthorizationDigest,
 		&request.PINAuthorizationDigest, &request.CreatedAtMilliseconds, &request.ExpiresAtMilliseconds,
-		&principalID, &bootstrapBytes,
+		&principalID, &bootstrapBytes, &request.Cancelled,
 	)
 	if err == pgx.ErrNoRows {
 		return devicesync.JoinRequest{}, false, nil

@@ -594,6 +594,7 @@ func (s *Server) Handler() http.Handler {
 		// unbound; they carry no Facets bearer, plaintext, or content key.
 		registerUnbound("POST /v1/device-sync/join-requests", traffic.SurfaceRendezvous, s.handleCreateDeviceSyncJoinRequest)
 		registerUnbound("GET /v1/device-sync/join-requests/{requestID}/bootstrap", traffic.SurfaceRendezvous, s.handleFetchDeviceSyncJoinBootstrap)
+		registerUnbound("DELETE /v1/device-sync/join-requests/{requestID}", traffic.SurfaceRendezvous, s.handleCancelDeviceSyncJoinRequest)
 		register(
 			"GET /v1/device-sync/principals/{principalID}/control-domains/{domainID}/join-requests/{pin}",
 			traffic.SurfaceManagement,

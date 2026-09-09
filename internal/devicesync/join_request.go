@@ -41,6 +41,7 @@ type JoinRequest struct {
 	ExpiresAtMilliseconds       int64                  `json:"expiresAtMilliseconds"`
 	PrincipalID                 *uuid.UUID             `json:"principalID,omitempty"`
 	Bootstrap                   *JoinBootstrapEnvelope `json:"bootstrap,omitempty"`
+	Cancelled                   bool                   `json:"cancelled,omitempty"`
 }
 
 func (r JoinRequest) Validate() error {
@@ -66,6 +67,9 @@ func (r JoinRequest) Validate() error {
 }
 
 func (r JoinRequest) RequireActive(nowMilliseconds int64) error {
+	if r.Cancelled {
+		return NewProtocolError(CodeJoinRequestNotFound, "join request was cancelled")
+	}
 	if nowMilliseconds < r.CreatedAtMilliseconds || nowMilliseconds >= r.ExpiresAtMilliseconds {
 		return NewProtocolError(CodeJoinRequestExpired, "join request is not active")
 	}

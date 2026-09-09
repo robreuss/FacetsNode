@@ -170,6 +170,26 @@ func (s *Server) handleStoreDeviceSyncJoinBootstrap(writer http.ResponseWriter, 
 	}{Acceptance: acceptance})
 }
 
+func (s *Server) handleCancelDeviceSyncJoinRequest(writer http.ResponseWriter, request *http.Request) {
+	requestID, err := parseUUID(request.PathValue("requestID"))
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidJoinRequest, err.Error()))
+		return
+	}
+	token, err := bearerToken(request)
+	if err != nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeUnauthorized, "join request credential is missing"))
+		return
+	}
+	if err := s.deviceSyncStore.CancelJoinRequest(request.Context(), devicesync.JoinRequestCredential{RequestID: requestID, Token: token}); err != nil {
+		s.writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Acceptance relay.Acceptance `json:"acceptance"`
+	}{relay.AcceptanceAccepted})
+}
+
 func (s *Server) handleFetchDeviceSyncJoinBootstrap(writer http.ResponseWriter, request *http.Request) {
 	requestID, err := parseUUID(request.PathValue("requestID"))
 	if err != nil {
