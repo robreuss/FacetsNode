@@ -106,11 +106,15 @@ func prepareServiceKit(c configuration) (serviceRelease, error) {
 }
 
 func importServiceImages(ctx context.Context, release serviceRelease) (map[string]string, error) {
+	return importServiceImagesAt(ctx, release, "/opt/fbd/service-kit")
+}
+
+func importServiceImagesAt(ctx context.Context, release serviceRelease, kit string) (map[string]string, error) {
 	images := map[string]string{}
 	for _, name := range imageNames {
 		image := release.Images[name]
-		archive := "/opt/fbd/import-" + name + ".tar"
-		if _, err := privateOutput(ctx, "/usr/bin/tar", "-cf", archive, "-C", "/opt/fbd/service-kit/images/"+name, "oci-layout", "index.json", "blobs"); err != nil {
+		archive := filepath.Join(kit, "import-"+name+".tar")
+		if _, err := privateOutput(ctx, "/usr/bin/tar", "-cf", archive, "-C", filepath.Join(kit, "images", name), "oci-layout", "index.json", "blobs"); err != nil {
 			return nil, fmt.Errorf("archive verified %s image: %w", name, err)
 		}
 		if _, err := privateOutput(ctx, "/usr/bin/docker", "image", "load", "--input", archive); err != nil {
@@ -382,6 +386,12 @@ func validateBuiltServiceKit(ctx context.Context, work string, release serviceRe
 		return err
 	}
 	if err := validateBuiltOnionIdentity(ctx, images["tor"]); err != nil {
+		return err
+	}
+	// A platform-selected child manifest can exist as content below a pulled
+	// multi-platform image without being a launchable image root. Import the
+	// exact verified portable artifacts, as ordinary appliance installation does.
+	if _, err := importServiceImagesAt(ctx, release, filepath.Join(work, "kit")); err != nil {
 		return err
 	}
 	return validateBuiltServiceRuntime(ctx, work, images)
