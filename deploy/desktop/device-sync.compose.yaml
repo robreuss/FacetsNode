@@ -1,0 +1,49 @@
+# Applied after the committed base compose.yaml and onion profile. No base edits.
+services:
+  postgres:
+    image: ${FBD_POSTGRES_IMAGE:?verified local image required}
+    pull_policy: never
+    restart: "no"
+  box-postgres:
+    image: ${FBD_POSTGRES_IMAGE:?verified local image required}
+    pull_policy: never
+    restart: "no"
+  server:
+    image: ${FBD_DEVICE_SYNC_IMAGE:?verified local image required}
+    build: !reset null
+    pull_policy: never
+    restart: "no"
+    ports: !reset []
+    environment:
+      FACETS_DEVICE_SYNC_CLEANUP_PERIOD: ${FBD_CLEANUP_PERIOD:-1m}
+    # The generic onion overlay drops service-control, breaking Box enrollment.
+    networks: !override [private, service-control, onion-application]
+  controller:
+    image: ${FBD_BOX_CONTROLLER_IMAGE:?verified local image required}
+    build: !reset null
+    pull_policy: never
+    restart: "no"
+    networks: !override [controller-private, service-control, onion-application]
+  discovery:
+    profiles: [desktop-disabled]
+    restart: "no"
+    network_mode: !reset null
+    networks: !override [controller-private]
+  ingress:
+    profiles: [desktop-disabled]
+    restart: "no"
+    ports: !reset []
+  onion-ingress:
+    image: ${FBD_CADDY_IMAGE:?verified local image required}
+    pull_policy: never
+    restart: "no"
+    volumes: !override
+      - ${FBD_RECIPE_DIRECTORY:?}/Box.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${FACETS_DEVICE_SYNC_TLS_DIRECTORY:?}:/etc/facets-server/tls:ro
+      - facets-device-sync-onion-socket:/run/facets-onion
+      - ${FBD_ADMIN_SOCKET_DIRECTORY:?}:/run/facets-admin
+  tor:
+    image: ${FBD_TOR_IMAGE:?verified local image required}
+    build: !reset null
+    pull_policy: never
+    restart: "no"

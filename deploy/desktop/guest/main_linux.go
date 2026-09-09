@@ -262,6 +262,23 @@ func main() {
 	} else if err == nil && len(os.Args) == 2 && os.Args[1] == "check-storage" {
 		_, err = status(c)
 	} else if err == nil {
+		if recipe, recipeErr := os.Open("/opt/fbd/desktop-recipes.tar"); recipeErr == nil {
+			if _, statErr := os.Stat("/opt/fbd/recipes"); os.IsNotExist(statErr) {
+				var staging string
+				staging, err = os.MkdirTemp("/opt/fbd", "recipes-")
+				if err == nil {
+					err = extractSource(recipe, staging)
+				}
+				if err == nil {
+					err = os.Rename(staging, "/opt/fbd/recipes")
+				}
+			}
+			recipe.Close()
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "desktop recipes unavailable")
+			os.Exit(1)
+		}
 		err = serve(c)
 	}
 	if err != nil {

@@ -1,0 +1,23 @@
+{
+ admin off
+ auto_https off
+}
+:8443 {
+ bind unix//run/facets-onion/ingress.sock|0222
+ tls /etc/facets-server/tls/server.crt /etc/facets-server/tls/server.key
+ route {
+  @operator path /v1/shared-spaces/provisioning-admissions
+  respond @operator 404
+  @application path /.well-known/facets-box /v1/service-deployment/proof /v1/service-deployment/bootstrap-proof /v1/pairing/* /v1/relay/tenants/* /v1/shared-spaces/*
+  reverse_proxy @application server:8080 {
+   header_up -Forwarded
+   header_up -X-Forwarded-For
+   header_up -X-Forwarded-Host
+   header_up -X-Forwarded-Proto
+   header_up -X-Real-IP
+   header_up X-Facets-Ingress-Transport tor-onion
+   header_up X-Facets-Onion-Ingress-Token {$FACETS_ONION_INGRESS_TOKEN}
+  }
+  respond 404
+ }
+}

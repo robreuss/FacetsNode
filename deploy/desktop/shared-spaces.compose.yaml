@@ -1,0 +1,31 @@
+# Independent project, databases, credentials and named volumes stay independent.
+services:
+  postgres:
+    image: ${FBD_POSTGRES_IMAGE:?verified local image required}
+    pull_policy: never
+    restart: "no"
+  server:
+    image: ${FBD_SHARED_SPACES_IMAGE:?verified local image required}
+    build: !reset null
+    pull_policy: never
+    restart: "no"
+    ports: !reset []
+    environment:
+      FACETS_SHARED_SPACES_CLEANUP_PERIOD: ${FBD_CLEANUP_PERIOD:-1m}
+  ingress:
+    profiles: [desktop-disabled]
+    restart: "no"
+    ports: !reset []
+  onion-ingress:
+    image: ${FBD_CADDY_IMAGE:?verified local image required}
+    pull_policy: never
+    restart: "no"
+    volumes: !override
+      - ${FBD_RECIPE_DIRECTORY:?}/Group.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${FACETS_SHARED_SPACES_TLS_DIRECTORY:?}:/etc/facets-server/tls:ro
+      - facets-shared-spaces-onion-socket:/run/facets-onion
+  tor:
+    image: ${FBD_TOR_IMAGE:?verified local image required}
+    build: !reset null
+    pull_policy: never
+    restart: "no"

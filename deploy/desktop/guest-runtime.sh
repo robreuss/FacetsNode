@@ -14,7 +14,10 @@ trap 'systemctl unmask --runtime docker.service docker.socket containerd.service
 # Offline restore fails closed if its dependency closure is incomplete.
 if [[ -f "$runtime_root/SHA256SUMS" ]]; then
   (cd "$runtime_root" && sha256sum --check SHA256SUMS)
-  apt-get --no-download --no-install-recommends install -y "$runtime_root"/debs/*.deb
+  # apt --no-download mishandles local .deb paths on Noble. dpkg never accesses
+  # a repository: unpack the complete set, then configure in dependency order.
+  dpkg --unpack "$runtime_root"/debs/*.deb
+  dpkg --configure -a
 else
 cat > /etc/apt/apt.conf.d/99fbd-cache <<'APT'
 Binary::apt::APT::Keep-Downloaded-Packages "true";

@@ -12,6 +12,11 @@ kit="$build_root/kit"
 install -d -m 0700 "$kit/images" "$kit/recipes"
 cp "$build_root/source/compose.yaml" "$kit/recipes/device-sync.compose.yaml"
 cp "$build_root/source/deploy/shared-spaces/compose.yaml" "$kit/recipes/shared-spaces.compose.yaml"
+cp "$build_root/source/deploy/onion/device-sync.compose.yaml" "$kit/recipes/device-sync.onion.yaml"
+cp "$build_root/source/deploy/onion/shared-spaces.compose.yaml" "$kit/recipes/shared-spaces.onion.yaml"
+cp /opt/fbd/recipes/device-sync.compose.yaml "$kit/recipes/device-sync.desktop.yaml"
+cp /opt/fbd/recipes/shared-spaces.compose.yaml "$kit/recipes/shared-spaces.desktop.yaml"
+cp /opt/fbd/recipes/*.Caddyfile "$kit/recipes/"
 # The builder is infrastructure, with a finite CPU/memory envelope. No ordinary
 # Facets container is created here and no workload receives the Docker socket.
 if ! docker buildx inspect fbd-builder >/dev/null 2>&1; then
@@ -39,5 +44,5 @@ for name in device-sync box-controller shared-spaces tor postgres caddy; do
 done
 jq -n --arg revision "$revision" --arg tree "$tree" --slurpfile images "$kit/images.json" \
  '{version:1,architecture:"arm64",sourceRevision:$revision,sourceTree:$tree,images:$images[0],acceptance:{dockerfileTests:"passed",serviceRuntime:"not-run",spacesSync:"not-run"}}' > "$kit/service-release.json"
-tar -cf /srv/facets-box-data/staging/serviceKit.tar.new -C "$kit" .
+tar -cf /srv/facets-box-data/staging/serviceKit.tar.new -C "$kit" images recipes images.json service-release.json
 mv /srv/facets-box-data/staging/serviceKit.tar.new /srv/facets-box-data/staging/serviceKit.tar

@@ -41,6 +41,10 @@ for recipe in guest-runtime.sh guest-build.sh; do
     chmod 600 "$output/$recipe"
   fi
 done
+if [[ -f "$staging/deploy/desktop/Box.Caddyfile" ]]; then
+  COPYFILE_DISABLE=1 tar -cf "$output/desktop-recipes.tar" -C "$staging/deploy/desktop" device-sync.compose.yaml shared-spaces.compose.yaml Box.Caddyfile Group.Caddyfile
+  chmod 600 "$output/desktop-recipes.tar"
+fi
 chmod 600 "$output/system.raw" "$output/guest-agent" "$output/guest-bootstrap.sh"
 "$fbdctl" sign "$output" "$key" "$release" "$revision" "$tree"
 echo "Foundation release prepared from $revision. No Facets workload containers are included."

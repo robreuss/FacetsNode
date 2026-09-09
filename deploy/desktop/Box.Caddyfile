@@ -1,0 +1,47 @@
+{
+ admin off
+ auto_https off
+}
+(onion_headers) {
+ header_up -Forwarded
+ header_up -X-Forwarded-For
+ header_up -X-Forwarded-Host
+ header_up -X-Forwarded-Proto
+ header_up -X-Real-IP
+ header_up X-Facets-Ingress-Transport tor-onion
+ header_up X-Facets-Onion-Ingress-Token {$FACETS_ONION_INGRESS_TOKEN}
+}
+(controller_only) {
+ route {
+  handle /facetsbox {
+   redir * /facetsbox/ 308
+  }
+  @management path /facetsbox/ /facetsbox/.well-known/facets-box /facetsbox/claim /facetsbox/login /facetsbox/logout /facetsbox/password /facetsbox/authorize-device /facetsbox/grants/*/revoke /facetsbox/v1/claim-connection-requests /facetsbox/v1/connection-invitations/redeem /facetsbox/v1/connection-requests/* /facetsbox/v1/profile /facetsbox/v1/services/device-sync/groups /facetsbox/v1/services/device-sync/account-admissions
+  handle @management {
+   uri strip_prefix /facetsbox
+   reverse_proxy controller:8081
+  }
+  respond 404
+ }
+}
+# Private local administration terminates TLS at the same pinned certificate,
+# but its separate Unix socket has no application/operator/database route.
+:8444 {
+ bind unix//run/facets-admin/controller.sock|0600
+ tls /etc/facets-server/tls/server.crt /etc/facets-server/tls/server.key
+ import controller_only
+}
+:8443 {
+ bind unix//run/facets-onion/ingress.sock|0222
+ tls /etc/facets-server/tls/server.crt /etc/facets-server/tls/server.key
+ route {
+  @sync path /facetsbox/device-sync/.well-known/facets-box /facetsbox/device-sync/v1/service-deployment/proof /facetsbox/device-sync/v1/service-deployment/bootstrap-proof /facetsbox/device-sync/v1/pairing/* /facetsbox/device-sync/v1/relay/tenants/* /facetsbox/device-sync/v1/device-sync/account-admissions/* /facetsbox/device-sync/v1/device-sync/join-requests /facetsbox/device-sync/v1/device-sync/join-requests/* /facetsbox/device-sync/v1/device-sync/principals/*
+  handle @sync {
+   uri strip_prefix /facetsbox/device-sync
+   reverse_proxy server:8080 {
+    import onion_headers
+   }
+  }
+  import controller_only
+ }
+}
