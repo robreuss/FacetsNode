@@ -238,7 +238,7 @@ func startServiceBuild(c configuration) error {
 					if json.Unmarshal(b, &record) != nil {
 						err = errors.New("invalid acceptance record")
 					} else {
-						record["acceptance"] = map[string]string{"dockerfileTests": "passed", "ociVerification": "passed", "renderedComposeBoundary": "passed", "ingressConfiguration": "passed", "serviceRuntime": "not-run", "spacesSync": "not-run"}
+						record["acceptance"] = map[string]string{"dockerfileTests": "passed", "ociVerification": "passed", "renderedComposeBoundary": "passed", "ingressConfiguration": "passed", "offlineOnionIdentity": "passed", "serviceRuntime": "not-run", "spacesSync": "not-run"}
 						err = writeJSONFile(filepath.Join(work, "kit/service-release.json"), record)
 					}
 				}

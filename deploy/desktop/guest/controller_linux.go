@@ -24,6 +24,9 @@ func controllerQuery(ctx context.Context, query string) (string, error) {
 // responsible for initialization; this code never inserts a Box identity row.
 func initializeController(ctx context.Context, identity applianceIdentity, image string) (controllerIdentity, error) {
 	var out controllerIdentity
+	if e := reconcileInitializationContainer(ctx, "fbd-controller-initialize", identity.InstallationID, "controller", image); e != nil {
+		return out, e
+	}
 	const record = dataRoot + "/configuration/controller-identity.json"
 	_, e := os.Stat(record)
 	retained := e == nil
@@ -113,7 +116,7 @@ func initializeController(ctx context.Context, identity applianceIdentity, image
 		}
 		// stdout contains the activation code. No Docker log is created and no
 		// raw output/error is forwarded to build logs or diagnostic exports.
-		b, e = privateOutput(ctx, "/usr/bin/docker", "run", "--rm", "--name", "fbd-controller-initialize", "--network", deviceProject+"_controller-private", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--log-driver", "none", "--env-file", "/opt/fbd/controller-initialize.env", "--mount", "type=volume,src="+deviceProject+"_facets-box-controller-state,dst=/var/lib/facets-box-controller", image, "initialize", "--activation-code", identity.Secrets["activation"])
+		b, e = privateOutput(ctx, "/usr/bin/docker", "run", "--rm", "--name", "fbd-controller-initialize", "--label", "net.simplyformed.facets.box.installation="+identity.InstallationID, "--label", "net.simplyformed.facets.box.initialization=controller", "--network", deviceProject+"_controller-private", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--log-driver", "none", "--env-file", "/opt/fbd/controller-initialize.env", "--mount", "type=volume,src="+deviceProject+"_facets-box-controller-state,dst=/var/lib/facets-box-controller", image, "initialize", "--activation-code", identity.Secrets["activation"])
 		if e != nil || strings.TrimSpace(string(b)) != "Facets Box one-time activation code: "+identity.Secrets["activation"] {
 			return out, errors.New("controller initialization incomplete; inspect private state")
 		}

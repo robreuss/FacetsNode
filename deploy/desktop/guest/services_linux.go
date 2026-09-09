@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type limitedOutput struct {
@@ -137,27 +139,53 @@ func volumeDirectory(ctx context.Context, name string, allowCreate bool) (string
 	return path, nil
 }
 
-func prepareOnion(ctx context.Context, project, volume, image string, existing bool) (string, error) {
+func reconcileInitializationContainer(ctx context.Context, name, installation, role, image string) error {
+	// A successful full name listing distinguishes absence from daemon failure.
+	b, err := privateOutput(ctx, "/usr/bin/docker", "container", "ls", "--all", "--format", "{{.Names}}")
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, entry := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if entry == name {
+			found = true
+		}
+	}
+	if !found {
+		return nil
+	}
+	b, err = privateOutput(ctx, "/usr/bin/docker", "container", "inspect", name)
+	if err != nil {
+		return err
+	}
+	if err = validateInitializationContainer(b, name, installation, role, image); err != nil {
+		return err
+	}
+	if _, err = privateOutput(ctx, "/usr/bin/docker", "stop", "--time", "10", name); err != nil {
+		return err
+	}
+	_, err = privateOutput(ctx, "/usr/bin/docker", "rm", name)
+	return err
+}
+
+func prepareOnion(ctx context.Context, installation, project, volume, image string, existing bool) (string, error) {
+	name := project + "-identity-initialization"
+	if err := reconcileInitializationContainer(ctx, name, installation, "onion", image); err != nil {
+		return "", err
+	}
 	root, err := volumeDirectory(ctx, project+"_"+volume, !existing)
 	if err != nil {
 		return "", err
 	}
 	read := func() (string, error) {
-		b, e := os.ReadFile(filepath.Join(root, "hostname"))
+		id, e := readOnionIdentity(root)
 		if e != nil {
 			return "", e
 		}
-		onion := strings.TrimSpace(string(b))
-		if len(onion) != 62 || !strings.HasSuffix(onion, ".onion") || strings.Trim(onion[:56], "abcdefghijklmnopqrstuvwxyz234567") != "" {
-			return "", errors.New("invalid retained onion")
+		if e = retainOnionIdentity(filepath.Join(dataRoot, project+"-onion-identity.json"), id, !existing); e != nil {
+			return "", e
 		}
-		for _, name := range []string{"hs_ed25519_secret_key", "hs_ed25519_public_key"} {
-			info, e := os.Lstat(filepath.Join(root, name))
-			if e != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-				return "", errors.New("onion key unavailable")
-			}
-		}
-		return onion, nil
+		return id.Onion, nil
 	}
 	if onion, e := read(); e == nil {
 		return onion, nil
@@ -166,10 +194,9 @@ func prepareOnion(ctx context.Context, project, volume, image string, existing b
 	if err != nil || existing || len(entries) != 0 {
 		return "", errors.New("inconsistent onion storage; identity was not replaced")
 	}
-	name := project + "-identity-initialization"
 	// The image's entrypoint is Tor. Network isolation and DisableNetwork both
 	// prevent publishing the new identity before the activation transaction.
-	if _, err = privateOutput(ctx, "/usr/bin/docker", "run", "--detach", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--log-driver", "none", "--tmpfs", "/tmp:size=32m,mode=1777", "--mount", "type=volume,src="+project+"_"+volume+",dst=/var/lib/tor/facets-onion", image, "--DisableNetwork", "1"); err != nil {
+	if _, err = privateOutput(ctx, "/usr/bin/docker", "run", "--detach", "--name", name, "--label", "net.simplyformed.facets.box.installation="+installation, "--label", "net.simplyformed.facets.box.initialization=onion", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--log-driver", "none", "--tmpfs", "/tmp:size=32m,mode=1777", "--mount", "type=volume,src="+project+"_"+volume+",dst=/var/lib/tor/facets-onion", image, "--DisableNetwork", "1"); err != nil {
 		return "", errors.New("offline onion initialization failed")
 	}
 	defer func() {
@@ -199,11 +226,11 @@ func writeServiceConfiguration(ctx context.Context, c configuration, images map[
 	if err != nil && !os.IsNotExist(err) {
 		return identity, err
 	}
-	box, err := prepareOnion(ctx, deviceProject, "facets-device-sync-onion", images["tor"], existing)
+	box, err := prepareOnion(ctx, c.InstallationID, deviceProject, "facets-device-sync-onion", images["tor"], existing)
 	if err != nil {
 		return identity, err
 	}
-	group, err := prepareOnion(ctx, sharedProject, "facets-shared-spaces-onion", images["tor"], existing)
+	group, err := prepareOnion(ctx, c.InstallationID, sharedProject, "facets-shared-spaces-onion", images["tor"], existing)
 	if err != nil {
 		return identity, err
 	}
@@ -337,5 +364,82 @@ func validateBuiltServiceKit(ctx context.Context, work string, release serviceRe
 	}
 	// The fixed pulled reference was bound to its ARM64 manifest during export.
 	// This validation container has no network, runtime socket or appliance data.
-	return validateRecipesAt(ctx, filepath.Join(work, "kit"), root, images, "caddy:2.10.2-alpine")
+	if err := validateRecipesAt(ctx, filepath.Join(work, "kit"), root, images, "caddy:2.10.2-alpine"); err != nil {
+		return err
+	}
+	return validateBuiltOnionIdentity(ctx, images["tor"])
+}
+
+// A disposable build acceptance test of the actual pinned Tor image. Both runs
+// are network-disabled; this neither initializes nor publishes the real Box.
+func validateBuiltOnionIdentity(ctx context.Context, image string) (result error) {
+	name := "fbd-build-onion-" + uuid.NewString()
+	root, err := volumeDirectory(ctx, name, true)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := reconcileInitializationContainer(cleanup, name, "build-validation", "onion", image); err != nil {
+			if result == nil {
+				result = err
+			}
+			return
+		}
+		// Only this test's freshly created, uniquely named volume is removed.
+		if _, err := privateOutput(cleanup, "/usr/bin/docker", "volume", "rm", name); err != nil && result == nil {
+			result = err
+		}
+	}()
+	var first onionIdentity
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err = privateOutput(ctx, "/usr/bin/docker", "run", "--detach", "--name", name,
+			"--label", "net.simplyformed.facets.box.installation=build-validation", "--label", "net.simplyformed.facets.box.initialization=onion",
+			"--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--log-driver", "none",
+			"--tmpfs", "/tmp:size=32m,mode=1777", "--mount", "type=volume,src="+name+",dst=/var/lib/tor/facets-onion", image, "--DisableNetwork", "1"); err != nil {
+			return errors.New("offline Tor validation startup failed")
+		}
+		deadline := time.Now().Add(20 * time.Second)
+		valid := false
+		for time.Now().Before(deadline) {
+			current, err := readOnionIdentity(root)
+			if err == nil {
+				if attempt == 0 {
+					first = current
+				} else if current != first {
+					return errors.New("offline Tor restart changed identity")
+				}
+				valid = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+		if !valid {
+			return errors.New("offline Tor did not produce a consistent identity")
+		}
+		// Allow the restarted process to finish reading the retained identity,
+		// rather than treating pre-existing files alone as proof it started.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+		state, err := privateOutput(ctx, "/usr/bin/docker", "container", "inspect", "--format", "{{.State.Running}}", name)
+		if err != nil || strings.TrimSpace(string(state)) != "true" {
+			return errors.New("offline Tor initialization process exited")
+		}
+		if err = reconcileInitializationContainer(ctx, name, "build-validation", "onion", image); err != nil {
+			return err
+		}
+		after, err := readOnionIdentity(root)
+		if err != nil || after != first {
+			return errors.New("offline Tor stop changed identity")
+		}
+	}
+	return nil
 }
