@@ -286,6 +286,9 @@ func serve(c configuration) error {
 		file.Write(encoded)
 		file.Close()
 		if r.Operation == "shutdown" && reply.Error == "" {
+			if err == nil {
+				_ = recordOperation(dataRoot, c.ReleaseID, "shutdown", "started")
+			}
 			return run("/usr/bin/systemctl", "poweroff", "--no-block")
 		}
 	}
@@ -302,6 +305,9 @@ func main() {
 	} else if err == nil && len(os.Args) == 2 && os.Args[1] == "check-storage" {
 		_, err = status(c)
 	} else if err == nil {
+		if _, storageErr := status(c); storageErr == nil {
+			_ = recordOperation(dataRoot, c.ReleaseID, "boot", "started")
+		}
 		if recipe, recipeErr := os.Open("/opt/fbd/desktop-recipes.tar"); recipeErr == nil {
 			if _, statErr := os.Stat("/opt/fbd/recipes"); os.IsNotExist(statErr) {
 				var staging string

@@ -73,6 +73,7 @@ func startRuntimeJob(c configuration) error {
 		return errors.New("runtime recipe unavailable")
 	}
 	runtimeJob.state = &jobState{Operation: "prepareRuntime", State: "running", Step: "installing pinned runtime"}
+	_ = recordOperation(dataRoot, c.ReleaseID, "prepareRuntime", "started")
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 		defer cancel()
@@ -116,6 +117,7 @@ func startRuntimeJob(c configuration) error {
 			runtimeJob.state.State = "failed"
 			runtimeJob.state.Step = "runtime preparation failed; private build log available"
 		}
+		_ = recordOperation(dataRoot, c.ReleaseID, "prepareRuntime", runtimeJob.state.State)
 	}()
 	return nil
 }
@@ -186,6 +188,7 @@ func startServiceBuild(c configuration) error {
 		return errors.New("committed source unavailable")
 	}
 	runtimeJob.state = &jobState{Operation: "buildServices", State: "running", Step: "building committed service images"}
+	_ = recordOperation(dataRoot, c.ReleaseID, "buildServices", "started")
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
@@ -267,6 +270,7 @@ func startServiceBuild(c configuration) error {
 			runtimeJob.state.State = "failed"
 			runtimeJob.state.Step = "service build failed; export private build log"
 		}
+		_ = recordOperation(dataRoot, c.ReleaseID, "buildServices", runtimeJob.state.State)
 	}()
 	return nil
 }
