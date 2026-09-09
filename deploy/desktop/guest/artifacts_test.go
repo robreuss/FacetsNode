@@ -12,13 +12,32 @@ import (
 )
 
 func TestCommittedRepositoryArchiveExtraction(t *testing.T) {
-	command := exec.Command("git", "-C", "../../..", "archive", "--format=tar", "HEAD")
-	archive, e := command.Output()
-	if e != nil {
-		t.Fatal(e)
+	// Prepared source archives deliberately contain no .git directory. Exercise
+	// real Git PAX metadata using an isolated repository, including in Docker.
+	repository := t.TempDir()
+	git := func(args ...string) []byte {
+		command := exec.Command("git", append([]string{"-C", repository, "-c", "user.name=FBD test", "-c", "user.email=fbd-test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("fixture git: %v: %s", err, output)
+		}
+		return output
 	}
-	if e = extractSource(bytes.NewReader(archive), t.TempDir()); e != nil {
+	git("init", "--initial-branch=main")
+	content := []byte("committed source fixture\n")
+	if err := os.WriteFile(filepath.Join(repository, "source.txt"), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "source.txt")
+	git("commit", "-m", "Archive fixture")
+	archive := git("archive", "--format=tar", "HEAD")
+	destination := t.TempDir()
+	if e := extractSource(bytes.NewReader(archive), destination); e != nil {
 		t.Fatalf("actual committed archive: %v", e)
+	}
+	actual, err := os.ReadFile(filepath.Join(destination, "source.txt"))
+	if err != nil || !bytes.Equal(actual, content) {
+		t.Fatal("committed fixture did not survive extraction")
 	}
 }
 
