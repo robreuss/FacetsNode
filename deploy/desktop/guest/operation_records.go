@@ -15,7 +15,7 @@ var operationRecordsLock sync.Mutex
 // Deliberately closed vocabulary: never accept error text, command arguments,
 // environment, activation codes, paths or application content as log fields.
 func recordOperation(root, release, operation, state string) error {
-	if operation != "boot" && operation != "prepareRuntime" && operation != "buildServices" && operation != "shutdown" {
+	if operation != "boot" && operation != "prepareRuntime" && operation != "buildServices" && operation != "shutdown" && operation != "prepareServices" && operation != "activateServices" {
 		return errors.New("unknown operational record")
 	}
 	if state != "started" && state != "succeeded" && state != "failed" {

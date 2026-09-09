@@ -102,6 +102,11 @@ func prepareServiceKit(c configuration) (serviceRelease, error) {
 	if release.SourceRevision != c.ServiceSourceRevision || release.SourceTree != c.ServiceSourceTree {
 		return release, errors.New("service source evidence mismatch")
 	}
+	for _, check := range []string{"candidateMaintenance", "isolatedServiceRuntime", "containerRecreationIdentity", "isolatedControllerClaimHTTPS", "offlineOnionIdentity"} {
+		if release.Acceptance[check] != "passed" {
+			return release, errors.New("service release lacks required isolated acceptance")
+		}
+	}
 	return release, nil
 }
 

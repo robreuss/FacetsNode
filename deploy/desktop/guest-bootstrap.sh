@@ -44,10 +44,12 @@ cat > /etc/systemd/system/fbd-guest.service <<'UNIT'
 [Unit]
 Description=Facets Box private appliance management
 Wants=fbd-data.service
-After=fbd-data.service
+After=fbd-data.service docker.service containerd.service
 [Service]
 Type=simple
 ExecStart=/opt/fbd/guest-agent
+ExecStop=/opt/fbd/guest-agent stop-services
+TimeoutStopSec=90
 Restart=on-failure
 RestartSec=3
 UMask=0077

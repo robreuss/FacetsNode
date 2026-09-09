@@ -21,6 +21,7 @@ type serviceRelease struct {
 	SourceRevision string                  `json:"sourceRevision"`
 	SourceTree     string                  `json:"sourceTree"`
 	Images         map[string]serviceImage `json:"images"`
+	Acceptance     map[string]string       `json:"acceptance,omitempty"`
 }
 
 func digestPath(root, digest string) (string, error) {

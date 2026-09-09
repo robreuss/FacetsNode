@@ -33,6 +33,9 @@ func TestServiceHealthRequiresEveryIndependentRuntimeAndWithholdsCandidateTor(t 
 		if err != nil {
 			t.Fatal(err)
 		}
+		if candidateServicesReady(states) != candidate {
+			t.Fatal("candidate acceptance did not require explicit withheld ingress")
+		}
 		for kind, state := range states {
 			if state != "ready" && !(candidate && kind == "tor" && state == "withheld") {
 				t.Fatal("healthy independent services were not recognized")
@@ -43,6 +46,9 @@ func TestServiceHealthRequiresEveryIndependentRuntimeAndWithholdsCandidateTor(t 
 		kind := expectedContainerImages(deviceProject)[d[0].Config.Labels["com.docker.compose.service"]]
 		if err != nil || states[kind] != "unavailable" {
 			t.Fatal("one deployment masked another's failure")
+		}
+		if candidateServicesReady(states) {
+			t.Fatal("incomplete candidate was eligible for activation")
 		}
 	}
 	d, g := fixture(deviceProject, false), fixture(sharedProject, false)

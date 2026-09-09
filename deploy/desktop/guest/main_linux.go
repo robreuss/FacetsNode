@@ -6,6 +6,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -163,6 +165,7 @@ func status(c configuration) (*health, error) {
 		DataMounted: true, FreeBytes: stat.Bavail * uint64(stat.Bsize), TotalBytes: stat.Blocks * uint64(stat.Bsize),
 		Sentinel: string(sentinel), Services: map[string]string{}, IngressEnabled: false}
 	runtimeHealth(h)
+	serviceHealth(h)
 	return h, nil
 }
 func serve(c configuration) error {
@@ -201,6 +204,14 @@ func serve(c configuration) error {
 			file.Close()
 			continue
 		}
+		// Activation updates this private working-system record atomically. Never
+		// adopt a changed installation/key/release while a VM remains running.
+		current, loadErr := load()
+		if loadErr != nil || current.InstallationID != c.InstallationID || current.DataID != c.DataID || current.ReleaseID != c.ReleaseID || !hmac.Equal(current.Key, c.Key) {
+			file.Close()
+			continue
+		}
+		c = current
 		// Read-only bulk transfers do not grow the mutation replay cache. Bound
 		// that cache as well as its lifetime, even for an authenticated local peer.
 		mutating := r.Operation != "status" && r.Operation != "artifactInfo" && r.Operation != "artifactRead"
@@ -251,7 +262,9 @@ func serve(c configuration) error {
 			}
 		}
 		if r.Operation == "prepareRuntime" {
-			if err := startRuntimeJob(c); err != nil {
+			if len(c.ServiceImages) != 0 {
+				reply.Error = "runtime replacement requires an attended appliance update"
+			} else if err := startRuntimeJob(c); err != nil {
 				reply.Error = "runtime preparation unavailable"
 			}
 		}
@@ -281,7 +294,11 @@ func serve(c configuration) error {
 		if r.Operation == "shutdown" && jobRunning() {
 			reply.Error = "a bounded build job is still running"
 		}
-		// Runtime preparation does not start Facets workloads or enable ingress.
+		if r.Operation == "activate" && reply.Error == "" && len(c.ServiceImages) != 0 {
+			if activationErr := startServiceJob(c, true); activationErr != nil {
+				reply.Error = "candidate activation unavailable"
+			}
+		}
 		encoded, _ := encodeResponse(reply, c.Key)
 		file.Write(encoded)
 		file.Close()
@@ -304,6 +321,12 @@ func main() {
 		}
 	} else if err == nil && len(os.Args) == 2 && os.Args[1] == "check-storage" {
 		_, err = status(c)
+	} else if err == nil && len(os.Args) == 2 && os.Args[1] == "stop-services" {
+		if len(c.ServiceImages) != 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 70*time.Second)
+			err = stopServiceContainers(ctx)
+			cancel()
+		}
 	} else if err == nil {
 		if _, storageErr := status(c); storageErr == nil {
 			_ = recordOperation(dataRoot, c.ReleaseID, "boot", "started")
@@ -328,6 +351,11 @@ func main() {
 		if _, included := c.Artifacts["runtimeKit.tar"]; included {
 			if _, readyErr := os.Stat("/opt/fbd/runtime-ready.json"); os.IsNotExist(readyErr) {
 				_ = startRuntimeJob(c)
+			}
+		}
+		if len(c.ServiceImages) != 0 && !jobRunning() {
+			if serviceErr := startServiceJob(c, false); serviceErr != nil {
+				fmt.Fprintln(os.Stderr, "FBD service preparation unavailable")
 			}
 		}
 		err = serve(c)

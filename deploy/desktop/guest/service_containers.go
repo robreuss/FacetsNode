@@ -19,6 +19,18 @@ type serviceContainer struct {
 	}
 }
 
+func candidateServicesReady(states map[string]string) bool {
+	if len(states) != len(imageNames) || states["tor"] != "withheld" {
+		return false
+	}
+	for _, name := range imageNames {
+		if name != "tor" && states[name] != "ready" {
+			return false
+		}
+	}
+	return true
+}
+
 func expectedContainerImages(project string) map[string]string {
 	if project == deviceProject {
 		return map[string]string{"postgres": "postgres", "box-postgres": "postgres", "server": "device-sync", "controller": "box-controller", "onion-ingress": "caddy", "tor": "tor"}

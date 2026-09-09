@@ -73,4 +73,25 @@ Normal serving is unchanged unless the service-specific boolean is explicitly
 enabled. New maintenance-bearing source/image evidence must be recorded separately
 from the frozen `0d02383d` native acceptance; Proxmox remains untouched.
 
+`runtime-20` exported `serviceKit-5.tar`, SHA-256
+`65c7929e61d6e4cfdf1f428de94dc1bd546c1a4cc3f8136b5e5225c501872f93`,
+from service source `40713ff96557f069f9cb7d780bc7ada60db06ce7`, tree
+`cf1facb4128462822f0d1264bd74c861aa826a11`. Its isolated runtime acceptance
+adds actual candidate readiness and GET/POST/stream rejection probes on both
+servers, repeated candidate startup, then restart in normal mode retaining the
+controller identity and claimed state. No Tor publication or client Sync was
+performed. The earlier attempt failed because a source-archive test expected
+checkout Git metadata; it now creates its own committed temporary repository,
+including inside the existing Docker build. No tests were skipped to publish it.
+
+Installed service orchestration is now staged behind the host's service-install
+gate. It prepares verified images, records independently owned persistent
+volumes, initializes the existing controller and starts the two deployments in
+candidate mode before attended activation. Random volume identity labels prevent
+missing/replaced Docker volumes from being silently substituted. Readiness
+aggregates all deployments (one healthy database cannot mask another's failure),
+and explicit shutdown stops Tor, applications/management, then databases.
+These newly wired production functions still need a signed installed-appliance
+runtime acceptance; the kit's disposable fixtures do not prove that path.
+
 No Proxmox deployment or Spaces Sync task is accessed by these scripts.

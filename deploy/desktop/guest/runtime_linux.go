@@ -110,7 +110,6 @@ func startRuntimeJob(c configuration) error {
 			_ = os.WriteFile(dataRoot+"/staging/buildLog.tar", b, 0600)
 		}
 		runtimeJob.Lock()
-		defer runtimeJob.Unlock()
 		runtimeJob.state.State = "succeeded"
 		runtimeJob.state.Step = "runtime prepared"
 		if err != nil {
@@ -118,6 +117,10 @@ func startRuntimeJob(c configuration) error {
 			runtimeJob.state.Step = "runtime preparation failed; private build log available"
 		}
 		_ = recordOperation(dataRoot, c.ReleaseID, "prepareRuntime", runtimeJob.state.State)
+		runtimeJob.Unlock()
+		if err == nil && len(c.ServiceImages) != 0 {
+			_ = startServiceJob(c, false)
+		}
 	}()
 	return nil
 }

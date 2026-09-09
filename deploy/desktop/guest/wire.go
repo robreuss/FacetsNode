@@ -28,18 +28,20 @@ type response struct {
 	Chunk    []byte            `json:"chunk,omitempty"`
 }
 type health struct {
-	Version        int               `json:"version"`
-	InstallationID string            `json:"installationID"`
-	DataID         string            `json:"dataID"`
-	ReleaseID      string            `json:"releaseID"`
-	DataMounted    bool              `json:"dataMounted"`
-	FreeBytes      uint64            `json:"freeBytes"`
-	TotalBytes     uint64            `json:"totalBytes"`
-	Sentinel       string            `json:"sentinel"`
-	Services       map[string]string `json:"services"`
-	IngressEnabled bool              `json:"ingressEnabled"`
-	Runtime        map[string]string `json:"runtime,omitempty"`
-	Job            *jobState         `json:"job,omitempty"`
+	Version         int               `json:"version"`
+	InstallationID  string            `json:"installationID"`
+	DataID          string            `json:"dataID"`
+	ReleaseID       string            `json:"releaseID"`
+	DataMounted     bool              `json:"dataMounted"`
+	FreeBytes       uint64            `json:"freeBytes"`
+	TotalBytes      uint64            `json:"totalBytes"`
+	Sentinel        string            `json:"sentinel"`
+	Services        map[string]string `json:"services"`
+	IngressEnabled  bool              `json:"ingressEnabled"`
+	ServiceMode     string            `json:"serviceMode,omitempty"`
+	ServiceIdentity string            `json:"serviceIdentity,omitempty"`
+	Runtime         map[string]string `json:"runtime,omitempty"`
+	Job             *jobState         `json:"job,omitempty"`
 }
 
 type jobState struct {
