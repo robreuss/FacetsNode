@@ -218,6 +218,32 @@ func serve(c configuration) error {
 		}
 		h, err := status(c)
 		reply := response{ID: r.ID, Status: h}
+		if r.Operation == "openManagement" {
+			admitted := false
+			if err == nil && !jobRunning() {
+				select {
+				case managementSlots <- struct{}{}:
+					admitted = true
+				default:
+				}
+			}
+			if admitted {
+				connection, openErr := openManagement(c)
+				if openErr == nil {
+					encoded, _ := encodeResponse(response{ID: r.ID}, c.Key)
+					if _, writeErr := file.Write(encoded); writeErr == nil {
+						go relayManagement(file, connection)
+						continue
+					}
+					connection.Close()
+				}
+				<-managementSlots
+			}
+			rejected, _ := encodeResponse(response{ID: r.ID, Error: "controller management unavailable"}, c.Key)
+			file.Write(rejected)
+			file.Close()
+			continue
+		}
 		if err != nil {
 			reply.Status = &health{Version: 1, InstallationID: c.InstallationID, DataID: c.DataID, ReleaseID: c.ReleaseID, Services: map[string]string{}}
 			if r.Operation == "activate" {
