@@ -66,5 +66,5 @@ for name in device-sync box-controller shared-spaces tor postgres caddy; do
 done
 jq -n --arg revision "$revision" --arg tree "$tree" --slurpfile images "$kit/images.json" \
  '{version:1,architecture:"arm64",sourceRevision:$revision,sourceTree:$tree,images:$images[0],acceptance:{dockerfileTests:"passed",serviceRuntime:"not-run",spacesSync:"not-run"}}' > "$kit/service-release.json"
-tar -cf /srv/facets-box-data/staging/serviceKit.tar.new -C "$kit" images recipes images.json service-release.json
-mv /srv/facets-box-data/staging/serviceKit.tar.new /srv/facets-box-data/staging/serviceKit.tar
+# The agent verifies the entire kit and the rendered deployment boundary before
+# publishing an export. A failed build must not publish a partly accepted kit.

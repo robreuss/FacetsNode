@@ -229,6 +229,33 @@ func startServiceBuild(c configuration) error {
 					expected[name] = image.Digest
 				}
 				_, err = verifyServiceKit(filepath.Join(work, "kit"), expected)
+				if err == nil {
+					err = validateBuiltServiceKit(ctx, work, produced)
+				}
+				if err == nil {
+					var record map[string]any
+					if json.Unmarshal(b, &record) != nil {
+						err = errors.New("invalid acceptance record")
+					} else {
+						record["acceptance"] = map[string]string{"dockerfileTests": "passed", "ociVerification": "passed", "renderedComposeBoundary": "passed", "ingressConfiguration": "passed", "serviceRuntime": "not-run", "spacesSync": "not-run"}
+						err = writeJSONFile(filepath.Join(work, "kit/service-release.json"), record)
+					}
+				}
+				if err == nil {
+					archive := filepath.Join(work, "accepted-serviceKit.tar")
+					_, err = privateOutput(ctx, "/usr/bin/tar", "-cf", archive, "-C", filepath.Join(work, "kit"), "images", "recipes", "images.json", "service-release.json")
+					if err == nil {
+						err = os.Rename(archive, dataRoot+"/staging/serviceKit.tar")
+					}
+				}
+			}
+		}
+		if err != nil {
+			// Only structural appliance errors reach this record. Fixed private
+			// command wrappers never include command arguments or configuration.
+			if f, e := os.OpenFile(dataRoot+"/staging/buildLog.tar", os.O_APPEND|os.O_WRONLY, 0600); e == nil {
+				_, _ = fmt.Fprintln(f, "Build acceptance:", err)
+				f.Close()
 			}
 		}
 		runtimeJob.Lock()

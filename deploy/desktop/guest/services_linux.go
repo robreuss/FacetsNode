@@ -241,22 +241,30 @@ func writeServiceConfiguration(ctx context.Context, c configuration, images map[
 }
 
 func composeCommand(ctx context.Context, project string, args ...string) ([]byte, error) {
+	return composeCommandAt(ctx, project, "/opt/fbd/service-kit", "/opt/fbd", args...)
+}
+
+func composeCommandAt(ctx context.Context, project, kit, environmentDirectory string, args ...string) ([]byte, error) {
 	kind := "device-sync"
 	if project == sharedProject {
 		kind = "shared-spaces"
 	} else if project != deviceProject {
 		return nil, errors.New("unknown deployment")
 	}
-	base := []string{"compose", "--project-name", project, "--env-file", "/opt/fbd/" + kind + ".env"}
+	base := []string{"compose", "--project-name", project, "--env-file", filepath.Join(environmentDirectory, kind+".env")}
 	for _, suffix := range []string{".compose.yaml", ".onion.yaml", ".desktop.yaml"} {
-		base = append(base, "-f", "/opt/fbd/service-kit/recipes/"+kind+suffix)
+		base = append(base, "-f", filepath.Join(kit, "recipes", kind+suffix))
 	}
 	return privateOutput(ctx, "/usr/bin/docker", append(base, args...)...)
 }
 
 func validateServiceRecipes(ctx context.Context, images map[string]string) error {
+	return validateRecipesAt(ctx, "/opt/fbd/service-kit", "/opt/fbd", images, images["caddy"])
+}
+
+func validateRecipesAt(ctx context.Context, kit, environmentDirectory string, images map[string]string, caddy string) error {
 	for _, project := range []string{deviceProject, sharedProject} {
-		b, err := composeCommand(ctx, project, "config", "--format", "json")
+		b, err := composeCommandAt(ctx, project, kit, environmentDirectory, "config", "--format", "json")
 		if err != nil {
 			return fmt.Errorf("render %s: %w", project, err)
 		}
@@ -265,7 +273,7 @@ func validateServiceRecipes(ctx context.Context, images map[string]string) error
 		}
 	}
 	for _, name := range []string{"Box", "Group"} {
-		b, err := privateOutput(ctx, "/usr/bin/docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--entrypoint", "/usr/bin/caddy", "--env", "FACETS_ONION_INGRESS_TOKEN=validation-only", "--mount", "type=bind,src=/opt/fbd/service-kit/recipes,dst=/etc/fbd,readonly", images["caddy"], "adapt", "--config", "/etc/fbd/"+name+".Caddyfile", "--adapter", "caddyfile")
+		b, err := privateOutput(ctx, "/usr/bin/docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--entrypoint", "/usr/bin/caddy", "--env", "FACETS_ONION_INGRESS_TOKEN=validation-only", "--mount", "type=bind,src="+filepath.Join(kit, "recipes")+",dst=/etc/fbd,readonly", caddy, "adapt", "--config", "/etc/fbd/"+name+".Caddyfile", "--adapter", "caddyfile")
 		if err != nil {
 			return fmt.Errorf("validate %s ingress recipe: %w", name, err)
 		}
@@ -288,4 +296,37 @@ func validateServiceRecipes(ctx context.Context, images map[string]string) error
 		}
 	}
 	return nil
+}
+
+// Build-time validation uses disposable fixture identities and renders the
+// exact kit recipes. It never creates real service volumes or deploys the Box.
+func validateBuiltServiceKit(ctx context.Context, work string, release serviceRelease) error {
+	root := filepath.Join(work, "validation")
+	if e := os.MkdirAll(root, 0700); e != nil {
+		return e
+	}
+	identity, e := initializeApplianceIdentity(root, "build-validation", strings.Repeat("a", 56)+".onion", strings.Repeat("b", 56)+".onion")
+	if e != nil {
+		return e
+	}
+	images := map[string]string{}
+	for name, image := range release.Images {
+		images[name] = image.Digest
+	}
+	d, g, e := serviceEnvironment(dataRoot, "/opt/fbd/service-kit", identity, images, true)
+	if e != nil {
+		return e
+	}
+	for name, env := range map[string]map[string]string{"device-sync": d, "shared-spaces": g} {
+		b, e := encodeEnvironment(env)
+		if e != nil {
+			return e
+		}
+		if e = os.WriteFile(filepath.Join(root, name+".env"), b, 0600); e != nil {
+			return e
+		}
+	}
+	// The fixed pulled reference was bound to its ARM64 manifest during export.
+	// This validation container has no network, runtime socket or appliance data.
+	return validateRecipesAt(ctx, filepath.Join(work, "kit"), root, images, "caddy:2.10.2-alpine")
 }
