@@ -1,0 +1,68 @@
+package main
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+)
+
+const maximumFrame = 64 * 1024
+
+type frame struct {
+	Payload        []byte `json:"payload"`
+	Authentication []byte `json:"authentication"`
+}
+type request struct {
+	ID        string `json:"id"`
+	Operation string `json:"operation"`
+}
+type response struct {
+	ID     string  `json:"id"`
+	Status *health `json:"status,omitempty"`
+	Error  string  `json:"error,omitempty"`
+}
+type health struct {
+	Version        int               `json:"version"`
+	InstallationID string            `json:"installationID"`
+	DataID         string            `json:"dataID"`
+	ReleaseID      string            `json:"releaseID"`
+	DataMounted    bool              `json:"dataMounted"`
+	FreeBytes      uint64            `json:"freeBytes"`
+	TotalBytes     uint64            `json:"totalBytes"`
+	Sentinel       string            `json:"sentinel"`
+	Services       map[string]string `json:"services"`
+	IngressEnabled bool              `json:"ingressEnabled"`
+}
+
+func decodeRequest(data, key []byte) (request, error) {
+	var f frame
+	var r request
+	if len(data) > maximumFrame || json.Unmarshal(data, &f) != nil {
+		return r, errors.New("invalid frame")
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write(f.Payload)
+	if !hmac.Equal(mac.Sum(nil), f.Authentication) {
+		return r, errors.New("authentication failed")
+	}
+	if json.Unmarshal(f.Payload, &r) != nil || len(r.ID) != 36 {
+		return r, errors.New("invalid request")
+	}
+	switch r.Operation {
+	case "status", "shutdown", "activate":
+	default:
+		return r, errors.New("unknown operation")
+	}
+	return r, nil
+}
+func encodeResponse(r response, key []byte) ([]byte, error) {
+	payload, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write(payload)
+	data, err := json.Marshal(frame{payload, mac.Sum(nil)})
+	return append(data, '\n'), err
+}
