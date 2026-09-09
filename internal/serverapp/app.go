@@ -33,6 +33,13 @@ func Main(service config.Service) {
 		healthcheck(os.Args[2])
 		return
 	}
+	if len(os.Args) == 3 && os.Args[1] == "candidate-healthcheck" &&
+		(service == config.DeviceSync || service == config.SharedSpaces) {
+		if !checkHealth(os.Args[2], true) {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "issue-account-admission" {
 		if err := issueAccountAdmission(service, os.Args[2:]); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "issue Device Sync account admission: %v\n", err)
@@ -451,27 +458,32 @@ func Main(service config.Service) {
 	}
 	relayWakeListener := postgres.NewRelayWakeListener(pool)
 	api.SetRelayWakeNotifier(postgres.NewRelayWakeNotifier(pool))
-	relayWakeContext, cancelRelayWake := context.WithCancel(rootContext)
-	defer cancelRelayWake()
-	relayWakeDone := make(chan struct{})
-	go func() {
-		defer close(relayWakeDone)
-		relayWakeListener.Run(relayWakeContext, api.ReceiveRelayWake, func(err error) {
-			logger.Warn("cross-instance relay wake listener unavailable", "error", err)
-		})
-	}()
+	backgroundContext, cancelBackground := context.WithCancel(rootContext)
+	defer cancelBackground()
+	backgroundDone := startServingBackground(backgroundContext, configuration.CandidateMaintenance,
+		func(ctx context.Context) {
+			relayWakeListener.Run(ctx, api.ReceiveRelayWake, func(err error) {
+				logger.Warn("cross-instance relay wake listener unavailable", "error", err)
+			})
+		},
+		func(ctx context.Context) { cleanupLoop(ctx, logger, store, configuration.CleanupPeriod) },
+		func(ctx context.Context) {
+			blobMaintenanceLoop(ctx, logger, blobMaintenanceStore, blobContentStore, blobUploadContentStore, configuration.CleanupPeriod, configuration.BlobOrphanGrace)
+		},
+	)
+	if configuration.CandidateMaintenance {
+		logger.Info("candidate maintenance enabled; application serving and background workers withheld; startup recovery and schema migration permitted")
+	}
 
 	httpServer := &http.Server{
 		Addr:              configuration.ListenAddress,
-		Handler:           api.Handler(),
+		Handler:           candidateMaintenanceHandler(api.Handler(), configuration.CandidateMaintenance),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       configuration.TransferPeriod,
 		WriteTimeout:      configuration.TransferPeriod,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 * 1_024,
 	}
-	go cleanupLoop(rootContext, logger, store, configuration.CleanupPeriod)
-	go blobMaintenanceLoop(rootContext, logger, blobMaintenanceStore, blobContentStore, blobUploadContentStore, configuration.CleanupPeriod, configuration.BlobOrphanGrace)
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info("Facets server listening", "address", configuration.ListenAddress, "go_version", runtime.Version())
@@ -493,11 +505,11 @@ func Main(service config.Service) {
 		logger.Error("graceful shutdown failed", "error", err)
 		os.Exit(1)
 	}
-	cancelRelayWake()
+	cancelBackground()
 	select {
-	case <-relayWakeDone:
+	case <-backgroundDone:
 	case <-shutdownContext.Done():
-		logger.Warn("cross-instance relay wake listener shutdown timed out")
+		logger.Warn("background worker shutdown timed out")
 	}
 	logger.Info("shutdown complete")
 }
@@ -678,10 +690,17 @@ func cleanupLoop(ctx context.Context, logger *slog.Logger, store expiryStore, pe
 }
 
 func healthcheck(url string) {
-	client := http.Client{Timeout: 2 * time.Second}
-	response, err := client.Get(url)
-	if err != nil || response.StatusCode != http.StatusOK {
+	if !checkHealth(url, false) {
 		os.Exit(1)
 	}
-	_ = response.Body.Close()
+}
+
+func checkHealth(url string, candidate bool) bool {
+	client := http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	return response.StatusCode == http.StatusOK && (!candidate || response.Header.Get(servingModeHeader) == "candidate")
 }

@@ -39,11 +39,16 @@ Onion continuity records now bind both key files and the checksum-verified
 hostname. Interrupted initialization containers are reconciled only after
 matching their name, image and installation/operation ownership labels.
 
-The next build gate runs the existing recipes with disposable project names,
-databases and identities, with Tor stopped and no published ports. It exercises
+`runtime-19` passed the existing service recipes with disposable project names,
+databases and identities, with Tor stopped and no published ports. It exercised
 controller initialization/claim over verified HTTPS on its private Unix socket,
-and container recreation with retained volumes. That code is cross-compiled;
-its live acceptance is not yet established. The named `openManagement` stream
+and container recreation with retained volumes, Box ID/key and claimed state.
+The exported `serviceKit-4.tar` SHA-256 is
+`57d0dd2eb410ade48f84515bdec6d30c06ded9b1fee5637ea25a1f8b6b639a78`.
+The first attempts exposed Docker image-root naming collisions; verified imports
+now use unique per-image references without changing signed OCI content digests.
+This is isolated build acceptance, not an installed Box or client Sync proof.
+The named `openManagement` stream
 also requires a matching active release record and can only reach the fixed
 controller-only Unix socket. No current foundation image creates that record.
 
@@ -52,7 +57,20 @@ initialization/claim and private activation-code UI, controller-only pinned HTTP
 administration through the host, and installed-service health/persistence checks.
 Before service-bearing updates are accepted, prove bounded candidate startup,
 withheld ingress/background activity, and consistent database/system/data
-rollback. The existing cleanup timers have no initial tick; a longer cleanup
-period is not a general read-only service mode.
+rollback.
+
+Spaces Sync confirmed its committed ordinary-Space/signed-update handoff
+(`fbbf0b18`, `c8e42870` in Facets) permits the narrow default-off maintenance
+integration. `FACETS_DEVICE_SYNC_CANDIDATE_MAINTENANCE` and
+`FACETS_SHARED_SPACES_CANDIDATE_MAINTENANCE` fence application HTTP/stream
+dispatch and prevent starting relay-wake, expiry and blob-maintenance workers.
+Only exact GET/HEAD `/livez` and `/readyz` routes remain, with
+`X-Facets-Serving-Mode: candidate`; a separate `candidate-healthcheck` command
+requires that marker plus successful readiness. Startup schema migration and
+durable authority recovery remain permitted. This is **not database read-only**,
+and does not replace the appliance's ingress fence/consistent rollback disks.
+Normal serving is unchanged unless the service-specific boolean is explicitly
+enabled. New maintenance-bearing source/image evidence must be recorded separately
+from the frozen `0d02383d` native acceptance; Proxmox remains untouched.
 
 No Proxmox deployment or Spaces Sync task is accessed by these scripts.

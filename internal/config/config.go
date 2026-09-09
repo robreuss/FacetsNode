@@ -16,7 +16,10 @@ import (
 const maximumBackupCustodyChunkBytes int64 = 64 * 1024 * 1024
 
 type Config struct {
-	Service                         Service
+	Service Service
+	// CandidateMaintenance permits startup recovery/schema migration and health
+	// checks, but withholds application serving and background maintenance.
+	CandidateMaintenance            bool
 	ListenAddress                   string
 	DatabaseURL                     string
 	ShutdownPeriod                  time.Duration
@@ -141,6 +144,15 @@ func Load(service Service) (Config, error) {
 		BackupMaximumStagingBytes:       2 << 40,
 		BackupMaximumCommittedBytes:     20 << 40,
 		TrafficLimits:                   traffic.DefaultLimits(),
+	}
+	if service == DeviceSync || service == SharedSpaces {
+		name := prefix + "_CANDIDATE_MAINTENANCE"
+		if value := os.Getenv(name); value != "" {
+			configuration.CandidateMaintenance, err = strconv.ParseBool(value)
+			if err != nil {
+				return Config{}, fmt.Errorf("%s must be a boolean", name)
+			}
+		}
 	}
 	if service == BackupCustody {
 		configuration.BlobRoot = ""
