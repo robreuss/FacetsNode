@@ -28,10 +28,11 @@ func TestServiceKitVerifiesManifestConfigLayersIndexAndArchitecture(t *testing.T
 			}
 			return digest
 		}
-		config := blob([]byte(`{"os":"linux","architecture":"arm64"}`))
+		configBytes := []byte(`{"os":"linux","architecture":"arm64"}`)
+		config := blob(configBytes)
 		layer := []byte("a compressed layer fixture")
 		layerDigest := blob(layer)
-		manifest, _ := json.Marshal(map[string]any{"schemaVersion": 2, "config": map[string]any{"digest": config, "size": 40}, "layers": []map[string]any{{"digest": layerDigest, "size": len(layer)}}})
+		manifest, _ := json.Marshal(map[string]any{"schemaVersion": 2, "config": map[string]any{"digest": config, "size": len(configBytes)}, "layers": []map[string]any{{"digest": layerDigest, "size": len(layer)}}})
 		digest := blob(manifest)
 		expected[name] = digest
 		release.Images[name] = serviceImage{Digest: digest, Config: config}

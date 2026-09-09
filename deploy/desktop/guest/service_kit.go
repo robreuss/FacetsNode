@@ -79,6 +79,9 @@ func verifyServiceKit(root string, expected map[string]string) (serviceRelease, 
 		if e != nil {
 			return release, e
 		}
+		if int64(len(config)) != manifest.Config.Size {
+			return release, errors.New("OCI config size mismatch")
+		}
 		var platform struct {
 			OS           string `json:"os"`
 			Architecture string `json:"architecture"`

@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -23,10 +24,11 @@ import (
 )
 
 type serviceIdentity struct {
-	DeploymentID string `json:"deploymentID"`
-	Onion        string `json:"onion"`
-	Endpoint     string `json:"endpoint"`
-	TLSSPKI      string `json:"tlsSPKI"`
+	DeploymentID          string `json:"deploymentID"`
+	Onion                 string `json:"onion"`
+	Endpoint              string `json:"endpoint"`
+	TLSSPKI               string `json:"tlsSPKI"`
+	SigningKeyFingerprint string `json:"signingKeyFingerprint"`
 }
 type applianceIdentity struct {
 	Version        int               `json:"version"`
@@ -124,7 +126,47 @@ func makeServiceIdentity(directory, onion, path string) (serviceIdentity, error)
 	if e = privateWrite(filepath.Join(directory, "state/bindings.json"), []byte(`{"bindings":[],"version":1}`)); e != nil {
 		return out, e
 	}
-	return serviceIdentity{DeploymentID: id.String(), Onion: onion, Endpoint: endpoint, TLSSPKI: pin}, nil
+	return serviceIdentity{DeploymentID: id.String(), Onion: onion, Endpoint: endpoint, TLSSPKI: pin, SigningKeyFingerprint: signer.SigningKeyFingerprint()}, nil
+}
+
+func validateServiceIdentity(directory string, identity serviceIdentity) error {
+	id, e := uuid.Parse(identity.DeploymentID)
+	if e != nil {
+		return e
+	}
+	signer, e := serviceauthority.LoadDeploymentSigner(id, filepath.Join(directory, "keys/deployment-signing-key"))
+	if e != nil {
+		return e
+	}
+	if signer.SigningKeyFingerprint() != identity.SigningKeyFingerprint {
+		return errors.New("deployment key changed")
+	}
+	policy, e := serviceauthority.LoadDeploymentOfferTemplate(filepath.Join(directory, "policy/deployment-routes.json"), signer)
+	if e != nil || len(policy.Deployment.Routes) != 1 || policy.Deployment.Routes[0].Endpoint != identity.Endpoint {
+		return errors.New("deployment route changed")
+	}
+	pin := policy.Deployment.Routes[0].ServerAuthentication.PinnedSPKISHA256
+	if pin == nil || *pin != identity.TLSSPKI {
+		return errors.New("TLS route pin changed")
+	}
+	cert, e := tls.LoadX509KeyPair(filepath.Join(directory, "tls/server.crt"), filepath.Join(directory, "tls/server.key"))
+	if e != nil {
+		return e
+	}
+	leaf, e := x509.ParseCertificate(cert.Certificate[0])
+	if e != nil || leaf.VerifyHostname(identity.Onion) != nil {
+		return errors.New("TLS identity changed")
+	}
+	sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+	if hex.EncodeToString(sum[:]) != identity.TLSSPKI {
+		return errors.New("TLS key changed")
+	}
+	bindingsPath := filepath.Join(directory, "state/bindings.json")
+	info, e := os.Lstat(bindingsPath)
+	if e != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return errors.New("authority state unavailable")
+	}
+	return nil
 }
 
 // The complete first-boot configuration is published atomically. An existing
@@ -136,6 +178,12 @@ func initializeApplianceIdentity(root, installationID, boxOnion, groupOnion stri
 		b, e := os.ReadFile(filepath.Join(final, "identity.json"))
 		if e != nil || json.Unmarshal(b, &out) != nil || out.Version != 1 || out.InstallationID != installationID || out.DeviceSync.Onion != boxOnion || out.SharedSpaces.Onion != groupOnion {
 			return out, errors.New("existing configuration identity inconsistent")
+		}
+		if e = validateServiceIdentity(filepath.Join(final, "device-sync"), out.DeviceSync); e != nil {
+			return out, e
+		}
+		if e = validateServiceIdentity(filepath.Join(final, "shared-spaces"), out.SharedSpaces); e != nil {
+			return out, e
 		}
 		return out, nil
 	} else if !os.IsNotExist(e) {

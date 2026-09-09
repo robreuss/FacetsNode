@@ -35,3 +35,22 @@ func TestApplianceIdentityIsIndependentPersistentAndFailsClosed(t *testing.T) {
 		t.Fatal("replaced corrupt configuration")
 	}
 }
+
+func TestMissingDeploymentKeyIsNeverRegenerated(t *testing.T) {
+	root := t.TempDir()
+	box := strings.Repeat("a", 56) + ".onion"
+	group := strings.Repeat("b", 56) + ".onion"
+	if _, e := initializeApplianceIdentity(root, "installation", box, group); e != nil {
+		t.Fatal(e)
+	}
+	key := filepath.Join(root, "configuration/device-sync/keys/deployment-signing-key")
+	if e := os.Remove(key); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := initializeApplianceIdentity(root, "installation", box, group); e == nil {
+		t.Fatal("accepted missing key")
+	}
+	if _, e := os.Stat(key); !os.IsNotExist(e) {
+		t.Fatal("regenerated missing identity")
+	}
+}
