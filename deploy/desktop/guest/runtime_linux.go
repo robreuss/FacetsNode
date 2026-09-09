@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -279,6 +280,9 @@ func runtimeHealth(h *health) {
 	runtimeJob.Unlock()
 	if b, err := os.ReadFile("/opt/fbd/runtime-ready.json"); err == nil {
 		_ = json.Unmarshal(b, &h.Runtime)
+		if version, e := os.ReadFile("/proc/sys/kernel/osrelease"); e == nil && h.Runtime != nil {
+			h.Runtime["kernel"] = strings.TrimSpace(string(version))
+		}
 	}
 }
 

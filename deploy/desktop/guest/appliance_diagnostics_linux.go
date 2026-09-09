@@ -22,11 +22,16 @@ func captureApplianceLog() error {
 	defer f.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	command := boundedCommand(ctx, "/usr/bin/journalctl", "--no-pager", "--lines=300", "--output=short-monotonic", "-u", "fbd-guest", "-u", "fbd-data", "-u", "docker", "-u", "containerd")
 	output := &boundedBuildLog{file: f, remaining: 1024 * 1024}
-	command.Stdout, command.Stderr = output, output
-	if err = command.Run(); err != nil {
-		return err
+	for _, args := range [][]string{
+		{"--no-pager", "--lines=300", "--output=short-monotonic", "-u", "fbd-guest", "-u", "fbd-data", "-u", "docker", "-u", "containerd"},
+		{"--no-pager", "--lines=200", "--output=short-monotonic", "--dmesg"},
+		{"--no-pager", "--lines=100", "--output=short-monotonic", "--dmesg", "--boot=-1"},
+	} {
+		command := boundedCommand(ctx, "/usr/bin/journalctl", args...)
+		command.Stdout, command.Stderr = output, output
+		// A first boot has no previous journal. Keep the available evidence.
+		_ = command.Run()
 	}
 	return f.Sync()
 }
