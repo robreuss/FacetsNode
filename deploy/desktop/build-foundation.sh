@@ -35,10 +35,12 @@ qemu-img convert -f qcow2 -O raw "$base" "$output/system.raw"
 qemu-img resize -f raw "$output/system.raw" 16G
 (cd "$staging" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$output/guest-agent" ./deploy/desktop/guest)
 cp "$staging/deploy/desktop/guest-bootstrap.sh" "$output/guest-bootstrap.sh"
-if [[ -f "$staging/deploy/desktop/guest-runtime.sh" ]]; then
-  cp "$staging/deploy/desktop/guest-runtime.sh" "$output/guest-runtime.sh"
-  chmod 600 "$output/guest-runtime.sh"
-fi
+for recipe in guest-runtime.sh guest-build.sh; do
+  if [[ -f "$staging/deploy/desktop/$recipe" ]]; then
+    cp "$staging/deploy/desktop/$recipe" "$output/$recipe"
+    chmod 600 "$output/$recipe"
+  fi
+done
 chmod 600 "$output/system.raw" "$output/guest-agent" "$output/guest-bootstrap.sh"
 "$fbdctl" sign "$output" "$key" "$release" "$revision" "$tree"
 echo "Foundation release prepared from $revision. No Facets workload containers are included."

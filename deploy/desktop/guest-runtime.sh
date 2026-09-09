@@ -10,6 +10,12 @@ install -d -m 0700 "$runtime_root/debs" /etc/docker /etc/containerd
 # Package postinst hooks cannot launch an unconfigured daemon.
 systemctl mask --runtime docker.service docker.socket containerd.service
 trap 'systemctl unmask --runtime docker.service docker.socket containerd.service' EXIT
+# A kit produced on the same immutable Ubuntu base supplies dependencies too.
+# Offline restore fails closed if its dependency closure is incomplete.
+if [[ -f "$runtime_root/SHA256SUMS" ]]; then
+  (cd "$runtime_root" && sha256sum --check SHA256SUMS)
+  apt-get --no-download --no-install-recommends install -y "$runtime_root"/debs/*.deb
+else
 cat > /etc/apt/apt.conf.d/99fbd-cache <<'APT'
 Binary::apt::APT::Keep-Downloaded-Packages "true";
 APT::Keep-Downloaded-Packages "true";
@@ -30,6 +36,11 @@ apt-get install -y \
  'docker-buildx-plugin=0.31.1-1~ubuntu.24.04~noble' \
  'docker-compose-plugin=5.5.1-1~ubuntu.24.04~noble' skopeo jq
 apt-mark hold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+cp /var/cache/apt/archives/*.deb "$runtime_root/debs/"
+dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > "$runtime_root/packages.tsv"
+(cd "$runtime_root" && sha256sum debs/*.deb > SHA256SUMS)
+fi
+apt-mark hold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 cat > /etc/docker/daemon.json <<'JSON'
 {"data-root":"/srv/facets-box-data/docker","live-restore":false,"log-driver":"local","log-opts":{"max-size":"10m","max-file":"3"}}
 JSON
@@ -45,9 +56,9 @@ systemctl enable --now containerd.service docker.service
 [[ $(docker info --format '{{.DockerRootDir}}') == /srv/facets-box-data/docker ]]
 [[ $(docker version --format '{{.Server.Version}}') == 29.8.0 ]]
 [[ $(docker compose version --short) == 5.5.1 ]]
-cp /var/cache/apt/archives/*.deb "$runtime_root/debs/"
-dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > "$runtime_root/packages.tsv"
-(cd "$runtime_root" && sha256sum debs/*.deb > SHA256SUMS)
+install -d -m 0700 /srv/facets-box-data/staging
+tar -cf /srv/facets-box-data/staging/runtimeKit.tar.new -C "$runtime_root" debs SHA256SUMS packages.tsv
+mv /srv/facets-box-data/staging/runtimeKit.tar.new /srv/facets-box-data/staging/runtimeKit.tar
 cat > /opt/fbd/runtime-ready.json <<'JSON'
 {"docker":"29.8.0","compose":"5.5.1","containerd":"2.3.5","durableRoots":"verified"}
 JSON

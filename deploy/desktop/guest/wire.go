@@ -14,13 +14,18 @@ type frame struct {
 	Authentication []byte `json:"authentication"`
 }
 type request struct {
-	ID        string `json:"id"`
-	Operation string `json:"operation"`
+	ID        string            `json:"id"`
+	Operation string            `json:"operation"`
+	Artifact  *transferArtifact `json:"artifact,omitempty"`
+	Offset    int64             `json:"offset,omitempty"`
+	Chunk     []byte            `json:"chunk,omitempty"`
 }
 type response struct {
-	ID     string  `json:"id"`
-	Status *health `json:"status,omitempty"`
-	Error  string  `json:"error,omitempty"`
+	ID       string            `json:"id"`
+	Status   *health           `json:"status,omitempty"`
+	Error    string            `json:"error,omitempty"`
+	Artifact *transferArtifact `json:"artifact,omitempty"`
+	Chunk    []byte            `json:"chunk,omitempty"`
 }
 type health struct {
 	Version        int               `json:"version"`
@@ -58,7 +63,7 @@ func decodeRequest(data, key []byte) (request, error) {
 		return r, errors.New("invalid request")
 	}
 	switch r.Operation {
-	case "status", "shutdown", "activate", "prepareRuntime":
+	case "status", "shutdown", "activate", "prepareRuntime", "uploadStart", "uploadChunk", "uploadFinish", "artifactInfo", "artifactRead", "buildServices":
 	default:
 		return r, errors.New("unknown operation")
 	}

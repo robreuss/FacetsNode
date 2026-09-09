@@ -220,6 +220,24 @@ func serve(c configuration) error {
 				reply.Error = "runtime preparation unavailable"
 			}
 		}
+		if r.Operation == "buildServices" {
+			if buildErr := startServiceBuild(c); buildErr != nil {
+				reply.Error = "service build unavailable"
+			}
+		}
+		if strings.HasPrefix(r.Operation, "upload") || strings.HasPrefix(r.Operation, "artifact") {
+			if err != nil || jobRunning() {
+				reply.Error = "artifact transfer unavailable"
+			} else {
+				transferred, transferErr := transfer(dataRoot+"/staging", r)
+				if transferErr != nil {
+					reply.Error = "artifact transfer rejected"
+				} else {
+					reply.Artifact = transferred.Artifact
+					reply.Chunk = transferred.Chunk
+				}
+			}
+		}
 		if r.Operation == "shutdown" && jobRunning() {
 			reply.Error = "a bounded build job is still running"
 		}
