@@ -137,7 +137,7 @@ func prepareRuntimeKit(c configuration) error {
 		return e
 	}
 	defer run("/usr/bin/umount", "/run/fbd-seed")
-	sum, size, e := fileHash("/run/fbd-seed/runtimeKit.tar")
+	sum, size, e := fileHash("/run/fbd-seed/runtimekit.tar")
 	if e != nil {
 		entries, _ := os.ReadDir("/run/fbd-seed")
 		names := []string{}
@@ -152,7 +152,7 @@ func prepareRuntimeKit(c configuration) error {
 	if size > 512*1024*1024 {
 		return errors.New("runtime kit exceeds size budget")
 	}
-	source, e := os.Open("/run/fbd-seed/runtimeKit.tar")
+	source, e := os.Open("/run/fbd-seed/runtimekit.tar")
 	if e != nil {
 		return e
 	}
