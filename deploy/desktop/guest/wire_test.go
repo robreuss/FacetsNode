@@ -9,7 +9,7 @@ import (
 
 func TestAuthenticatedNamedOperations(t *testing.T) {
 	key := []byte("01234567890123456789012345678901")
-	for _, operation := range []string{"status", "shutdown", "activate", "exec"} {
+	for _, operation := range []string{"status", "shutdown", "activate", "prepareRuntime", "exec"} {
 		payload, _ := json.Marshal(request{ID: "00000000-0000-0000-0000-000000000001", Operation: operation})
 		mac := hmac.New(sha256.New, key)
 		mac.Write(payload)

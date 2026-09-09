@@ -155,9 +155,11 @@ func status(c configuration) (*health, error) {
 	if err != nil {
 		return nil, errors.New("sentinel unavailable")
 	}
-	return &health{Version: 1, InstallationID: c.InstallationID, DataID: c.DataID, ReleaseID: c.ReleaseID,
+	h := &health{Version: 1, InstallationID: c.InstallationID, DataID: c.DataID, ReleaseID: c.ReleaseID,
 		DataMounted: true, FreeBytes: stat.Bavail * uint64(stat.Bsize), TotalBytes: stat.Blocks * uint64(stat.Bsize),
-		Sentinel: string(sentinel), Services: map[string]string{}, IngressEnabled: false}, nil
+		Sentinel: string(sentinel), Services: map[string]string{}, IngressEnabled: false}
+	runtimeHealth(h)
+	return h, nil
 }
 func serve(c configuration) error {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
@@ -213,11 +215,19 @@ func serve(c configuration) error {
 				reply.Error = "storage unavailable"
 			}
 		}
-		// Foundation releases have no workloads and never claim service readiness or enable ingress.
+		if r.Operation == "prepareRuntime" {
+			if err := startRuntimeJob(c); err != nil {
+				reply.Error = "runtime preparation unavailable"
+			}
+		}
+		if r.Operation == "shutdown" && jobRunning() {
+			reply.Error = "a bounded build job is still running"
+		}
+		// Runtime preparation does not start Facets workloads or enable ingress.
 		encoded, _ := encodeResponse(reply, c.Key)
 		file.Write(encoded)
 		file.Close()
-		if r.Operation == "shutdown" {
+		if r.Operation == "shutdown" && reply.Error == "" {
 			return run("/usr/bin/systemctl", "poweroff", "--no-block")
 		}
 	}
@@ -231,6 +241,8 @@ func main() {
 		} else {
 			os.WriteFile("/opt/fbd/storage-failed", []byte("storage initialization failed"), 0600)
 		}
+	} else if err == nil && len(os.Args) == 2 && os.Args[1] == "check-storage" {
+		_, err = status(c)
 	} else if err == nil {
 		err = serve(c)
 	}

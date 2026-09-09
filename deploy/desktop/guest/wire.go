@@ -33,6 +33,14 @@ type health struct {
 	Sentinel       string            `json:"sentinel"`
 	Services       map[string]string `json:"services"`
 	IngressEnabled bool              `json:"ingressEnabled"`
+	Runtime        map[string]string `json:"runtime,omitempty"`
+	Job            *jobState         `json:"job,omitempty"`
+}
+
+type jobState struct {
+	Operation string `json:"operation"`
+	State     string `json:"state"`
+	Step      string `json:"step"`
 }
 
 func decodeRequest(data, key []byte) (request, error) {
@@ -50,7 +58,7 @@ func decodeRequest(data, key []byte) (request, error) {
 		return r, errors.New("invalid request")
 	}
 	switch r.Operation {
-	case "status", "shutdown", "activate":
+	case "status", "shutdown", "activate", "prepareRuntime":
 	default:
 		return r, errors.New("unknown operation")
 	}
