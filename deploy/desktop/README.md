@@ -100,4 +100,22 @@ checks passed; Tor had not yet become healthy in the completion snapshot, so the
 host did not claim client readiness. This persistent Box is still unclaimed;
 host-tunnel/WebKit management and actual onion application access remain gates.
 
+Both Tor instances subsequently became healthy. The persistent appliance retained
+its service fingerprint across orderly restart and the `services-2` system
+replacement. Later repeated cold boots exposed a socket/service ordering cycle
+which could drop the data-mount startup job. Guest `5fa185c` removes the early
+`docker.socket` dependency on the ordinary storage service; the daemons retain
+their storage dependency and `check-storage` preflight. Runtime preparation now
+also runs `systemd-analyze verify` before daemon startup. `services-3` with this
+guest activated successfully against the retained data disk; repeat cold-boot
+acceptance is in progress. The failed boot created no replacement storage.
+
+The host's explicit public connection export returned authenticated trust material.
+The existing Facets embedded Tor route probe reached the installed controller's
+`/facetsbox/.well-known/facets-box` through its onion address with the expected
+SPKI pin and HTTP 200. An initial request timed out before a warm retry passed.
+This is not yet authenticated client Sync acceptance. Native WebKit administration
+still requires live TLS-challenge diagnosis; the exported certificate passes the
+host's standalone certificate/SPKI, hostname and validity checks.
+
 No Proxmox deployment or Spaces Sync task is accessed by these scripts.
