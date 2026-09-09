@@ -19,11 +19,16 @@ func TestRenderedComposeBoundary(t *testing.T) {
 		}
 		services[name] = map[string]any{"image": images[kind], "pull_policy": "never", "restart": "no", "networks": map[string]any{network: nil}}
 	}
-	document := map[string]any{"name": deviceProject, "services": services, "networks": map[string]any{"private": map[string]bool{"internal": true}, "tor-egress": map[string]bool{}}}
+	document := map[string]any{"name": deviceProject, "services": services, "networks": map[string]any{"private": map[string]any{"internal": true, "name": deviceProject + "_private"}, "tor-egress": map[string]any{"name": deviceProject + "_tor-egress"}}}
 	check := func() error { b, _ := json.Marshal(document); return validateComposeBoundary(b, deviceProject, images) }
 	if e := check(); e != nil {
 		t.Fatal(e)
 	}
+	document["volumes"] = map[string]any{"data": map[string]any{"name": "another-project_data"}}
+	if check() == nil {
+		t.Fatal("accepted foreign volume")
+	}
+	delete(document, "volumes")
 	server := services["server"].(map[string]any)
 	server["ports"] = []string{"8080:8080"}
 	if check() == nil {

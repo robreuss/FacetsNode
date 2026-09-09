@@ -277,10 +277,14 @@ func composeCommand(ctx context.Context, project string, args ...string) ([]byte
 }
 
 func composeCommandAt(ctx context.Context, project, kit, environmentDirectory string, args ...string) ([]byte, error) {
+	return composeCommandNamed(ctx, project, project, kit, environmentDirectory, args...)
+}
+
+func composeCommandNamed(ctx context.Context, kindProject, project, kit, environmentDirectory string, args ...string) ([]byte, error) {
 	kind := "device-sync"
-	if project == sharedProject {
+	if kindProject == sharedProject {
 		kind = "shared-spaces"
-	} else if project != deviceProject {
+	} else if kindProject != deviceProject {
 		return nil, errors.New("unknown deployment")
 	}
 	base := []string{"compose", "--project-name", project, "--env-file", filepath.Join(environmentDirectory, kind+".env")}
@@ -367,7 +371,10 @@ func validateBuiltServiceKit(ctx context.Context, work string, release serviceRe
 	if err := validateRecipesAt(ctx, filepath.Join(work, "kit"), root, images, "caddy:2.10.2-alpine"); err != nil {
 		return err
 	}
-	return validateBuiltOnionIdentity(ctx, images["tor"])
+	if err := validateBuiltOnionIdentity(ctx, images["tor"]); err != nil {
+		return err
+	}
+	return validateBuiltServiceRuntime(ctx, work, images)
 }
 
 // A disposable build acceptance test of the actual pinned Tor image. Both runs

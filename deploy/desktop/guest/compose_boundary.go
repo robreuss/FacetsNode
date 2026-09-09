@@ -3,12 +3,19 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 )
 
 // Inspect the fully rendered (but never logged) Compose document, not just the
 // overlay text. Secret-bearing environment values stay in private memory/files.
 func validateComposeBoundary(raw []byte, project string, images map[string]string) error {
+	return validateComposeBoundaryAt(raw, project, project, images, "/srv/facets-box-data", "/opt/fbd/service-kit")
+}
+
+// Alternate roots/project names are internal disposable build fixtures, never
+// host-request parameters. They undergo the same fully rendered boundary audit.
+func validateComposeBoundaryAt(raw []byte, kind, project string, images map[string]string, root, kit string) error {
 	if len(raw) > 1024*1024 {
 		return errors.New("rendered deployment too large")
 	}
@@ -32,15 +39,33 @@ func validateComposeBoundary(raw []byte, project string, images map[string]strin
 			Restart     string
 			PullPolicy  string `json:"pull_policy"`
 		}
-		Networks map[string]struct{ Internal bool }
+		Networks map[string]struct {
+			Internal bool
+			Name     string
+			External bool
+		}
+		Volumes map[string]struct {
+			Name     string
+			External bool
+		}
 	}
 	if json.Unmarshal(raw, &rendered) != nil || rendered.Name != project {
 		return errors.New("unexpected Compose project")
 	}
+	for name, network := range rendered.Networks {
+		if network.External || network.Name != project+"_"+name {
+			return errors.New("network escapes deployment ownership")
+		}
+	}
+	for name, volume := range rendered.Volumes {
+		if volume.External || volume.Name != project+"_"+name {
+			return errors.New("volume escapes deployment ownership")
+		}
+	}
 	expected := map[string]string{"postgres": "postgres", "server": "shared-spaces", "onion-ingress": "caddy", "tor": "tor"}
-	if project == deviceProject {
+	if kind == deviceProject {
 		expected["server"], expected["controller"], expected["box-postgres"] = "device-sync", "box-controller", "postgres"
-	} else if project != sharedProject {
+	} else if kind != sharedProject {
 		return errors.New("unknown deployment")
 	}
 	active := 0
@@ -69,10 +94,15 @@ func validateComposeBoundary(raw []byte, project string, images map[string]strin
 			if mount.Type != "volume" && mount.Type != "bind" {
 				return errors.New("unexpected workload mount")
 			}
+			if mount.Type == "volume" {
+				if _, found := rendered.Volumes[mount.Source]; !found {
+					return errors.New("unowned service volume")
+				}
+			}
 			if strings.Contains(mount.Source, "docker.sock") || strings.Contains(mount.Target, "docker.sock") || mount.Target == "/" || mount.Source == "/" {
 				return errors.New("runtime authority exposed to workload")
 			}
-			if mount.Type == "bind" && !strings.HasPrefix(mount.Source, "/srv/facets-box-data/configuration/") && !strings.HasPrefix(mount.Source, "/opt/fbd/service-kit/recipes/") && mount.Source != "/srv/facets-box-data/management" {
+			if mount.Type == "bind" && !strings.HasPrefix(mount.Source, filepath.Join(root, "configuration")+"/") && !strings.HasPrefix(mount.Source, filepath.Join(kit, "recipes")+"/") && mount.Source != filepath.Join(root, "management") {
 				return errors.New("unapproved host bind mount")
 			}
 		}
