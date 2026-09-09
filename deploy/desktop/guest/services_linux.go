@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -35,6 +36,10 @@ func privateOutput(ctx context.Context, program string, args ...string) ([]byte,
 	out := &limitedOutput{remaining: 1024 * 1024}
 	command.Stdout, command.Stderr = out, io.Discard
 	if err := command.Run(); err != nil {
+		var exited *exec.ExitError
+		if errors.As(err, &exited) {
+			return nil, fmt.Errorf("private appliance operation failed (exit %d)", exited.ExitCode())
+		}
 		return nil, errors.New("private appliance operation failed")
 	}
 	return out.Bytes(), nil
@@ -273,7 +278,11 @@ func validateRecipesAt(ctx context.Context, kit, environmentDirectory string, im
 		}
 	}
 	for _, name := range []string{"Box", "Group"} {
-		b, err := privateOutput(ctx, "/usr/bin/docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--entrypoint", "/usr/bin/caddy", "--env", "FACETS_ONION_INGRESS_TOKEN=validation-only", "--mount", "type=bind,src="+filepath.Join(kit, "recipes")+",dst=/etc/fbd,readonly", caddy, "adapt", "--config", "/etc/fbd/"+name+".Caddyfile", "--adapter", "caddyfile")
+		// The pinned Caddy binary carries cap_net_bind_service in its file
+		// capabilities. Its bounding set must retain that bit even for `adapt`,
+		// otherwise Linux rejects exec. The validation container has no network
+		// or published ports; this matches the existing ingress image's needs.
+		b, err := privateOutput(ctx, "/usr/bin/docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges=true", "--entrypoint", "/usr/bin/caddy", "--env", "FACETS_ONION_INGRESS_TOKEN=validation-only", "--mount", "type=bind,src="+filepath.Join(kit, "recipes")+",dst=/etc/fbd,readonly", caddy, "adapt", "--config", "/etc/fbd/"+name+".Caddyfile", "--adapter", "caddyfile")
 		if err != nil {
 			return fmt.Errorf("validate %s ingress recipe: %w", name, err)
 		}
