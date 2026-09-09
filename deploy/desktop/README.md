@@ -20,7 +20,15 @@ Fresh appliance configuration generation creates independent credentials, deploy
 
 ## Integration boundary
 
-Coordinated frozen service snapshot: `0d02383d818177f3443b79482c02beafefb1df31`, tree `03120d567412773791b3b4d2133c551b217a53e3`. The user authorized coordination with the Spaces Sync task on 2026-09-09; its current native acceptance run is not yet complete. Leave its Proxmox instance and A/B participant state untouched. No base Compose, controller, shared-contract or client edits are required for independent packaging.
+Coordinated frozen service snapshot: `0d02383d818177f3443b79482c02beafefb1df31`, tree `03120d567412773791b3b4d2133c551b217a53e3`. The user authorized coordination with the Spaces Sync task on 2026-09-09. Its second ordinary-Space native acceptance passed and was recorded in Facets commit `fbbf0b18`, `docs/development/facets-vm-lab.md`; encrypted receiver-at-rest parity is not proven by that run. Leave its Proxmox instance and A/B participant state untouched. No base Compose, controller, shared-contract or client edits are required for independent packaging.
+
+The native OCI exporter selects the exact inspected ARM64 manifest, preserving
+its digest rather than comparing it with a configuration ID. A successful kit
+publication additionally requires complete OCI hash verification, rendered
+Compose isolation checks and Caddy configuration parsing in a network-disabled
+validation container. These checks are explicitly distinct from service runtime
+and Spaces Sync acceptance. Prepared Linux import, offline onion identity and
+resumable controller-initialization functions are not yet wired into service boot.
 
 Remaining Stage 2 gates: complete a service-kit build, signed service release assembly/installation, first Box initialization and private activation-code handling, controller-only pinned HTTPS administration, and existing-service health/persistence checks. Before service-bearing updates are accepted, prove bounded candidate startup, withheld ingress/background activity, and consistent database/system/data rollback. The existing cleanup timers have no initial tick; a longer cleanup period is only a bounded-lifetime constraint, not a general read-only service mode.
 
