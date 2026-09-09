@@ -55,9 +55,14 @@ func load() (configuration, error) {
 }
 func run(name string, args ...string) error {
 	command := exec.Command(name, args...)
-	// No secrets, config contents, or subprocess output go into the boot console.
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("%s failed", name)
+	// These fixed storage/system operations receive no credentials or user paths.
+	// Their output stays on the private console, never in exported diagnostics.
+	output, err := command.CombinedOutput()
+	if err != nil {
+		if len(output) > 1024 {
+			output = output[len(output)-1024:]
+		}
+		return fmt.Errorf("%s failed: %s", name, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -131,6 +136,9 @@ func prepare(c configuration) error {
 	return nil
 }
 func status(c configuration) (*health, error) {
+	if _, err := os.Stat("/opt/fbd/storage-failed"); err == nil {
+		return nil, errors.New("storage initialization failed")
+	}
 	var stat unix.Statfs_t
 	if err := unix.Statfs(dataRoot, &stat); err != nil || stat.Type != unix.EXT4_SUPER_MAGIC {
 		return nil, errors.New("data filesystem unavailable")
@@ -199,13 +207,16 @@ func serve(c configuration) error {
 		h, err := status(c)
 		reply := response{ID: r.ID, Status: h}
 		if err != nil {
-			reply.Error = "storage unavailable"
+			reply.Status = &health{Version: 1, InstallationID: c.InstallationID, DataID: c.DataID, ReleaseID: c.ReleaseID, Services: map[string]string{}}
+			if r.Operation == "activate" {
+				reply.Error = "storage unavailable"
+			}
 		}
 		// Foundation releases have no workloads and never claim service readiness or enable ingress.
 		encoded, _ := encodeResponse(reply, c.Key)
 		file.Write(encoded)
 		file.Close()
-		if err == nil && r.Operation == "shutdown" {
+		if r.Operation == "shutdown" {
 			return run("/usr/bin/systemctl", "poweroff", "--no-block")
 		}
 	}
@@ -214,6 +225,11 @@ func main() {
 	c, err := load()
 	if err == nil && len(os.Args) == 2 && os.Args[1] == "prepare" {
 		err = prepare(c)
+		if err == nil {
+			os.Remove("/opt/fbd/storage-failed")
+		} else {
+			os.WriteFile("/opt/fbd/storage-failed", []byte("storage initialization failed"), 0600)
+		}
 	} else if err == nil {
 		err = serve(c)
 	}
