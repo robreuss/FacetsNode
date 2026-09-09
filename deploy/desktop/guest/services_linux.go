@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,11 +35,22 @@ func (b *limitedOutput) Write(p []byte) (int, error) {
 func privateOutput(ctx context.Context, program string, args ...string) ([]byte, error) {
 	command := boundedCommand(ctx, program, args...)
 	out := &limitedOutput{remaining: 1024 * 1024}
-	command.Stdout, command.Stderr = out, io.Discard
+	stderr := &limitedOutput{remaining: 128 * 1024}
+	command.Stdout, command.Stderr = out, stderr
 	if err := command.Run(); err != nil {
 		var exited *exec.ExitError
 		if errors.As(err, &exited) {
-			return nil, fmt.Errorf("private appliance operation failed (exit %d)", exited.ExitCode())
+			// Classification only: the original diagnostic can contain credentials
+			// or generated environment values and must never be returned/logged.
+			category := "unclassified"
+			message := strings.ToLower(stderr.String())
+			for _, entry := range [][2]string{{"no such image", "image unavailable"}, {"pull access denied", "image pull denied"}, {"is not running", "container not running"}, {"is unhealthy", "container unhealthy"}, {"dependency failed", "dependency failed"}, {"invalid reference format", "invalid image reference"}, {"permission denied", "permission denied"}, {"no space left", "storage full"}, {"already in use", "name or socket already in use"}, {"timeout", "operation timeout"}, {"unknown flag", "unsupported command option"}, {"has no container to start", "container unavailable"}} {
+				if strings.Contains(message, entry[0]) {
+					category = entry[1]
+					break
+				}
+			}
+			return nil, fmt.Errorf("private appliance operation failed (exit %d; %s)", exited.ExitCode(), category)
 		}
 		return nil, errors.New("private appliance operation failed")
 	}

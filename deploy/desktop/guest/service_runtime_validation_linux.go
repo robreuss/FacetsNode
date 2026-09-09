@@ -28,6 +28,15 @@ import (
 func validateBuiltServiceRuntime(ctx context.Context, work string, images map[string]string) (result error) {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
+	for _, name := range imageNames {
+		b, e := privateOutput(ctx, "/usr/bin/docker", "image", "inspect", "--format", "{{.Id}}", images[name])
+		if e != nil {
+			return fmt.Errorf("fixture image root %s: %w", name, e)
+		}
+		if strings.TrimSpace(string(b)) != images[name] {
+			return fmt.Errorf("fixture image root %s differs from its verified manifest", name)
+		}
+	}
 	root, kit := filepath.Join(work, "runtime-validation"), filepath.Join(work, "kit")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return err
