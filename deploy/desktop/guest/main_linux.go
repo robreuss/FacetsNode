@@ -280,6 +280,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "desktop recipes unavailable")
 			os.Exit(1)
 		}
+		if _, included := c.Artifacts["runtimeKit.tar"]; included {
+			if _, readyErr := os.Stat("/opt/fbd/runtime-ready.json"); os.IsNotExist(readyErr) {
+				_ = startRuntimeJob(c)
+			}
+		}
 		err = serve(c)
 	}
 	if err != nil {
