@@ -84,14 +84,20 @@ performed. The earlier attempt failed because a source-archive test expected
 checkout Git metadata; it now creates its own committed temporary repository,
 including inside the existing Docker build. No tests were skipped to publish it.
 
-Installed service orchestration is now staged behind the host's service-install
-gate. It prepares verified images, records independently owned persistent
+Installed service orchestration prepares verified images, records independently owned persistent
 volumes, initializes the existing controller and starts the two deployments in
 candidate mode before attended activation. Random volume identity labels prevent
 missing/replaced Docker volumes from being silently substituted. Readiness
 aggregates all deployments (one healthy database cannot mask another's failure),
 and explicit shutdown stops Tor, applications/management, then databases.
-These newly wired production functions still need a signed installed-appliance
-runtime acceptance; the kit's disposable fixtures do not prove that path.
+The first signed installed update (`services-1`) passed with factory guest and
+service source `44d696194250350e758e0b251fce3b51e40d5747` and helper `847ba7ff`.
+`serviceKit-6.tar` SHA-256 is
+`3fee05ae9f3cf1e1f5dbf236d1ed6f9036c45a7d0b22a07a58c26bda55b9beed`.
+Candidate preparation withheld Tor, then attended activation restarted ordinary
+services with the same freshly initialized authorities. All non-Tor runtime
+checks passed; Tor had not yet become healthy in the completion snapshot, so the
+host did not claim client readiness. This persistent Box is still unclaimed;
+host-tunnel/WebKit management and actual onion application access remain gates.
 
 No Proxmox deployment or Spaces Sync task is accessed by these scripts.
