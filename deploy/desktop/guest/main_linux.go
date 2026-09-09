@@ -96,8 +96,9 @@ func prepare(c configuration) error {
 	if err := os.WriteFile("/opt/fbd/data-initialized", []byte(c.DataID), 0600); err != nil {
 		return err
 	}
-	// This runs before mounting and before any workload runtime. Corrected filesystems return 1.
-	command := exec.Command("/usr/sbin/e2fsck", "-p", dataDevice)
+	// resize2fs requires a full check, even when the prior clean-unmount marker
+	// would let e2fsck skip scanning. Corrected filesystems return 1.
+	command := exec.Command("/usr/sbin/e2fsck", "-f", "-p", dataDevice)
 	if err := command.Run(); err != nil {
 		var e *exec.ExitError
 		if !errors.As(err, &e) || e.ExitCode() != 1 {
