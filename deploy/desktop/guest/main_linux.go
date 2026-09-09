@@ -25,12 +25,13 @@ const dataRoot = "/srv/facets-box-data"
 const dataDevice = "/dev/disk/by-id/virtio-fbd-data"
 
 type configuration struct {
-	InstallationID    string `json:"installationID"`
-	DataID            string `json:"dataID"`
-	ReleaseID         string `json:"releaseID"`
-	Key               []byte `json:"key"`
-	ActivationPending bool   `json:"activationPending"`
-	AllowFormat       bool   `json:"allowFormat"`
+	InstallationID    string            `json:"installationID"`
+	DataID            string            `json:"dataID"`
+	ReleaseID         string            `json:"releaseID"`
+	Key               []byte            `json:"key"`
+	ActivationPending bool              `json:"activationPending"`
+	AllowFormat       bool              `json:"allowFormat"`
+	Artifacts         map[string]string `json:"artifacts"`
 }
 
 func load() (configuration, error) {

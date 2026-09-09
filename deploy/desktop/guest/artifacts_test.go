@@ -6,9 +6,21 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+func TestCommittedRepositoryArchiveExtraction(t *testing.T) {
+	command := exec.Command("git", "-C", "../../..", "archive", "--format=tar", "HEAD")
+	archive, e := command.Output()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = extractSource(bytes.NewReader(archive), t.TempDir()); e != nil {
+		t.Fatalf("actual committed archive: %v", e)
+	}
+}
 
 func TestSourceTransferIdentityOffsetsAndHash(t *testing.T) {
 	root := t.TempDir()

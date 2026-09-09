@@ -6,6 +6,7 @@ set -euo pipefail
 [[ $(dpkg --print-architecture) == arm64 ]] || exit 1
 export DEBIAN_FRONTEND=noninteractive
 runtime_root=/srv/facets-box-data/runtime
+if [[ -d /opt/fbd/runtime-kit ]]; then runtime_root=/opt/fbd/runtime-kit; fi
 install -d -m 0700 "$runtime_root/debs" /etc/docker /etc/containerd
 # Package postinst hooks cannot launch an unconfigured daemon.
 systemctl mask --runtime docker.service docker.socket containerd.service

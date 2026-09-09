@@ -188,6 +188,10 @@ func transfer(root string, r request) (response, error) {
 // The exported committed source is data until a separately requested bounded
 // build. Reject links, devices, traversal, excessive expansion, and duplicates.
 func extractSource(reader io.Reader, destination string) error {
+	return extractArchive(reader, destination, 100*1024*1024)
+}
+
+func extractArchive(reader io.Reader, destination string, budget int64) error {
 	tr := tar.NewReader(reader)
 	seen := map[string]bool{}
 	var total int64
@@ -198,6 +202,14 @@ func extractSource(reader io.Reader, destination string) error {
 		}
 		if e != nil {
 			return e
+		}
+		// git archive emits one global PAX comment carrying its commit ID. It is
+		// metadata, not a filesystem entry; no path/ownership overrides are allowed.
+		if h.Typeflag == tar.TypeXGlobalHeader {
+			if len(h.PAXRecords) != 1 || !validHex(h.PAXRecords["comment"], 20) {
+				return errors.New("unsupported archive metadata")
+			}
+			continue
 		}
 		name := strings.TrimSuffix(h.Name, "/")
 		if name == "" || filepath.IsAbs(name) || filepath.Clean(name) != name || name == ".." || strings.HasPrefix(name, "../") || seen[name] {
@@ -211,14 +223,18 @@ func extractSource(reader io.Reader, destination string) error {
 				return e
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			total += h.Size
-			if h.Size < 0 || total > 100*1024*1024 || len(seen) > 20000 {
+			if h.Size < 0 || h.Size > budget-total || len(seen) > 20000 {
 				return errors.New("archive budget exceeded")
 			}
+			total += h.Size
 			if e = os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 				return e
 			}
-			f, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			mode := os.FileMode(0600)
+			if h.Mode&0111 != 0 {
+				mode = 0700
+			}
+			f, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 			if e != nil {
 				return e
 			}
