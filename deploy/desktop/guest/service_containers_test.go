@@ -52,6 +52,24 @@ func TestServiceHealthRequiresEveryIndependentRuntimeAndWithholdsCandidateTor(t 
 		}
 	}
 	d, g := fixture(deviceProject, false), fixture(sharedProject, false)
+	for i := range d {
+		if d[i].Config.Labels["com.docker.compose.service"] == "tor" {
+			d[i].State.Health.Status = "starting"
+		}
+	}
+	states, err := aggregateServiceHealth(d, g, images, false)
+	if err != nil || states["tor"] != "starting" {
+		t.Fatal("Tor bootstrap was not distinguished from failure")
+	}
+	for i := range g {
+		if g[i].Config.Labels["com.docker.compose.service"] == "tor" {
+			g[i].State.Health.Status = "unhealthy"
+		}
+	}
+	states, err = aggregateServiceHealth(d, g, images, false)
+	if err != nil || states["tor"] != "unavailable" {
+		t.Fatal("starting Tor masked a failed peer")
+	}
 	if _, err := aggregateServiceHealth(d, g, images, true); err == nil {
 		t.Fatal("running Tor accepted for candidate")
 	}

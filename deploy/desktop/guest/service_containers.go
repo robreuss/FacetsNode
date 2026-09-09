@@ -84,8 +84,10 @@ func aggregateServiceHealth(device, group []serviceContainer, images map[string]
 			if kind == "" || c.Config.Image != images[kind] || !strings.HasPrefix(c.Config.Image, "sha256:") {
 				return nil, errors.New("running service image differs from release")
 			}
-			if !c.State.Running || (name != "onion-ingress" && (c.State.Health == nil || c.State.Health.Status != "healthy")) {
+			if !c.State.Running || (name != "onion-ingress" && (c.State.Health == nil || (c.State.Health.Status != "healthy" && c.State.Health.Status != "starting"))) {
 				states[kind] = "unavailable"
+			} else if name != "onion-ingress" && c.State.Health.Status == "starting" && states[kind] == "ready" {
+				states[kind] = "starting"
 			}
 		}
 		for name, kind := range expectedContainerImages(project) {

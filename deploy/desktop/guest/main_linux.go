@@ -299,6 +299,18 @@ func serve(c configuration) error {
 				reply.Error = "candidate activation unavailable"
 			}
 		}
+		if r.Operation == "managementInfo" || r.Operation == "setupCode" {
+			if err != nil || jobRunning() {
+				reply.Error = "controller management unavailable"
+			} else {
+				details, code, managementErr := readManagementDetails(c, r.Operation == "setupCode")
+				if managementErr != nil {
+					reply.Error = "controller management unavailable"
+				} else {
+					reply.Management, reply.SetupCode = details, code
+				}
+			}
+		}
 		encoded, _ := encodeResponse(reply, c.Key)
 		file.Write(encoded)
 		file.Close()
