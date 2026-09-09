@@ -89,7 +89,12 @@ func startRuntimeJob(c configuration) error {
 		if prepErr != nil {
 			err = prepErr
 			if log != nil {
+				_, _ = log.WriteString("Runtime kit staging failed: " + prepErr.Error() + "\n")
 				log.Close()
+			}
+			if console, e := os.OpenFile("/dev/hvc0", os.O_WRONLY, 0); e == nil {
+				_, _ = console.WriteString("FBD runtime kit staging failed: " + prepErr.Error() + "\n")
+				console.Close()
 			}
 		}
 		// Build logs contain tool output, not setup/activation credentials. Export
