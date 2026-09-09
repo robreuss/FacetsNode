@@ -85,9 +85,17 @@ func verifyServiceKit(root string, expected map[string]string) (serviceRelease, 
 		var platform struct {
 			OS           string `json:"os"`
 			Architecture string `json:"architecture"`
+			Config       struct {
+				Labels map[string]string `json:"Labels"`
+			} `json:"config"`
 		}
 		if json.Unmarshal(config, &platform) != nil || platform.OS != "linux" || platform.Architecture != "arm64" {
 			return release, errors.New("wrong OCI platform")
+		}
+		if name == "device-sync" || name == "box-controller" || name == "shared-spaces" {
+			if platform.Config.Labels["org.opencontainers.image.revision"] != release.SourceRevision || platform.Config.Labels["org.opencontainers.image.source-tree"] != release.SourceTree {
+				return release, errors.New("OCI source revision mismatch")
+			}
 		}
 		for _, layer := range manifest.Layers {
 			path, e := digestPath(imageRoot, layer.Digest)

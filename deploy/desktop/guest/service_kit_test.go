@@ -28,7 +28,7 @@ func TestServiceKitVerifiesManifestConfigLayersIndexAndArchitecture(t *testing.T
 			}
 			return digest
 		}
-		configBytes := []byte(`{"os":"linux","architecture":"arm64"}`)
+		configBytes, _ := json.Marshal(map[string]any{"os": "linux", "architecture": "arm64", "config": map[string]any{"Labels": map[string]string{"org.opencontainers.image.revision": release.SourceRevision, "org.opencontainers.image.source-tree": release.SourceTree}}})
 		config := blob(configBytes)
 		layer := []byte("a compressed layer fixture")
 		layerDigest := blob(layer)
@@ -47,6 +47,13 @@ func TestServiceKitVerifiesManifestConfigLayersIndexAndArchitecture(t *testing.T
 	if _, e := verifyServiceKit(root, expected); e != nil {
 		t.Fatal(e)
 	}
+	release.SourceRevision = strings.Repeat("c", 40)
+	_ = writeJSONFile(filepath.Join(root, "service-release.json"), release)
+	if _, e := verifyServiceKit(root, expected); e == nil {
+		t.Fatal("accepted wrong source labels")
+	}
+	release.SourceRevision = strings.Repeat("a", 40)
+	_ = writeJSONFile(filepath.Join(root, "service-release.json"), release)
 	expected["tor"] = release.Images["tor"].Config
 	if _, e := verifyServiceKit(root, expected); e == nil {
 		t.Fatal("accepted config ID as manifest digest")
