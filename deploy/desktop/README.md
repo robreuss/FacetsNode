@@ -119,3 +119,29 @@ still requires live TLS-challenge diagnosis; the exported certificate passes the
 host's standalone certificate/SPKI, hostname and validity checks.
 
 No Proxmox deployment or Spaces Sync task is accessed by these scripts.
+
+### Database-changing failed-candidate acceptance
+
+The developer image builder accepts `FBD_ACCEPTANCE_FAILURE=1` only with an
+`acceptance-` release ID. This compiles the separate `fbd_candidate_failure` Go
+build tag; normal appliances contain only a no-op hook and none of its SQL. The
+test appliance always fails service preparation before candidate activation.
+After the ordinary fenced service/database readiness checks, it requires an
+unused reserved table name, creates `fbd_candidate_rollback_probe` in the Box
+Controller database, commits a fixed marker, and reads it in another database
+session. Successful verification produces the closed failure description
+`acceptance-only failure: committed database probe verified; activation withheld`.
+Other failures must not be reported as proof of a committed mutation. It refuses
+normal/non-pending startup and adds no guest operation or general SQL interface.
+
+Use only on the fresh development Box, through the normal signed update path.
+Keep its existing service kit unchanged. After the deliberately failed update,
+inspect the private `candidate-failure-*.log` retained by the helper for the exact
+committed-probe description. While the restored Box is still stopped, hash its
+data/system disks, seed, EFI store and machine ID against **that update's**
+rollback snapshot. Equality proves restoration of the consistent pre-activation
+pair despite the committed database change. Then boot the previous release and
+recheck retained identities and readiness. Do not restore a snapshot after a
+candidate was authorized to accept client writes. Keep the test source revision,
+signed artifact hashes, log and disk comparisons together; test-tag unit tests
+and cross-compilation alone are not runtime acceptance.

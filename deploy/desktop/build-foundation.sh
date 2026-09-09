@@ -12,6 +12,13 @@ output=$2
 fbdctl=$3
 key=$4
 release=$5
+build_tags=''
+case ${FBD_ACCEPTANCE_FAILURE:-} in
+  "") ;;
+  1) [[ "$release" == acceptance-* ]] || { echo "Failure-test appliances require an acceptance- release ID." >&2; exit 1; }
+     build_tags=fbd_candidate_failure ;;
+  *) echo "Unknown acceptance build mode." >&2; exit 1 ;;
+esac
 [[ ! -e "$output" ]] || { echo "Output must not already exist." >&2; exit 1; }
 command -v go >/dev/null
 command -v qemu-img >/dev/null
@@ -33,7 +40,7 @@ actual=$(shasum -a 256 "$base" | cut -d ' ' -f 1)
 [[ "$actual" == "$base_hash" ]] || { echo "Ubuntu base checksum mismatch." >&2; exit 1; }
 qemu-img convert -f qcow2 -O raw "$base" "$output/system.raw"
 qemu-img resize -f raw "$output/system.raw" 16G
-(cd "$staging" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$output/guest-agent" ./deploy/desktop/guest)
+(cd "$staging" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags="$build_tags" -trimpath -buildvcs=false -o "$output/guest-agent" ./deploy/desktop/guest)
 cp "$staging/deploy/desktop/guest-bootstrap.sh" "$output/guest-bootstrap.sh"
 for recipe in guest-runtime.sh guest-build.sh; do
   if [[ -f "$staging/deploy/desktop/$recipe" ]]; then

@@ -169,6 +169,9 @@ func prepareServiceAppliance(ctx context.Context, c configuration) error {
 	if !candidateServicesReady(states) {
 		return errors.New("candidate service readiness incomplete")
 	}
+	if err = candidateAcceptanceProbe(ctx, c); err != nil {
+		return err
+	}
 	if err = writeJSONFile(dataRoot+"/service-activation.json", serviceActivation{Version: 1, InstallationID: c.InstallationID, ReleaseID: c.ReleaseID, Phase: "candidate"}); err != nil {
 		return err
 	}
