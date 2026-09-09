@@ -111,10 +111,26 @@ func importServiceImages(ctx context.Context, release serviceRelease) (map[strin
 
 func importServiceImagesAt(ctx context.Context, release serviceRelease, kit string) (map[string]string, error) {
 	images := map[string]string{}
+	staging, err := os.MkdirTemp(kit, "runtime-import-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(staging) // Only this newly created import metadata/archive directory.
 	for _, name := range imageNames {
 		image := release.Images[name]
-		archive := filepath.Join(kit, "import-"+name+".tar")
-		if _, err := privateOutput(ctx, "/usr/bin/tar", "-cf", archive, "-C", filepath.Join(kit, "images", name), "oci-layout", "index.json", "blobs"); err != nil {
+		raw, e := boundedIdentityFile(filepath.Join(kit, "images", name, "index.json"), 64*1024)
+		if e != nil {
+			return nil, e
+		}
+		index, e := runtimeImportIndex(raw, name, image.Digest)
+		if e != nil {
+			return nil, e
+		}
+		if e = os.WriteFile(filepath.Join(staging, "index.json"), index, 0600); e != nil {
+			return nil, e
+		}
+		archive := filepath.Join(staging, "import-"+name+".tar")
+		if _, err := privateOutput(ctx, "/usr/bin/tar", "-cf", archive, "-C", filepath.Join(kit, "images", name), "oci-layout", "blobs", "-C", staging, "index.json"); err != nil {
 			return nil, fmt.Errorf("archive verified %s image: %w", name, err)
 		}
 		if _, err := privateOutput(ctx, "/usr/bin/docker", "image", "load", "--input", archive); err != nil {
