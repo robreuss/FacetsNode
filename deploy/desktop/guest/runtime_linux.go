@@ -265,6 +265,17 @@ func startServiceBuild(c configuration) error {
 				f.Close()
 			}
 		}
+		if err == nil && filepath.Dir(work) == dataRoot+"/staging" && strings.HasPrefix(filepath.Base(work), "build-") {
+			// The accepted archive was moved out above, and all disposable runtime
+			// fixtures completed their verified cleanup. Retain Docker's build cache,
+			// not another full source/OCI scratch copy after every successful build.
+			if e := os.RemoveAll(work); e != nil {
+				if f, e := os.OpenFile(dataRoot+"/staging/buildLog.tar", os.O_APPEND|os.O_WRONLY, 0600); e == nil {
+					_, _ = f.WriteString("Verified kit published; scratch cleanup incomplete.\n")
+					f.Close()
+				}
+			}
+		}
 		runtimeJob.Lock()
 		defer runtimeJob.Unlock()
 		runtimeJob.state.State = "succeeded"
