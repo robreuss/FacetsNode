@@ -245,10 +245,11 @@ func (store *MemoryStore) TouchWebSession(_ context.Context, digest [32]byte, no
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	session, present := store.sessions[digest]
-	if !present {
+	if !present || !session.ExpiresAt.After(now) || now.Sub(session.LastSeenAt) > WebSessionIdleLifetime {
 		return ErrInvalidCredential
 	}
 	session.LastSeenAt = now
+	session.ExpiresAt = now.Add(WebSessionRenewalLifetime)
 	store.sessions[digest] = session
 	return nil
 }

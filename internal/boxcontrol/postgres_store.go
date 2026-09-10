@@ -263,7 +263,11 @@ func (store *PostgresStore) WebSession(ctx context.Context, digest [32]byte, now
 }
 
 func (store *PostgresStore) TouchWebSession(ctx context.Context, digest [32]byte, now time.Time) error {
-	result, err := store.pool.Exec(ctx, `UPDATE web_sessions SET last_seen_at = $2 WHERE token_digest = $1`, digest[:], now)
+	// Revalidate in the same write: a renewal racing logout/password change must
+	// never recreate a deleted session, and an expired session cannot be revived.
+	result, err := store.pool.Exec(ctx, `UPDATE web_sessions SET last_seen_at = $2, expires_at = $3
+		WHERE token_digest = $1 AND expires_at > $2
+		AND last_seen_at >= $2 - INTERVAL '30 minutes'`, digest[:], now, now.Add(WebSessionRenewalLifetime))
 	if err != nil {
 		return err
 	}

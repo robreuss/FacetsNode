@@ -26,7 +26,9 @@ const (
 	MaximumOwnerPasswordRunes = 128
 	ConnectionRequestLifetime = 10 * time.Minute
 	WebSessionIdleLifetime    = 30 * time.Minute
-	WebSessionMaximumLifetime = 12 * time.Hour
+	// Authenticated activity renews this window. It is not an absolute deadline
+	// that can interrupt an administrator who is still configuring the Box.
+	WebSessionRenewalLifetime = 12 * time.Hour
 	ConnectionGrantLifetime   = 180 * 24 * time.Hour
 	MaximumRequestBytes       = 32 * 1024
 	ApprovalCodeDigits        = 6

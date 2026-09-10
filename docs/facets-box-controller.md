@@ -37,7 +37,12 @@ The Box Owner password is normalized Unicode and accepts spaces and password
 manager paste. There are no composition rules or periodic expiry. Common
 choices are rejected. Only a versioned Argon2id verifier is stored. Repeated
 login failures are throttled. Web sessions use Secure, HttpOnly, SameSite
-cookies plus CSRF tokens and bounded idle/absolute lifetimes.
+cookies plus CSRF tokens and a 30-minute idle limit. Authenticated administration
+renews the 12-hour cookie/storage window; it has no absolute cutoff during active
+configuration. Renewal does not recreate expired, revoked, or signed-out sessions.
+The Desktop host maintains this activity only while its administration panel is
+foregrounded, using a pinned read-only home request without navigating the form.
+Client grants and sync service operation are independent of owner-session expiry.
 
 ## App connection
 

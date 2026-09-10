@@ -233,7 +233,9 @@ func (service *Service) handleHome(writer http.ResponseWriter, request *http.Req
 		}
 	}
 	if authenticated {
-		_ = service.store.TouchWebSession(request.Context(), session.TokenDigest, service.now())
+		if !service.renewWebSession(writer, request, session) {
+			return
+		}
 		model.Grants, _ = service.store.ListGrants(request.Context())
 		model.Audit, _ = service.store.RecentAudit(request.Context(), 20)
 		healthContext, cancel := context.WithTimeout(request.Context(), 2*time.Second)
@@ -268,7 +270,9 @@ func (service *Service) handleAuthorizeDevice(writer http.ResponseWriter, reques
 		GroupSpacesName: groupSpacesProductName,
 	}
 	if authenticated {
-		_ = service.store.TouchWebSession(request.Context(), session.TokenDigest, service.now())
+		if !service.renewWebSession(writer, request, session) {
+			return
+		}
 		code, invitation, createErr := service.createConnectionInvitation(request.Context())
 		if createErr != nil {
 			service.internalError(writer, request, "connection_invitation", createErr)
@@ -840,13 +844,35 @@ func (service *Service) issueWebSession(writer http.ResponseWriter, request *htt
 	now := service.now()
 	if err := service.store.CreateWebSession(request.Context(), WebSession{
 		TokenDigest: tokenDigest, CSRFDigest: csrfDigest, CreatedAt: now, LastSeenAt: now,
-		ExpiresAt: now.Add(WebSessionMaximumLifetime),
+		ExpiresAt: now.Add(WebSessionRenewalLifetime),
 	}); err != nil {
 		return "", "", err
 	}
-	http.SetCookie(writer, &http.Cookie{Name: "facets_box_session", Value: token, Path: service.cookiePath, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(WebSessionMaximumLifetime.Seconds())})
-	http.SetCookie(writer, &http.Cookie{Name: "facets_box_csrf", Value: csrf, Path: service.cookiePath, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(WebSessionMaximumLifetime.Seconds())})
+	service.setSessionCookies(writer, token, csrf)
 	return token, csrf, nil
+}
+
+// The native administration view uses the existing, read-only home request to
+// retain a login while configuration is foregrounded. It never reloads the form
+// or supplies an owner password. Normal authenticated navigation renews too.
+func (service *Service) renewWebSession(writer http.ResponseWriter, request *http.Request, session WebSession) bool {
+	if err := service.store.TouchWebSession(request.Context(), session.TokenDigest, service.now()); err != nil {
+		http.Error(writer, "Please sign in to administer this Box.", http.StatusUnauthorized)
+		return false
+	}
+	token, tokenErr := request.Cookie("facets_box_session")
+	csrf, csrfErr := request.Cookie("facets_box_csrf")
+	if tokenErr != nil || csrfErr != nil {
+		return false
+	}
+	service.setSessionCookies(writer, token.Value, csrf.Value)
+	return true
+}
+
+func (service *Service) setSessionCookies(writer http.ResponseWriter, token, csrf string) {
+	for name, value := range map[string]string{"facets_box_session": token, "facets_box_csrf": csrf} {
+		http.SetCookie(writer, &http.Cookie{Name: name, Value: value, Path: service.cookiePath, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(WebSessionRenewalLifetime.Seconds())})
+	}
 }
 
 func (service *Service) webContext(request *http.Request) (string, WebSession, bool) {
@@ -900,7 +926,7 @@ func (service *Service) ensurePreauthCSRF(writer http.ResponseWriter, request *h
 	if err != nil {
 		return ""
 	}
-	http.SetCookie(writer, &http.Cookie{Name: "facets_box_csrf", Value: token, Path: service.cookiePath, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(WebSessionMaximumLifetime.Seconds())})
+	http.SetCookie(writer, &http.Cookie{Name: "facets_box_csrf", Value: token, Path: service.cookiePath, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(WebSessionRenewalLifetime.Seconds())})
 	return token
 }
 
