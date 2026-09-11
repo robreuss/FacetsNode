@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/robreuss/FacetsNode/internal/boxcontrol"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
@@ -239,11 +240,15 @@ func initializeApplianceIdentity(root, installationID, boxOnion, groupOnion stri
 	if e != nil {
 		return out, e
 	}
-	for _, name := range []string{"device-sync-db", "controller-db", "shared-spaces-db", "device-sync-operator", "shared-spaces-operator", "box-controller", "device-sync-onion", "shared-spaces-onion", "shared-spaces-key", "shared-spaces-compute-seed", "activation"} {
+	for _, name := range []string{"device-sync-db", "controller-db", "shared-spaces-db", "device-sync-operator", "shared-spaces-operator", "box-controller", "device-sync-onion", "shared-spaces-onion", "shared-spaces-key", "shared-spaces-compute-seed"} {
 		out.Secrets[name], e = randomSecret()
 		if e != nil {
 			return out, e
 		}
+	}
+	out.Secrets["activation"], e = boxcontrol.GenerateActivationCode()
+	if e != nil {
+		return out, e
 	}
 	if e = writeJSONFile(filepath.Join(staging, "identity.json"), out); e != nil {
 		return out, e

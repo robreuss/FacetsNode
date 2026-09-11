@@ -18,6 +18,14 @@ Desktop overlays are new files, applied after the frozen base and onion profiles
 
 Fresh appliance configuration generation creates independent credentials, deployment signing keys, TLS keys and pinned onion route policies, then publishes the complete configuration atomically. Existing inconsistent configuration is rejected rather than replaced. This code is tested but not yet connected to full Box initialization/claim.
 
+Desktop activation uses the controller's shared human-entered code generator:
+12 uppercase letters/digits in three four-character groups, excluding `0`, `1`,
+`I` and `O`. It is separate from the 32-byte random machine credentials. The code
+is retained across restarts until consumed by claim; it is not the expiring
+six-digit code for authorizing another device. A source update does not rotate
+an existing installation's activation secret. Development acceptance of a new
+format requires a fresh disposable installation, not rewriting its verifier.
+
 ## Integration boundary
 
 Coordinated frozen service snapshot: `0d02383d818177f3443b79482c02beafefb1df31`, tree `03120d567412773791b3b4d2133c551b217a53e3`. The user authorized coordination with the Spaces Sync task on 2026-09-09. Its second ordinary-Space native acceptance passed and was recorded in Facets commit `fbbf0b18`, `docs/development/facets-vm-lab.md`; encrypted receiver-at-rest parity is not proven by that run. Leave its Proxmox instance and A/B participant state untouched. No base Compose, controller, shared-contract or client edits are required for independent packaging.

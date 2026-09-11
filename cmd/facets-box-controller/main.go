@@ -163,7 +163,7 @@ func initialize(ctx context.Context, store *boxcontrol.PostgresStore, identityKe
 	activationCode := strings.TrimSpace(*activationFlag)
 	if activationCode == "" {
 		var err error
-		activationCode, err = generateActivationCode()
+		activationCode, err = boxcontrol.GenerateActivationCode()
 		if err != nil {
 			return err
 		}
@@ -189,18 +189,6 @@ func initialize(ctx context.Context, store *boxcontrol.PostgresStore, identityKe
 // verifiers use the same versioned Argon2id implementation.
 func boxcontrolHashActivation(value string) (string, error) {
 	return boxcontrol.HashActivationCode(value)
-}
-
-func generateActivationCode() (string, error) {
-	const alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-	bytes := make([]byte, 12)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	for index := range bytes {
-		bytes[index] = alphabet[int(bytes[index])%len(alphabet)]
-	}
-	return string(bytes[:4]) + "-" + string(bytes[4:8]) + "-" + string(bytes[8:]), nil
 }
 
 func ensureIdentityKey(path string) (ed25519.PrivateKey, error) {

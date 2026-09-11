@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -72,6 +74,19 @@ func TestApplianceIdentityIsIndependentPersistentAndFailsClosed(t *testing.T) {
 	}
 	if first.DeviceSync != second.DeviceSync || first.Secrets["activation"] != second.Secrets["activation"] {
 		t.Fatal("regenerated identity")
+	}
+	format := regexp.MustCompile(`^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}(-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}){2}$`)
+	if !format.MatchString(first.Secrets["activation"]) {
+		t.Fatal("Desktop activation must use the shared human-readable Box code format")
+	}
+	for name, secret := range first.Secrets {
+		if name == "activation" {
+			continue
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(secret)
+		if err != nil || len(decoded) != 32 {
+			t.Fatalf("machine credential %s must retain 32 random bytes", name)
+		}
 	}
 	if first.DeviceSync.DeploymentID == first.SharedSpaces.DeploymentID || first.Secrets["device-sync-db"] == first.Secrets["shared-spaces-db"] {
 		t.Fatal("shared authority or credentials")
