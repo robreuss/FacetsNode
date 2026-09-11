@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type serviceIdentity struct {
 	DeploymentID          string `json:"deploymentID"`
 	Onion                 string `json:"onion"`
 	Endpoint              string `json:"endpoint"`
+	LANEndpoint           string `json:"lanEndpoint"`
 	TLSSPKI               string `json:"tlsSPKI"`
 	SigningKeyFingerprint string `json:"signingKeyFingerprint"`
 }
@@ -56,10 +58,20 @@ func privateWrite(path string, b []byte) error {
 	}
 	return f.Sync()
 }
-func makeServiceIdentity(directory, onion, path string) (serviceIdentity, error) {
+
+// Stable installation-scoped mDNS name, independent of DHCP and host renames.
+func applianceLANHost(installationID string) string {
+	digest := sha256.Sum256([]byte("facets-box-lan-v1\x00" + installationID))
+	return "facets-box-" + hex.EncodeToString(digest[:16]) + ".local"
+}
+
+func makeServiceIdentity(directory, onion, path, lanHost, lanPort string) (serviceIdentity, error) {
 	var out serviceIdentity
 	if len(onion) != 62 || !strings.HasSuffix(onion, ".onion") || strings.Trim(onion[:56], "abcdefghijklmnopqrstuvwxyz234567") != "" {
 		return out, errors.New("invalid onion identity")
+	}
+	if !strings.HasPrefix(lanHost, "facets-box-") || !strings.HasSuffix(lanHost, ".local") || len(lanHost) != 49 || strings.Trim(lanHost[11:43], "0123456789abcdef") != "" || (lanPort != "9243" && lanPort != "9244") {
+		return out, errors.New("invalid LAN identity")
 	}
 	for _, child := range []string{"keys", "policy", "state", "tls"} {
 		if e := os.MkdirAll(filepath.Join(directory, child), 0700); e != nil {
@@ -86,7 +98,7 @@ func makeServiceIdentity(directory, onion, path string) (serviceIdentity, error)
 	if e != nil {
 		return out, e
 	}
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: onion}, DNSNames: []string{onion}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(1, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: onion}, DNSNames: []string{onion, lanHost}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(1, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true}
 	der, e := x509.CreateCertificate(rand.Reader, template, template, &tlsKey.PublicKey, tlsKey)
 	if e != nil {
 		return out, e
@@ -111,8 +123,14 @@ func makeServiceIdentity(directory, onion, path string) (serviceIdentity, error)
 	onionID := onion[:56]
 	portability := "dedicated_portable"
 	endpoint := "https://" + onion + path
+	lanEndpoint := "https://" + lanHost + ":" + lanPort + path
 	descriptor := serviceauthority.DeploymentDescriptor{Version: 1, CreatedAtMilliseconds: time.Now().UnixMilli(), DeploymentID: id, PublicSigningKeyX963: signer.PublicSigningKeyX963(), SigningKeyFingerprint: signer.SigningKeyFingerprint(), Routes: []serviceauthority.TransportRoute{{Endpoint: endpoint, Kind: serviceauthority.RouteTorOnion, NetworkScope: serviceauthority.NetworkTor, OnionServiceID: &onionID, OnionPortability: &portability, RouteID: routeID, ServerAuthentication: serviceauthority.ServerAuthentication{Kind: "pinned_spki_sha256", PinnedSPKISHA256: &pin}}}}
-	policy := serviceauthority.TransportPolicy{Version: 1, ControlRouteIDs: []uuid.UUID{routeID}, MessageRouteIDs: []uuid.UUID{routeID}, BulkRouteIDs: []uuid.UUID{routeID}}
+	lanRouteID := uuid.New()
+	descriptor.Routes = append(descriptor.Routes, serviceauthority.TransportRoute{Endpoint: lanEndpoint, Kind: serviceauthority.RouteDirectHTTPS, NetworkScope: serviceauthority.NetworkTrustedLAN, RouteID: lanRouteID, ServerAuthentication: serviceauthority.ServerAuthentication{Kind: "pinned_spki_sha256", PinnedSPKISHA256: &pin}})
+	sort.Slice(descriptor.Routes, func(i, j int) bool {
+		return descriptor.Routes[i].RouteID.String() < descriptor.Routes[j].RouteID.String()
+	})
+	policy := serviceauthority.TransportPolicy{Version: 1, ControlRouteIDs: []uuid.UUID{lanRouteID, routeID}, MessageRouteIDs: []uuid.UUID{lanRouteID, routeID}, BulkRouteIDs: []uuid.UUID{lanRouteID, routeID}}
 	if descriptor.Validate() != nil || policy.Validate(descriptor) != nil {
 		return out, errors.New("invalid generated route policy")
 	}
@@ -126,7 +144,7 @@ func makeServiceIdentity(directory, onion, path string) (serviceIdentity, error)
 	if e = privateWrite(filepath.Join(directory, "state/bindings.json"), []byte(`{"bindings":[],"version":1}`)); e != nil {
 		return out, e
 	}
-	return serviceIdentity{DeploymentID: id.String(), Onion: onion, Endpoint: endpoint, TLSSPKI: pin, SigningKeyFingerprint: signer.SigningKeyFingerprint()}, nil
+	return serviceIdentity{DeploymentID: id.String(), Onion: onion, Endpoint: endpoint, LANEndpoint: lanEndpoint, TLSSPKI: pin, SigningKeyFingerprint: signer.SigningKeyFingerprint()}, nil
 }
 
 func validateServiceIdentity(directory string, identity serviceIdentity) error {
@@ -142,19 +160,38 @@ func validateServiceIdentity(directory string, identity serviceIdentity) error {
 		return errors.New("deployment key changed")
 	}
 	policy, e := serviceauthority.LoadDeploymentOfferTemplate(filepath.Join(directory, "policy/deployment-routes.json"), signer)
-	if e != nil || len(policy.Deployment.Routes) != 1 || policy.Deployment.Routes[0].Endpoint != identity.Endpoint {
+	if e != nil || len(policy.Deployment.Routes) != 2 || identity.LANEndpoint == "" {
 		return errors.New("deployment route changed")
 	}
-	pin := policy.Deployment.Routes[0].ServerAuthentication.PinnedSPKISHA256
-	if pin == nil || *pin != identity.TLSSPKI {
-		return errors.New("TLS route pin changed")
+	var lan, onion *serviceauthority.TransportRoute
+	for i := range policy.Deployment.Routes {
+		route := &policy.Deployment.Routes[i]
+		pin := route.ServerAuthentication.PinnedSPKISHA256
+		if pin == nil || *pin != identity.TLSSPKI {
+			return errors.New("TLS route pin changed")
+		}
+		if route.Kind == serviceauthority.RouteDirectHTTPS && route.NetworkScope == serviceauthority.NetworkTrustedLAN && route.Endpoint == identity.LANEndpoint {
+			lan = route
+		}
+		if route.Kind == serviceauthority.RouteTorOnion && route.Endpoint == identity.Endpoint {
+			onion = route
+		}
+	}
+	if lan == nil || onion == nil {
+		return errors.New("deployment route changed")
+	}
+	for _, ids := range [][]uuid.UUID{policy.TransportPolicy.ControlRouteIDs, policy.TransportPolicy.MessageRouteIDs, policy.TransportPolicy.BulkRouteIDs} {
+		if len(ids) != 2 || ids[0] != lan.RouteID || ids[1] != onion.RouteID {
+			return errors.New("deployment route order changed")
+		}
 	}
 	cert, e := tls.LoadX509KeyPair(filepath.Join(directory, "tls/server.crt"), filepath.Join(directory, "tls/server.key"))
 	if e != nil {
 		return e
 	}
 	leaf, e := x509.ParseCertificate(cert.Certificate[0])
-	if e != nil || leaf.VerifyHostname(identity.Onion) != nil {
+	lanHost := strings.Split(strings.TrimPrefix(identity.LANEndpoint, "https://"), ":")[0]
+	if e != nil || leaf.VerifyHostname(identity.Onion) != nil || leaf.VerifyHostname(lanHost) != nil {
 		return errors.New("TLS identity changed")
 	}
 	sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
@@ -194,11 +231,11 @@ func initializeApplianceIdentity(root, installationID, boxOnion, groupOnion stri
 		return out, e
 	}
 	out = applianceIdentity{Version: 1, InstallationID: installationID, Secrets: map[string]string{}}
-	out.DeviceSync, e = makeServiceIdentity(filepath.Join(staging, "device-sync"), boxOnion, "/facetsbox/device-sync")
+	out.DeviceSync, e = makeServiceIdentity(filepath.Join(staging, "device-sync"), boxOnion, "/facetsbox/device-sync", applianceLANHost(installationID), "9243")
 	if e != nil {
 		return out, e
 	}
-	out.SharedSpaces, e = makeServiceIdentity(filepath.Join(staging, "shared-spaces"), groupOnion, "")
+	out.SharedSpaces, e = makeServiceIdentity(filepath.Join(staging, "shared-spaces"), groupOnion, "", applianceLANHost(installationID), "9244")
 	if e != nil {
 		return out, e
 	}

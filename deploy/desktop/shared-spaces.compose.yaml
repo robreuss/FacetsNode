@@ -32,6 +32,7 @@ services:
       - ${FBD_RECIPE_DIRECTORY:?}/Group.Caddyfile:/etc/caddy/Caddyfile:ro
       - ${FACETS_SHARED_SPACES_TLS_DIRECTORY:?}:/etc/facets-server/tls:ro
       - facets-shared-spaces-onion-socket:/run/facets-onion
+      - ${FBD_ADMIN_SOCKET_DIRECTORY:?}:/run/facets-admin
   tor:
     image: ${FBD_TOR_IMAGE:?verified local image required}
     build: !reset null

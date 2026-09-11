@@ -4,6 +4,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -55,6 +58,13 @@ func readManagementDetails(c configuration, includeSetupCode bool) (*managementD
 		return nil, "", errors.New("controller claim state unavailable")
 	}
 	details := &managementDetails{Onion: identity.DeviceSync.Onion, CertificateDER: block.Bytes, SPKISHA256: identity.DeviceSync.TLSSPKI, ServiceIdentity: fingerprint, BoxID: controller.BoxID, SetupRequired: !box.Claimed}
+	publicKey, err := base64.RawURLEncoding.DecodeString(controller.PublicKey)
+	if err != nil || len(publicKey) != 32 {
+		return nil, "", errors.New("controller key unavailable")
+	}
+	digest := sha256.Sum256(publicKey)
+	details.BoxKeyFingerprint = hex.EncodeToString(digest[:])
+	details.LANHost = applianceLANHost(c.InstallationID)
 	code := ""
 	if includeSetupCode {
 		if box.Claimed {

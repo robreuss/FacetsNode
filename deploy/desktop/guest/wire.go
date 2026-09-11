@@ -67,7 +67,7 @@ func decodeRequest(data, key []byte) (request, error) {
 		return r, errors.New("invalid request")
 	}
 	switch r.Operation {
-	case "status", "shutdown", "activate", "prepareRuntime", "uploadStart", "uploadChunk", "uploadFinish", "artifactInfo", "artifactRead", "buildServices", "openManagement", "managementInfo", "setupCode":
+	case "status", "shutdown", "activate", "prepareRuntime", "uploadStart", "uploadChunk", "uploadFinish", "artifactInfo", "artifactRead", "buildServices", "openManagement", "managementInfo", "setupCode", "openDeviceSyncLAN", "openGroupSpacesLAN":
 	default:
 		return r, errors.New("unknown operation")
 	}

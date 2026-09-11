@@ -28,6 +28,7 @@ func serviceEnvironment(root, kit string, identity applianceIdentity, images map
 	}
 	configuration := filepath.Join(root, "configuration")
 	device["FBD_ADMIN_SOCKET_DIRECTORY"] = filepath.Join(root, "management")
+	shared["FBD_ADMIN_SOCKET_DIRECTORY"] = filepath.Join(root, "management")
 	device["FACETS_DEVICE_SYNC_POSTGRES_PASSWORD"] = identity.Secrets["device-sync-db"]
 	device["FACETS_BOX_CONTROLLER_POSTGRES_PASSWORD"] = identity.Secrets["controller-db"]
 	device["FACETS_DEVICE_SYNC_OPERATOR_TOKEN"] = identity.Secrets["device-sync-operator"]

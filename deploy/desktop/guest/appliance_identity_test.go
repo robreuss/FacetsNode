@@ -1,11 +1,62 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
+
+func TestLANRoutesAreStablePinnedAndPreferredWithoutChangingTorIdentity(t *testing.T) {
+	root := t.TempDir()
+	box := strings.Repeat("a", 56) + ".onion"
+	group := strings.Repeat("b", 56) + ".onion"
+	identity, err := initializeApplianceIdentity(root, "installation", box, group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := applianceLANHost("installation")
+	if host != "facets-box-18eec647da36972c98009e1848c39fb9.local" || host == applianceLANHost("other") {
+		t.Fatal("unstable LAN identity")
+	}
+	if identity.DeviceSync.LANEndpoint != "https://"+host+":9243/facetsbox/device-sync" || identity.SharedSpaces.LANEndpoint != "https://"+host+":9244" {
+		t.Fatal("incorrect local endpoints")
+	}
+	for _, name := range []string{"device-sync", "shared-spaces"} {
+		path := filepath.Join(root, "configuration", name, "policy/deployment-routes.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var offer serviceauthority.DeploymentOfferTemplate
+		if err := json.Unmarshal(data, &offer); err != nil {
+			t.Fatal(err)
+		}
+		if len(offer.Deployment.Routes) != 2 {
+			t.Fatal("missing route")
+		}
+		for _, route := range offer.Deployment.Routes {
+			if route.Kind == serviceauthority.RouteDirectHTTPS && (route.NetworkScope != serviceauthority.NetworkTrustedLAN || route.RouteID != offer.TransportPolicy.ControlRouteIDs[0] || route.RouteID != offer.TransportPolicy.BulkRouteIDs[0]) {
+				t.Fatal("LAN not preferred")
+			}
+		}
+		// A changed route cannot be silently repaired or used with old pins.
+		offer.Deployment.Routes[0].Endpoint = "https://wrong.local:9243"
+		changed, _ := json.Marshal(offer)
+		if err := os.WriteFile(path, changed, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := initializeApplianceIdentity(root, "installation", box, group); err == nil {
+			t.Fatal("accepted changed route")
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestApplianceIdentityIsIndependentPersistentAndFailsClosed(t *testing.T) {
 	root := t.TempDir()

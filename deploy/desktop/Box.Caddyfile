@@ -45,3 +45,25 @@
   import controller_only
  }
 }
+# Host LAN forwarding is TLS-opaque and reaches only this private socket.
+# Strip client-supplied ingress markers: LAN must never impersonate Tor.
+:8445 {
+ bind unix//run/facets-admin/box-lan.sock|0600
+ tls /etc/facets-server/tls/server.crt /etc/facets-server/tls/server.key
+ route {
+  @sync path /facetsbox/device-sync/.well-known/facets-box /facetsbox/device-sync/v1/service-deployment/proof /facetsbox/device-sync/v1/service-deployment/bootstrap-proof /facetsbox/device-sync/v1/pairing/* /facetsbox/device-sync/v1/relay/tenants/* /facetsbox/device-sync/v1/device-sync/account-admissions/* /facetsbox/device-sync/v1/device-sync/join-requests /facetsbox/device-sync/v1/device-sync/join-requests/* /facetsbox/device-sync/v1/device-sync/principals/*
+  handle @sync {
+   uri strip_prefix /facetsbox/device-sync
+   reverse_proxy server:8080 {
+    header_up -Forwarded
+    header_up -X-Forwarded-For
+    header_up -X-Forwarded-Host
+    header_up -X-Forwarded-Proto
+    header_up -X-Real-IP
+    header_up -X-Facets-Ingress-Transport
+    header_up -X-Facets-Onion-Ingress-Token
+   }
+  }
+  import controller_only
+ }
+}

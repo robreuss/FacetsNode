@@ -229,6 +229,32 @@ func serve(c configuration) error {
 		}
 		h, err := status(c)
 		reply := response{ID: r.ID, Status: h}
+		if r.Operation == "openDeviceSyncLAN" || r.Operation == "openGroupSpacesLAN" {
+			admitted := false
+			if err == nil && !jobRunning() {
+				select {
+				case applicationSlots <- struct{}{}:
+					admitted = true
+				default:
+				}
+			}
+			if admitted {
+				connection, openErr := openLANApplication(c, r.Operation)
+				if openErr == nil {
+					encoded, _ := encodeResponse(response{ID: r.ID}, c.Key)
+					if _, writeErr := file.Write(encoded); writeErr == nil {
+						go relayLANApplication(file, connection)
+						continue
+					}
+					connection.Close()
+				}
+				<-applicationSlots
+			}
+			rejected, _ := encodeResponse(response{ID: r.ID, Error: "application unavailable"}, c.Key)
+			file.Write(rejected)
+			file.Close()
+			continue
+		}
 		if r.Operation == "openManagement" {
 			admitted := false
 			if err == nil && !jobRunning() {
