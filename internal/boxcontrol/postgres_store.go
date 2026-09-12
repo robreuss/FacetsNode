@@ -124,6 +124,26 @@ func (store *PostgresStore) State(ctx context.Context) (State, error) {
 	return state, nil
 }
 
+// ReplaceActivationVerifier is a local-operator operation, never an HTTP route.
+// Compare-and-swap with the exact unclaimed Box prevents a concurrent claim or
+// another rotation from being overwritten. Box identity and requests survive.
+func (store *PostgresStore) ReplaceActivationVerifier(ctx context.Context, boxID uuid.UUID, previous, replacement string) error {
+	if boxID == uuid.Nil || previous == "" || replacement == "" || previous == replacement {
+		return ErrInvalidCredential
+	}
+	result, err := store.pool.Exec(ctx, `
+		UPDATE box_state SET activation_verifier = $3
+		WHERE id = TRUE AND box_id = $1 AND owner_verifier = ''
+		  AND activation_verifier = $2`, boxID, previous, replacement)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrInvalidCredential
+	}
+	return nil
+}
+
 func (store *PostgresStore) Claim(
 	ctx context.Context,
 	activationVerifier string,

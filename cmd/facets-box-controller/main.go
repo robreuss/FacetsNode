@@ -67,6 +67,14 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "replace-activation-code" {
+		code, err := replaceActivationCode(startup, store, os.Args[2:])
+		if err != nil {
+			fatal("Activation code replacement failed", err)
+		}
+		fmt.Printf("Facets Box one-time activation code: %s\n", code)
+		return
+	}
 	privateKey, err := loadIdentityKey(config.identityKeyFile)
 	if err != nil {
 		fatal("Box identity unavailable", err)
@@ -189,6 +197,42 @@ func initialize(ctx context.Context, store *boxcontrol.PostgresStore, identityKe
 // verifiers use the same versioned Argon2id implementation.
 func boxcontrolHashActivation(value string) (string, error) {
 	return boxcontrol.HashActivationCode(value)
+}
+
+type activationCodeStore interface {
+	State(context.Context) (boxcontrol.State, error)
+	ReplaceActivationVerifier(context.Context, uuid.UUID, string, string) error
+}
+
+func replaceActivationCode(ctx context.Context, store activationCodeStore, arguments []string) (string, error) {
+	flags := flag.NewFlagSet("replace-activation-code", flag.ContinueOnError)
+	expected := flags.String("box-id", "", "required exact identity of the unclaimed Box")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
+		return "", errors.New("replace-activation-code requires only --box-id")
+	}
+	boxID, err := uuid.Parse(*expected)
+	if err != nil || boxID == uuid.Nil {
+		return "", errors.New("a nonzero --box-id is required")
+	}
+	state, err := store.State(ctx)
+	if err != nil {
+		return "", err
+	}
+	if state.BoxID != boxID || state.Claimed() || state.ActivationVerifier == "" {
+		return "", errors.New("activation code can only be replaced on the exact unclaimed Box")
+	}
+	code, err := boxcontrol.GenerateActivationCode()
+	if err != nil {
+		return "", err
+	}
+	verifier, err := boxcontrol.HashActivationCode(code)
+	if err != nil {
+		return "", err
+	}
+	if err := store.ReplaceActivationVerifier(ctx, boxID, state.ActivationVerifier, verifier); err != nil {
+		return "", err
+	}
+	return code, nil
 }
 
 func ensureIdentityKey(path string) (ed25519.PrivateKey, error) {

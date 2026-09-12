@@ -25,7 +25,10 @@ const (
 	MinimumOwnerPasswordRunes = 15
 	MaximumOwnerPasswordRunes = 128
 	ConnectionRequestLifetime = 10 * time.Minute
-	WebSessionIdleLifetime    = 30 * time.Minute
+	// Claiming includes choosing an owner password; keep this distinct from
+	// short-lived six-digit device invitations and authenticated admin sessions.
+	ClaimRequestLifetime   = time.Hour
+	WebSessionIdleLifetime = 30 * time.Minute
 	// Authenticated activity renews this window. It is not an absolute deadline
 	// that can interrupt an administrator who is still configuring the Box.
 	WebSessionRenewalLifetime = 12 * time.Hour
@@ -148,9 +151,13 @@ func (invitation ConnectionInvitation) Validate(now time.Time) error {
 }
 
 func (request ConnectionRequest) Validate(now time.Time) error {
+	lifetime := ConnectionRequestLifetime
+	if request.ApprovalCodeDigest == claimRequestDigest(request.RequestID) {
+		lifetime = ClaimRequestLifetime
+	}
 	if request.RequestID == uuid.Nil || request.CreatedAt.IsZero() ||
 		!request.ExpiresAt.After(request.CreatedAt) ||
-		request.ExpiresAt.Sub(request.CreatedAt) > ConnectionRequestLifetime ||
+		request.ExpiresAt.Sub(request.CreatedAt) > lifetime ||
 		!request.ExpiresAt.After(now) {
 		return ErrRequestExpired
 	}

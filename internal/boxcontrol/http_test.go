@@ -303,8 +303,8 @@ func TestConnectionRequestExpiryIsCappedToTheControllerClock(t *testing.T) {
 		PollTokenDigest: base64.RawURLEncoding.EncodeToString(pollDigest[:]),
 		ClientPublicKey: base64.RawURLEncoding.EncodeToString(clientPrivate.PublicKey().Bytes()),
 		DeviceName:      "Mac",
-		// The client is 500 ms ahead and asks for the documented ten-minute lifetime.
-		ExpiresAtMillis: now.Add(ConnectionRequestLifetime + 500*time.Millisecond).UnixMilli(),
+		// The client is 500 ms ahead and asks for the documented one-hour claim lifetime.
+		ExpiresAtMillis: now.Add(ClaimRequestLifetime + 500*time.Millisecond).UnixMilli(),
 	})
 	create := httptest.NewRequest(http.MethodPost, "/v1/claim-connection-requests", bytes.NewReader(createBody))
 	create.Header.Set("Content-Type", "application/json")
@@ -317,7 +317,7 @@ func TestConnectionRequestExpiryIsCappedToTheControllerClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.CreatedAt != now || stored.ExpiresAt != now.Add(ConnectionRequestLifetime) {
+	if stored.CreatedAt != now || stored.ExpiresAt != now.Add(ClaimRequestLifetime) {
 		t.Fatalf("controller did not enforce its own lifetime: created=%s expires=%s", stored.CreatedAt, stored.ExpiresAt)
 	}
 }

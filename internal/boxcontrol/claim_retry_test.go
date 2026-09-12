@@ -127,6 +127,82 @@ func TestStandaloneClaimHasAccurateLabel(t *testing.T) {
 	}
 }
 
+func TestClaimOneHourWindowAndCodeReuseAfterExpiry(t *testing.T) {
+	withFastArgon(t)
+	for _, elapsed := range []time.Duration{59 * time.Minute, time.Hour, time.Hour + time.Second} {
+		t.Run(elapsed.String(), func(t *testing.T) {
+			now := time.Unix(1_800_000_000, 0).UTC()
+			store := initializedMemoryStore(t, "RETRY-BOX-CODE")
+			service := makeTestService(t, store, &testDeviceSyncController{}, now)
+			handler := service.Handler()
+			_, _, raw := testConnectionRequest(t, now, "Claiming Mac")
+			var input createConnectionRequestBody
+			if err := json.Unmarshal(raw, &input); err != nil {
+				t.Fatal(err)
+			}
+			input.ExpiresAtMillis = now.Add(time.Hour).UnixMilli()
+			raw, _ = json.Marshal(input)
+			created := httptest.NewRecorder()
+			handler.ServeHTTP(created, httptest.NewRequest(http.MethodPost, "/v1/claim-connection-requests", bytes.NewReader(raw)))
+			if created.Code != http.StatusCreated {
+				t.Fatal("create", created.Code)
+			}
+			service.now = func() time.Time { return now.Add(elapsed) }
+			home := httptest.NewRecorder()
+			handler.ServeHTTP(home, httptest.NewRequest(http.MethodGet, "/?claim_request_id="+input.RequestID.String(), nil))
+			csrf := cookieNamed(t, home.Result().Cookies(), "facets_box_csrf")
+			postClaimRetry(handler, csrf, claimRetryForm(csrf.Value, input.RequestID.String()))
+			state, _ := store.State(context.Background())
+			if elapsed < time.Hour {
+				if !state.Claimed() {
+					t.Fatal("claim failed before one hour")
+				}
+				return
+			}
+			assertUnavailableClaimPage(t, home.Body.String())
+			if state.Claimed() || !verifySecret(state.ActivationVerifier, "RETRY-BOX-CODE") {
+				t.Fatal("expired claim consumed code")
+			}
+			// A new app-bound request can use that same activation code.
+			input.RequestID = uuid.New()
+			input.ExpiresAtMillis = service.now().Add(time.Hour).UnixMilli()
+			raw, _ = json.Marshal(input)
+			fresh := httptest.NewRecorder()
+			handler.ServeHTTP(fresh, httptest.NewRequest(http.MethodPost, "/v1/claim-connection-requests", bytes.NewReader(raw)))
+			if fresh.Code != http.StatusCreated {
+				t.Fatal("fresh create", fresh.Code)
+			}
+			postClaimRetry(handler, csrf, claimRetryForm(csrf.Value, input.RequestID.String()))
+			state, _ = store.State(context.Background())
+			if !state.Claimed() {
+				t.Fatal("same activation code failed on fresh request")
+			}
+		})
+	}
+}
+
+func TestOneHourClaimDoesNotExtendSixDigitRequests(t *testing.T) {
+	now := time.Now().UTC()
+	id := uuid.New()
+	digest, _ := ApprovalCodeDigest("123456")
+	request := ConnectionRequest{RequestID: id, ApprovalCodeDigest: digest, DeviceName: "Mac", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if request.Validate(now) == nil {
+		t.Fatal("six-digit request accepted an hour")
+	}
+	request.ApprovalCodeDigest = claimRequestDigest(id)
+	if err := request.Validate(now); err != nil {
+		t.Fatal("claim rejected an hour", err)
+	}
+	request.ExpiresAt = now.Add(time.Hour + time.Nanosecond)
+	if request.Validate(now) == nil {
+		t.Fatal("claim exceeded one hour")
+	}
+	invitation := ConnectionInvitation{InvitationID: id, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if invitation.Validate(now) == nil {
+		t.Fatal("six-digit invitation accepted an hour")
+	}
+}
+
 func claimRetryForm(csrf, requestID string) url.Values {
 	return url.Values{"csrf": {csrf}, "display_name": {"Retry Box"}, "activation_code": {"RETRY-BOX-CODE"}, "password": {"a memorable private facets owner phrase"}, "password_confirmation": {"a memorable private facets owner phrase"}, "claim_request_id": {requestID}}
 }
@@ -144,5 +220,9 @@ func assertUnavailableClaimPage(t *testing.T, body string) {
 	t.Helper()
 	if strings.Contains(body, `action="claim"`) || !strings.Contains(body, "start Box setup again in Facets") {
 		t.Fatal("unavailable connection offered an owner-only claim instead of restarting setup")
+	}
+	if strings.Contains(body, "credential rejected") || strings.Contains(body, `class="bad"`) ||
+		!strings.Contains(body, "this attempt did not use up your activation code") {
+		t.Fatal("unavailable setup misrepresented activation-code validity")
 	}
 }
