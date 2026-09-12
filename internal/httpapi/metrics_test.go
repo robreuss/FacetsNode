@@ -27,7 +27,7 @@ func TestMetricsFixedSurfaceSnapshot(t *testing.T) {
 	}
 	snapshot := output.String()
 	digest := sha256.Sum256([]byte(snapshot))
-	const expectedSHA256 = "845049751390f8ec8735d7f912a406644cad31e29d9eca848af41b42f2d823d9"
+	const expectedSHA256 = "4a2f51654657db981ebb3cad444784a4b29af5ad27aac735041bb6ba7d0db91b"
 	if got := fmt.Sprintf("%x", digest); got != expectedSHA256 {
 		t.Fatalf("metrics snapshot SHA-256=%s", got)
 	}

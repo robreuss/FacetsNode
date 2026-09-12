@@ -34,6 +34,14 @@ func TestRegisteredRoutesUseFixedTrafficSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seed := make([]byte, 32)
+	seed[31] = 8
+	signer, err := serviceauthority.NewDeploymentSigner(uuid.New(), seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetServiceAuthorityDeployment(signer, serviceauthority.NewBindingRegistry(), serviceauthority.ScopeDeviceSync)
+	setUnboundDeviceSyncMutationFenceForTesting(server)
 	handler := server.Handler()
 	tenantID, domainID := uuid.New(), uuid.New()
 	requests := []struct {
@@ -43,6 +51,9 @@ func TestRegisteredRoutesUseFixedTrafficSurfaces(t *testing.T) {
 		{method: http.MethodGet, path: "/livez"},
 		{method: http.MethodPost, path: "/v1/relay/tenants"},
 		{method: http.MethodPost, path: "/v1/pairing/routes"},
+		{method: http.MethodPost, path: "/v1/service-deployment/proof"},
+		{method: http.MethodPost, path: "/v1/service-deployment/bootstrap-proof"},
+		{method: http.MethodPost, path: "/v1/relay/tenants/" + tenantID.String() + "/domains/" + domainID.String() + "/bulk-transfer-grants"},
 		{method: http.MethodGet, path: "/v1/relay/tenants/" + tenantID.String() + "/domains/" + domainID.String() + "/messages"},
 		{method: http.MethodGet, path: "/v1/relay/tenants/" + tenantID.String() + "/domains/" + domainID.String() + "/blobs/" + relay.BlobID([]byte("blob"))},
 		{method: http.MethodPost, path: "/v1/relay/tenants/" + tenantID.String() + "/domains/" + domainID.String() + "/checkpoint-fences"},
@@ -57,11 +68,16 @@ func TestRegisteredRoutesUseFixedTrafficSurfaces(t *testing.T) {
 		traffic.SurfaceStorage:         1,
 		traffic.SurfaceCheckpointAdmin: 1,
 		traffic.SurfaceManagement:      2,
+		traffic.SurfaceDeploymentProof: 2,
+		traffic.SurfaceBulkGrant:       1,
 	}
 	for surface, count := range expected {
 		if got := server.metrics.requests[surface].Load(); got != count {
 			t.Fatalf("surface %s requests=%d expected=%d", surface.Name(), got, count)
 		}
+	}
+	if serviceAuthorityTrafficClass(traffic.SurfaceBulkGrant) != serviceauthority.TrafficControl {
+		t.Fatal("bulk grants must retain authenticated control-route authorization")
 	}
 }
 
@@ -258,6 +274,48 @@ func TestDeploymentProofSigningConcurrencyRemainsBounded(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/proof", nil))
 	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") == "" {
 		t.Fatalf("unbounded proof concurrency: status=%d", recorder.Code)
+	}
+}
+
+func TestCompleteTwoClientBulkProtocolFitsSeparateBoundedBudgets(t *testing.T) {
+	server := newTrafficTestServer(t, traffic.SurfaceBulkGrant, traffic.DefaultLimits()[traffic.SurfaceBulkGrant])
+	now := time.Unix(1_000, 0)
+	server.now = func() time.Time { return now }
+	handlers := map[traffic.Surface]http.Handler{}
+	for _, surface := range traffic.Surfaces() {
+		handlers[surface] = server.trafficHandler(surface, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	}
+	request := func(surface traffic.Surface, credential string, sequence int) {
+		req := httptest.NewRequest(http.MethodPost, "/protocol", nil)
+		req.Pattern = "POST /protocol"
+		req.RemoteAddr = "192.0.2.10:50000"
+		if credential != "" {
+			req.Header.Set("Authorization", "Bearer "+credential)
+		}
+		recorder := httptest.NewRecorder()
+		handlers[surface].ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusNoContent {
+			t.Fatalf("surface=%s sequence=%d status=%d", surface.Name(), sequence, recorder.Code)
+		}
+	}
+	// A/B have four slots each. Each 240ms batch has 24 actual operations,
+	// 24 grants and 48 proofs. Reuse each member credential deliberately:
+	// capacity must not depend on inventing identities for each request.
+	for batch := 0; batch < 300; batch++ {
+		for client := 0; client < 2; client++ {
+			credential := fmt.Sprintf("member-%d", client)
+			for range 4 * 3 {
+				request(traffic.SurfaceDeploymentProof, "", batch)
+				request(traffic.SurfaceBulkGrant, credential, batch)
+				request(traffic.SurfaceDeploymentProof, "", batch)
+				request(traffic.SurfaceStorage, credential, batch)
+			}
+		}
+		if batch%10 == 0 {
+			request(traffic.SurfaceManagement, "admin", batch)
+			request(traffic.SurfaceCheckpointAdmin, "checkpoint-admin", batch)
+		}
+		now = now.Add(240 * time.Millisecond)
 	}
 }
 

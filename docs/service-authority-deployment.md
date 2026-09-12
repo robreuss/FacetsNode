@@ -240,6 +240,16 @@ environment settings use the same validated rate/burst/concurrency controls as
 other surfaces. Forwarded identity headers remain untrusted. This is admission
 separation, not proof caching or relaxed proof validation.
 
+The matching `bulk_grant` surface remains authenticated control traffic and has
+6,000 requests/minute per credential (burst 200), 12,000/minute per connection
+(burst 400), and concurrency 16. Storage has 6,000/minute per credential (burst
+200), 12,000/minute per connection (burst 800), and unchanged concurrency 32.
+The complete two-client/four-slots-each test admits 100 bulk operations/second,
+their 100 grants and 200 fresh proofs, without consuming checkpoint/interactive
+administration budgets. These remain finite admission limits, not guaranteed
+throughput. The live wide run exposed the old checkpoint-admin grant budget
+after proof/outbox repair; measuring proof calls alone did not cover it.
+
 - `POST /v1/service-deployment/proof` issues a five-minute deployment-key
   proof only for an exact current scope/revision/digest/deployment binding;
 - `POST /v1/service-deployment/bootstrap-proof` accepts a signed, unexpired

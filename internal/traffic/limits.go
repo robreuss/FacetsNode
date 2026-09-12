@@ -11,6 +11,7 @@ const (
 	SurfaceCheckpointAdmin
 	SurfaceManagement
 	SurfaceDeploymentProof
+	SurfaceBulkGrant
 	SurfaceCount
 )
 
@@ -28,6 +29,7 @@ var allSurfaces = [...]Surface{
 	SurfaceCheckpointAdmin,
 	SurfaceManagement,
 	SurfaceDeploymentProof,
+	SurfaceBulkGrant,
 }
 
 func Surfaces() [SurfaceCount]Surface { return allSurfaces }
@@ -46,6 +48,8 @@ func (s Surface) Name() string {
 		return "management"
 	case SurfaceDeploymentProof:
 		return "deployment_proof"
+	case SurfaceBulkGrant:
+		return "bulk_grant"
 	default:
 		return "invalid"
 	}
@@ -65,7 +69,7 @@ func DefaultLimits() Limits {
 	var limits Limits
 	limits[SurfaceRendezvous] = Limit{RequestsPerMinute: 300, Burst: 100, ConnectionRequestsPerMinute: 2_400, ConnectionBurst: 400, Concurrency: 32}
 	limits[SurfaceRelayMessage] = Limit{RequestsPerMinute: 3_000, Burst: 500, ConnectionRequestsPerMinute: 24_000, ConnectionBurst: 2_000, Concurrency: 128}
-	limits[SurfaceStorage] = Limit{RequestsPerMinute: 1_200, Burst: 200, ConnectionRequestsPerMinute: 4_800, ConnectionBurst: 800, Concurrency: 32}
+	limits[SurfaceStorage] = Limit{RequestsPerMinute: 6_000, Burst: 200, ConnectionRequestsPerMinute: 12_000, ConnectionBurst: 800, Concurrency: 32}
 	limits[SurfaceCheckpointAdmin] = Limit{RequestsPerMinute: 600, Burst: 200, ConnectionRequestsPerMinute: 4_800, ConnectionBurst: 800, Concurrency: 32}
 	limits[SurfaceManagement] = Limit{RequestsPerMinute: 300, Burst: 100, ConnectionRequestsPerMinute: 600, ConnectionBurst: 200, Concurrency: 8}
 	// Each authenticated bulk operation needs a fresh proof both for its grant
@@ -74,6 +78,11 @@ func DefaultLimits() Limits {
 	// 200 proofs/second per observed peer/route (not client-supplied identity),
 	// while retaining a small burst and a separate hard signing-work bound.
 	limits[SurfaceDeploymentProof] = Limit{RequestsPerMinute: 12_000, Burst: 400, ConnectionRequestsPerMinute: 24_000, ConnectionBurst: 800, Concurrency: 16}
+	// One resource-scoped grant per bulk operation. Grants remain authenticated
+	// control traffic, but must not exhaust checkpoint administration. Storage
+	// admission is sized for the same 100-operation/s tested protocol workload;
+	// request sizes, signing validation and hard concurrency remain bounded.
+	limits[SurfaceBulkGrant] = Limit{RequestsPerMinute: 6_000, Burst: 200, ConnectionRequestsPerMinute: 12_000, ConnectionBurst: 400, Concurrency: 16}
 	return limits
 }
 

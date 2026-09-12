@@ -476,7 +476,7 @@ func (s *Server) Handler() http.Handler {
 			if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
 				register(
 					"POST /v1/relay/tenants/{tenantID}/domains/{domainID}/bulk-transfer-grants",
-					traffic.SurfaceCheckpointAdmin,
+					traffic.SurfaceBulkGrant,
 					mutation,
 					s.handleCreateRelayBulkTransferGrant,
 				)

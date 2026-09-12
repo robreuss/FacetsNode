@@ -441,6 +441,7 @@ var trafficSurfaceEnvironmentNames = map[traffic.Surface]string{
 	traffic.SurfaceCheckpointAdmin: "CHECKPOINT_ADMIN",
 	traffic.SurfaceManagement:      "MANAGEMENT",
 	traffic.SurfaceDeploymentProof: "DEPLOYMENT_PROOF",
+	traffic.SurfaceBulkGrant:       "BULK_GRANT",
 }
 
 func loadTrafficLimits(configuration *Config, servicePrefix string) error {
