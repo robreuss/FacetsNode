@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 func (s *RelayStore) AuthorizeBlobUpload(
@@ -98,6 +99,13 @@ func (s *RelayStore) CreateBlobUpload(
 	}
 	if tenantBlobCount+tenantReservedCount >= tenant.MaximumAggregateBlobCount || request.ByteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobBytes-tenantReservedBytes {
 		return relay.BlobUploadCreateResponse{}, relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate blob quota")
+	}
+	reservation, err := storagecapacity.UploadReservation(request.ByteCount, 0, 0)
+	if err != nil {
+		return relay.BlobUploadCreateResponse{}, err
+	}
+	if err := s.admitSharedCapacity(ctx, tx, reservation); err != nil {
+		return relay.BlobUploadCreateResponse{}, err
 	}
 	expires := nowMilliseconds + s.blobUploadTTL.Milliseconds()
 	if expires < nowMilliseconds {
@@ -202,6 +210,9 @@ func (s *RelayStore) AppendBlobUploadChunk(
 	// Keep the upload row locked across tail repair, append, and fsync. A second
 	// instance cannot inspect a stale offset or touch staging until this exact
 	// chunk and the durable offset commit together.
+	if err := s.admitSharedCapacity(ctx, tx, storagecapacity.ChunkMetadataAllowance); err != nil {
+		return relay.BlobUploadStatus{}, err
+	}
 	if err := write(upload.status); err != nil {
 		return relay.BlobUploadStatus{}, err
 	}
@@ -284,6 +295,11 @@ func (s *RelayStore) FinalizeBlobUpload(
 	}
 	if blobFound && existing.ByteCount != request.ByteCount {
 		return relay.BlobUploadFinalizationResponse{}, relay.NewProtocolError(relay.CodeBlobCollision, "blob ID was reused with a different length")
+	}
+	// The active reservation already includes the temporary publication copy
+	// and finalization metadata. Keep pool admission serialized until commit.
+	if err := s.admitSharedCapacity(ctx, tx, 0); err != nil {
+		return relay.BlobUploadFinalizationResponse{}, err
 	}
 	if !blobFound {
 		if publish == nil {

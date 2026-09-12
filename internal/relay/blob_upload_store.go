@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/google/uuid"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 type BlobUploadContentStore interface {
@@ -28,8 +29,17 @@ type BlobUploadMaintenanceContentStore interface {
 }
 
 type FileBlobUploadContentStore struct {
-	root  string
-	blobs BlobContentStore
+	root             string
+	blobs            BlobContentStore
+	capacityProvider storagecapacity.Provider
+}
+
+func (s *FileBlobUploadContentStore) SetSharedCapacityProvider(provider storagecapacity.Provider) error {
+	if provider == nil {
+		return storagecapacity.ErrUnavailable
+	}
+	s.capacityProvider = provider
+	return nil
 }
 
 func NewFileBlobUploadContentStore(root string, blobs BlobContentStore) (*FileBlobUploadContentStore, error) {
@@ -109,7 +119,11 @@ func (s *FileBlobUploadContentStore) Append(
 	}
 	hash := sha256.New()
 	limited := &io.LimitedReader{R: &contextReader{ctx: ctx, reader: source}, N: request.ByteCount + 1}
-	written, copyErr := io.Copy(io.MultiWriter(file, hash), limited)
+	var destinationWriter io.Writer = file
+	if s.capacityProvider != nil {
+		destinationWriter = storagecapacity.CheckedWriter{Context: ctx, Destination: file, Capacity: s.capacityProvider}
+	}
+	written, copyErr := io.Copy(io.MultiWriter(destinationWriter, hash), limited)
 	if copyErr != nil || written != request.ByteCount ||
 		hex.EncodeToString(hash.Sum(nil)) != request.ChunkSHA256 {
 		_ = file.Truncate(request.Offset)

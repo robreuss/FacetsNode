@@ -12,9 +12,11 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 type RelayStore struct {
+	capacityProvider            storagecapacity.Provider
 	pool                        *pgxpool.Pool
 	blobUploadTTL               time.Duration
 	checkpointFenceTTL          time.Duration
@@ -1016,6 +1018,11 @@ func (s *RelayStore) publishInTransaction(
 		return relay.PublishResult{}, relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate message quota")
 	}
 	sequence := lastSequence + 1
+	// Base64 payload, indexes and WAL can temporarily coexist with the stored
+	// row. Reserve a conservative multiple rather than only ciphertext bytes.
+	if err := s.admitSharedCapacity(ctx, transaction, 4*int64(ciphertextByteCount)+storagecapacity.MutationMetadataAllowance); err != nil {
+		return relay.PublishResult{}, err
+	}
 	if _, err := transaction.Exec(ctx, `
 		INSERT INTO relay_messages (
 			tenant_id, domain_id, domain_sequence, message_id,

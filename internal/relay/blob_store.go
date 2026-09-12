@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/google/uuid"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 type BlobScope struct {
@@ -71,7 +72,18 @@ type BlobUploadContentCandidate struct {
 }
 
 type FileBlobContentStore struct {
-	root string
+	root             string
+	capacityProvider storagecapacity.Provider
+}
+
+// SetSharedCapacityProvider must be called before serving requests. Reads and
+// maintenance never depend on a capacity probe succeeding.
+func (s *FileBlobContentStore) SetSharedCapacityProvider(provider storagecapacity.Provider) error {
+	if provider == nil {
+		return storagecapacity.ErrUnavailable
+	}
+	s.capacityProvider = provider
+	return nil
 }
 
 func NewFileBlobContentStore(root string) (*FileBlobContentStore, error) {
@@ -112,7 +124,11 @@ func (s *FileBlobContentStore) Put(
 		R: &contextReader{ctx: ctx, reader: source},
 		N: expectedByteCount + 1,
 	}
-	written, copyErr := io.Copy(io.MultiWriter(staged, hash), limited)
+	var destinationWriter io.Writer = staged
+	if s.capacityProvider != nil {
+		destinationWriter = storagecapacity.CheckedWriter{Context: ctx, Destination: staged, Capacity: s.capacityProvider}
+	}
+	written, copyErr := io.Copy(io.MultiWriter(destinationWriter, hash), limited)
 	if copyErr != nil {
 		_ = staged.Close()
 		return BlobContentResult{}, fmt.Errorf("stage blob content: %w", copyErr)
