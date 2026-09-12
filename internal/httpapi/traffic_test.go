@@ -102,6 +102,48 @@ func TestTrafficRateLimitRefillsAndExactRetryCanResume(t *testing.T) {
 	}
 }
 
+// Characterizes why interactive management admission must not also be the
+// anonymous per-request deployment-proof budget for a bulk transfer. The
+// production retry policy sleeps for Retry-After; the fake clock keeps this
+// reproduction deterministic and does not require a live service.
+func TestManagementBudgetCannotServeBulkDeploymentProofWorkload(t *testing.T) {
+	server := newTrafficTestServer(t, traffic.SurfaceManagement, traffic.DefaultLimits()[traffic.SurfaceManagement])
+	now := time.Unix(1_000, 0)
+	server.now = func() time.Time { return now }
+	handler := server.trafficHandler(traffic.SurfaceManagement, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	const requests = 256 * 8 // four upload operations, two proofs per operation
+	accepted, rejected, slept := 0, 0, 0
+	for accepted < requests {
+		req := httptest.NewRequest(http.MethodPost, "/v1/service-deployment/proof", nil)
+		req.Pattern = "POST /v1/service-deployment/proof"
+		req.RemoteAddr = "192.0.2.10:50000" // observed peer, e.g. an ingress proxy
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", accepted%2+1))
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		now = now.Add(2 * time.Millisecond)
+		if recorder.Code == http.StatusNoContent {
+			accepted++
+			continue
+		}
+		if recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("unexpected status %d", recorder.Code)
+		}
+		seconds, err := strconv.Atoi(recorder.Header().Get("Retry-After"))
+		if err != nil || seconds < 1 || seconds > 60 {
+			t.Fatalf("invalid backoff %q", recorder.Header().Get("Retry-After"))
+		}
+		rejected++
+		slept += seconds
+		now = now.Add(time.Duration(seconds) * time.Second)
+	}
+	if slept < 350 || rejected == 0 {
+		t.Fatalf("missing reproduced bottleneck: accepted=%d rejected=%d sleep=%ds", accepted, rejected, slept)
+	}
+	t.Logf("proofRequests=%d http429=%d retrySleepSeconds=%d network=none", accepted, rejected, slept)
+}
+
 func TestTrafficPairingRoutesRemainIndependentBehindOneConnectionAddress(t *testing.T) {
 	server := newTrafficTestServer(t, traffic.SurfaceRendezvous, traffic.Limit{
 		RequestsPerMinute: 1, Burst: 1,
