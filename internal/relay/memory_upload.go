@@ -79,8 +79,8 @@ func (s *MemoryStore) CreateBlobUpload(
 		}
 		return BlobUploadCreateResponse{}, protocolError(CodeBlobUploadCollision, "blob is already published")
 	}
-	if int64(len(domain.blobs))+domain.reservedBlobCount >= int64(domain.registration.MaximumBlobCount) ||
-		request.ByteCount > domain.registration.MaximumBlobByteCount-domain.blobBytes-domain.reservedBlobBytes {
+	if !domain.registration.UsesSharedCapacity() && (int64(len(domain.blobs))+domain.reservedBlobCount >= int64(domain.registration.MaximumBlobCount) ||
+		request.ByteCount > domain.registration.MaximumBlobByteCount-domain.blobBytes-domain.reservedBlobBytes) {
 		return BlobUploadCreateResponse{}, protocolError(CodeDomainFull, "domain reached its blob quota")
 	}
 	if err := s.ensureTenantBlobCapacityLocked(credential.TenantID, request.ByteCount); err != nil {

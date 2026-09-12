@@ -89,7 +89,7 @@ func TestPostgresDeviceSyncMigrationRollbackReplacesStateAndRestoresWrites(
 		exportPostgresDeviceSyncMigrationState(t, ctx, pool, principalID)
 	if _, err := pool.Exec(ctx, `
 		UPDATE relay_tenants
-		SET maximum_aggregate_message_count = maximum_aggregate_message_count + 1
+		SET created_at_milliseconds = created_at_milliseconds + 1
 		WHERE tenant_id=$1
 	`, principalID); err != nil {
 		t.Fatal(err)

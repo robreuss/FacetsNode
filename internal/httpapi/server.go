@@ -21,6 +21,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -902,7 +903,16 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 	code := "internal_error"
 	message := "The request could not be completed."
 	var protocol *rendezvous.ProtocolError
-	if errors.As(err, &protocol) {
+	if errors.Is(err, storagecapacity.ErrPressure) || errors.Is(err, storagecapacity.ErrUnavailable) {
+		status = http.StatusInsufficientStorage
+		code = "storage_pressure"
+		message = "Sync paused: the Box needs more storage."
+		if errors.Is(err, storagecapacity.ErrUnavailable) {
+			code = "storage_capacity_unavailable"
+			message = "Sync paused: the Box cannot check its available storage."
+		}
+		writer.Header().Set("Retry-After", "30")
+	} else if errors.As(err, &protocol) {
 		code = string(protocol.Code)
 		message = "The rendezvous request was rejected."
 		switch protocol.Code {

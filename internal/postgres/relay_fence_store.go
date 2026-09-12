@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 type storedFence struct {
@@ -63,6 +64,9 @@ func (s *RelayStore) CreateCheckpointFence(ctx context.Context, credential relay
 	}
 	if active {
 		return relay.CheckpointFenceResponse{}, relay.NewProtocolError(relay.CodeCheckpointFenceActive, "domain already has an active fence")
+	}
+	if err := s.admitSharedCapacity(ctx, tx, storagecapacity.MutationMetadataAllowance); err != nil {
+		return relay.CheckpointFenceResponse{}, err
 	}
 	expires := now + s.checkpointFenceTTL.Milliseconds()
 	if _, err := tx.Exec(ctx, `INSERT INTO relay_checkpoint_fences (tenant_id,domain_id,fence_id,create_retry_id,holder_subscription_id,status,boundary_sequence,requested_at_milliseconds,acquired_at_milliseconds,expires_at_milliseconds) VALUES($1,$2,$3,$4,$5,'active',$6,$7,$8,$9)`, credential.TenantID, credential.DomainID, request.FenceID, request.RetryID, subscriptionID, last, request.RequestedAtMilliseconds, now, expires); err != nil {

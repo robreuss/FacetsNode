@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Credential, candidate relay.CheckpointCandidate, nowMilliseconds int64) (relay.CheckpointStageResponse, error) {
@@ -109,6 +110,11 @@ func (s *RelayStore) StageCheckpoint(ctx context.Context, credential relay.Crede
 		if !exists {
 			return relay.CheckpointStageResponse{}, relay.NewProtocolError(relay.CodeInvalidCheckpoint, "retained blob is missing")
 		}
+	}
+	metadataBytes := storagecapacity.UploadMetadataAllowance +
+		(int64(len(candidate.RetainedMessageIDs))+int64(len(candidate.RetainedBlobIDs)))*storagecapacity.ChunkMetadataAllowance
+	if err := s.admitSharedCapacity(ctx, tx, metadataBytes); err != nil {
+		return relay.CheckpointStageResponse{}, err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO relay_checkpoints (tenant_id,domain_id,checkpoint_id,stage_retry_id,candidate_digest,version,publisher_subscription_id,publisher_member_id,covered_through_sequence,created_at_milliseconds,fence_id,key_epoch) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, candidate.TenantID, candidate.DomainID, candidate.CheckpointID, candidate.RetryID, relay.CheckpointCandidateDigest(candidate), candidate.Version, candidate.PublisherSubscriptionID, credential.MemberID, int64(covered), candidate.CreatedAtMilliseconds, candidate.FenceID, candidate.KeyEpoch)
 	if err != nil {
@@ -255,6 +261,19 @@ func (s *RelayStore) ActivateCheckpoint(ctx context.Context, credential relay.Ad
 		}
 		previousArgument = previousID
 	} else if err != pgx.ErrNoRows {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	// Activation materializes retention/deletion rows before collection can
+	// release data. Include that temporary database growth in admission.
+	var metadataBytes int64
+	if err := tx.QueryRow(ctx, `SELECT $3::bigint + $4::bigint * (
+		(SELECT count(*) FROM relay_subscriptions WHERE tenant_id=$1 AND domain_id=$2) +
+		(SELECT count(*) FROM relay_messages WHERE tenant_id=$1 AND domain_id=$2) +
+		(SELECT count(*) FROM relay_blobs WHERE tenant_id=$1 AND domain_id=$2))`,
+		credential.TenantID, credential.DomainID, storagecapacity.UploadMetadataAllowance, storagecapacity.ChunkMetadataAllowance).Scan(&metadataBytes); err != nil {
+		return relay.CheckpointActivationResponse{}, err
+	}
+	if err := s.admitSharedCapacity(ctx, tx, metadataBytes); err != nil {
 		return relay.CheckpointActivationResponse{}, err
 	}
 	var ordinal int64

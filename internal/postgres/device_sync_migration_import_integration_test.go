@@ -389,14 +389,22 @@ func populatePostgresDeviceSyncMigrationRepresentativeState(
 
 	blobBytes := []byte("device-sync-migration-representative-blob")
 	blobID := relay.BlobID(blobBytes)
-	if err := store.PrepareBlobPublish(
-		ctx, publisher, blobID, int64(len(blobBytes)), 1_210,
-	); err != nil {
+	uploadID := uuid.New()
+	chunkDigest := sha256.Sum256(blobBytes)
+	if _, err := store.CreateBlobUpload(ctx, publisher, relay.BlobUploadRequest{
+		RetryID: uuid.New(), UploadID: uploadID, RelayBlobID: blobID,
+		ByteCount: int64(len(blobBytes)), CreatedAtMilliseconds: 1_210,
+	}, 1_210); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CommitBlobPublish(
-		ctx, publisher, blobID, int64(len(blobBytes)), 1_210,
-	); err != nil {
+	if _, err := store.AppendBlobUploadChunk(ctx, publisher, relay.BlobUploadChunkRequest{
+		UploadID: uploadID, Offset: 0, ByteCount: int64(len(blobBytes)), ChunkSHA256: hex.EncodeToString(chunkDigest[:]),
+	}, 1_215, func(relay.BlobUploadStatus) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeBlobUpload(ctx, publisher, relay.BlobUploadFinalizationRequest{
+		RetryID: uuid.New(), UploadID: uploadID, RelayBlobID: blobID, ByteCount: int64(len(blobBytes)), FinalizedAtMilliseconds: 1_215,
+	}, 1_215, func(relay.BlobUploadStatus) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 
@@ -434,40 +442,6 @@ func populatePostgresDeviceSyncMigrationRepresentativeState(
 		ctx, authority.ControlAdministrationCredential, activation, 1_240,
 	); err != nil || activated.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("activate representative checkpoint=%+v err=%v", activated, err)
-	}
-
-	uploadID := uuid.New()
-	chunkDigest := sha256.Sum256(blobBytes)
-	createRetryID := uuid.New()
-	finalizeRetryID := uuid.New()
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO relay_blob_uploads (
-			tenant_id,domain_id,upload_id,create_retry_id,subscription_id,
-			publisher_member_id,relay_blob_id,byte_count,committed_offset,state,
-			created_at_milliseconds,updated_at_milliseconds,
-			expires_at_milliseconds,finalized_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,'finalized',1210,1215,2000,1215)
-	`, tenantID, domainID, uploadID, createRetryID, subscriptionID,
-		initialDeviceID, blobID, int64(len(blobBytes))); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO relay_blob_upload_chunks (
-			tenant_id,domain_id,upload_id,chunk_offset,byte_count,
-			chunk_sha256,committed_at_milliseconds
-		) VALUES ($1,$2,$3,0,$4,$5,1215)
-	`, tenantID, domainID, uploadID, int64(len(blobBytes)),
-		hex.EncodeToString(chunkDigest[:])); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO relay_blob_upload_finalizations (
-			tenant_id,domain_id,retry_id,upload_id,relay_blob_id,
-			byte_count,finalized_at_milliseconds
-		) VALUES ($1,$2,$3,$4,$5,$6,1215)
-	`, tenantID, domainID, finalizeRetryID, uploadID, blobID,
-		int64(len(blobBytes))); err != nil {
-		t.Fatal(err)
 	}
 
 	requestCredential := devicesync.JoinRequestCredential{

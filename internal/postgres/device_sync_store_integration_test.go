@@ -394,6 +394,11 @@ func postgresBootstrapDeviceSyncPrincipal(
 	initialAuthorities ...*devicesync.InitialServiceAuthorityBinding,
 ) postgresDeviceSyncAuthority {
 	t.Helper()
+	// Production startup now installs the physical-capacity provider before
+	// issuing default self-hosted admissions. Model that required dependency.
+	if err := store.SetSharedCapacityProvider(&poolTestCapacity{free: 8 << 30}); err != nil {
+		t.Fatal(err)
+	}
 	admissionCredential := devicesync.AdmissionCredential{
 		AdmissionID: uuid.New(), Token: postgresRelayToken(21),
 	}

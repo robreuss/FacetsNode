@@ -172,6 +172,34 @@ func validBlobMaintenanceTime(nowMilliseconds, graceMilliseconds int64) bool {
 		graceMilliseconds <= math.MaxInt64-nowMilliseconds
 }
 
+// Called after authorized permanent subscription revocation, inside the same
+// transaction and with tenant/domain write locks already held. An abandoned
+// upload cannot retain a reservation after its authority is revoked. File
+// deletion remains the existing bounded, authority-checked maintenance work.
+func cancelSubscriptionBlobUploads(ctx context.Context, tx pgx.Tx, tenantID, domainID, subscriptionID uuid.UUID, now int64) error {
+	var count, bytes int64
+	if err := tx.QueryRow(ctx, `WITH cancelled AS (
+		UPDATE relay_blob_uploads SET state='expired',updated_at=now()
+		WHERE tenant_id=$1 AND domain_id=$2 AND subscription_id=$3 AND state='active'
+		RETURNING tenant_id,domain_id,upload_id,byte_count
+	), queued AS (
+		INSERT INTO relay_blob_upload_deletions (tenant_id,domain_id,upload_id,eligible_at_milliseconds)
+		SELECT tenant_id,domain_id,upload_id,$4 FROM cancelled
+		ON CONFLICT (tenant_id,domain_id,upload_id) DO NOTHING RETURNING upload_id
+	) SELECT count(*),COALESCE(SUM(byte_count),0)::bigint FROM cancelled`,
+		tenantID, domainID, subscriptionID, now).Scan(&count, &bytes); err != nil {
+		return fmt.Errorf("cancel revoked subscription uploads: %w", err)
+	}
+	if count == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE relay_domains SET reserved_blob_count=reserved_blob_count-$3,reserved_blob_byte_count=reserved_blob_byte_count-$4 WHERE tenant_id=$1 AND domain_id=$2`, tenantID, domainID, count, bytes); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE relay_tenants SET reserved_blob_count=reserved_blob_count-$2,reserved_blob_byte_count=reserved_blob_byte_count-$3 WHERE tenant_id=$1`, tenantID, count, bytes)
+	return err
+}
+
 func (s *RelayStore) DeleteBlobIfUnauthorized(ctx context.Context, candidate relay.BlobContentCandidate, nowMilliseconds, graceMilliseconds int64, remove func() error) (bool, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {

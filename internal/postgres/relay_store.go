@@ -988,7 +988,7 @@ func (s *RelayStore) publishInTransaction(
 	if err != nil {
 		return relay.PublishResult{}, err
 	}
-	if messageCount >= domain.MaximumMessageCount {
+	if !domain.UsesSharedCapacity() && messageCount >= domain.MaximumMessageCount {
 		return relay.PublishResult{}, relay.NewProtocolError(
 			relay.CodeDomainFull,
 			"domain reached its message limit",
@@ -1002,7 +1002,7 @@ func (s *RelayStore) publishInTransaction(
 	if err != nil {
 		return relay.PublishResult{}, err
 	}
-	if ciphertextByteCount > domain.MaximumMessageByteCount-messageByteCount {
+	if !domain.UsesSharedCapacity() && ciphertextByteCount > domain.MaximumMessageByteCount-messageByteCount {
 		return relay.PublishResult{}, relay.NewProtocolError(
 			relay.CodeDomainFull,
 			"domain reached its message-byte limit",
@@ -1013,8 +1013,8 @@ func (s *RelayStore) publishInTransaction(
 	if err := transaction.QueryRow(ctx, `SELECT message_count,aggregate_message_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&tenantMessageCount, &tenantMessageByteCount); err != nil {
 		return relay.PublishResult{}, fmt.Errorf("load tenant message counters: %w", err)
 	}
-	if tenantMessageCount >= tenant.MaximumAggregateMessageCount ||
-		ciphertextByteCount > tenant.MaximumAggregateMessageByteCount-tenantMessageByteCount {
+	if !tenant.UsesSharedCapacity() && (tenantMessageCount >= tenant.MaximumAggregateMessageCount ||
+		ciphertextByteCount > tenant.MaximumAggregateMessageByteCount-tenantMessageByteCount) {
 		return relay.PublishResult{}, relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate message quota")
 	}
 	sequence := lastSequence + 1
@@ -1481,6 +1481,9 @@ func (s *RelayStore) Acknowledge(
 			"applied requires a durable accepted acknowledgment",
 		)
 	}
+	if err := s.admitSharedCapacity(ctx, transaction, storagecapacity.MutationMetadataAllowance); err != nil {
+		return relay.AcknowledgmentResult{}, err
+	}
 	if !hasExisting {
 		result, err := transaction.Exec(ctx, `
 			INSERT INTO relay_acknowledgments (
@@ -1624,6 +1627,12 @@ func (s *RelayStore) PrepareBlobPublish(
 			"blob ID was reused with a different length",
 		)
 	}
+	// Shared-capacity writes require a durable upload reservation. This
+	// internal direct-publish helper is not an HTTP upload path and cannot
+	// safely reserve across its separate prepare/commit transactions.
+	if tenant.UsesSharedCapacity() {
+		return relay.NewProtocolError(relay.CodeInvalidBlobUpload, "shared capacity requires a resumable blob upload")
+	}
 	if err := ensureRelayBlobCapacity(domain, blobCount, blobByteCount, byteCount); err != nil {
 		return err
 	}
@@ -1632,7 +1641,7 @@ func (s *RelayStore) PrepareBlobPublish(
 	if err := transaction.QueryRow(ctx, `SELECT blob_count,aggregate_blob_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&tenantBlobCount, &tenantBlobByteCount); err != nil {
 		return err
 	}
-	if tenantBlobCount >= tenant.MaximumAggregateBlobCount || byteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobByteCount {
+	if !tenant.UsesSharedCapacity() && (tenantBlobCount >= tenant.MaximumAggregateBlobCount || byteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobByteCount) {
 		return relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate blob quota")
 	}
 	return nil
@@ -1736,12 +1745,15 @@ func (s *RelayStore) CommitBlobPublish(
 	); err != nil {
 		return relay.BlobPublishResult{}, err
 	}
+	if tenant.UsesSharedCapacity() {
+		return relay.BlobPublishResult{}, relay.NewProtocolError(relay.CodeInvalidBlobUpload, "shared capacity requires a resumable blob upload")
+	}
 	var tenantBlobCount int
 	var tenantBlobByteCount int64
 	if err := transaction.QueryRow(ctx, `SELECT blob_count,aggregate_blob_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&tenantBlobCount, &tenantBlobByteCount); err != nil {
 		return relay.BlobPublishResult{}, err
 	}
-	if tenantBlobCount >= tenant.MaximumAggregateBlobCount || byteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobByteCount {
+	if !tenant.UsesSharedCapacity() && (tenantBlobCount >= tenant.MaximumAggregateBlobCount || byteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobByteCount) {
 		return relay.BlobPublishResult{}, relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate blob quota")
 	}
 	if _, err := transaction.Exec(ctx, `
@@ -1905,11 +1917,10 @@ func loadRelayDomain(
 	if err := registration.Validate(); err != nil {
 		return relay.DomainRegistration{}, 0, 0, 0, 0, 0, fmt.Errorf("stored relay domain failed validation: %v", err)
 	}
-	if messageCount < 0 || messageCount > registration.MaximumMessageCount ||
-		messageByteCount < 0 || messageByteCount > registration.MaximumMessageByteCount ||
-		blobCount < 0 || blobCount > registration.MaximumBlobCount ||
-		blobByteCount < 0 || blobByteCount > registration.MaximumBlobByteCount ||
-		lastSequence < int64(messageCount) {
+	if messageCount < 0 || messageByteCount < 0 || blobCount < 0 || blobByteCount < 0 ||
+		lastSequence < int64(messageCount) || (!registration.UsesSharedCapacity() &&
+		(messageCount > registration.MaximumMessageCount || messageByteCount > registration.MaximumMessageByteCount ||
+			blobCount > registration.MaximumBlobCount || blobByteCount > registration.MaximumBlobByteCount)) {
 		return relay.DomainRegistration{}, 0, 0, 0, 0, 0, fmt.Errorf("stored relay domain counters are invalid")
 	}
 	return registration, messageCount, messageByteCount, blobCount, blobByteCount, lastSequence, nil
@@ -2116,10 +2127,10 @@ func ensureRelayBlobCapacity(
 	storedByteCount int64,
 	byteCount int64,
 ) error {
-	if blobCount >= domain.MaximumBlobCount {
+	if !domain.UsesSharedCapacity() && blobCount >= domain.MaximumBlobCount {
 		return relay.NewProtocolError(relay.CodeDomainFull, "domain reached its blob limit")
 	}
-	if byteCount > domain.MaximumBlobByteCount-storedByteCount {
+	if !domain.UsesSharedCapacity() && byteCount > domain.MaximumBlobByteCount-storedByteCount {
 		return relay.NewProtocolError(
 			relay.CodeDomainFull,
 			"domain reached its blob-byte limit",

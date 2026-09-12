@@ -219,6 +219,10 @@ func (s *MemoryStore) ProvisionTenant(
 		tenant.CreatedAtMilliseconds != initialDomain.Registration.CreatedAtMilliseconds {
 		return TenantProvisioningResult{}, protocolError(CodeWrongScope, "initial domain belongs to another tenant")
 	}
+	initialDomain, err := tenant.ApplyCapacityPolicy(initialDomain)
+	if err != nil {
+		return TenantProvisioningResult{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for tenantID, existing := range s.tenants {
@@ -264,6 +268,10 @@ func (s *MemoryStore) ProvisionDomain(
 	if err := tenant.registration.Authorize(credential); err != nil {
 		return DomainProvisioningResult{}, err
 	}
+	provisioning, err := tenant.registration.ApplyCapacityPolicy(provisioning)
+	if err != nil {
+		return DomainProvisioningResult{}, err
+	}
 	key := domainKey{credential.TenantID, provisioning.Registration.DomainID}
 	if existing := s.domains[key]; existing != nil {
 		if domainProvisioningEqual(existing, provisioning) {
@@ -282,7 +290,7 @@ func (s *MemoryStore) ProvisionDomain(
 			domainCount++
 		}
 	}
-	if domainCount >= tenant.registration.MaximumDomainCount {
+	if !tenant.registration.UsesSharedCapacity() && domainCount >= tenant.registration.MaximumDomainCount {
 		return DomainProvisioningResult{}, protocolError(CodeTenantFull, "tenant reached its domain limit")
 	}
 	s.createDomainLocked(provisioning)
@@ -1906,14 +1914,14 @@ func (s *MemoryStore) Publish(
 	if err := memoryFenceAllowsWrite(domain, publisherSubscription.SubscriptionID, nowMilliseconds); err != nil {
 		return PublishResult{}, err
 	}
-	if len(domain.messages) >= domain.registration.MaximumMessageCount {
+	if !domain.registration.UsesSharedCapacity() && len(domain.messages) >= domain.registration.MaximumMessageCount {
 		return PublishResult{}, protocolError(CodeDomainFull, "domain reached its message limit")
 	}
 	ciphertextByteCount, err := envelope.CiphertextByteCount()
 	if err != nil {
 		return PublishResult{}, err
 	}
-	if ciphertextByteCount > domain.registration.MaximumMessageByteCount-domain.messageBytes {
+	if !domain.registration.UsesSharedCapacity() && ciphertextByteCount > domain.registration.MaximumMessageByteCount-domain.messageBytes {
 		return PublishResult{}, protocolError(CodeDomainFull, "domain reached its message-byte limit")
 	}
 	if err := s.ensureTenantMessageCapacityLocked(
@@ -2319,10 +2327,10 @@ func validateBlobRequest(blobID string, byteCount int64) error {
 }
 
 func ensureBlobCapacity(domain *memoryDomain, byteCount int64) error {
-	if len(domain.blobs) >= domain.registration.MaximumBlobCount {
+	if !domain.registration.UsesSharedCapacity() && len(domain.blobs) >= domain.registration.MaximumBlobCount {
 		return protocolError(CodeDomainFull, "domain reached its blob limit")
 	}
-	if byteCount > domain.registration.MaximumBlobByteCount-domain.blobBytes {
+	if !domain.registration.UsesSharedCapacity() && byteCount > domain.registration.MaximumBlobByteCount-domain.blobBytes {
 		return protocolError(CodeDomainFull, "domain reached its blob-byte limit")
 	}
 	return nil
@@ -2395,8 +2403,8 @@ func (s *MemoryStore) ensureTenantMessageCapacityLocked(
 		return protocolError(CodeTenantNotFound, "tenant was not found")
 	}
 	messages, messageBytes, _, _ := s.tenantUsageLocked(tenantID)
-	if messages >= tenant.registration.MaximumAggregateMessageCount ||
-		additionalBytes > tenant.registration.MaximumAggregateMessageByteCount-messageBytes {
+	if !tenant.registration.UsesSharedCapacity() && (messages >= tenant.registration.MaximumAggregateMessageCount ||
+		additionalBytes > tenant.registration.MaximumAggregateMessageByteCount-messageBytes) {
 		return protocolError(CodeTenantFull, "tenant reached its message or byte limit")
 	}
 	return nil
@@ -2413,8 +2421,8 @@ func (s *MemoryStore) ensureTenantBlobCapacityLocked(
 	_, _, blobs, blobBytes := s.tenantUsageLocked(tenantID)
 	reservedCount := s.tenantReservedBlobCountLocked(tenantID)
 	reservedBytes := s.tenantReservedBlobBytesLocked(tenantID)
-	if int64(blobs)+reservedCount >= int64(tenant.registration.MaximumAggregateBlobCount) ||
-		additionalBytes > tenant.registration.MaximumAggregateBlobByteCount-blobBytes-reservedBytes {
+	if !tenant.registration.UsesSharedCapacity() && (int64(blobs)+reservedCount >= int64(tenant.registration.MaximumAggregateBlobCount) ||
+		additionalBytes > tenant.registration.MaximumAggregateBlobByteCount-blobBytes-reservedBytes) {
 		return protocolError(CodeTenantFull, "tenant reached its blob or byte limit")
 	}
 	return nil

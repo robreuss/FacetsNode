@@ -19,11 +19,11 @@ CREATE TABLE relay_tenants (
     provisioning_retry_id uuid NOT NULL UNIQUE,
     provisioning_authorization_digest text NOT NULL CHECK (provisioning_authorization_digest ~ '^[0-9a-f]{64}$'),
     created_at_milliseconds bigint NOT NULL CHECK (created_at_milliseconds >= 0),
-    maximum_domain_count integer NOT NULL CHECK (maximum_domain_count > 0),
-    maximum_aggregate_message_count integer NOT NULL CHECK (maximum_aggregate_message_count > 0),
-    maximum_aggregate_message_byte_count bigint NOT NULL CHECK (maximum_aggregate_message_byte_count > 0),
-    maximum_aggregate_blob_count integer NOT NULL CHECK (maximum_aggregate_blob_count > 0),
-    maximum_aggregate_blob_byte_count bigint NOT NULL CHECK (maximum_aggregate_blob_byte_count > 0),
+    maximum_domain_count integer NOT NULL CHECK (maximum_domain_count >= 0),
+    maximum_aggregate_message_count integer NOT NULL CHECK (maximum_aggregate_message_count >= 0),
+    maximum_aggregate_message_byte_count bigint NOT NULL CHECK (maximum_aggregate_message_byte_count >= 0),
+    maximum_aggregate_blob_count integer NOT NULL CHECK (maximum_aggregate_blob_count >= 0),
+    maximum_aggregate_blob_byte_count bigint NOT NULL CHECK (maximum_aggregate_blob_byte_count >= 0),
     domain_count integer NOT NULL DEFAULT 0 CHECK (domain_count >= 0),
     message_count integer NOT NULL DEFAULT 0 CHECK (message_count >= 0),
     blob_count integer NOT NULL DEFAULT 0 CHECK (blob_count >= 0),
@@ -31,11 +31,15 @@ CREATE TABLE relay_tenants (
     aggregate_blob_byte_count bigint NOT NULL DEFAULT 0 CHECK (aggregate_blob_byte_count >= 0),
     stored_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    CHECK (domain_count <= maximum_domain_count),
-    CHECK (message_count <= maximum_aggregate_message_count),
-    CHECK (aggregate_message_byte_count <= maximum_aggregate_message_byte_count),
-    CHECK (blob_count <= maximum_aggregate_blob_count),
-    CHECK (aggregate_blob_byte_count <= maximum_aggregate_blob_byte_count)
+    CHECK ((maximum_domain_count=0 AND maximum_aggregate_message_count=0 AND
+            maximum_aggregate_message_byte_count=0 AND maximum_aggregate_blob_count=0 AND maximum_aggregate_blob_byte_count=0)
+        OR (maximum_domain_count>0 AND maximum_aggregate_message_count>0 AND
+            maximum_aggregate_message_byte_count>0 AND maximum_aggregate_blob_count>0 AND maximum_aggregate_blob_byte_count>0)),
+    CHECK (maximum_domain_count=0 OR domain_count <= maximum_domain_count),
+    CHECK (maximum_aggregate_message_count=0 OR message_count <= maximum_aggregate_message_count),
+    CHECK (maximum_aggregate_message_byte_count=0 OR aggregate_message_byte_count <= maximum_aggregate_message_byte_count),
+    CHECK (maximum_aggregate_blob_count=0 OR blob_count <= maximum_aggregate_blob_count),
+    CHECK (maximum_aggregate_blob_byte_count=0 OR aggregate_blob_byte_count <= maximum_aggregate_blob_byte_count)
 );
 
 CREATE TABLE relay_domains (
@@ -45,10 +49,10 @@ CREATE TABLE relay_domains (
     version smallint NOT NULL CHECK (version = 1),
     administration_digest text NOT NULL CHECK (administration_digest ~ '^[0-9a-f]{64}$'),
     created_at_milliseconds bigint NOT NULL CHECK (created_at_milliseconds >= 0),
-    maximum_message_count integer NOT NULL CHECK (maximum_message_count > 0),
-    maximum_message_byte_count bigint NOT NULL CHECK (maximum_message_byte_count > 0),
-    maximum_blob_count integer NOT NULL CHECK (maximum_blob_count > 0),
-    maximum_blob_byte_count bigint NOT NULL CHECK (maximum_blob_byte_count > 0),
+    maximum_message_count integer NOT NULL CHECK (maximum_message_count >= 0),
+    maximum_message_byte_count bigint NOT NULL CHECK (maximum_message_byte_count >= 0),
+    maximum_blob_count integer NOT NULL CHECK (maximum_blob_count >= 0),
+    maximum_blob_byte_count bigint NOT NULL CHECK (maximum_blob_byte_count >= 0),
     message_count integer NOT NULL DEFAULT 0 CHECK (message_count >= 0),
     blob_count integer NOT NULL DEFAULT 0 CHECK (blob_count >= 0),
     message_byte_count bigint NOT NULL DEFAULT 0 CHECK (message_byte_count >= 0),
@@ -58,10 +62,12 @@ CREATE TABLE relay_domains (
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, domain_id),
     UNIQUE (tenant_id, provisioning_retry_id),
-    CHECK (message_count <= maximum_message_count),
-    CHECK (message_byte_count <= maximum_message_byte_count),
-    CHECK (blob_count <= maximum_blob_count),
-    CHECK (blob_byte_count <= maximum_blob_byte_count)
+    CHECK ((maximum_message_count=0 AND maximum_message_byte_count=0 AND maximum_blob_count=0 AND maximum_blob_byte_count=0)
+        OR (maximum_message_count>0 AND maximum_message_byte_count>0 AND maximum_blob_count>0 AND maximum_blob_byte_count>0)),
+    CHECK (maximum_message_count=0 OR message_count <= maximum_message_count),
+    CHECK (maximum_message_byte_count=0 OR message_byte_count <= maximum_message_byte_count),
+    CHECK (maximum_blob_count=0 OR blob_count <= maximum_blob_count),
+    CHECK (maximum_blob_byte_count=0 OR blob_byte_count <= maximum_blob_byte_count)
 );
 
 CREATE TABLE relay_subscriptions (

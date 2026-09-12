@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 func (s *RelayStore) ProvisionTenant(
@@ -46,6 +47,22 @@ func (s *RelayStore) provisionTenantTx(
 	tenant relay.TenantRegistration,
 	initial relay.DomainProvisioning,
 ) (relay.TenantProvisioningResult, error) {
+	if tenant.UsesSharedCapacity() && s.capacityProvider == nil {
+		return relay.TenantProvisioningResult{}, storagecapacity.ErrUnavailable
+	}
+	initial, err := tenant.ApplyCapacityPolicy(initial)
+	if err != nil {
+		return relay.TenantProvisioningResult{}, err
+	}
+	var alreadyPresent bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM relay_tenants WHERE tenant_id=$1 OR provisioning_retry_id=$2)`, tenant.TenantID, tenant.RetryID).Scan(&alreadyPresent); err != nil {
+		return relay.TenantProvisioningResult{}, err
+	}
+	if !alreadyPresent {
+		if err := s.admitSharedCapacity(ctx, tx, storagecapacity.UploadMetadataAllowance); err != nil {
+			return relay.TenantProvisioningResult{}, err
+		}
+	}
 	result, err := tx.Exec(ctx, `
 		INSERT INTO relay_tenants (
 			tenant_id, version, provisioning_retry_id,
@@ -143,6 +160,13 @@ func (s *RelayStore) provisionDomainTx(
 	if err := tenant.Authorize(credential); err != nil {
 		return relay.DomainProvisioningResult{}, err
 	}
+	domain, err = tenant.ApplyCapacityPolicy(domain)
+	if err != nil {
+		return relay.DomainProvisioningResult{}, err
+	}
+	if tenant.UsesSharedCapacity() && s.capacityProvider == nil {
+		return relay.DomainProvisioningResult{}, storagecapacity.ErrUnavailable
+	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM relay_domains WHERE tenant_id=$1 AND domain_id=$2)`, credential.TenantID, domain.Registration.DomainID).Scan(&exists); err != nil {
 		return relay.DomainProvisioningResult{}, err
@@ -169,8 +193,11 @@ func (s *RelayStore) provisionDomainTx(
 	if err := tx.QueryRow(ctx, `SELECT domain_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&domainCount); err != nil {
 		return relay.DomainProvisioningResult{}, err
 	}
-	if domainCount >= tenant.MaximumDomainCount {
+	if !tenant.UsesSharedCapacity() && domainCount >= tenant.MaximumDomainCount {
 		return relay.DomainProvisioningResult{}, relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its domain limit")
+	}
+	if err := s.admitSharedCapacity(ctx, tx, storagecapacity.UploadMetadataAllowance); err != nil {
+		return relay.DomainProvisioningResult{}, err
 	}
 	if err := insertSubscriptionDomain(ctx, tx, domain); err != nil {
 		return relay.DomainProvisioningResult{}, err
@@ -390,6 +417,9 @@ func (s *RelayStore) CreateSubscriptionMember(
 	if err := ensurePostgresMemberCapacity(ctx, tx, registration.TenantID, registration.DomainID, nowMilliseconds); err != nil {
 		return "", err
 	}
+	if err := s.admitSharedCapacity(ctx, tx, storagecapacity.MutationMetadataAllowance); err != nil {
+		return "", err
+	}
 	if err := insertRelayMemberWithSubscription(ctx, tx, registration, subscriptionID); err != nil {
 		return "", err
 	}
@@ -475,6 +505,9 @@ func (s *RelayStore) createSubscriptionAdmissionTx(
 		return relay.SubscriptionAdmissionCreateResult{}, relay.NewProtocolError(relay.CodeAdmissionCollision, "admission ID was reused")
 	}
 	if err := ensurePostgresAdmissionCapacity(ctx, tx, registration.TenantID, registration.DomainID, nowMilliseconds); err != nil {
+		return relay.SubscriptionAdmissionCreateResult{}, err
+	}
+	if err := s.admitSharedCapacity(ctx, tx, storagecapacity.MutationMetadataAllowance); err != nil {
 		return relay.SubscriptionAdmissionCreateResult{}, err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO relay_member_admissions (tenant_id,domain_id,admission_id,subscription_id,version,authorization_digest,capabilities,created_at_milliseconds,expires_at_milliseconds,member_expires_at_milliseconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, registration.TenantID, registration.DomainID, registration.AdmissionID, subscriptionID, registration.Version, registration.AuthorizationDigest, capabilityStrings(registration.Capabilities), registration.CreatedAtMilliseconds, registration.ExpiresAtMilliseconds, registration.MemberExpiresAtMilliseconds)
@@ -714,6 +747,9 @@ func (s *RelayStore) createSubscriptionTx(
 	if request.CreatedAtMilliseconds < domain.CreatedAtMilliseconds {
 		return relay.SubscriptionCreateResponse{}, relay.NewProtocolError(relay.CodeInvalidSubscription, "subscription predates its domain")
 	}
+	if err := s.admitSharedCapacity(ctx, tx, storagecapacity.MutationMetadataAllowance); err != nil {
+		return relay.SubscriptionCreateResponse{}, err
+	}
 	startSequence, err := latestActivatedCheckpointStart(ctx, tx, credential.TenantID, credential.DomainID)
 	if err != nil {
 		return relay.SubscriptionCreateResponse{}, err
@@ -885,6 +921,9 @@ func (s *RelayStore) revokeTenantMembershipsTx(
 		if err := insertDataPlaneAudit(ctx, tx, credential.TenantID, &target.DomainID, &target.SubscriptionID, &target.MemberID, "tenant_membership_revoked", revocation.RevokedAtMilliseconds); err != nil {
 			return relay.TenantMembershipRevocationResult{}, err
 		}
+		if err := cancelSubscriptionBlobUploads(ctx, tx, credential.TenantID, target.DomainID, target.SubscriptionID, revocation.RevokedAtMilliseconds); err != nil {
+			return relay.TenantMembershipRevocationResult{}, err
+		}
 	}
 	return relay.TenantMembershipRevocationResult{
 		Acceptance: relay.AcceptanceAccepted, RetryID: revocation.RetryID,
@@ -966,7 +1005,7 @@ func (s *RelayStore) changeSubscriptionStatusInTransaction(
 	if err := request.Validate(); err != nil {
 		return relay.SubscriptionStatusChangeResponse{}, err
 	}
-	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR SHARE"); err != nil {
+	if _, err := loadRelayTenant(ctx, tx, credential.TenantID, "FOR UPDATE"); err != nil {
 		return relay.SubscriptionStatusChangeResponse{}, err
 	}
 	domain, _, _, _, _, _, err := loadRelayDomain(ctx, tx, credential.TenantID, credential.DomainID, "FOR UPDATE")
@@ -1027,6 +1066,11 @@ func (s *RelayStore) changeSubscriptionStatusInTransaction(
 	subscription.UpdatedAtMilliseconds = request.ChangedAtMilliseconds
 	if err := insertDataPlaneAudit(ctx, tx, credential.TenantID, &credential.DomainID, &subscriptionID, nil, "subscription_status_changed", request.ChangedAtMilliseconds); err != nil {
 		return relay.SubscriptionStatusChangeResponse{}, err
+	}
+	if request.Status == relay.SubscriptionRevoked {
+		if err := cancelSubscriptionBlobUploads(ctx, tx, credential.TenantID, credential.DomainID, subscriptionID, request.ChangedAtMilliseconds); err != nil {
+			return relay.SubscriptionStatusChangeResponse{}, err
+		}
 	}
 	return relay.SubscriptionStatusChangeResponse{Acceptance: relay.AcceptanceAccepted, RetryID: request.RetryID, Subscription: subscription}, nil
 }

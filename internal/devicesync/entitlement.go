@@ -24,25 +24,15 @@ type ServiceEntitlement struct {
 
 func DefaultServiceEntitlement() ServiceEntitlement {
 	return ServiceEntitlement{
-		Version: SchemaVersion,
-		PlanID:  "self-hosted",
-		TenantQuota: relay.TenantQuota{
-			MaximumDomainCount:               relay.DefaultMaximumDomainCountPerTenant,
-			MaximumAggregateMessageCount:     relay.DefaultMaximumMessageCountPerTenant,
-			MaximumAggregateMessageByteCount: relay.DefaultMaximumMessageBytesPerTenant,
-			MaximumAggregateBlobCount:        relay.DefaultMaximumBlobCountPerTenant,
-			MaximumAggregateBlobByteCount:    relay.DefaultMaximumBlobBytesPerTenant,
-		},
+		Version:     SchemaVersion,
+		PlanID:      "self-hosted",
+		TenantQuota: relay.TenantQuota{},
 	}
 }
 
 func (e ServiceEntitlement) Validate() error {
-	if e.Version != SchemaVersion || !validServicePlanID(e.PlanID) ||
-		e.TenantQuota.MaximumDomainCount <= 0 ||
-		e.TenantQuota.MaximumAggregateMessageCount <= 0 ||
-		e.TenantQuota.MaximumAggregateMessageByteCount <= 0 ||
-		e.TenantQuota.MaximumAggregateBlobCount <= 0 ||
-		e.TenantQuota.MaximumAggregateBlobByteCount <= 0 {
+	if e.Version != SchemaVersion || !validServicePlanID(e.PlanID) || !e.TenantQuota.Valid() ||
+		(e.TenantQuota.UsesSharedCapacity() && e.PlanID != "self-hosted") {
 		return NewProtocolError(CodeInvalidAdmission, "Device Sync service entitlement is invalid")
 	}
 	return nil
@@ -81,5 +71,8 @@ func (e ServiceEntitlement) Apply(provisioning PrincipalProvisioning) PrincipalP
 	provisioning.Tenant.MaximumAggregateMessageByteCount = e.TenantQuota.MaximumAggregateMessageByteCount
 	provisioning.Tenant.MaximumAggregateBlobCount = e.TenantQuota.MaximumAggregateBlobCount
 	provisioning.Tenant.MaximumAggregateBlobByteCount = e.TenantQuota.MaximumAggregateBlobByteCount
+	if e.TenantQuota.UsesSharedCapacity() {
+		provisioning.ControlDomain.Registration = provisioning.ControlDomain.Registration.WithSharedCapacity()
+	}
 	return provisioning
 }

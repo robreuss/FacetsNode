@@ -1,14 +1,14 @@
 ALTER TABLE relay_tenants
     ADD COLUMN reserved_blob_count integer NOT NULL DEFAULT 0 CHECK (reserved_blob_count >= 0),
     ADD COLUMN reserved_blob_byte_count bigint NOT NULL DEFAULT 0 CHECK (reserved_blob_byte_count >= 0),
-    ADD CHECK (blob_count + reserved_blob_count <= maximum_aggregate_blob_count),
-    ADD CHECK (aggregate_blob_byte_count + reserved_blob_byte_count <= maximum_aggregate_blob_byte_count);
+    ADD CHECK (maximum_aggregate_blob_count=0 OR blob_count + reserved_blob_count <= maximum_aggregate_blob_count),
+    ADD CHECK (maximum_aggregate_blob_byte_count=0 OR aggregate_blob_byte_count + reserved_blob_byte_count <= maximum_aggregate_blob_byte_count);
 
 ALTER TABLE relay_domains
     ADD COLUMN reserved_blob_count integer NOT NULL DEFAULT 0 CHECK (reserved_blob_count >= 0),
     ADD COLUMN reserved_blob_byte_count bigint NOT NULL DEFAULT 0 CHECK (reserved_blob_byte_count >= 0),
-    ADD CHECK (blob_count + reserved_blob_count <= maximum_blob_count),
-    ADD CHECK (blob_byte_count + reserved_blob_byte_count <= maximum_blob_byte_count);
+    ADD CHECK (maximum_blob_count=0 OR blob_count + reserved_blob_count <= maximum_blob_count),
+    ADD CHECK (maximum_blob_byte_count=0 OR blob_byte_count + reserved_blob_byte_count <= maximum_blob_byte_count);
 
 CREATE TABLE relay_blob_uploads (
     tenant_id uuid NOT NULL,
@@ -35,6 +35,10 @@ CREATE TABLE relay_blob_uploads (
     CHECK ((state = 'finalized') = (finalized_at_milliseconds IS NOT NULL)),
     CHECK (state <> 'finalized' OR committed_offset = byte_count)
 );
+
+CREATE INDEX relay_blob_upload_active_capacity
+    ON relay_blob_uploads (tenant_id, domain_id, upload_id)
+    INCLUDE (byte_count, committed_offset) WHERE state='active';
 
 CREATE TABLE relay_blob_upload_chunks (
     tenant_id uuid NOT NULL,

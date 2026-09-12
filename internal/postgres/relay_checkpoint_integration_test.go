@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"reflect"
 	"sort"
@@ -12,6 +13,7 @@ import (
 
 	postgresstore "github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/relay"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/testfixture"
 )
 
@@ -29,6 +31,10 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		t.Fatal(err)
 	}
 	store := postgresstore.NewRelayStore(pool)
+	capacity := &poolTestCapacity{free: 8 << 30}
+	if err := store.SetSharedCapacityProvider(capacity); err != nil {
+		t.Fatal(err)
+	}
 	tenantID, domainID := uuid.New(), uuid.New()
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM relay_tenants WHERE tenant_id=$1`, tenantID)
@@ -176,13 +182,20 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 		CoveredThroughCursor: fence.BoundaryCursor, RetainedMessageIDs: []uuid.UUID{retainedSuffix.MessageID},
 		RetainedBlobIDs: retainedBlobIDs, CreatedAtMilliseconds: 1_200,
 	}
+	capacity.set(storagecapacity.MinimumOperatingReserve, false)
+	if _, err := store.StageCheckpoint(ctx, publisher, candidate, 1_200); !errors.Is(err, storagecapacity.ErrPressure) {
+		t.Fatalf("checkpoint metadata bypassed storage pressure: %v", err)
+	}
+	capacity.set(8<<30, false)
 	staged, err := store.StageCheckpoint(ctx, publisher, candidate, 1_200)
 	if err != nil || staged.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("stage=%+v err=%v", staged, err)
 	}
+	capacity.set(0, true)
 	if retried, err := store.StageCheckpoint(ctx, publisher, candidate, 1_200); err != nil || retried.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("stage retry=%+v err=%v", retried, err)
 	}
+	capacity.set(8<<30, false)
 
 	activationRequest := relay.CheckpointActivationRequest{RetryID: uuid.New(), CheckpointID: candidate.CheckpointID, ActivatedAtMilliseconds: 1_251}
 	if _, err := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_250); !relay.ErrorHasCode(err, relay.CodeCheckpointCollision) {
@@ -191,6 +204,11 @@ func TestPostgresCheckpointFreezesCollectionAndPersistsExactRetry(t *testing.T) 
 	third := first
 	third.MessageID = uuid.New()
 	third.CreatedAtMilliseconds = 1_251
+	capacity.set(storagecapacity.MinimumOperatingReserve, false)
+	if _, err := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_251); !errors.Is(err, storagecapacity.ErrPressure) {
+		t.Fatalf("checkpoint activation bypassed storage pressure: %v", err)
+	}
+	capacity.set(8<<30, false)
 	activatedResponse, activateErr := store.ActivateCheckpoint(ctx, admin, activationRequest, 1_251)
 	if activateErr != nil || activatedResponse.StartCursor != relay.EncodeCursor(2) {
 		t.Fatalf("activation=%+v err=%v", activatedResponse, activateErr)

@@ -26,6 +26,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/sharedspaces"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 func Main(service config.Service) {
@@ -189,6 +190,17 @@ func Main(service config.Service) {
 	if err != nil {
 		logger.Error("blob upload store configuration rejected", "error", err)
 		os.Exit(1)
+	}
+	if service == config.DeviceSync {
+		capacity, capacityErr := storagecapacity.NewFileSystemProvider(configuration.BlobRoot)
+		if capacityErr == nil {
+			capacityErr = errors.Join(relayStore.SetSharedCapacityProvider(capacity),
+				blobContentStore.SetSharedCapacityProvider(capacity), blobUploadContentStore.SetSharedCapacityProvider(capacity))
+		}
+		if capacityErr != nil {
+			logger.Error("shared storage capacity configuration rejected", "error", capacityErr)
+			os.Exit(1)
+		}
 	}
 	api, err := httpapi.NewWithRelay(store, relayStore, blobContentStore, logger, configuration.OperatorToken, blobUploadContentStore)
 	if err != nil {

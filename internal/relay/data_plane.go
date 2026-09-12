@@ -55,11 +55,7 @@ type TenantRegistration struct {
 func (r TenantRegistration) Validate() error {
 	if r.Version != SchemaVersion || r.RetryID == uuid.Nil ||
 		r.TenantID == uuid.Nil || !validDigest(r.AuthorizationDigest) ||
-		r.CreatedAtMilliseconds < 0 || r.MaximumDomainCount <= 0 ||
-		r.MaximumAggregateMessageCount <= 0 ||
-		r.MaximumAggregateMessageByteCount <= 0 ||
-		r.MaximumAggregateBlobCount <= 0 ||
-		r.MaximumAggregateBlobByteCount <= 0 {
+		r.CreatedAtMilliseconds < 0 || !r.Quota().Valid() {
 		return protocolError(CodeInvalidTenant, "tenant fields are invalid")
 	}
 	return nil

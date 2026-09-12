@@ -229,14 +229,17 @@ type DomainRegistration struct {
 func (r DomainRegistration) Validate() error {
 	if r.Version != SchemaVersion || r.TenantID == uuid.Nil ||
 		r.DomainID == uuid.Nil || !validDigest(r.AdministrationDigest) ||
-		r.CreatedAtMilliseconds < 0 || r.MaximumMessageCount <= 0 ||
+		r.CreatedAtMilliseconds < 0 {
+		return protocolError(CodeInvalidDomain, "domain fields are invalid")
+	}
+	if !r.UsesSharedCapacity() && (r.MaximumMessageCount <= 0 ||
 		r.MaximumMessageCount > AbsoluteMaximumMessageCount ||
 		r.MaximumBlobCount <= 0 ||
 		r.MaximumMessageByteCount <= 0 ||
 		r.MaximumMessageByteCount > AbsoluteMaximumMessageByteCount ||
 		r.MaximumBlobCount > AbsoluteMaximumBlobCount ||
 		r.MaximumBlobByteCount <= 0 ||
-		r.MaximumBlobByteCount > AbsoluteMaximumBlobByteCount {
+		r.MaximumBlobByteCount > AbsoluteMaximumBlobByteCount) {
 		return protocolError(CodeInvalidDomain, "domain fields are invalid")
 	}
 	return nil

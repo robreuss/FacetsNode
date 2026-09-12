@@ -89,7 +89,7 @@ func (s *RelayStore) CreateBlobUpload(
 	if err := tx.QueryRow(ctx, `SELECT reserved_blob_count,reserved_blob_byte_count FROM relay_domains WHERE tenant_id=$1 AND domain_id=$2`, credential.TenantID, credential.DomainID).Scan(&domainReservedCount, &domainReservedBytes); err != nil {
 		return relay.BlobUploadCreateResponse{}, err
 	}
-	if blobCount+domainReservedCount >= domain.MaximumBlobCount || request.ByteCount > domain.MaximumBlobByteCount-blobBytes-domainReservedBytes {
+	if !domain.UsesSharedCapacity() && (blobCount+domainReservedCount >= domain.MaximumBlobCount || request.ByteCount > domain.MaximumBlobByteCount-blobBytes-domainReservedBytes) {
 		return relay.BlobUploadCreateResponse{}, relay.NewProtocolError(relay.CodeDomainFull, "domain reached its blob quota")
 	}
 	var tenantBlobCount, tenantReservedCount int
@@ -97,7 +97,7 @@ func (s *RelayStore) CreateBlobUpload(
 	if err := tx.QueryRow(ctx, `SELECT blob_count,aggregate_blob_byte_count,reserved_blob_count,reserved_blob_byte_count FROM relay_tenants WHERE tenant_id=$1`, credential.TenantID).Scan(&tenantBlobCount, &tenantBlobBytes, &tenantReservedCount, &tenantReservedBytes); err != nil {
 		return relay.BlobUploadCreateResponse{}, err
 	}
-	if tenantBlobCount+tenantReservedCount >= tenant.MaximumAggregateBlobCount || request.ByteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobBytes-tenantReservedBytes {
+	if !tenant.UsesSharedCapacity() && (tenantBlobCount+tenantReservedCount >= tenant.MaximumAggregateBlobCount || request.ByteCount > tenant.MaximumAggregateBlobByteCount-tenantBlobBytes-tenantReservedBytes) {
 		return relay.BlobUploadCreateResponse{}, relay.NewProtocolError(relay.CodeTenantFull, "tenant reached its aggregate blob quota")
 	}
 	reservation, err := storagecapacity.UploadReservation(request.ByteCount, 0, 0)

@@ -365,7 +365,7 @@ var deviceSyncMigrationTableSpecs = []deviceSyncMigrationTableSpec{
 		migrationUUID("candidate_device_id"), migrationText("candidate_bootstrap_public_key"),
 		migrationText("polling_authorization_digest"), migrationText("pin_authorization_digest"),
 		migrationInt64("created_at_milliseconds"), migrationInt64("expires_at_milliseconds"),
-		migrationUUID("principal_id", true), migrationJSON("bootstrap", true)),
+		migrationUUID("principal_id", true), migrationJSON("bootstrap", true), migrationBool("cancelled")),
 }
 
 var deviceSyncMigrationExcludedTables = map[string]string{
