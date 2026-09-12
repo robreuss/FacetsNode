@@ -258,12 +258,12 @@ func (s *Server) Handler() http.Handler {
 	if s.deploymentSigner != nil && s.serviceAuthorityBindings != nil {
 		registerUnbound(
 			"POST /v1/service-deployment/bootstrap-proof",
-			traffic.SurfaceManagement,
+			traffic.SurfaceDeploymentProof,
 			s.handleServiceBootstrapDeploymentProof,
 		)
 		registerUnbound(
 			"POST /v1/service-deployment/proof",
-			traffic.SurfaceManagement,
+			traffic.SurfaceDeploymentProof,
 			s.handleServiceDeploymentProof,
 		)
 	}

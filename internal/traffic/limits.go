@@ -10,6 +10,7 @@ const (
 	SurfaceStorage
 	SurfaceCheckpointAdmin
 	SurfaceManagement
+	SurfaceDeploymentProof
 	SurfaceCount
 )
 
@@ -26,6 +27,7 @@ var allSurfaces = [...]Surface{
 	SurfaceStorage,
 	SurfaceCheckpointAdmin,
 	SurfaceManagement,
+	SurfaceDeploymentProof,
 }
 
 func Surfaces() [SurfaceCount]Surface { return allSurfaces }
@@ -42,6 +44,8 @@ func (s Surface) Name() string {
 		return "checkpoint_admin"
 	case SurfaceManagement:
 		return "management"
+	case SurfaceDeploymentProof:
+		return "deployment_proof"
 	default:
 		return "invalid"
 	}
@@ -64,6 +68,12 @@ func DefaultLimits() Limits {
 	limits[SurfaceStorage] = Limit{RequestsPerMinute: 1_200, Burst: 200, ConnectionRequestsPerMinute: 4_800, ConnectionBurst: 800, Concurrency: 32}
 	limits[SurfaceCheckpointAdmin] = Limit{RequestsPerMinute: 600, Burst: 200, ConnectionRequestsPerMinute: 4_800, ConnectionBurst: 800, Concurrency: 32}
 	limits[SurfaceManagement] = Limit{RequestsPerMinute: 300, Burst: 100, ConnectionRequestsPerMinute: 600, ConnectionBurst: 200, Concurrency: 8}
+	// Each authenticated bulk operation needs a fresh proof both for its grant
+	// and for its dispatch. Two clients with four upload slots must not compete
+	// with interactive administration for that admission budget. This admits
+	// 200 proofs/second per observed peer/route (not client-supplied identity),
+	// while retaining a small burst and a separate hard signing-work bound.
+	limits[SurfaceDeploymentProof] = Limit{RequestsPerMinute: 12_000, Burst: 400, ConnectionRequestsPerMinute: 24_000, ConnectionBurst: 800, Concurrency: 16}
 	return limits
 }
 

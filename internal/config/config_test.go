@@ -72,6 +72,7 @@ func TestTrafficLimitDefaultsOverridesAndHardCaps(t *testing.T) {
 	t.Setenv("FACETS_DEVICE_SYNC_TRAFFIC_RELAY_MESSAGE_CONNECTION_RATE_PER_MINUTE", "84")
 	t.Setenv("FACETS_DEVICE_SYNC_TRAFFIC_RELAY_MESSAGE_CONNECTION_BURST", "14")
 	t.Setenv("FACETS_DEVICE_SYNC_TRAFFIC_RELAY_MESSAGE_CONCURRENCY", "3")
+	t.Setenv("FACETS_DEVICE_SYNC_TRAFFIC_DEPLOYMENT_PROOF_RATE_PER_MINUTE", "6000")
 	configuration, err = config.Load(config.DeviceSync)
 	if err != nil {
 		t.Fatal(err)
@@ -79,10 +80,17 @@ func TestTrafficLimitDefaultsOverridesAndHardCaps(t *testing.T) {
 	if got := configuration.TrafficLimits[traffic.SurfaceRelayMessage]; got != (traffic.Limit{RequestsPerMinute: 42, Burst: 7, ConnectionRequestsPerMinute: 84, ConnectionBurst: 14, Concurrency: 3}) {
 		t.Fatalf("relay message limits=%+v", got)
 	}
+	if got := configuration.TrafficLimits[traffic.SurfaceDeploymentProof].RequestsPerMinute; got != 6000 {
+		t.Fatalf("deployment proof override=%d", got)
+	}
+	if configuration.TrafficLimits[traffic.SurfaceManagement] != traffic.DefaultLimits()[traffic.SurfaceManagement] {
+		t.Fatal("deployment proof override changed interactive management admission")
+	}
 	for name, value := range map[string]string{
 		"FACETS_DEVICE_SYNC_TRAFFIC_RENDEZVOUS_RATE_PER_MINUTE":   "0",
 		"FACETS_DEVICE_SYNC_TRAFFIC_STORAGE_BURST":                "10001",
 		"FACETS_DEVICE_SYNC_TRAFFIC_MANAGEMENT_CONCURRENCY":       "1025",
+		"FACETS_DEVICE_SYNC_TRAFFIC_DEPLOYMENT_PROOF_CONCURRENCY": "0",
 		"FACETS_DEVICE_SYNC_TRAFFIC_CHECKPOINT_ADMIN_CONCURRENCY": "invalid",
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -142,6 +143,122 @@ func TestManagementBudgetCannotServeBulkDeploymentProofWorkload(t *testing.T) {
 		t.Fatalf("missing reproduced bottleneck: accepted=%d rejected=%d sleep=%ds", accepted, rejected, slept)
 	}
 	t.Logf("proofRequests=%d http429=%d retrySleepSeconds=%d network=none", accepted, rejected, slept)
+}
+
+func TestDeploymentProofRoutesHaveIndependentAdmission(t *testing.T) {
+	server := newTrafficTestServer(t, traffic.SurfaceManagement, traffic.Limit{
+		RequestsPerMinute: 1, Burst: 1, ConnectionRequestsPerMinute: 1, ConnectionBurst: 1, Concurrency: 1,
+	})
+	seed := make([]byte, 32)
+	seed[31] = 6
+	signer, err := serviceauthority.NewDeploymentSigner(uuid.New(), seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.SetServiceAuthorityDeployment(signer, serviceauthority.NewBindingRegistry(), serviceauthority.ScopeDeviceSync)
+	handler := server.Handler()
+	for _, path := range []string{"/v1/service-deployment/proof", "/v1/service-deployment/bootstrap-proof"} {
+		for range 2 {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}")))
+			// Admission is independent; request validation still runs and rejects
+			// malformed proof requests instead of producing trusted proofs.
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("proof route %s status=%d", path, recorder.Code)
+			}
+		}
+	}
+	if got := server.metrics.requests[traffic.SurfaceDeploymentProof].Load(); got != 4 {
+		t.Fatalf("deployment proof requests=%d", got)
+	}
+	if got := server.metrics.requests[traffic.SurfaceManagement].Load(); got != 0 {
+		t.Fatalf("proof requests charged to management=%d", got)
+	}
+}
+
+func TestDeploymentProofBudgetServesBoundedTwoClientBulkWorkload(t *testing.T) {
+	server := newTrafficTestServer(t, traffic.SurfaceDeploymentProof, traffic.DefaultLimits()[traffic.SurfaceDeploymentProof])
+	now := time.Unix(1_000, 0)
+	server.now = func() time.Time { return now }
+	proof := server.trafficHandler(traffic.SurfaceDeploymentProof, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	management := server.trafficHandler(traffic.SurfaceManagement, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	request := func(handler http.Handler, path string) int {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Pattern = "POST " + path
+		req.RemoteAddr = "192.0.2.10:50000"
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+	// Eight slots, three upload operations each, with fresh grant and dispatch
+	// proofs: 48 proofs per bounded batch. 240ms/batch is 200 proofs/second.
+	for batch := 0; batch < 256; batch++ {
+		for range 2 * 4 * 3 * 2 {
+			if status := request(proof, "/v1/service-deployment/proof"); status != http.StatusNoContent {
+				t.Fatalf("bounded batch=%d status=%d", batch, status)
+			}
+		}
+		if batch%10 == 0 && request(management, "/v1/administration") != http.StatusNoContent {
+			t.Fatal("bulk proofs exhausted interactive administration")
+		}
+		now = now.Add(240 * time.Millisecond)
+	}
+	// A client cannot exceed the retained burst indefinitely, even when it
+	// invents proxy identity headers. The observed peer controls admission.
+	for attempt := 0; attempt <= traffic.DefaultLimits()[traffic.SurfaceDeploymentProof].Burst; attempt++ {
+		status := request(proof, "/v1/service-deployment/proof")
+		if status == http.StatusTooManyRequests {
+			now = now.Add(time.Second)
+			if request(proof, "/v1/service-deployment/proof") != http.StatusNoContent {
+				t.Fatal("proof admission did not recover after bounded backoff")
+			}
+			if request(management, "/v1/administration") != http.StatusNoContent {
+				t.Fatal("exhausted proof budget affected administration")
+			}
+			return
+		}
+		if status != http.StatusNoContent {
+			t.Fatalf("unexpected proof status=%d", status)
+		}
+	}
+	t.Fatal("proof flood was not bounded")
+}
+
+func TestDeploymentProofSigningConcurrencyRemainsBounded(t *testing.T) {
+	limit := traffic.DefaultLimits()[traffic.SurfaceDeploymentProof]
+	server := newTrafficTestServer(t, traffic.SurfaceDeploymentProof, limit)
+	entered := make(chan struct{}, limit.Concurrency)
+	release := make(chan struct{})
+	done := make(chan struct{}, limit.Concurrency)
+	handler := server.trafficHandler(traffic.SurfaceDeploymentProof, func(w http.ResponseWriter, _ *http.Request) {
+		entered <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	})
+	for range limit.Concurrency {
+		go func() {
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/proof", nil))
+			done <- struct{}{}
+		}()
+	}
+	defer func() {
+		close(release)
+		for range limit.Concurrency {
+			<-done
+		}
+	}()
+	for range limit.Concurrency {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("proof concurrency capacity did not fill")
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/proof", nil))
+	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") == "" {
+		t.Fatalf("unbounded proof concurrency: status=%d", recorder.Code)
+	}
 }
 
 func TestTrafficPairingRoutesRemainIndependentBehindOneConnectionAddress(t *testing.T) {

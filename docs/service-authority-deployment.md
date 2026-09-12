@@ -230,6 +230,16 @@ unbound initial claim are also outside a per-principal drain proof.
 
 Once enabled:
 
+Deployment proofs have their own bounded traffic surface, `deployment_proof`:
+12,000 requests/minute with burst 400 per observed peer/route, a connection
+budget of 24,000/minute with burst 800, and at most 16 concurrent handlers.
+These bounds cover the tested two-client/four-upload-slot protocol workload
+(grant and dispatch each need a fresh proof). They do not consume interactive
+management admission. The service-specific `TRAFFIC_DEPLOYMENT_PROOF_*`
+environment settings use the same validated rate/burst/concurrency controls as
+other surfaces. Forwarded identity headers remain untrusted. This is admission
+separation, not proof caching or relaxed proof validation.
+
 - `POST /v1/service-deployment/proof` issues a five-minute deployment-key
   proof only for an exact current scope/revision/digest/deployment binding;
 - `POST /v1/service-deployment/bootstrap-proof` accepts a signed, unexpired
