@@ -90,6 +90,9 @@ def main():
         run(old + ['logs', '--no-color'], stdout=output, stderr=subprocess.STDOUT)
     # Build the exact fresh service before any interruption of the old one.
     run([str(prepare), '--directory', str(config), '--address', args.address], cwd=source)
+    # The discovery container sees only this public certificate, not its key.
+    # Its unprivileged UID must be able to read the mounted certificate file.
+    (config / 'tls' / 'server.crt').chmod(0o644)
     run(new + ['build', 'server', 'controller', 'discovery'], cwd=source)
     run(old + ['stop', 'controller', 'discovery', 'ingress', 'server'])
     for service, user, name in [('postgres', 'facets_device_sync', 'sync.pg_dump'),
