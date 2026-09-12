@@ -70,7 +70,13 @@ def main():
     for identity in ids:
         labels = json.loads(run(['docker', 'inspect', '-f', '{{json .Config.Labels}}', identity],
                                capture_output=True, text=True).stdout)
-        if labels.get('com.docker.compose.project.config_files') != str(previous_source / 'compose.yaml'):
+        container_source = Path(labels.get('com.docker.compose.project.config_files', ''))
+        # A service-only repair can leave the other services on an earlier
+        # committed archive in this same acceptance root. Retain that evidence;
+        # still refuse unrelated Compose sources or a list of override files.
+        if (container_source.name != 'compose.yaml' or container_source.parent.parent != root
+                or container_source.resolve() != container_source
+                or labels.get('com.docker.compose.project') != args.previous_project):
             raise ValueError('Previous container source does not match the explicit acceptance source')
     if run(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=' + args.project],
            capture_output=True, text=True).stdout.strip():
