@@ -299,7 +299,7 @@ func hashSecret(value string, random io.Reader) (string, error) {
 }
 
 func HashActivationCode(value string) (string, error) {
-	value = strings.TrimSpace(value)
+	value = normalizeActivationCode(value)
 	if len(value) < 12 || len(value) > 128 {
 		return "", errors.New("activation code is invalid")
 	}

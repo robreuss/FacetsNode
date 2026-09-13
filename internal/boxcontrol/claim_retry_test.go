@@ -53,11 +53,24 @@ func TestClaimRetryRetainsExactInstallation(t *testing.T) {
 	if !strings.Contains(retryPage.Body.String(), `name="claim_request_id" value="`+input.RequestID.String()+`"`) || !strings.Contains(retryPage.Body.String(), "Claiming Mac") {
 		t.Fatal("retry form lost the claiming installation")
 	}
-	form.Set("activation_code", "RETRY-BOX-CODE")
+	form.Set("activation_code", "retry-Box-cOdE")
 	accepted := postClaimRetry(handler, csrf, form)
 	grants, err := store.ListGrants(context.Background())
 	if accepted.Code != http.StatusSeeOther || err != nil || len(grants) != 1 || grants[0].DeviceName != "Claiming Mac" {
 		t.Fatalf("retry failed to connect exact device: status=%d grants=%d err=%v", accepted.Code, len(grants), err)
+	}
+}
+
+func TestClaimFormDisablesActivationCodeAutocorrection(t *testing.T) {
+	withFastArgon(t)
+	store := initializedMemoryStore(t, "RETRY-BOX-CODE")
+	service := makeTestService(t, store, &testDeviceSyncController{}, time.Now().UTC())
+	page := httptest.NewRecorder()
+	service.Handler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	for _, required := range []string{`autocapitalize="characters"`, `autocorrect="off"`, `spellcheck="false"`, "Activation-code letters may be entered in either case."} {
+		if !strings.Contains(page.Body.String(), required) {
+			t.Fatalf("claim page missing %s", required)
+		}
 	}
 }
 

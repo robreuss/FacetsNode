@@ -182,7 +182,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 {{if and .Error (not .ClaimConnectionUnavailable)}}<p class="bad" role="alert">{{.Error}}</p>{{end}}
 {{if not .Claimed}}<section><h2>Claim this Facets Box</h2>
 {{if .ClaimConnectionUnavailable}}<h3>Reopen setup to continue</h3><p>This setup page has expired or is no longer available. The Box has not been claimed, and this attempt did not use up your activation code.</p><p><strong>Close this page and start Box setup again in Facets, then enter the same activation code.</strong> If you have requested a replacement code, use the newest one instead.</p>
-{{else}}<p>Enter the one-time activation code shown by the Box console, name the Box, and choose the shared Box Owner password.</p>{{if .ClaimDeviceName}}<p class="quiet">This will also connect <strong>{{.ClaimDeviceName}}</strong> to the Box. Complete setup before {{.ClaimExpires}} (one hour after starting setup).</p>{{end}}<form method="post" action="claim"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .ClaimRequestID}}<input type="hidden" name="claim_request_id" value="{{.ClaimRequestID}}">{{end}}<p><input name="activation_code" autocomplete="one-time-code" placeholder="One-time activation code" required></p><p><input name="display_name" autocomplete="organization" maxlength="128" value="{{.DisplayName}}" placeholder="Box name, for example Home Box" required></p><p><input type="password" name="password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New Box Owner password" required></p><p><input type="password" name="password_confirmation" autocomplete="new-password" minlength="15" maxlength="128" placeholder="Confirm Box Owner password" required></p><button>{{if .ClaimRequestID}}Claim and connect{{else}}Claim Box{{end}}</button></form>{{end}}</section>
+{{else}}<p>Enter the one-time activation code shown by the Box console, name the Box, and choose the shared Box Owner password. Activation-code letters may be entered in either case.</p>{{if .ClaimDeviceName}}<p class="quiet">This will also connect <strong>{{.ClaimDeviceName}}</strong> to the Box. Complete setup before {{.ClaimExpires}} (one hour after starting setup).</p>{{end}}<form method="post" action="claim"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .ClaimRequestID}}<input type="hidden" name="claim_request_id" value="{{.ClaimRequestID}}">{{end}}<p><input name="activation_code" autocomplete="one-time-code" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="One-time activation code" required></p><p><input name="display_name" autocomplete="organization" maxlength="128" value="{{.DisplayName}}" placeholder="Box name, for example Home Box" required></p><p><input type="password" name="password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New Box Owner password" required></p><p><input type="password" name="password_confirmation" autocomplete="new-password" minlength="15" maxlength="128" placeholder="Confirm Box Owner password" required></p><button>{{if .ClaimRequestID}}Claim and connect{{else}}Claim Box{{end}}</button></form>{{end}}</section>
 {{else if not .Authenticated}}<section><h2>{{.DisplayName}}</h2><p>Enter the Box Owner password to continue.</p><form method="post" action="login{{if .ReturnTo}}?return_to={{.ReturnTo}}{{end}}"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input type="password" name="password" autocomplete="current-password" maxlength="128" required></p><button>Sign in</button></form></section>
 {{else}}
 {{if .InvitationCode}}<section><h2>Authorize another device</h2><p class="pin">{{.InvitationCode}}</p><p>Use this code to add another Facets device. It expires {{.InvitationExpires}}.</p></section>{{end}}
@@ -326,7 +326,7 @@ func (service *Service) handleClaim(writer http.ResponseWriter, request *http.Re
 		}
 	}
 	if err != nil || nameErr != nil || connectionErr != nil || password != confirmation ||
-		!verifySecret(state.ActivationVerifier, activation) {
+		!verifyActivationCode(state.ActivationVerifier, activation) {
 		service.audit(request.Context(), "box_claim", "rejected")
 		query := url.Values{}
 		// A stale app-bound request is not a rejected activation code. Its
@@ -338,7 +338,7 @@ func (service *Service) handleClaim(writer http.ResponseWriter, request *http.Re
 			case password != confirmation:
 				query.Set("error", "The Box Owner passwords do not match. Enter the same password in both fields.")
 			default:
-				query.Set("error", "That activation code was not accepted. Check the code shown by the Box console, including capital letters. If you requested a replacement, use the newest code.")
+				query.Set("error", "That activation code was not accepted. Check the letters and numbers against the Box console; uppercase and lowercase letters are equivalent. If you requested a replacement, use the newest code.")
 			}
 		}
 		if _, hasConnection := request.PostForm["claim_request_id"]; hasConnection {
