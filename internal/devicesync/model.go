@@ -268,6 +268,7 @@ type SpaceProvisioningResult struct {
 // membership only. The server does not grant Space content trust, distribute
 // content keys, or interpret the encrypted payloads carried by the domain.
 type SpaceDeviceAdmission struct {
+	Sponsor               SpaceSponsorBinding   `json:"sponsor"`
 	Version               int                   `json:"version"`
 	RetryID               uuid.UUID             `json:"retryID"`
 	PrincipalID           uuid.UUID             `json:"principalID"`

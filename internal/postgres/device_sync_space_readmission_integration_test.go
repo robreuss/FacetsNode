@@ -73,7 +73,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 			}
 			oldCredential, oldAdmission := makeAdmission(3500)
 			oldClaim := makeClaim(3600, 42)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, oldAdmission, 3500); err != nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, admin), oldAdmission, 3500); err != nil {
 				t.Fatal(err)
 			}
 			// Cancel before any claim, then race fresh preparations. Only the
@@ -81,7 +81,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 			// records must remain to reject late bearer/retry use.
 			retiredCredential, retiredAdmission := oldCredential, oldAdmission
 			_, activePendingCollision := makeAdmission(3510)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, activePendingCollision, 3510); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, admin), activePendingCollision, 3510); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
 				t.Fatalf("active pending admission displaced=%v", err)
 			}
 			if _, err := s.ChangeSubscriptionStatus(ctx, admin, retiredAdmission.SubscriptionID, relay.SubscriptionStatusChangeRequest{RetryID: uuid.New(), Status: inactive, ChangedAtMilliseconds: 3520}); err != nil {
@@ -89,7 +89,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 			}
 			wrongAdmin := admin
 			wrongAdmin.Token = postgresRelayToken(99)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, wrongAdmin, activePendingCollision, 3530); err == nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, wrongAdmin), activePendingCollision, 3530); err == nil {
 				t.Fatal("unauthenticated pending replacement accepted")
 			}
 			pendingCredentials := make([]devicesync.SpaceDeviceAdmissionCredential, 2)
@@ -103,7 +103,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 				pendingWG.Add(1)
 				go func(i int) {
 					defer pendingWG.Done()
-					_, pendingErrors[i] = s.CreateSpaceDeviceAdmission(ctx, admin, pendingAdmissions[i], 3530)
+					_, pendingErrors[i] = s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, admin), pendingAdmissions[i], 3530)
 				}(i)
 			}
 			pendingWG.Wait()
@@ -127,7 +127,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 			if _, err := s.ClaimSubscriptionAdmission(ctx, relay.AdmissionCredential{TenantID: principal, DomainID: admin.DomainID, AdmissionID: retiredCredential.AdmissionID, Token: retiredCredential.Token}, oldClaim.RelayClaim, 3600); err == nil {
 				t.Fatal("retired relay admission revived")
 			}
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, retiredAdmission, 3600); err == nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, admin), retiredAdmission, 3600); err == nil {
 				t.Fatal("old retry revived retired binding")
 			}
 			var bindingCount, relayAdmissionCount int
@@ -148,7 +148,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, activeCollision := makeAdmission(3650)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, activeCollision, 3650); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, admin), activeCollision, 3650); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
 				t.Fatalf("active collision=%v", err)
 			}
 			if _, err := s.ChangeSubscriptionStatus(ctx, admin, oldAdmission.SubscriptionID, relay.SubscriptionStatusChangeRequest{RetryID: uuid.New(), Status: inactive, ChangedAtMilliseconds: 3700}); err != nil {
@@ -168,7 +168,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 				wg.Add(1)
 				go func(i int) {
 					defer wg.Done()
-					_, errors[i] = s.CreateSpaceDeviceAdmission(ctx, admin, admissions[i], 3800)
+					_, errors[i] = s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, admin), admissions[i], 3800)
 				}(i)
 			}
 			wg.Wait()
@@ -243,7 +243,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 				t.Fatal(err)
 			}
 			pendingCredential, pending := makeAdmission(4100)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, pending, 4100); err != nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, admin), pending, 4100); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.RevokeDevice(ctx, authority.TenantCredential, devicesync.DeviceRevocation{Version: devicesync.SchemaVersion, RetryID: uuid.New(), PrincipalID: principal, DeviceID: device}, 4200); err != nil {
@@ -253,7 +253,7 @@ func TestPostgresSpaceReadmissionAtomicRenewalAndReplay(t *testing.T) {
 				t.Fatalf("revoked group claim=%v", err)
 			}
 			_, another := makeAdmission(4400)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, another, 4400); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, postgresSpaceSponsor(authority, space, admin), another, 4400); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
 				t.Fatalf("revoked group admission=%v", err)
 			}
 			var claimed *int64

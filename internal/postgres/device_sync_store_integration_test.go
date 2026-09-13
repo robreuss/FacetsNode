@@ -137,7 +137,7 @@ func TestPostgresDeviceSyncSpaceAndRelayDomainCommitAtomically(t *testing.T) {
 		Token: postgresRelayToken(31),
 	}
 	spaceAdmissionCreated, err := store.CreateSpaceDeviceAdmission(
-		ctx, spaceAdministrationCredential, spaceAdmission, now+2,
+		ctx, postgresSpaceSponsor(authority, space, spaceAdministrationCredential), spaceAdmission, now+2,
 	)
 	if err != nil || spaceAdmissionCreated.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("create Space device admission=%+v err=%v", spaceAdmissionCreated, err)
@@ -373,6 +373,14 @@ func TestPostgresDeviceSyncSpaceAndRelayDomainCommitAtomically(t *testing.T) {
 	}
 	if retirementCount != 1 {
 		t.Fatalf("Device Sync principal retirement count=%d", retirementCount)
+	}
+}
+
+func postgresSpaceSponsor(authority postgresDeviceSyncAuthority, space devicesync.SpaceProvisioning, admin relay.AdministrationCredential) devicesync.SpaceSponsorCredential {
+	return devicesync.SpaceSponsorCredential{
+		Administration: admin,
+		Control:        relay.Credential{TenantID: authority.PrincipalProvisioning.PrincipalID, DomainID: authority.ControlDomain.Registration.DomainID, MemberID: authority.PrincipalProvisioning.InitialDeviceID, Token: postgresRelayToken(24)},
+		Space:          relay.Credential{TenantID: space.PrincipalID, DomainID: space.Domain.Registration.DomainID, MemberID: space.InitialDeviceID, Token: postgresRelayToken(32)},
 	}
 }
 

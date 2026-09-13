@@ -778,6 +778,7 @@ func TestDeviceSyncSpaceAdmitsEnrolledDeviceTransportExactlyOnce(t *testing.T) {
 		AdmissionID: uuid.New(), AuthorizationToken: relayTestToken(50),
 	}
 	createInput := deviceSyncDeviceAdmissionCreateInput{
+		Sponsor: testHTTPSpaceSponsor(controlDomain, spaceDomainInput),
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(), DeviceID: deviceID,
 		SubscriptionID:        uuid.New(),
 		AdmissionCredential:   admissionCredential,

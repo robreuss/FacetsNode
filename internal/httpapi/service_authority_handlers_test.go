@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/robreuss/FacetsNode/internal/devicesync"
 	"github.com/robreuss/FacetsNode/internal/relay"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
@@ -559,6 +560,7 @@ func TestMutatingGETHEADAndGrantRoutesWaitForScopeDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	server.SetServiceAuthorityDeployment(signer, bindings, serviceauthority.ScopeDeviceSync)
+	setUnboundDeviceSyncStoreForTesting(server, devicesync.NewMemoryStore(relayStore))
 	setUnboundDeviceSyncMutationFenceForTesting(server)
 	drain, err := bindings.AcquireMigrationDrain(context.Background(), scope)
 	if err != nil {
@@ -620,6 +622,12 @@ func TestMutatingGETHEADAndGrantRoutesWaitForScopeDrain(t *testing.T) {
 				"/v1/relay/tenants/%s/domains/%s/bulk-transfer-grants",
 				tenantID, domainID,
 			),
+			trafficClass: serviceauthority.TrafficControl,
+		},
+		{
+			method: http.MethodPost,
+			path: fmt.Sprintf("/v1/device-sync/principals/%s/spaces/%s/domains/%s/device-admissions/%s/cancellation",
+				tenantID, uuid.New(), domainID, uuid.New()),
 			trafficClass: serviceauthority.TrafficControl,
 		},
 	}

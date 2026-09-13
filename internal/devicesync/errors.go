@@ -22,6 +22,7 @@ const (
 	CodeAdmissionNotFound    ErrorCode = "device_sync_admission_not_found"
 	CodeAdmissionExpired     ErrorCode = "device_sync_admission_expired"
 	CodeAdmissionClaimed     ErrorCode = "device_sync_admission_claimed"
+	CodeAdmissionSuperseded  ErrorCode = "device_sync_admission_superseded"
 	CodeAdmissionCollision   ErrorCode = "device_sync_admission_collision"
 	CodePrincipalCollision   ErrorCode = "device_sync_principal_collision"
 	CodeDeviceCollision      ErrorCode = "device_sync_device_collision"

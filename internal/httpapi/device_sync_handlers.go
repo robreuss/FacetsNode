@@ -35,6 +35,7 @@ type deviceSyncPrincipalClaimInput struct {
 }
 
 type deviceSyncDeviceAdmissionCreateInput struct {
+	Sponsor                     *deviceSyncSpaceSponsorInput  `json:"sponsor,omitempty"`
 	Version                     int                           `json:"version"`
 	RetryID                     uuid.UUID                     `json:"retryID"`
 	DeviceID                    uuid.UUID                     `json:"deviceID"`
@@ -42,6 +43,15 @@ type deviceSyncDeviceAdmissionCreateInput struct {
 	AdmissionCredential         deviceSyncAdmissionCredential `json:"admissionCredential"`
 	ExpiresAtMilliseconds       int64                         `json:"expiresAtMilliseconds"`
 	MemberExpiresAtMilliseconds *int64                        `json:"memberExpiresAtMilliseconds,omitempty"`
+}
+
+// These tokens exist only during request authentication. Stored admission
+// bindings contain verified digests, never raw sponsor credentials.
+type deviceSyncSpaceSponsorInput struct {
+	DeviceID                  uuid.UUID `json:"deviceID"`
+	ControlDomainID           uuid.UUID `json:"controlDomainID"`
+	ControlAuthorizationToken string    `json:"controlAuthorizationToken"`
+	SpaceAuthorizationToken   string    `json:"spaceAuthorizationToken"`
 }
 
 type deviceSyncDeviceAdmissionClaimInput struct {
@@ -673,6 +683,10 @@ func (s *Server) handleCreateDeviceSyncSpaceDeviceAdmission(writer http.Response
 		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeInvalidAdmission, "Space device admission version is invalid"))
 		return
 	}
+	if input.Sponsor == nil {
+		s.writeError(writer, devicesync.NewProtocolError(devicesync.CodeUnauthorized, "current Space sponsor credentials are required"))
+		return
+	}
 	admissionCredential := relay.AdmissionCredential{
 		TenantID: principalID, DomainID: domainID,
 		AdmissionID: input.AdmissionCredential.AdmissionID,
@@ -686,7 +700,11 @@ func (s *Server) handleCreateDeviceSyncSpaceDeviceAdmission(writer http.Response
 	now := s.nowMilliseconds()
 	result, err := s.deviceSyncStore.CreateSpaceDeviceAdmission(
 		request.Context(),
-		relay.AdministrationCredential{TenantID: principalID, DomainID: domainID, Token: token},
+		devicesync.SpaceSponsorCredential{
+			Administration: relay.AdministrationCredential{TenantID: principalID, DomainID: domainID, Token: token},
+			Control:        relay.Credential{TenantID: principalID, DomainID: input.Sponsor.ControlDomainID, MemberID: input.Sponsor.DeviceID, Token: input.Sponsor.ControlAuthorizationToken},
+			Space:          relay.Credential{TenantID: principalID, DomainID: domainID, MemberID: input.Sponsor.DeviceID, Token: input.Sponsor.SpaceAuthorizationToken},
+		},
 		devicesync.SpaceDeviceAdmission{
 			Version: devicesync.SchemaVersion, RetryID: input.RetryID,
 			PrincipalID: principalID, SpaceID: spaceID, DeviceID: input.DeviceID,

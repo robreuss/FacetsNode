@@ -767,6 +767,9 @@ func (s *Server) relayCheckpointAdministration(request *http.Request) (uuid.UUID
 }
 
 func (s *Server) handleCreateRelayMember(writer http.ResponseWriter, request *http.Request) {
+	if s.rejectGenericDeviceSyncEnrollment(writer) {
+		return
+	}
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {
 		s.writeError(writer, err)
@@ -968,6 +971,9 @@ func (s *Server) handleCreateRelayAdmission(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) {
+	if s.rejectGenericDeviceSyncEnrollment(writer) {
+		return
+	}
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {
 		s.writeError(writer, err)
@@ -1136,6 +1142,9 @@ func (s *Server) handleClaimRelayAdmission(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) {
+	if s.rejectGenericDeviceSyncEnrollment(writer) {
+		return
+	}
 	tenantID, domainID, err := relayScopeFromPath(request)
 	if err != nil {
 		s.writeError(writer, err)

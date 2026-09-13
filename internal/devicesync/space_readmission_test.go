@@ -25,7 +25,7 @@ func TestMemorySpaceReadmissionReplacesOnlyInactiveTransport(t *testing.T) {
 			admin := relay.AdministrationCredential{TenantID: space.PrincipalID, DomainID: space.Domain.Registration.DomainID, Token: testToken(0x41)}
 			oldCredential, oldAdmission := testSpaceDeviceAdmission(t, space, device, 3500)
 			oldClaim := readmissionClaim(t, space, device, 0x74, 3600)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, oldAdmission, 3500); err != nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), oldAdmission, 3500); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.ClaimSpaceDeviceAdmission(ctx, oldCredential, oldClaim, 3600); err != nil {
@@ -38,7 +38,7 @@ func TestMemorySpaceReadmissionReplacesOnlyInactiveTransport(t *testing.T) {
 			}
 
 			newCredential, newAdmission := testSpaceDeviceAdmission(t, space, device, 3800)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, newAdmission, 3800); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), newAdmission, 3800); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
 				t.Fatalf("active collision=%v", err)
 			}
 			if _, err := r.ChangeSubscriptionStatus(ctx, admin, oldAdmission.SubscriptionID, relay.SubscriptionStatusChangeRequest{RetryID: uuid.New(), Status: inactive, ChangedAtMilliseconds: 3700}); err != nil {
@@ -47,7 +47,7 @@ func TestMemorySpaceReadmissionReplacesOnlyInactiveTransport(t *testing.T) {
 			if _, err := s.ClaimSpaceDeviceAdmission(ctx, oldCredential, oldClaim, 3600); err == nil {
 				t.Fatal("inactive exact claim replay accepted")
 			}
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, newAdmission, 3800); err != nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), newAdmission, 3800); err != nil {
 				t.Fatal(err)
 			}
 			newClaim := readmissionClaim(t, space, device, 0x75, 3900)
@@ -103,7 +103,7 @@ func TestMemorySpaceReadmissionFirstWinnerAndRevokedGroup(t *testing.T) {
 	}
 	admin := relay.AdministrationCredential{TenantID: space.PrincipalID, DomainID: space.Domain.Registration.DomainID, Token: testToken(0x41)}
 	oldCredential, oldAdmission := testSpaceDeviceAdmission(t, space, device, 3500)
-	if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, oldAdmission, 3500); err != nil {
+	if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), oldAdmission, 3500); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ClaimSpaceDeviceAdmission(ctx, oldCredential, readmissionClaim(t, space, device, 0x74, 3600), 3600); err != nil {
@@ -123,7 +123,7 @@ func TestMemorySpaceReadmissionFirstWinnerAndRevokedGroup(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errors[i] = s.CreateSpaceDeviceAdmission(ctx, admin, admissions[i], 3800)
+			_, errors[i] = s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), admissions[i], 3800)
 		}(i)
 	}
 	wg.Wait()
@@ -171,7 +171,7 @@ func TestMemorySpaceReadmissionFirstWinnerAndRevokedGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	pendingCredential, pending := testSpaceDeviceAdmission(t, space, device, 4100)
-	if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, pending, 4100); err != nil {
+	if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), pending, 4100); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.RevokeDevice(ctx, tenant, devicesync.DeviceRevocation{Version: devicesync.SchemaVersion, RetryID: uuid.New(), PrincipalID: space.PrincipalID, DeviceID: device}, 4200); err != nil {
@@ -181,7 +181,7 @@ func TestMemorySpaceReadmissionFirstWinnerAndRevokedGroup(t *testing.T) {
 		t.Fatalf("group revoked between preparation and claim=%v", err)
 	}
 	_, another := testSpaceDeviceAdmission(t, space, device, 4400)
-	if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, another, 4400); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
+	if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), another, 4400); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
 		t.Fatalf("revoked group creates admission=%v", err)
 	}
 }
@@ -206,11 +206,11 @@ func TestMemorySpacePendingCancellationAllowsOnlyFreshFirstWinner(t *testing.T) 
 			}
 			admin := relay.AdministrationCredential{TenantID: space.PrincipalID, DomainID: space.Domain.Registration.DomainID, Token: testToken(0x41)}
 			retiredCredential, retired := testSpaceDeviceAdmission(t, space, device, 3500)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, retired, 3500); err != nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), retired, 3500); err != nil {
 				t.Fatal(err)
 			}
 			_, competing := testSpaceDeviceAdmission(t, space, device, 3510)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, competing, 3510); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), competing, 3510); !devicesync.ErrorHasCode(err, devicesync.CodeDeviceCollision) {
 				t.Fatalf("active pending admission was displaced: %v", err)
 			}
 			if _, err := r.ChangeSubscriptionStatus(ctx, admin, retired.SubscriptionID, relay.SubscriptionStatusChangeRequest{RetryID: uuid.New(), Status: inactive, ChangedAtMilliseconds: 3520}); err != nil {
@@ -218,7 +218,7 @@ func TestMemorySpacePendingCancellationAllowsOnlyFreshFirstWinner(t *testing.T) 
 			}
 			wrongAdmin := admin
 			wrongAdmin.Token = testToken(0x99)
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, wrongAdmin, competing, 3530); err == nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, wrongAdmin), competing, 3530); err == nil {
 				t.Fatal("unauthenticated pending replacement accepted")
 			}
 			credentials := make([]devicesync.SpaceDeviceAdmissionCredential, 2)
@@ -232,7 +232,7 @@ func TestMemorySpacePendingCancellationAllowsOnlyFreshFirstWinner(t *testing.T) 
 				wg.Add(1)
 				go func(i int) {
 					defer wg.Done()
-					_, errors[i] = s.CreateSpaceDeviceAdmission(ctx, admin, admissions[i], 3530)
+					_, errors[i] = s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), admissions[i], 3530)
 				}(i)
 			}
 			wg.Wait()
@@ -260,7 +260,7 @@ func TestMemorySpacePendingCancellationAllowsOnlyFreshFirstWinner(t *testing.T) 
 			if old, err := r.GetSubscription(ctx, admin, retired.SubscriptionID); err != nil || old.Status != inactive {
 				t.Fatalf("retired subscription tombstone=%+v err=%v", old, err)
 			}
-			if _, err := s.CreateSpaceDeviceAdmission(ctx, admin, retired, 3600); err == nil {
+			if _, err := s.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), retired, 3600); err == nil {
 				t.Fatal("old retry revived retired binding")
 			}
 			result, err := s.ClaimSpaceDeviceAdmission(ctx, credentials[winner], claim, 3600)

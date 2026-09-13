@@ -580,6 +580,10 @@ func (s *Server) Handler() http.Handler {
 			s.handleCreateDeviceSyncSpaceDeviceAdmission,
 		)
 		register(
+			"POST /v1/device-sync/principals/{principalID}/spaces/{spaceID}/domains/{domainID}/device-admissions/{admissionID}/cancellation",
+			traffic.SurfaceManagement, mutation, s.handleCancelDeviceSyncSpaceDeviceAdmission,
+		)
+		register(
 			"POST /v1/device-sync/principals/{principalID}/spaces/{spaceID}/device-admissions/{admissionID}/claim",
 			traffic.SurfaceManagement,
 			mutation,
@@ -949,7 +953,7 @@ func (s *Server) writeError(writer http.ResponseWriter, err error) {
 				status = http.StatusNotFound
 			case devicesync.CodeAdmissionExpired, devicesync.CodeJoinRequestExpired:
 				status = http.StatusGone
-			case devicesync.CodeAdmissionClaimed, devicesync.CodeAdmissionCollision,
+			case devicesync.CodeAdmissionClaimed, devicesync.CodeAdmissionSuperseded, devicesync.CodeAdmissionCollision,
 				devicesync.CodePrincipalCollision, devicesync.CodeDeviceCollision,
 				devicesync.CodeDeviceRevoked, devicesync.CodeLastDevice,
 				devicesync.CodeSpaceCollision, devicesync.CodeJoinRequestClaimed,

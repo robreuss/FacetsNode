@@ -37,43 +37,45 @@ type memorySpaceDeviceAdmission struct {
 }
 
 type MemoryStore struct {
-	mu                        sync.Mutex
-	relay                     relay.Store
-	admissions                map[uuid.UUID]AccountAdmission
-	admissionRetry            map[uuid.UUID]uuid.UUID
-	principals                map[uuid.UUID]memoryPrincipal
-	deviceAdmissions          map[uuid.UUID]memoryDeviceAdmission
-	deviceAdmissionRetry      map[uuid.UUID]uuid.UUID
-	spaces                    map[uuid.UUID]memorySpace
-	spaceRetry                map[uuid.UUID]uuid.UUID
-	spaceDeviceAdmissions     map[uuid.UUID]memorySpaceDeviceAdmission
-	spaceDeviceAdmissionRetry map[uuid.UUID]uuid.UUID
-	deviceRevocationRequests  map[uuid.UUID]DeviceRevocation
-	deviceRevocations         map[uuid.UUID]DeviceRevocationResult
-	revokedDevices            map[uuid.UUID]map[uuid.UUID]int64
-	retiredPrincipals         map[uuid.UUID]DeviceRevocationResult
-	joinRequests              map[uuid.UUID]JoinRequest
-	joinRequestRetry          map[uuid.UUID]uuid.UUID
-	discoveryProfiles         map[uuid.UUID]DiscoveryProfile
+	mu                          sync.Mutex
+	relay                       relay.Store
+	admissions                  map[uuid.UUID]AccountAdmission
+	admissionRetry              map[uuid.UUID]uuid.UUID
+	principals                  map[uuid.UUID]memoryPrincipal
+	deviceAdmissions            map[uuid.UUID]memoryDeviceAdmission
+	deviceAdmissionRetry        map[uuid.UUID]uuid.UUID
+	spaces                      map[uuid.UUID]memorySpace
+	spaceRetry                  map[uuid.UUID]uuid.UUID
+	spaceDeviceAdmissions       map[uuid.UUID]memorySpaceDeviceAdmission
+	spaceDeviceAdmissionRetry   map[uuid.UUID]uuid.UUID
+	spaceAdmissionCancellations map[uuid.UUID]SpaceDeviceAdmissionCancellation
+	deviceRevocationRequests    map[uuid.UUID]DeviceRevocation
+	deviceRevocations           map[uuid.UUID]DeviceRevocationResult
+	revokedDevices              map[uuid.UUID]map[uuid.UUID]int64
+	retiredPrincipals           map[uuid.UUID]DeviceRevocationResult
+	joinRequests                map[uuid.UUID]JoinRequest
+	joinRequestRetry            map[uuid.UUID]uuid.UUID
+	discoveryProfiles           map[uuid.UUID]DiscoveryProfile
 }
 
 func NewMemoryStore(relayStore relay.Store) *MemoryStore {
 	return &MemoryStore{
 		relay: relayStore, admissions: make(map[uuid.UUID]AccountAdmission),
 		admissionRetry: make(map[uuid.UUID]uuid.UUID), principals: make(map[uuid.UUID]memoryPrincipal),
-		deviceAdmissions:          make(map[uuid.UUID]memoryDeviceAdmission),
-		deviceAdmissionRetry:      make(map[uuid.UUID]uuid.UUID),
-		spaces:                    make(map[uuid.UUID]memorySpace),
-		spaceRetry:                make(map[uuid.UUID]uuid.UUID),
-		spaceDeviceAdmissions:     make(map[uuid.UUID]memorySpaceDeviceAdmission),
-		spaceDeviceAdmissionRetry: make(map[uuid.UUID]uuid.UUID),
-		deviceRevocationRequests:  make(map[uuid.UUID]DeviceRevocation),
-		deviceRevocations:         make(map[uuid.UUID]DeviceRevocationResult),
-		revokedDevices:            make(map[uuid.UUID]map[uuid.UUID]int64),
-		retiredPrincipals:         make(map[uuid.UUID]DeviceRevocationResult),
-		joinRequests:              make(map[uuid.UUID]JoinRequest),
-		joinRequestRetry:          make(map[uuid.UUID]uuid.UUID),
-		discoveryProfiles:         make(map[uuid.UUID]DiscoveryProfile),
+		deviceAdmissions:            make(map[uuid.UUID]memoryDeviceAdmission),
+		deviceAdmissionRetry:        make(map[uuid.UUID]uuid.UUID),
+		spaces:                      make(map[uuid.UUID]memorySpace),
+		spaceRetry:                  make(map[uuid.UUID]uuid.UUID),
+		spaceDeviceAdmissions:       make(map[uuid.UUID]memorySpaceDeviceAdmission),
+		spaceDeviceAdmissionRetry:   make(map[uuid.UUID]uuid.UUID),
+		spaceAdmissionCancellations: make(map[uuid.UUID]SpaceDeviceAdmissionCancellation),
+		deviceRevocationRequests:    make(map[uuid.UUID]DeviceRevocation),
+		deviceRevocations:           make(map[uuid.UUID]DeviceRevocationResult),
+		revokedDevices:              make(map[uuid.UUID]map[uuid.UUID]int64),
+		retiredPrincipals:           make(map[uuid.UUID]DeviceRevocationResult),
+		joinRequests:                make(map[uuid.UUID]JoinRequest),
+		joinRequestRetry:            make(map[uuid.UUID]uuid.UUID),
+		discoveryProfiles:           make(map[uuid.UUID]DiscoveryProfile),
 	}
 }
 
@@ -675,7 +677,8 @@ func (s *MemoryStore) RevokeDevice(
 		if space.provisioning.PrincipalID != revocation.PrincipalID || space.devices[revocation.DeviceID] == uuid.Nil {
 			continue
 		}
-		if revocation.DeviceID == space.provisioning.InitialDeviceID {
+		if revocation.DeviceID == space.provisioning.InitialDeviceID &&
+			space.devices[revocation.DeviceID] == space.provisioning.Domain.Subscription.SubscriptionID {
 			targets = append(targets, relay.TenantMembershipRevocationItem{
 				DomainID:       space.provisioning.Domain.Registration.DomainID,
 				SubscriptionID: space.provisioning.Domain.Subscription.SubscriptionID,
@@ -782,10 +785,11 @@ func (s *MemoryStore) ProvisionSpace(
 
 func (s *MemoryStore) CreateSpaceDeviceAdmission(
 	ctx context.Context,
-	credential relay.AdministrationCredential,
+	sponsor SpaceSponsorCredential,
 	admission SpaceDeviceAdmission,
 	nowMilliseconds int64,
 ) (SpaceDeviceAdmissionCreateResult, error) {
+	credential := sponsor.Administration
 	if err := admission.Validate(); err != nil {
 		return SpaceDeviceAdmissionCreateResult{}, err
 	}
@@ -809,6 +813,24 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 	if !found || space.provisioning.PrincipalID != admission.PrincipalID {
 		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeUnauthorized, "Device Sync Space was not found")
 	}
+	// Authenticate before looking up any retry or mutating reservations.
+	if _, err := s.relay.GetDomainStatus(ctx, credential); err != nil {
+		return SpaceDeviceAdmissionCreateResult{}, err
+	}
+	control, member, target, err := s.sponsorMembers(ctx, admission.PrincipalID, admission.SpaceID, sponsor.Control.MemberID, admission.DeviceID)
+	if err != nil {
+		return SpaceDeviceAdmissionCreateResult{}, err
+	}
+	admission.Sponsor, err = BindSpaceSponsor(sponsor, control, member, target, nowMilliseconds)
+	if err != nil {
+		return SpaceDeviceAdmissionCreateResult{}, err
+	}
+	for _, cancelled := range s.spaceAdmissionCancellations {
+		if cancelled.PrincipalID == admission.PrincipalID && cancelled.SpaceID == admission.SpaceID &&
+			(cancelled.AdmissionID == admission.RelayAdmission.AdmissionID || cancelled.RetryID == admission.RetryID) {
+			return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionClaimed, "Space admission was cancelled")
+		}
+	}
 	if credential.TenantID != admission.PrincipalID ||
 		credential.DomainID != space.provisioning.Domain.Registration.DomainID ||
 		admission.RelayAdmission.TenantID != admission.PrincipalID ||
@@ -820,13 +842,32 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 	}
 	if admissionID, found := s.spaceDeviceAdmissionRetry[admission.RetryID]; found {
 		existing := s.spaceDeviceAdmissions[admissionID]
+		// Server time is stamped only on first acceptance, not on each retry.
+		admission.CreatedAtMilliseconds = existing.admission.CreatedAtMilliseconds
+		admission.RelayAdmission.CreatedAtMilliseconds = existing.admission.RelayAdmission.CreatedAtMilliseconds
 		if reflect.DeepEqual(existing.admission, admission) {
+			previous, err := s.relay.GetSubscription(ctx, credential, admission.SubscriptionID)
+			if err != nil {
+				return SpaceDeviceAdmissionCreateResult{}, err
+			}
+			if previous.Status != relay.SubscriptionActive {
+				return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionClaimed, "Space admission was retired")
+			}
 			return SpaceDeviceAdmissionCreateResult{Acceptance: relay.AcceptanceDuplicate, Admission: admission}, nil
 		}
 		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionCollision, "Space device admission retry ID was reused")
 	}
 	if existing, found := s.spaceDeviceAdmissions[admission.RelayAdmission.AdmissionID]; found {
+		admission.CreatedAtMilliseconds = existing.admission.CreatedAtMilliseconds
+		admission.RelayAdmission.CreatedAtMilliseconds = existing.admission.RelayAdmission.CreatedAtMilliseconds
 		if reflect.DeepEqual(existing.admission, admission) {
+			previous, err := s.relay.GetSubscription(ctx, credential, admission.SubscriptionID)
+			if err != nil {
+				return SpaceDeviceAdmissionCreateResult{}, err
+			}
+			if previous.Status != relay.SubscriptionActive {
+				return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionClaimed, "Space admission was retired")
+			}
 			return SpaceDeviceAdmissionCreateResult{Acceptance: relay.AcceptanceDuplicate, Admission: admission}, nil
 		}
 		return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeAdmissionCollision, "Space device admission ID was reused")
@@ -836,8 +877,7 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 		if err != nil {
 			return SpaceDeviceAdmissionCreateResult{}, err
 		}
-		if admission.DeviceID == space.provisioning.InitialDeviceID ||
-			(previous.Status != relay.SubscriptionRevoked && previous.Status != relay.SubscriptionRebootstrapRequired) {
+		if previous.Status != relay.SubscriptionRevoked && previous.Status != relay.SubscriptionRebootstrapRequired {
 			return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device is already active in the Space")
 		}
 	}
@@ -851,7 +891,16 @@ func (s *MemoryStore) CreateSpaceDeviceAdmission(
 				return SpaceDeviceAdmissionCreateResult{}, err
 			}
 			if previous.Status != relay.SubscriptionRevoked && previous.Status != relay.SubscriptionRebootstrapRequired {
-				return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device already has another pending Space admission")
+				if !existing.admission.CanReplacePending(nowMilliseconds) {
+					return SpaceDeviceAdmissionCreateResult{}, NewProtocolError(CodeDeviceCollision, "device already has another pending Space admission")
+				}
+				// s.mu serializes takeover against claim; retirement is exact to
+				// this unclaimed reservation, never the target's active membership.
+				if _, err := s.relay.ChangeSubscriptionStatus(ctx, credential, previous.SubscriptionID,
+					relay.SubscriptionStatusChangeRequest{RetryID: existing.admission.RelayAdmission.AdmissionID,
+						Status: relay.SubscriptionRevoked, ChangedAtMilliseconds: nowMilliseconds}); err != nil {
+					return SpaceDeviceAdmissionCreateResult{}, err
+				}
 			}
 			// Retire only the unclaimed Device Sync binding. The inactive relay
 			// subscription/admission remain as tombstones rejecting late claims.
@@ -912,6 +961,15 @@ func (s *MemoryStore) ClaimSpaceDeviceAdmission(
 		claim.DeviceID != record.admission.DeviceID {
 		return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeWrongScope, "Space device claim belongs to another admission")
 	}
+	if record.result == nil {
+		control, member, target, err := s.sponsorMembers(ctx, record.admission.PrincipalID, record.admission.SpaceID, record.admission.Sponsor.DeviceID, record.admission.DeviceID)
+		if err != nil {
+			return SpaceDeviceAdmissionClaimResult{}, err
+		}
+		if !record.admission.Sponsor.IsCurrent(control, member, target, nowMilliseconds) {
+			return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeAdmissionSuperseded, "Space sponsor authority changed before claim")
+		}
+	}
 	relayCredential := relay.AdmissionCredential{
 		TenantID: record.admission.PrincipalID, DomainID: record.admission.RelayAdmission.DomainID,
 		AdmissionID: credential.AdmissionID, Token: credential.Token,
@@ -935,9 +993,6 @@ func (s *MemoryStore) ClaimSpaceDeviceAdmission(
 	var relayResult relay.SubscriptionAdmissionClaimResult
 	var err error
 	if previousSubscriptionID := space.devices[claim.DeviceID]; previousSubscriptionID != uuid.Nil {
-		if claim.DeviceID == space.provisioning.InitialDeviceID {
-			return SpaceDeviceAdmissionClaimResult{}, NewProtocolError(CodeDeviceCollision, "origin membership cannot be replaced")
-		}
 		relayResult, err = s.relay.ClaimSubscriptionAdmissionReplacingInactiveMembership(
 			ctx, relayCredential, claim.RelayClaim, previousSubscriptionID, nowMilliseconds,
 		)
@@ -1026,6 +1081,9 @@ func (s *MemoryStore) GetPrincipalStatus(
 				CreatedAtMilliseconds: space.provisioning.Domain.InitialMember.CreatedAtMilliseconds,
 				RevokedAtMilliseconds: space.provisioning.Domain.InitialMember.RevokedAtMilliseconds,
 			}},
+		}
+		if space.devices[space.provisioning.InitialDeviceID] != space.provisioning.Domain.Subscription.SubscriptionID {
+			spaceStatus.Devices = nil
 		}
 		for _, record := range s.spaceDeviceAdmissions {
 			if record.result == nil || record.admission.PrincipalID != credential.TenantID ||

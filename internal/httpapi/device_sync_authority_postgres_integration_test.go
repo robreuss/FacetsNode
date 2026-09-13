@@ -19,8 +19,17 @@ import (
 	postgresstore "github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/rendezvous"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/testpostgres"
 )
+
+// This test injects authority-persistence failures, not physical capacity
+// failures. Keep shared-capacity admission enabled with a deterministic probe.
+type authorityTestCapacity struct{}
+
+func (authorityTestCapacity) Snapshot(context.Context) (storagecapacity.Snapshot, error) {
+	return storagecapacity.Snapshot{TotalBytes: 16 << 30, AvailableBytes: 8 << 30}, nil
+}
 
 func TestPostgresDeviceSyncHTTPClaimCrashRepairRemainsMutationFenced(
 	t *testing.T,
@@ -64,6 +73,9 @@ func TestPostgresDeviceSyncHTTPClaimCrashRepairRemainsMutationFenced(
 		pool, deploymentID,
 	)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSharedCapacityProvider(authorityTestCapacity{}); err != nil {
 		t.Fatal(err)
 	}
 

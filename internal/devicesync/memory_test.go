@@ -209,11 +209,11 @@ func TestMemoryStoreAdmitsEnrolledDeviceToSpaceExactlyOnce(t *testing.T) {
 		Token:    testToken(0x41),
 	}
 	credential, admission := testSpaceDeviceAdmission(t, space, deviceID, 3_500)
-	created, err := store.CreateSpaceDeviceAdmission(ctx, admin, admission, 3_500)
+	created, err := store.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), admission, 3_500)
 	if err != nil || created.Acceptance != relay.AcceptanceAccepted {
 		t.Fatalf("create=%+v err=%v", created, err)
 	}
-	duplicate, err := store.CreateSpaceDeviceAdmission(ctx, admin, admission, 3_500)
+	duplicate, err := store.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, admin), admission, 3_500)
 	if err != nil || duplicate.Acceptance != relay.AcceptanceDuplicate {
 		t.Fatalf("duplicate=%+v err=%v", duplicate, err)
 	}
@@ -249,7 +249,7 @@ func TestMemoryStoreReportsContentBlindPrincipalStatus(t *testing.T) {
 	if _, err := store.ProvisionSpace(ctx, credential, space, 5_400); err != nil {
 		t.Fatal(err)
 	}
-	enrollMemoryDeviceInSpace(t, store, space, deviceID, 5_500)
+	enrollMemoryDeviceInSpace(t, store, principal, space, deviceID, 5_500)
 
 	status, err := store.GetPrincipalStatus(ctx, credential)
 	if err != nil {
@@ -334,7 +334,7 @@ func TestMemoryStoreRevokesDeviceAcrossPrincipalAndSpaceAtomically(t *testing.T)
 	if _, err := store.ProvisionSpace(ctx, credential, space, 6_400); err != nil {
 		t.Fatal(err)
 	}
-	enrollMemoryDeviceInSpace(t, store, space, deviceID, 6_500)
+	enrollMemoryDeviceInSpace(t, store, principal, space, deviceID, 6_500)
 
 	revocation := devicesync.DeviceRevocation{
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(),
@@ -472,7 +472,7 @@ func TestMemoryStoreRejectsSpaceAdmissionForUnenrolledDeviceAndWrongDomain(t *te
 		TenantID: principal.PrincipalID, DomainID: space.Domain.Registration.DomainID,
 		Token: testToken(0x41),
 	}
-	if _, err := store.CreateSpaceDeviceAdmission(ctx, spaceAdmin, admission, 4_300); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
+	if _, err := store.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, spaceAdmin), admission, 4_300); !devicesync.ErrorHasCode(err, devicesync.CodeUnauthorized) {
 		t.Fatalf("unenrolled device err=%v", err)
 	}
 
@@ -483,7 +483,7 @@ func TestMemoryStoreRejectsSpaceAdmissionForUnenrolledDeviceAndWrongDomain(t *te
 		DomainID: principal.ControlDomain.Registration.DomainID,
 		Token:    testToken(0x20),
 	}
-	if _, err := store.CreateSpaceDeviceAdmission(ctx, controlAdmin, admission, 4_500); !devicesync.ErrorHasCode(err, devicesync.CodeWrongScope) {
+	if _, err := store.CreateSpaceDeviceAdmission(ctx, testSpaceSponsor(principal, space, controlAdmin), admission, 4_500); !devicesync.ErrorHasCode(err, devicesync.CodeWrongScope) {
 		t.Fatalf("wrong domain err=%v", err)
 	}
 }
@@ -542,6 +542,7 @@ func enrollMemoryDevice(
 func enrollMemoryDeviceInSpace(
 	t *testing.T,
 	store *devicesync.MemoryStore,
+	principal devicesync.PrincipalProvisioning,
 	space devicesync.SpaceProvisioning,
 	deviceID uuid.UUID,
 	createdAt int64,
@@ -554,7 +555,7 @@ func enrollMemoryDeviceInSpace(
 		Token:    testToken(0x41),
 	}
 	if _, err := store.CreateSpaceDeviceAdmission(
-		context.Background(), admin, admission, createdAt,
+		context.Background(), testSpaceSponsor(principal, space, admin), admission, createdAt,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -743,6 +744,14 @@ func testSpaceProvisioning(
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(), PrincipalID: principal.PrincipalID,
 		SpaceID: uuid.New(), InitialDeviceID: principal.InitialDeviceID,
 		Domain: domain, CreatedAtMilliseconds: createdAt,
+	}
+}
+
+func testSpaceSponsor(principal devicesync.PrincipalProvisioning, space devicesync.SpaceProvisioning, admin relay.AdministrationCredential) devicesync.SpaceSponsorCredential {
+	return devicesync.SpaceSponsorCredential{
+		Administration: admin,
+		Control:        relay.Credential{TenantID: principal.PrincipalID, DomainID: principal.ControlDomain.Registration.DomainID, MemberID: principal.InitialDeviceID, Token: testToken(0x30)},
+		Space:          relay.Credential{TenantID: space.PrincipalID, DomainID: space.Domain.Registration.DomainID, MemberID: space.InitialDeviceID, Token: testToken(0x42)},
 	}
 }
 

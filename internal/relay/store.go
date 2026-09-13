@@ -9,6 +9,9 @@ import (
 const MaximumBlobUploadExpiryBatchSize = 256
 
 type Store interface {
+	// Internal snapshot only, never an HTTP endpoint. Authority coordinators
+	// authenticate requests and bind this to their current membership records.
+	GetMemberAuthority(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (SubscriptionMemberRegistration, error)
 	ProvisionTenant(
 		ctx context.Context,
 		tenant TenantRegistration,

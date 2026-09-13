@@ -70,7 +70,7 @@ func TestDeviceSyncSpaceDataPlaneCarriesOpaqueCheckpointTailAndBlob(t *testing.T
 	secondSpaceToken := relayTestToken(70)
 	secondSpaceCredential := admitDeviceToTestSpace(
 		t, handler, principalID, spaceID, secondDeviceID,
-		spaceDomainInput, secondSpaceToken, now,
+		controlDomain, spaceDomainInput, secondSpaceToken, now,
 	)
 	basePath := "/v1/relay/tenants/" + principalID.String() +
 		"/domains/" + spaceDomainInput.AdministrationCredential.DomainID.String()
@@ -376,6 +376,7 @@ func admitDeviceToTestSpace(
 	principalID uuid.UUID,
 	spaceID uuid.UUID,
 	deviceID uuid.UUID,
+	controlDomain relayDomainProvisioningRequest,
 	spaceDomain relayDomainProvisioningRequest,
 	memberToken string,
 	now int64,
@@ -385,6 +386,7 @@ func admitDeviceToTestSpace(
 		AdmissionID: uuid.New(), AuthorizationToken: relayTestToken(71),
 	}
 	createInput := deviceSyncDeviceAdmissionCreateInput{
+		Sponsor: testHTTPSpaceSponsor(controlDomain, spaceDomain),
 		Version: devicesync.SchemaVersion, RetryID: uuid.New(), DeviceID: deviceID,
 		SubscriptionID:        uuid.New(),
 		AdmissionCredential:   admissionCredential,
@@ -422,6 +424,13 @@ func admitDeviceToTestSpace(
 	requireStatus(t, claim, http.StatusCreated)
 	_ = claim.Body.Close()
 	return credential
+}
+
+func testHTTPSpaceSponsor(control, space relayDomainProvisioningRequest) *deviceSyncSpaceSponsorInput {
+	return &deviceSyncSpaceSponsorInput{DeviceID: control.MemberCredential.MemberID,
+		ControlDomainID:           control.MemberCredential.DomainID,
+		ControlAuthorizationToken: control.MemberCredential.AuthorizationToken,
+		SpaceAuthorizationToken:   space.MemberCredential.AuthorizationToken}
 }
 
 func newDeviceSyncTransportEnvelope(

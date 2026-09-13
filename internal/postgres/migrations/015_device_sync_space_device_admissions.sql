@@ -5,6 +5,7 @@ CREATE TABLE device_sync_space_device_admissions (
     space_id uuid NOT NULL,
     retry_id uuid NOT NULL,
     device_id uuid NOT NULL,
+    sponsor_binding jsonb NOT NULL,
     domain_id uuid NOT NULL,
     subscription_id uuid NOT NULL,
     admission_id uuid NOT NULL,
