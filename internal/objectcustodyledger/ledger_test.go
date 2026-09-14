@@ -776,6 +776,22 @@ func TestLedgerAbruptProcessHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	point := os.Getenv("FACETS_CUSTODY_LEDGER_CRASH_POINT")
+	ledger.fault = func(current string) error {
+		if current == point {
+			if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			// Signal delivery need not preempt this goroutine before its next
+			// instruction. Never continue into COMMIT after requesting the kill.
+			select {}
+		}
+		return nil
+	}
+	if os.Getenv("FACETS_CUSTODY_LEDGER_CRASH_ACTION") != "" {
+		runRetentionCrashAction(t, ledger, bindingID)
+		return
+	}
 	header, err := hex.DecodeString(os.Getenv("FACETS_CUSTODY_LEDGER_CRASH_HEADER"))
 	if err != nil || len(header) != 54 {
 		t.Fatal("invalid fixture header")
@@ -784,13 +800,6 @@ func TestLedgerAbruptProcessHelper(t *testing.T) {
 	reference, err := objectcustodywire.Inspect(wire)
 	if err != nil {
 		t.Fatal(err)
-	}
-	point := os.Getenv("FACETS_CUSTODY_LEDGER_CRASH_POINT")
-	ledger.fault = func(current string) error {
-		if current == point {
-			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
-		}
-		return nil
 	}
 	_ = ledger.Put(ctx, bindingID, reference, wire)
 	t.Fatal("expected process termination")

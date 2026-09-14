@@ -175,7 +175,10 @@ func TestAbruptProcessRecoveryHelper(t *testing.T) {
 	}
 	store.fault = func(current boundary) error {
 		if int(current) == point {
-			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+			if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			select {} // Do not advance a file effect before signal delivery.
 		}
 		return nil
 	}

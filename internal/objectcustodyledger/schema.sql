@@ -26,13 +26,43 @@ CREATE TABLE immutable_custody_publications (
     publication_id uuid NOT NULL,
     root_digest text NOT NULL CHECK (root_digest ~ '^[0-9a-f]{64}$'),
     object_count bigint NOT NULL CHECK (object_count >= 0),
-    state text NOT NULL CHECK (state IN ('open', 'prepared', 'committed')),
+    state text NOT NULL CHECK (state IN ('open', 'prepared', 'committed', 'retired')),
     inventory_digest text CHECK (inventory_digest ~ '^[0-9a-f]{64}$'),
     receipt_digest text CHECK (receipt_digest ~ '^[0-9a-f]{64}$'),
+    retirement_digest text CHECK (retirement_digest ~ '^[0-9a-f]{64}$'),
     PRIMARY KEY (binding_id, publication_id),
-    CHECK ((state = 'open' AND inventory_digest IS NULL AND receipt_digest IS NULL)
-        OR (state = 'prepared' AND inventory_digest IS NOT NULL AND receipt_digest IS NULL)
-        OR (state = 'committed' AND inventory_digest IS NOT NULL AND receipt_digest IS NOT NULL))
+    CHECK ((state = 'open' AND inventory_digest IS NULL AND receipt_digest IS NULL AND retirement_digest IS NULL)
+        OR (state = 'prepared' AND inventory_digest IS NOT NULL AND receipt_digest IS NULL AND retirement_digest IS NULL)
+        OR (state = 'committed' AND inventory_digest IS NOT NULL AND receipt_digest IS NOT NULL AND retirement_digest IS NULL)
+        OR (state = 'retired' AND inventory_digest IS NOT NULL AND receipt_digest IS NOT NULL AND retirement_digest IS NOT NULL))
+);
+CREATE TABLE immutable_custody_leases (
+    binding_id uuid NOT NULL,
+    publication_id uuid NOT NULL,
+    lease_id uuid NOT NULL,
+    revision bigint NOT NULL CHECK (revision > 0),
+    expires_at_milliseconds bigint NOT NULL CHECK (expires_at_milliseconds > 0),
+    closed boolean NOT NULL,
+    PRIMARY KEY (binding_id, publication_id, lease_id),
+    FOREIGN KEY (binding_id, publication_id) REFERENCES immutable_custody_publications(binding_id, publication_id)
+);
+CREATE TABLE immutable_custody_lease_operations (
+    binding_id uuid NOT NULL,
+    publication_id uuid NOT NULL,
+    lease_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    kind text NOT NULL CHECK (kind IN ('acquire', 'renew', 'close')),
+    base_revision bigint NOT NULL CHECK (base_revision >= 0),
+    result_revision bigint NOT NULL CHECK (result_revision > 0),
+    result_expires_at_milliseconds bigint NOT NULL CHECK (result_expires_at_milliseconds > 0),
+    result_closed boolean NOT NULL,
+    PRIMARY KEY (binding_id, publication_id, lease_id, operation_id),
+    UNIQUE (binding_id, publication_id, lease_id, result_revision),
+    FOREIGN KEY (binding_id, publication_id, lease_id) REFERENCES immutable_custody_leases(binding_id, publication_id, lease_id),
+    CHECK (result_revision - 1 = base_revision),
+    CHECK ((kind = 'acquire' AND base_revision = 0 AND NOT result_closed)
+        OR (kind = 'renew' AND base_revision > 0 AND NOT result_closed)
+        OR (kind = 'close' AND base_revision > 0 AND result_closed))
 );
 CREATE TABLE immutable_custody_pins (
     binding_id uuid NOT NULL,
@@ -42,3 +72,4 @@ CREATE TABLE immutable_custody_pins (
     FOREIGN KEY (binding_id, publication_id)
         REFERENCES immutable_custody_publications(binding_id, publication_id)
 );
+CREATE INDEX immutable_custody_pins_by_object ON immutable_custody_pins (ciphertext_id, binding_id, publication_id);

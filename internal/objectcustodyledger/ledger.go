@@ -36,6 +36,7 @@ var (
 )
 
 const MaximumPinBatch = 256
+const ledgerTableCount = 7
 
 type Binding struct {
 	ID                                         uuid.UUID
@@ -59,6 +60,7 @@ type Publication struct {
 	ObjectCount                    int64
 	State                          string
 	InventoryDigest, ReceiptDigest string
+	RetirementDigest               string
 }
 
 func (p Publication) validateIdentity() error {
@@ -74,15 +76,19 @@ func (p Publication) validateState() error {
 	}
 	switch p.State {
 	case "open":
-		if p.InventoryDigest != "" || p.ReceiptDigest != "" {
+		if p.InventoryDigest != "" || p.ReceiptDigest != "" || p.RetirementDigest != "" {
 			return ErrInvalid
 		}
 	case "prepared":
-		if !validDigest(p.InventoryDigest) || p.ReceiptDigest != "" {
+		if !validDigest(p.InventoryDigest) || p.ReceiptDigest != "" || p.RetirementDigest != "" {
 			return ErrInvalid
 		}
 	case "committed":
-		if !validDigest(p.InventoryDigest) || !validDigest(p.ReceiptDigest) {
+		if !validDigest(p.InventoryDigest) || !validDigest(p.ReceiptDigest) || p.RetirementDigest != "" {
+			return ErrInvalid
+		}
+	case "retired":
+		if !validDigest(p.InventoryDigest) || !validDigest(p.ReceiptDigest) || !validDigest(p.RetirementDigest) {
 			return ErrInvalid
 		}
 	default:
@@ -116,7 +122,7 @@ func Initialize(ctx context.Context, pool *pgxpool.Pool, poolID uuid.UUID, files
 		return ErrUnavailable
 	}
 	var count int
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','v','m','f','p')`).Scan(&count); err != nil || (count != 0 && count != 5) {
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','v','m','f','p')`).Scan(&count); err != nil || (count != 0 && count != ledgerTableCount) {
 		return ErrInvalid
 	}
 	if count == 0 {
@@ -189,7 +195,7 @@ func Open(ctx context.Context, pool *pgxpool.Pool, poolID uuid.UUID, files *obje
 	}
 	defer tx.Rollback(ctx)
 	var count int
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','v','m','f','p')`).Scan(&count); err != nil || count != 5 {
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','v','m','f','p')`).Scan(&count); err != nil || count != ledgerTableCount {
 		return nil, ErrInvalid
 	}
 	if tx.Commit(ctx) != nil {
@@ -346,7 +352,7 @@ func (l *Ledger) Read(ctx context.Context, bindingID uuid.UUID, reference object
 }
 
 func (l *Ledger) BeginPublication(ctx context.Context, requested Publication) (Publication, error) {
-	if requested.validateIdentity() != nil || requested.State != "" || requested.InventoryDigest != "" || requested.ReceiptDigest != "" {
+	if requested.validateIdentity() != nil || requested.State != "" || requested.InventoryDigest != "" || requested.ReceiptDigest != "" || requested.RetirementDigest != "" {
 		return Publication{}, ErrInvalid
 	}
 	tx, err := l.begin(ctx)
@@ -359,7 +365,7 @@ func (l *Ledger) BeginPublication(ctx context.Context, requested Publication) (P
 	}
 	existing, err := loadPublication(ctx, tx, requested.BindingID, requested.ID)
 	if err == nil {
-		if existing.RootDigest != requested.RootDigest || existing.ObjectCount != requested.ObjectCount {
+		if existing.RootDigest != requested.RootDigest || existing.ObjectCount != requested.ObjectCount || existing.State == "retired" {
 			return Publication{}, ErrConflict
 		}
 		return existing, nil
@@ -390,6 +396,9 @@ func (l *Ledger) AddPins(ctx context.Context, bindingID, publicationID uuid.UUID
 	publication, err := loadPublication(ctx, tx, bindingID, publicationID)
 	if err != nil {
 		return err
+	}
+	if publication.State == "retired" {
+		return ErrConflict
 	}
 	var currentCount int64
 	if err = tx.QueryRow(ctx, `SELECT count(*) FROM immutable_custody_pins WHERE binding_id=$1 AND publication_id=$2`, bindingID, publicationID).Scan(&currentCount); err != nil {
@@ -430,7 +439,8 @@ func (l *Ledger) AddPins(ctx context.Context, bindingID, publicationID uuid.UUID
 
 // Prepare verifies a streamed opaque closure without holding the global pool
 // transaction across a whole resource. Finalization rechecks the exact inventory
-// under the pool lock. Pins cannot be removed and file deletion is not exposed.
+// under the pool lock. Retired publications cannot be prepared again. Pin rows
+// cannot be removed and file deletion is not exposed.
 func (l *Ledger) Prepare(ctx context.Context, bindingID, publicationID uuid.UUID) (Publication, error) {
 	if l == nil || ctx == nil || l.pool == nil {
 		return Publication{}, ErrInvalid
@@ -438,6 +448,9 @@ func (l *Ledger) Prepare(ctx context.Context, bindingID, publicationID uuid.UUID
 	initial, err := loadPublication(ctx, l.pool, bindingID, publicationID)
 	if err != nil {
 		return Publication{}, err
+	}
+	if initial.State == "retired" {
+		return Publication{}, ErrConflict
 	}
 	digest, err := l.inventory(ctx, l.pool, initial, true)
 	if err != nil {
@@ -452,7 +465,7 @@ func (l *Ledger) Prepare(ctx context.Context, bindingID, publicationID uuid.UUID
 	if err != nil {
 		return Publication{}, err
 	}
-	if current.RootDigest != initial.RootDigest || current.ObjectCount != initial.ObjectCount {
+	if current.RootDigest != initial.RootDigest || current.ObjectCount != initial.ObjectCount || current.State == "retired" {
 		return Publication{}, ErrConflict
 	}
 	currentDigest, err := l.inventory(ctx, tx, current, false)
@@ -496,6 +509,9 @@ func (l *Ledger) Confirm(ctx context.Context, bindingID, publicationID uuid.UUID
 	}
 	if current.State == "open" {
 		return Publication{}, ErrIncomplete
+	}
+	if current.State == "retired" {
+		return Publication{}, ErrConflict
 	}
 	if current.RootDigest != rootDigest || current.InventoryDigest != inventoryDigest {
 		return Publication{}, ErrConflict
@@ -629,8 +645,8 @@ func loadPublication(ctx context.Context, q querier, bindingID, id uuid.UUID) (P
 		return Publication{}, ErrInvalid
 	}
 	var p Publication
-	err := q.QueryRow(ctx, `SELECT binding_id,publication_id,root_digest,object_count,state,COALESCE(inventory_digest,''),COALESCE(receipt_digest,'') FROM immutable_custody_publications WHERE binding_id=$1 AND publication_id=$2`, bindingID, id).Scan(
-		&p.BindingID, &p.ID, &p.RootDigest, &p.ObjectCount, &p.State, &p.InventoryDigest, &p.ReceiptDigest)
+	err := q.QueryRow(ctx, `SELECT binding_id,publication_id,root_digest,object_count,state,COALESCE(inventory_digest,''),COALESCE(receipt_digest,''),COALESCE(retirement_digest,'') FROM immutable_custody_publications WHERE binding_id=$1 AND publication_id=$2`, bindingID, id).Scan(
+		&p.BindingID, &p.ID, &p.RootDigest, &p.ObjectCount, &p.State, &p.InventoryDigest, &p.ReceiptDigest, &p.RetirementDigest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Publication{}, err
 	}
