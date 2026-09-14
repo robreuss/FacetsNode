@@ -77,6 +77,27 @@ func TestExactSwiftFixtureAndStandardAEAD(t *testing.T) {
 	}
 }
 
+func TestFixedHeaderDecodeNeedsNoPayloadAndDoesNotAliasInput(t *testing.T) {
+	b := unhex(t, fixture(t)["headerHex"])
+	h, err := DecodeHeader(b)
+	if err != nil || h.ContentEpoch != 7 || h.PlaintextBytes != 34 {
+		t.Fatal("header decode", err)
+	}
+	for n := 0; n < HeaderBytes; n++ {
+		if _, err := DecodeHeader(b[:n]); err == nil {
+			t.Fatal("short header accepted")
+		}
+	}
+	if _, err := DecodeHeader(append(bytes.Clone(b), 0)); err == nil {
+		t.Fatal("trailing byte accepted")
+	}
+	clear(b)
+	encoded, err := h.Encode()
+	if err != nil || !bytes.Equal(encoded, unhex(t, fixture(t)["headerHex"])) {
+		t.Fatal("header aliased input")
+	}
+}
+
 func TestEveryByteBoundToReference(t *testing.T) {
 	wire := unhex(t, fixture(t)["wireHex"])
 	r, err := Inspect(wire)

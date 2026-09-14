@@ -48,6 +48,15 @@ func newPeerFixtureKind(t *testing.T, kind serviceauthority.ScopeKind) peerFixtu
 			t.Fatal(err)
 		}
 	}
+	result := newPeerAuthorityFixture(t, f.binding, f.l.poolID, f.l.ledgerID)
+	result.f = f
+	return result
+}
+
+// Actual separately pinned signing/receiving registries; operation-body unit
+// tests can use them without a database or pretending a challenge was consumed.
+func newPeerAuthorityFixture(t *testing.T, binding Binding, poolID, ledgerID uuid.UUID) peerFixture {
+	t.Helper()
 	seed := make([]byte, 32)
 	seed[31] = 2
 	signer, err := serviceauthority.NewDeploymentSigner(uuid.New(), seed)
@@ -60,7 +69,7 @@ func newPeerFixtureKind(t *testing.T, kind serviceauthority.ScopeKind) peerFixtu
 	}
 	pin := strings.Repeat("1", 64)
 	route := serviceauthority.TransportRoute{Endpoint: "https://peer.invalid:8443", Kind: serviceauthority.RouteDirectHTTPS, NetworkScope: serviceauthority.NetworkTrustedLAN, RouteID: uuid.New(), ServerAuthentication: serviceauthority.ServerAuthentication{Kind: "pinned_spki_sha256", PinnedSPKISHA256: &pin}}
-	scope := serviceauthority.Scope{Kind: kind, ScopeID: f.binding.ServiceScopeID}
+	scope := serviceauthority.Scope{Kind: serviceauthority.ScopeKind(binding.ServiceKind), ScopeID: binding.ServiceScopeID}
 	manifestPayload := serviceauthority.ManifestPayload{ActiveDeployment: serviceauthority.DeploymentDescriptor{CreatedAtMilliseconds: 900, DeploymentID: signer.DeploymentID(), PublicSigningKeyX963: signer.PublicSigningKeyX963(), SigningKeyFingerprint: signer.SigningKeyFingerprint(), Routes: []serviceauthority.TransportRoute{route}, Version: 1}, IssuedAtMilliseconds: 1000, PreparedDeployments: []serviceauthority.DeploymentDescriptor{}, Revision: 1, Scope: scope, Transition: serviceauthority.TransitionInitialActivation, TransportPolicy: serviceauthority.TransportPolicy{BulkRouteIDs: []uuid.UUID{route.RouteID}, ControlRouteIDs: []uuid.UUID{route.RouteID}, MessageRouteIDs: []uuid.UUID{route.RouteID}, Version: 1}, ValidFromMilliseconds: 1000, Version: 1}
 	encoded, err := json.Marshal(manifestPayload)
 	if err != nil {
@@ -108,8 +117,8 @@ func newPeerFixtureKind(t *testing.T, kind serviceauthority.ScopeKind) peerFixtu
 	}
 	body := []byte("bounded opaque request fixture")
 	sender, receiver := newRegistry(), newRegistry()
-	return peerFixture{f: f, signer: signer, sender: sender, receiver: receiver, receiverPath: registryPath, source: serviceauthority.RequestBinding{Scope: scope, AuthorityRevision: 1, AuthorityDigest: digest, DeploymentID: signer.DeploymentID(), RouteID: route.RouteID, TrafficClass: serviceauthority.TrafficControl}, body: body,
-		intent: serviceauthority.CustodyPeerRequest{BodyByteCount: int64(len(body)), BodySHA256: hashLabel(string(body)), Operation: serviceauthority.CustodyReserveObject, OperationID: uuid.New(), Target: serviceauthority.CustodyPeerTarget{BindingID: f.binding.ID, ContentEpoch: f.binding.ContentEpoch, ContentScopeID: f.binding.ContentScopeID, LedgerID: f.l.ledgerID, PoolID: f.l.poolID}, Version: 1}}
+	return peerFixture{signer: signer, sender: sender, receiver: receiver, receiverPath: registryPath, source: serviceauthority.RequestBinding{Scope: scope, AuthorityRevision: 1, AuthorityDigest: digest, DeploymentID: signer.DeploymentID(), RouteID: route.RouteID, TrafficClass: serviceauthority.TrafficControl}, body: body,
+		intent: serviceauthority.CustodyPeerRequest{BodyByteCount: int64(len(body)), BodySHA256: hashLabel(string(body)), Operation: serviceauthority.CustodyReserveObject, OperationID: uuid.New(), Target: serviceauthority.CustodyPeerTarget{BindingID: binding.ID, ContentEpoch: binding.ContentEpoch, ContentScopeID: binding.ContentScopeID, LedgerID: ledgerID, PoolID: poolID}, Version: 1}}
 }
 
 func (f peerFixture) issue(t *testing.T) PeerChallenge {

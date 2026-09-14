@@ -56,6 +56,21 @@ func (h Header) Encode() ([]byte, error) {
 	return result, nil
 }
 
+// DecodeHeader validates the fixed public header without allocating a body.
+// It proves neither ciphertext custody nor authorization for this scope.
+func DecodeHeader(encoded []byte) (Header, error) {
+	if len(encoded) != HeaderBytes || !bytes.Equal(encoded[:4], magic) || binary.BigEndian.Uint16(encoded[44:46]) != 1 {
+		return Header{}, ErrHeader
+	}
+	h := Header{ContentEpoch: binary.BigEndian.Uint64(encoded[20:28]), PlaintextBytes: binary.BigEndian.Uint64(encoded[46:54])}
+	copy(h.ScopeID[:], encoded[4:20])
+	copy(h.IncarnationID[:], encoded[28:44])
+	if err := h.Validate(); err != nil {
+		return Header{}, err
+	}
+	return h, nil
+}
+
 type Reference struct {
 	Header       Header
 	CiphertextID string
@@ -78,14 +93,8 @@ func Inspect(wire []byte) (Reference, error) {
 	if len(wire) < WireOverhead || len(wire) > WireOverhead+MaximumPlaintextBytes {
 		return Reference{}, ErrWire
 	}
-	if !bytes.Equal(wire[:4], magic) || binary.BigEndian.Uint16(wire[44:46]) != 1 {
-		return Reference{}, ErrHeader
-	}
-	h := Header{ContentEpoch: binary.BigEndian.Uint64(wire[20:28]),
-		PlaintextBytes: binary.BigEndian.Uint64(wire[46:54])}
-	copy(h.ScopeID[:], wire[4:20])
-	copy(h.IncarnationID[:], wire[28:44])
-	if err := h.Validate(); err != nil {
+	h, err := DecodeHeader(wire[:HeaderBytes])
+	if err != nil {
 		return Reference{}, err
 	}
 	// The bound above and validated h avoid integer conversion/addition overflow.
