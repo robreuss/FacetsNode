@@ -120,6 +120,16 @@ func Open(path string) (_ *Store, result error) {
 // an existing incarnation. Its success is byte custody, not a service receipt.
 // The production integration must reserve capacity before calling this method.
 func (s *Store) Put(expected objectcustodywire.Reference, wire []byte) error {
+	return s.PutWithWriteAdmission(expected, wire, nil)
+}
+
+// PutWithWriteAdmission lets the trusted neutral ledger recheck its reserved
+// physical pool before each bounded write. offset is the exact already retained
+// prefix, including a reconciled prior attempt; count is the next write size,
+// or zero at the final metadata-only publication boundary.
+// This callback is not a client-supplied permission or a capacity reservation.
+// The bare Put remains an isolated filesystem primitive, not a service path.
+func (s *Store) PutWithWriteAdmission(expected objectcustodywire.Reference, wire []byte, admission func(offset, count int64) error) error {
 	if s == nil || objectcustodywire.Verify(wire, expected) != nil {
 		return ErrInvalid
 	}
@@ -164,6 +174,11 @@ func (s *Store) Put(expected objectcustodywire.Reference, wire []byte) error {
 			return ErrInvalid
 		}
 		end := min(offset+blockBytes, len(wire))
+		if admission != nil {
+			if err = admission(int64(offset), int64(end-offset)); err != nil {
+				return err
+			}
+		}
 		written, writeErr := file.Write(wire[offset:end])
 		if writeErr != nil || written != end-offset {
 			return ErrUnavailable
@@ -187,6 +202,11 @@ func (s *Store) Put(expected objectcustodywire.Reference, wire []byte) error {
 	}
 	if s.validate() != nil || !stableFile(s.staging, id, file, 1, 0o400) {
 		return ErrInvalid
+	}
+	if admission != nil {
+		if err = admission(int64(len(wire)), 0); err != nil {
+			return err
+		}
 	}
 	// Link is non-overwriting. The alias stays inside this owner's descriptor-
 	// anchored root; it never joins the existing Sync/Backup private directories.
