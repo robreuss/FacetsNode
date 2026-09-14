@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
@@ -348,7 +349,12 @@ func TestPeerChallengeExpiryReissueInvalidatesOldProofNotOperation(t *testing.T)
 func TestPeerChallengeConcurrentIssuanceAndConsumption(t *testing.T) {
 	f := newPeerFixture(t)
 	ctx := context.Background()
-	other, err := Open(ctx, f.f.pool, f.f.l.poolID, f.f.files, f.f.provider)
+	otherPool, err := pgxpool.NewWithConfig(ctx, f.f.pool.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherPool.Close()
+	other, err := Open(ctx, otherPool, f.f.l.poolID, f.f.files, f.f.provider)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +392,15 @@ func TestPeerChallengeConcurrentIssuanceAndConsumption(t *testing.T) {
 	proof := f.sign(t, first)
 	for n := 0; n < 16; n++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, err := f.verify(proof, f.body); errs <- err }()
+		go func(n int) {
+			defer wg.Done()
+			l := f.f.l
+			if n%2 == 1 {
+				l = other
+			}
+			_, err := l.VerifyPeerChallenge(ctx, f.receiver, f.f.binding.ID, f.intent.OperationID, proof, f.body)
+			errs <- err
+		}(n)
 	}
 	wg.Wait()
 	for n := 0; n < 16; n++ {
