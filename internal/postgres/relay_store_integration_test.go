@@ -641,6 +641,52 @@ func TestPostgresResumableBlobReservationsRetriesAndExpiry(t *testing.T) {
 	if finalizedStatus, err := store.GetBlobUpload(ctx, publisher, request.UploadID, 1_400); err != nil || finalizedStatus.UpdatedAtMilliseconds != 1_400 {
 		t.Fatalf("finalized upload status=%+v err=%v", finalizedStatus, err)
 	}
+	// A checkpoint's seal-once vault reuses exact ciphertext after the first
+	// outbox has completed. New retry IDs are not collisions with content IDs.
+	reused := request
+	reused.RetryID, reused.UploadID = uuid.New(), uuid.New()
+	reused.CreatedAtMilliseconds = 1_401
+	badLength := reused
+	badLength.ByteCount++
+	if _, err := store.CreateBlobUpload(ctx, publisher, badLength, 1_401); !relay.ErrorHasCode(err, relay.CodeBlobCollision) {
+		t.Fatalf("same content ID with changed length err=%v", err)
+	}
+	if created, err := store.CreateBlobUpload(ctx, publisher, reused, 1_401); err != nil || created.Status.CommittedOffset != 0 {
+		t.Fatalf("retained ciphertext new upload=%+v err=%v", created, err)
+	}
+	pool.Close()
+	pool = openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	store = postgresstore.NewRelayStore(pool, time.Second)
+	if retried, err := store.CreateBlobUpload(ctx, agent, reused, 1_402); err != nil || retried.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("retained ciphertext restarted retry=%+v err=%v", retried, err)
+	}
+	status, _ = store.GetDomainStatus(ctx, admin)
+	if status.BlobCount != 1 || status.ReservedBlobCount != 1 || status.ReservedBlobByteCount != 8 {
+		t.Fatalf("retained ciphertext reservation=%+v", status)
+	}
+	reusedChunk := chunk
+	reusedChunk.UploadID = reused.UploadID
+	if _, err := store.AppendBlobUploadChunk(ctx, agent, reusedChunk, 1_403, func(relay.BlobUploadStatus) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	reusedFinal := finalRequest
+	reusedFinal.RetryID, reusedFinal.UploadID = uuid.New(), reused.UploadID
+	reusedFinal.FinalizedAtMilliseconds = 1_401
+	if result, err := store.FinalizeBlobUpload(ctx, publisher, reusedFinal, 1_404, func(relay.BlobUploadStatus) error {
+		t.Fatal("retained ciphertext was physically republished")
+		return nil
+	}); err != nil || result.Acceptance != relay.AcceptanceAccepted {
+		t.Fatalf("retained ciphertext finalization=%+v err=%v", result, err)
+	}
+	if result, err := store.FinalizeBlobUpload(ctx, agent, reusedFinal, 1_405, nil); err != nil || result.Acceptance != relay.AcceptanceDuplicate {
+		t.Fatalf("retained ciphertext finalization retry=%+v err=%v", result, err)
+	}
+	status, _ = store.GetDomainStatus(ctx, admin)
+	tenantStatus, _ = store.GetTenantStatus(ctx, tenantCredential)
+	if status.BlobCount != 1 || status.BlobByteCount != 8 || status.ReservedBlobCount != 0 || status.ReservedBlobByteCount != 0 || tenantStatus.ReservedBlobCount != 0 || tenantStatus.ReservedBlobByteCount != 0 {
+		t.Fatalf("retained ciphertext accounting domain=%+v tenant=%+v", status, tenantStatus)
+	}
 	second := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID([]byte("abcdefgh")), ByteCount: 8, CreatedAtMilliseconds: 1_500}
 	if _, err := store.CreateBlobUpload(ctx, publisher, second, 1_500); err != nil {
 		t.Fatal(err)

@@ -82,7 +82,9 @@ func (s *RelayStore) CreateBlobUpload(
 		if existing.ByteCount != request.ByteCount {
 			return relay.BlobUploadCreateResponse{}, relay.NewProtocolError(relay.CodeBlobCollision, "blob ID was reused with a different length")
 		}
-		return relay.BlobUploadCreateResponse{}, relay.NewProtocolError(relay.CodeBlobUploadCollision, "blob is already published")
+		// A fresh publication may reuse exact retained ciphertext. Keep normal
+		// reservation and upload validation; finalization already serializes
+		// reuse against collection and avoids a second finalized physical copy.
 	}
 	var domainReservedCount int
 	var domainReservedBytes int64

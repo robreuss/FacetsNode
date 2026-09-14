@@ -77,7 +77,10 @@ func (s *MemoryStore) CreateBlobUpload(
 		if blob.ByteCount != request.ByteCount {
 			return BlobUploadCreateResponse{}, protocolError(CodeBlobCollision, "blob ID was reused with a different length")
 		}
-		return BlobUploadCreateResponse{}, protocolError(CodeBlobUploadCollision, "blob is already published")
+		// A new checkpoint may reference exact ciphertext already retained by
+		// this domain. It still receives its own scoped, reserved upload attempt;
+		// finalization atomically recognizes the existing immutable blob. Do not
+		// confuse content identity with reuse of an operation's retry identifier.
 	}
 	if !domain.registration.UsesSharedCapacity() && (int64(len(domain.blobs))+domain.reservedBlobCount >= int64(domain.registration.MaximumBlobCount) ||
 		request.ByteCount > domain.registration.MaximumBlobByteCount-domain.blobBytes-domain.reservedBlobBytes) {

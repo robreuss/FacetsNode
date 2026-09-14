@@ -435,6 +435,54 @@ func TestMemoryStoreResumableUploadReservesQuotaAndAllowsSameSubscriptionAgent(t
 	}
 }
 
+func TestMemoryStoreRetainedCiphertextAcceptsNewUploadWithoutRepublishing(t *testing.T) {
+	ctx := context.Background()
+	store := relay.NewMemoryStore()
+	provision, publisher := tenantDomainProvisioning(t, uuid.New(), uuid.New(), uuid.New(), uuid.New(), 51, 52)
+	provision.InitialMember.Capabilities = []relay.Capability{relay.CapabilityPublishBlob}
+	if _, err := store.CreateDomain(ctx, provision.Registration, provision.InitialMember); err != nil {
+		t.Fatal(err)
+	}
+	admin := relay.AdministrationCredential{TenantID: publisher.TenantID, DomainID: publisher.DomainID, Token: token(51)}
+	physicalPublications := 0
+	for iteration := 0; iteration < 2; iteration++ {
+		request := relay.BlobUploadRequest{RetryID: uuid.New(), UploadID: uuid.New(), RelayBlobID: relay.BlobID([]byte("12345678")), ByteCount: 8, CreatedAtMilliseconds: 1_200}
+		if result, err := store.CreateBlobUpload(ctx, publisher, request, 1_200); err != nil || result.Status.CommittedOffset != 0 {
+			t.Fatalf("iteration %d create=%+v err=%v", iteration, result, err)
+		}
+		if result, err := store.CreateBlobUpload(ctx, publisher, request, 1_200); err != nil || result.Acceptance != relay.AcceptanceDuplicate {
+			t.Fatalf("create retry=%+v err=%v", result, err)
+		}
+		changed := request
+		changed.UploadID = uuid.New()
+		if _, err := store.CreateBlobUpload(ctx, publisher, changed, 1_200); !relay.ErrorHasCode(err, relay.CodeBlobUploadCollision) {
+			t.Fatalf("changed retry identity err=%v", err)
+		}
+		status, _ := store.GetDomainStatus(ctx, admin)
+		if status.ReservedBlobCount != 1 || status.ReservedBlobByteCount != 8 || status.BlobCount != int64(iteration) {
+			t.Fatalf("reservation=%+v", status)
+		}
+		chunk := relay.BlobUploadChunkRequest{UploadID: request.UploadID, Offset: 0, ByteCount: 8, ChunkSHA256: strings.Repeat("a", 64)}
+		if _, err := store.AppendBlobUploadChunk(ctx, publisher, chunk, 1_300, func(relay.BlobUploadStatus) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		final := relay.BlobUploadFinalizationRequest{RetryID: uuid.New(), UploadID: request.UploadID, RelayBlobID: request.RelayBlobID, ByteCount: 8, FinalizedAtMilliseconds: 1_250}
+		if _, err := store.FinalizeBlobUpload(ctx, publisher, final, 1_400, func(relay.BlobUploadStatus) error { physicalPublications++; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if result, err := store.FinalizeBlobUpload(ctx, publisher, final, 1_401, nil); err != nil || result.Acceptance != relay.AcceptanceDuplicate {
+			t.Fatalf("final retry=%+v err=%v", result, err)
+		}
+		status, _ = store.GetDomainStatus(ctx, admin)
+		if status.ReservedBlobCount != 0 || status.ReservedBlobByteCount != 0 || status.BlobCount != 1 || status.BlobByteCount != 8 {
+			t.Fatalf("completed accounting=%+v", status)
+		}
+	}
+	if physicalPublications != 1 {
+		t.Fatalf("physical publications=%d", physicalPublications)
+	}
+}
+
 func TestMemoryStoreRejectsScopeCapabilityAndMessageCollisions(t *testing.T) {
 	ctx := context.Background()
 	fixture, err := testfixture.LoadRelayCarrier()
