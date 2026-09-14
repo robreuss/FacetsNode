@@ -36,7 +36,13 @@ func newCustodyPeerFixture(t *testing.T, kind ScopeKind, operation CustodyPeerOp
 		t.Fatal(err)
 	}
 	newRegistry := func() *BindingRegistry {
-		path := filepath.Join(t.TempDir(), "bindings.json")
+		directory := t.TempDir()
+		// testing.TempDir's numbered child respects the process umask. Keep
+		// this authority fixture owner-controlled even on group-writable CI.
+		if err := os.Chmod(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, "bindings.json")
 		data, err := json.Marshal(BindingFile{Bindings: []BindingFileEntry{{DeploymentID: f.descriptor.DeploymentID, Digest: digest, Manifest: &manifest, Revision: 1, Scope: f.scope}}, Version: SchemaVersion})
 		if err != nil {
 			t.Fatal(err)
