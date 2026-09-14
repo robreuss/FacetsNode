@@ -114,7 +114,7 @@ func newFixture(t *testing.T) *fixtureContext {
 	}
 	t.Cleanup(func() { _ = files.Close() })
 	poolID := uuid.New()
-	if err = Initialize(ctx, pool, poolID); err != nil {
+	if err = Initialize(ctx, pool, poolID, files); err != nil {
 		t.Fatal(err)
 	}
 	provider := &testCapacity{available: 90 << 30}
@@ -173,7 +173,7 @@ func assertWire(t *testing.T, l *Ledger, b Binding, r objectcustodywire.Referenc
 func TestDedicatedSchemaAndExactBinding(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	if err := Initialize(ctx, f.pool, uuid.New()); err == nil {
+	if err := Initialize(ctx, f.pool, uuid.New(), f.files); err == nil {
 		t.Fatal("existing schema adopted")
 	}
 	if _, err := Open(ctx, f.pool, uuid.New(), f.files, f.provider); err == nil {
@@ -890,5 +890,84 @@ func TestPublicationInventoryIndependentDigestFixture(t *testing.T) {
 		if hex.EncodeToString(changed.Sum(nil)) == fixture.InventoryDigest {
 			t.Fatal("substitution did not change commitment")
 		}
+	}
+}
+
+func TestBoundLedgerRejectsFreshRootAndSecondDatabaseInstance(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	if err := Initialize(ctx, f.pool, f.l.poolID, f.files); err != nil {
+		t.Fatalf("exact bootstrap retry: %v", err)
+	}
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	otherFiles, err := objectcustodyfiles.Open(filepath.Join(parent, "other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherFiles.Close()
+	if _, err = Open(ctx, f.pool, f.l.poolID, otherFiles, f.provider); err == nil {
+		t.Fatal("new empty directory adopted for bound database")
+	}
+	if err = Initialize(ctx, f.pool, f.l.poolID, otherFiles); err == nil {
+		t.Fatal("initialization rebound operational database")
+	}
+	// Another independent database/schema cannot claim the existing root, even
+	// if an operator mistakenly repeats the pool ID from its configuration.
+	second := newFixture(t)
+	if _, err = second.pool.Exec(ctx, `UPDATE immutable_custody_pool SET pool_id=$1,binding_state='bootstrap'`, f.l.poolID); err != nil {
+		t.Fatal(err)
+	}
+	if err = Initialize(ctx, second.pool, f.l.poolID, f.files); err == nil {
+		t.Fatal("independent database adopted the first ledger's root")
+	}
+	if err = f.files.CheckLedger(f.l.poolID, f.l.ledgerID); err != nil {
+		t.Fatal("rejected initialization changed existing file identity")
+	}
+	var state string
+	var ledgerID uuid.UUID
+	if err = second.pool.QueryRow(ctx, `SELECT binding_state,ledger_id FROM immutable_custody_pool WHERE singleton`).Scan(&state, &ledgerID); err != nil || state != "bootstrap" || ledgerID != second.l.ledgerID {
+		t.Fatalf("rejected initialization changed bootstrap identity/state: %v", err)
+	}
+	if _, err = f.pool.Exec(ctx, `UPDATE immutable_custody_pool SET ledger_id=$1`, uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(ctx, f.pool, f.l.poolID, f.files, f.provider); err == nil {
+		t.Fatal("changed ledger identity accepted")
+	}
+}
+
+func TestBootstrapDatabaseAndMarkerResumeWithoutFreshIdentity(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// Model a crash after the database identity commit, before marker publish.
+	// The fixture has no object bytes; ordinary Open must not auto-bind it.
+	if _, err := f.pool.Exec(ctx, `UPDATE immutable_custody_pool SET binding_state='bootstrap'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(f.path, ".ledger-binding")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(ctx, f.pool, f.l.poolID, f.files, f.provider); err == nil {
+		t.Fatal("bootstrap accepted as operational")
+	}
+	if err := Initialize(ctx, f.pool, f.l.poolID, f.files); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := Open(ctx, f.pool, f.l.poolID, f.files, f.provider)
+	if err != nil || resumed.ledgerID != f.l.ledgerID {
+		t.Fatalf("bootstrap generated a rival identity: %v", err)
+	}
+	// Crash after marker durability, before bound-state commit is also exact.
+	if _, err = f.pool.Exec(ctx, `UPDATE immutable_custody_pool SET binding_state='bootstrap'`); err != nil {
+		t.Fatal(err)
+	}
+	if err = Initialize(ctx, f.pool, f.l.poolID, f.files); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(ctx, f.pool, f.l.poolID, f.files, f.provider); err != nil {
+		t.Fatal(err)
 	}
 }

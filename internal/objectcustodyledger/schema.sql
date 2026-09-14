@@ -1,6 +1,8 @@
 CREATE TABLE immutable_custody_pool (
     singleton boolean PRIMARY KEY CHECK (singleton),
     pool_id uuid NOT NULL UNIQUE,
+    ledger_id uuid NOT NULL UNIQUE,
+    binding_state text NOT NULL CHECK (binding_state IN ('bootstrap','bound')),
     version integer NOT NULL CHECK (version = 1)
 );
 CREATE TABLE immutable_custody_bindings (

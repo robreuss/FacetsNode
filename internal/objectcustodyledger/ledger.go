@@ -94,15 +94,17 @@ func (p Publication) validateState() error {
 type Ledger struct {
 	pool     *pgxpool.Pool
 	poolID   uuid.UUID
+	ledgerID uuid.UUID
 	files    *objectcustodyfiles.Store
 	capacity storagecapacity.Provider
 	fault    func(string) error // fixed labels only; test fault injection
 }
 
-// Initialize creates only an empty dedicated schema. No deployed service data
-// is migrated, truncated or adopted. Callers own that dedicated database/schema.
-func Initialize(ctx context.Context, pool *pgxpool.Pool, poolID uuid.UUID) error {
-	if ctx == nil || pool == nil || poolID == uuid.Nil {
+// Initialize creates an empty dedicated schema or resumes its exact bootstrap.
+// A bound instance can only verify its existing file marker, never bind a new
+// root. No deployed service data is migrated, truncated or adopted.
+func Initialize(ctx context.Context, pool *pgxpool.Pool, poolID uuid.UUID, files *objectcustodyfiles.Store) error {
+	if ctx == nil || pool == nil || poolID == uuid.Nil || files == nil {
 		return ErrInvalid
 	}
 	tx, err := pool.Begin(ctx)
@@ -114,13 +116,53 @@ func Initialize(ctx context.Context, pool *pgxpool.Pool, poolID uuid.UUID) error
 		return ErrUnavailable
 	}
 	var count int
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','v','m','f','p')`).Scan(&count); err != nil || count != 0 {
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','v','m','f','p')`).Scan(&count); err != nil || (count != 0 && count != 5) {
 		return ErrInvalid
 	}
-	if _, err = tx.Exec(ctx, schema); err != nil {
+	if count == 0 {
+		if _, err = tx.Exec(ctx, schema); err != nil {
+			return ErrUnavailable
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO immutable_custody_pool VALUES (true,$1,$2,'bootstrap',1)`, poolID, uuid.New()); err != nil {
+			return ErrUnavailable
+		}
+	} else {
+		var existingID uuid.UUID
+		var state string
+		if err = tx.QueryRow(ctx, `SELECT pool_id,binding_state FROM immutable_custody_pool WHERE singleton FOR UPDATE`).Scan(&existingID, &state); err != nil || existingID != poolID || (state != "bootstrap" && state != "bound") {
+			return ErrInvalid
+		}
+	}
+	if tx.Commit(ctx) != nil {
 		return ErrUnavailable
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO immutable_custody_pool VALUES (true,$1,1)`, poolID); err != nil {
+	return finishInitialization(ctx, pool, poolID, files)
+}
+
+// The database identity is durable before the file root is touched. Interrupted
+// bootstrap resumes exactly; ordinary Open never performs this first binding.
+func finishInitialization(ctx context.Context, pool *pgxpool.Pool, poolID uuid.UUID, files *objectcustodyfiles.Store) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return ErrUnavailable
+	}
+	defer tx.Rollback(ctx)
+	var existingID, ledgerID uuid.UUID
+	var state string
+	var version int
+	if err = tx.QueryRow(ctx, `SELECT pool_id,ledger_id,binding_state,version FROM immutable_custody_pool WHERE singleton FOR UPDATE`).Scan(&existingID, &ledgerID, &state, &version); err != nil || existingID != poolID || ledgerID == uuid.Nil || version != 1 {
+		return ErrInvalid
+	}
+	if state == "bound" {
+		return files.CheckLedger(poolID, ledgerID)
+	}
+	if state != "bootstrap" {
+		return ErrInvalid
+	}
+	if err = files.BindLedger(poolID, ledgerID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE immutable_custody_pool SET binding_state='bound' WHERE singleton`); err != nil {
 		return ErrUnavailable
 	}
 	if tx.Commit(ctx) != nil {
@@ -136,7 +178,11 @@ func Open(ctx context.Context, pool *pgxpool.Pool, poolID uuid.UUID, files *obje
 	if ctx == nil || pool == nil || poolID == uuid.Nil || files == nil || capacity == nil {
 		return nil, ErrInvalid
 	}
-	l := &Ledger{pool: pool, poolID: poolID, files: files, capacity: capacity}
+	var ledgerID uuid.UUID
+	if pool.QueryRow(ctx, `SELECT ledger_id FROM immutable_custody_pool WHERE singleton AND pool_id=$1 AND binding_state='bound'`, poolID).Scan(&ledgerID) != nil || ledgerID == uuid.Nil {
+		return nil, ErrInvalid
+	}
+	l := &Ledger{pool: pool, poolID: poolID, ledgerID: ledgerID, files: files, capacity: capacity}
 	tx, err := l.begin(ctx)
 	if err != nil {
 		return nil, err
@@ -491,11 +537,16 @@ func (l *Ledger) begin(ctx context.Context) (pgx.Tx, error) {
 	if err != nil {
 		return nil, ErrUnavailable
 	}
-	var poolID uuid.UUID
+	var poolID, ledgerID uuid.UUID
 	var version int
-	if err = tx.QueryRow(ctx, `SELECT pool_id,version FROM immutable_custody_pool WHERE singleton FOR UPDATE`).Scan(&poolID, &version); err != nil || poolID != l.poolID || version != 1 {
+	var bindingState string
+	if err = tx.QueryRow(ctx, `SELECT pool_id,ledger_id,binding_state,version FROM immutable_custody_pool WHERE singleton FOR UPDATE`).Scan(&poolID, &ledgerID, &bindingState, &version); err != nil || poolID != l.poolID || ledgerID != l.ledgerID || bindingState != "bound" || version != 1 {
 		tx.Rollback(ctx)
 		return nil, ErrInvalid
+	}
+	if err = l.files.CheckLedger(poolID, ledgerID); err != nil {
+		tx.Rollback(ctx)
+		return nil, err
 	}
 	return tx, nil
 }
