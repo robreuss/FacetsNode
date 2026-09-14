@@ -73,3 +73,16 @@ CREATE TABLE immutable_custody_pins (
         REFERENCES immutable_custody_publications(binding_id, publication_id)
 );
 CREATE INDEX immutable_custody_pins_by_object ON immutable_custody_pins (ciphertext_id, binding_id, publication_id);
+CREATE TABLE immutable_custody_peer_challenges (
+    binding_id uuid NOT NULL REFERENCES immutable_custody_bindings(binding_id),
+    operation_id uuid NOT NULL,
+    payload bytea NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 16384),
+    challenge text NOT NULL UNIQUE CHECK (challenge ~ '^[A-Za-z0-9_-]{43}$'),
+    issued_at_milliseconds bigint NOT NULL CHECK (issued_at_milliseconds > 0),
+    expires_at_milliseconds bigint NOT NULL,
+    consumed boolean NOT NULL,
+    PRIMARY KEY (binding_id, operation_id),
+    CHECK (expires_at_milliseconds - issued_at_milliseconds = 300000)
+);
+CREATE INDEX immutable_custody_pending_challenges ON immutable_custody_peer_challenges (binding_id, expires_at_milliseconds)
+    WHERE NOT consumed;
