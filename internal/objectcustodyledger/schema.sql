@@ -86,3 +86,12 @@ CREATE TABLE immutable_custody_peer_challenges (
 );
 CREATE INDEX immutable_custody_pending_challenges ON immutable_custody_peer_challenges (binding_id, expires_at_milliseconds)
     WHERE NOT consumed;
+CREATE TABLE immutable_custody_peer_authorities (
+    service_kind text NOT NULL CHECK (service_kind IN ('device_sync', 'backup_custody')),
+    service_scope_id uuid NOT NULL,
+    authority_revision text NOT NULL CHECK (authority_revision ~ '^[1-9][0-9]{0,19}$'),
+    manifest_digest text NOT NULL CHECK (manifest_digest ~ '^[0-9a-f]{64}$'),
+    deployment_id uuid NOT NULL,
+    write_fenced boolean NOT NULL,
+    PRIMARY KEY (service_kind, service_scope_id)
+);

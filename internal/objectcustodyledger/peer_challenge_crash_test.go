@@ -74,13 +74,17 @@ func TestPeerChallengeAbruptHelper(t *testing.T) {
 	switch input.Action {
 	case "issue":
 		_, err = l.IssuePeerChallenge(ctx, input.Source, input.Intent)
-	case "consume":
+	case "consume", "reconcile":
 		registry, loadErr := serviceauthority.LoadBindingRegistry(input.RegistryPath, input.Source.DeploymentID)
 		if loadErr != nil {
 			t.Fatal(loadErr)
 		}
 		defer registry.Close()
-		_, err = l.VerifyPeerChallenge(ctx, registry, input.Intent.Target.BindingID, input.Intent.OperationID, input.Proof, input.Body)
+		if input.Action == "reconcile" {
+			err = l.ReconcilePeerAuthority(ctx, registry, input.Source.Scope)
+		} else {
+			_, err = l.VerifyPeerChallenge(ctx, registry, input.Intent.Target.BindingID, input.Intent.OperationID, input.Proof, input.Body)
+		}
 	default:
 		t.Fatal("unexpected crash action")
 	}
@@ -88,7 +92,7 @@ func TestPeerChallengeAbruptHelper(t *testing.T) {
 }
 
 func TestPeerChallengeActualProcessTermination(t *testing.T) {
-	for _, action := range []string{"issue", "consume"} {
+	for _, action := range []string{"issue", "consume", "reconcile"} {
 		for _, point := range []string{"before_database_commit", "after_database_commit"} {
 			t.Run(action+"/"+point, func(t *testing.T) {
 				f := newPeerFixture(t)
@@ -96,6 +100,11 @@ func TestPeerChallengeActualProcessTermination(t *testing.T) {
 				input := peerCrashInput{Action: action, Point: point, Root: f.f.path, Schema: f.f.pool.Config().ConnConfig.RuntimeParams["search_path"], RegistryPath: f.receiverPath, PoolID: f.f.l.poolID, Source: f.source, Intent: f.intent, Body: f.body}
 				if action == "consume" {
 					input.Proof = f.sign(t, f.issue(t))
+				}
+				if action == "reconcile" {
+					if _, err := f.f.pool.Exec(ctx, `DELETE FROM immutable_custody_peer_authorities`); err != nil {
+						t.Fatal(err)
+					}
 				}
 				encoded, err := json.Marshal(input)
 				if err != nil {
@@ -137,6 +146,22 @@ func TestPeerChallengeActualProcessTermination(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer f.receiver.Close()
+				if action == "reconcile" {
+					_, err := loadPeerAuthority(ctx, f.f.pool, f.source.Scope)
+					if point == "before_database_commit" && !errors.Is(err, pgx.ErrNoRows) {
+						t.Fatal("uncommitted authority survived process kill", err)
+					}
+					if point == "after_database_commit" && err != nil {
+						t.Fatal("committed authority lost after process kill", err)
+					}
+					if err := f.f.l.ReconcilePeerAuthority(ctx, f.receiver, f.source.Scope); err != nil {
+						t.Fatal("authority restart reconciliation", err)
+					}
+					if _, err := f.verify(f.sign(t, f.issue(t)), f.body); err != nil {
+						t.Fatal("authority restart challenge", err)
+					}
+					return
+				}
 				current, err := loadPeerChallenge(ctx, f.f.pool, f.f.binding.ID, f.intent.OperationID)
 				if action == "issue" && point == "before_database_commit" {
 					if !errors.Is(err, pgx.ErrNoRows) {

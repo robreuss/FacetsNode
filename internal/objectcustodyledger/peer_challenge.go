@@ -175,7 +175,7 @@ func (l *Ledger) matchPeerBinding(ctx context.Context, q querier, payload servic
 		binding.ContentScopeID != target.ContentScopeID || binding.ContentEpoch != target.ContentEpoch {
 		return ErrInvalid
 	}
-	return nil
+	return checkPeerAuthority(ctx, q, payload)
 }
 
 func loadPeerChallenge(ctx context.Context, q querier, bindingID, operationID uuid.UUID) (PeerChallenge, error) {

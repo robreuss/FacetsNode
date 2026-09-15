@@ -36,7 +36,7 @@ var (
 )
 
 const MaximumPinBatch = 256
-const ledgerTableCount = 8
+const ledgerTableCount = 9
 
 type Binding struct {
 	ID                                         uuid.UUID

@@ -33,6 +33,9 @@ type peerFixture struct {
 	source           serviceauthority.RequestBinding
 	intent           serviceauthority.CustodyPeerRequest
 	body             []byte
+	authorityKey     *ecdsa.PrivateKey
+	manifest         serviceauthority.Manifest
+	anchor           serviceauthority.TrustAnchor
 }
 
 func newPeerFixture(t *testing.T) peerFixture {
@@ -50,6 +53,9 @@ func newPeerFixtureKind(t *testing.T, kind serviceauthority.ScopeKind) peerFixtu
 	}
 	result := newPeerAuthorityFixture(t, f.binding, f.l.poolID, f.l.ledgerID)
 	result.f = f
+	if err := f.l.ReconcilePeerAuthority(context.Background(), result.receiver, result.source.Scope); err != nil {
+		t.Fatal(err)
+	}
 	return result
 }
 
@@ -117,7 +123,8 @@ func newPeerAuthorityFixture(t *testing.T, binding Binding, poolID, ledgerID uui
 	}
 	body := []byte("bounded opaque request fixture")
 	sender, receiver := newRegistry(), newRegistry()
-	return peerFixture{signer: signer, sender: sender, receiver: receiver, receiverPath: registryPath, source: serviceauthority.RequestBinding{Scope: scope, AuthorityRevision: 1, AuthorityDigest: digest, DeploymentID: signer.DeploymentID(), RouteID: route.RouteID, TrafficClass: serviceauthority.TrafficControl}, body: body,
+	anchor := serviceauthority.TrustAnchor{PublicSigningKeyX963: manifest.Signature.PublicSigningKeyX963, Scope: scope, SignerID: manifest.Signature.SignerID, SigningKeyFingerprint: manifest.Signature.SigningKeyFingerprint, Version: 1}
+	return peerFixture{authorityKey: key, manifest: manifest, anchor: anchor, signer: signer, sender: sender, receiver: receiver, receiverPath: registryPath, source: serviceauthority.RequestBinding{Scope: scope, AuthorityRevision: 1, AuthorityDigest: digest, DeploymentID: signer.DeploymentID(), RouteID: route.RouteID, TrafficClass: serviceauthority.TrafficControl}, body: body,
 		intent: serviceauthority.CustodyPeerRequest{BodyByteCount: int64(len(body)), BodySHA256: hashLabel(string(body)), Operation: serviceauthority.CustodyReserveObject, OperationID: uuid.New(), Target: serviceauthority.CustodyPeerTarget{BindingID: binding.ID, ContentEpoch: binding.ContentEpoch, ContentScopeID: binding.ContentScopeID, LedgerID: ledgerID, PoolID: poolID}, Version: 1}}
 }
 
@@ -282,9 +289,10 @@ func TestPeerChallengeSourceChangeRotatesAndPreventsRevisionRollback(t *testing.
 	f := newPeerFixture(t)
 	c := f.issue(t)
 	proof := f.sign(t, c)
-	changed := f.source
-	changed.AuthorityRevision++
-	changed.AuthorityDigest = hashLabel("synthetic next authority head")
+	changed, _ := advancePeerReceiver(t, f)
+	if err := f.f.l.ReconcilePeerAuthority(context.Background(), f.receiver, changed.Scope); err != nil {
+		t.Fatal(err)
+	}
 	next, err := f.f.l.IssuePeerChallenge(context.Background(), changed, f.intent)
 	if err != nil || next.Payload.Request.Challenge == c.Payload.Request.Challenge {
 		t.Fatal("source change did not rotate", err)
@@ -295,8 +303,7 @@ func TestPeerChallengeSourceChangeRotatesAndPreventsRevisionRollback(t *testing.
 	if _, err = f.f.l.IssuePeerChallenge(context.Background(), f.source, f.intent); err == nil {
 		t.Fatal("source revision rollback accepted")
 	}
-	// Issuance accepts a trusted adapter input, not proof of a new authority.
-	// The old pinned registry cannot sign or authorize the requested new head.
+	// The old sender cannot sign the genuinely advanced receiver's new head.
 	if _, err = f.sender.SignCustodyPeerRequestAt(f.signer, changed, next.Payload.Request, f.body, time.Now()); err == nil {
 		t.Fatal("unsigned new head acquired signing authority")
 	}
