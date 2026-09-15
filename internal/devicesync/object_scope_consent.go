@@ -1,6 +1,7 @@
 package devicesync
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -54,6 +55,23 @@ func (c ObjectScopeConsent) ReferenceDigest() (string, error) {
 	}
 	digest := sha256.Sum256(append([]byte("Facets sync object scope consent reference v1\x00"), body...))
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func DecodeObjectScopeConsent(data []byte) (ObjectScopeConsent, error) {
+	var c ObjectScopeConsent
+	if len(data) == 0 || len(data) > 4096 {
+		return c, serviceauthority.ErrInvalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&c) != nil || c.Validate() != nil {
+		return ObjectScopeConsent{}, serviceauthority.ErrInvalid
+	}
+	canonical, err := json.Marshal(c)
+	if err != nil || !bytes.Equal(canonical, data) {
+		return ObjectScopeConsent{}, serviceauthority.ErrInvalid
+	}
+	return c, nil
 }
 
 // Mutations retain the exact operation body for retry. Withdrawing consent is
