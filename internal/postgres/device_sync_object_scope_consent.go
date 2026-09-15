@@ -47,6 +47,11 @@ func (r *syncObjectConsentTransaction) checkParticipant(now int64) error {
 
 func (s *RelayStore) BeginObjectScopeConsentMutation(ctx context.Context, credential devicesync.SpaceSponsorCredential,
 	m devicesync.ObjectScopeConsentMutation, a serviceauthority.MutationAuthorization) (devicesync.ObjectScopeConsentTransaction, error) {
+	return s.beginSyncObjectConsentTransaction(ctx, credential, m, a)
+}
+
+func (s *RelayStore) beginSyncObjectConsentTransaction(ctx context.Context, credential devicesync.SpaceSponsorCredential,
+	m devicesync.ObjectScopeConsentMutation, a serviceauthority.MutationAuthorization) (*syncObjectConsentTransaction, error) {
 	if ctx == nil || s == nil || s.pool == nil || m.Validate(credential) != nil ||
 		a.ValidateFor(serviceauthority.ScopeDeviceSync, s.deviceSyncLocalDeploymentID) != nil || a.Scope().ScopeID != m.Consent.PrincipalID {
 		return nil, serviceauthority.ErrInvalid
