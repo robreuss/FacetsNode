@@ -342,6 +342,60 @@ func TestPostgresBackupObjectScopePublication(t *testing.T) {
 	}
 }
 
+// Exercises the database backstop itself, deliberately without the source
+// coordinator's earlier Go cancellation. No object operation is performed.
+func TestPostgresBackupObjectScopePublicationIdleExpiry(t *testing.T) {
+	databaseURL := os.Getenv("FACETS_BACKUP_CONSENT_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("FACETS_BACKUP_CONSENT_TEST_DATABASE_URL is not set")
+	}
+	u, err := url.Parse(databaseURL)
+	if err != nil || u.Path != "/facets_backup_consent_tests" {
+		t.Fatal("requires dedicated disposable consent database")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+	defer cancel()
+	lockDisposablePostgres(t, ctx, databaseURL)
+	pool, other := openPool(t, ctx, databaseURL), openPool(t, ctx, databaseURL)
+	defer pool.Close()
+	defer other.Close()
+	resetBackupCustodySchema(t, ctx, pool)
+	f := newPublicationFixture(t, ctx, pool, other)
+	f.clock.millis.Store(1500)
+	a, err := f.custody.Registry.AuthorizeMutationAt(f.binding, f.clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, _ := f.credential.AuthorizationDigest()
+	lease, err := f.custody.Store.BeginObjectScopePublication(ctx, backupcustody.CredentialUse{Reference: f.credential.Reference, AuthorizationDigest: digest}, f.request, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close(context.Background())
+	// PostgreSQL is idle while a disappeared source would be doing work. Its
+	// own 35-second timeout must end the transaction and release account locks.
+	timer := time.NewTimer(36 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	ref, _ := f.request.Consent.ReferenceDigest()
+	ready, stop := context.WithTimeout(ctx, 2*time.Second)
+	defer stop()
+	if _, err := f.otherControl.Submit(ready, f.command(t, backupcustody.ControlEffect{Kind: backupcustody.RevokeObjectScopeConsent, PriorObjectScopeConsentDigest: &ref}), f.binding); err != nil {
+		t.Fatal("database idle timeout left source lock held", err)
+	}
+	if err := lease.Revalidate(ctx, a); err == nil {
+		t.Fatal("database-expired transaction remained usable")
+	}
+	var floor int64
+	if err := other.QueryRow(ctx, `SELECT server_time_high_water_milliseconds FROM backup_custody_accounts WHERE account_id=$1`, f.request.Consent.AccountID).Scan(&floor); err != nil || floor < 1500 {
+		t.Fatalf("idle timeout erased committed admission floor: %d %v", floor, err)
+	}
+}
+
 type publicationClock struct{ millis atomic.Int64 }
 
 func (c *publicationClock) Now() time.Time { return time.UnixMilli(c.millis.Load()) }
