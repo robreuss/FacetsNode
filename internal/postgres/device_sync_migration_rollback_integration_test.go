@@ -386,7 +386,13 @@ func signPostgresDeviceSyncRollbackSnapshot(
 	payload serviceauthority.MigrationSnapshotPayload,
 ) serviceauthority.MigrationSnapshot {
 	t.Helper()
-	bindingFile := filepath.Join(t.TempDir(), "bindings.json")
+	bindingDirectory := t.TempDir()
+	// Linux development umasks may otherwise leave the numbered TempDir
+	// group-writable; authority custody deliberately rejects that directory.
+	if err := os.Chmod(bindingDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bindingFile := filepath.Join(bindingDirectory, "bindings.json")
 	if err := os.WriteFile(bindingFile, []byte(`{"bindings":[],"version":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +400,7 @@ func signPostgresDeviceSyncRollbackSnapshot(
 		bindingFile, targetSigner.DeploymentID(),
 	)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("load rollback-signing registry: %v", err)
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	if err := registry.ApplyMigrationPreparation(preparation, anchor, 2_200); err != nil {

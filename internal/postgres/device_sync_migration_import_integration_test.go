@@ -79,6 +79,7 @@ func TestPostgresPreparedDeviceSyncMigrationImportIsAtomicAndStandby(
 	}
 	_, emptyBlobInventory, emptyArtifactDigests :=
 		exportPostgresDeviceSyncMigrationState(t, ctx, pool, principalID)
+	populatePostgresSyncConsentMigrationState(t, ctx, pool, sourceAuthority, initialDeviceID)
 	populatePostgresDeviceSyncMigrationRepresentativeState(
 		t, ctx, pool, store, sourceAuthority, initialDeviceID,
 	)
@@ -208,6 +209,16 @@ func TestPostgresPreparedDeviceSyncMigrationImportIsAtomicAndStandby(
 	) {
 		t.Fatalf("prepared-target standby allowed a semantic write: %v", err)
 	}
+	var consents, withdrawn, mutations int
+	if err := pool.QueryRow(ctx, `SELECT
+	 (SELECT count(*) FROM device_sync_object_scope_consents WHERE principal_id=$1),
+	 (SELECT count(*) FROM device_sync_object_scope_consents WHERE principal_id=$1 AND withdrawn_at_ms IS NOT NULL),
+	 (SELECT count(*) FROM device_sync_object_scope_mutations WHERE principal_id=$1)`, principalID).Scan(&consents, &withdrawn, &mutations); err != nil || consents != 2 || withdrawn != 1 || mutations != 3 {
+		t.Fatalf("relocated consent state=%d withdrawn=%d mutations=%d err=%v", consents, withdrawn, mutations, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE device_sync_object_scope_consents SET withdrawn_at_ms=NULL WHERE principal_id=$1`, principalID); err == nil {
+		t.Fatal("standby accepted an unfenced consent write")
+	}
 
 	// Exact durable retries do not re-run semantic import and remain recoverable
 	// after both the snapshot and target offer have expired.
@@ -292,7 +303,14 @@ func signPostgresPreparedDeviceSyncMigrationSnapshot(
 	if err != nil {
 		t.Fatal(err)
 	}
-	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
+	bindingDirectory := t.TempDir()
+	// testing.TempDir's numbered child uses 0777 filtered by umask. A Linux
+	// developer's 0002 umask otherwise creates a group-writable authority dir.
+	// Match production private-custody setup; do not weaken the owner check.
+	if err := os.Chmod(bindingDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bindingPath := filepath.Join(bindingDirectory, "bindings.json")
 	if err := os.WriteFile(
 		bindingPath, []byte(`{"bindings":[],"version":1}`), 0o600,
 	); err != nil {
@@ -302,7 +320,7 @@ func signPostgresPreparedDeviceSyncMigrationSnapshot(
 		bindingPath, current.ActiveDeployment.DeploymentID,
 	)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("load snapshot-signing registry: %v", err)
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	initialManifest := preparation.CurrentManifest
@@ -312,23 +330,23 @@ func signPostgresPreparedDeviceSyncMigrationSnapshot(
 		DeploymentID: current.ActiveDeployment.DeploymentID,
 		Manifest:     &initialManifest,
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("activate snapshot-signing registry: %v", err)
 	}
 	if err := registry.ApplyMigrationPreparation(
 		preparation, anchor, 2_200,
 	); err != nil {
-		t.Fatal(err)
+		t.Fatalf("apply snapshot migration preparation: %v", err)
 	}
 	if err := registry.StageMigrationWriteFence(
 		preparation.PreparationManifest, payload, anchor, 3_000,
 	); err != nil {
-		t.Fatal(err)
+		t.Fatalf("stage snapshot write fence: %v", err)
 	}
 	snapshot, err := registry.SignStagedMigrationSnapshotAt(
 		current.Scope, signer, 3_000,
 	)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("sign staged snapshot: %v", err)
 	}
 	canonicalPayload, err := json.Marshal(payload)
 	if err != nil {
