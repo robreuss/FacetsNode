@@ -15,9 +15,9 @@ import (
 )
 
 // This file defines portable, content-blind account-control and credential
-// records only. They are not custody/retention receipts, are not wired to a
-// service handler or store in this checkpoint, and carry no Recovery Root
-// coordinates or raw bearer secret.
+// records only. The dedicated control store accepts their signed sequence;
+// they are not custody/retention receipts or neutral-object access permits,
+// and carry no Recovery Root coordinates or raw bearer secret.
 const (
 	CredentialAuthorityVersion                                   = 1
 	CredentialAuthoritySignatureAlgorithm                        = "Ed25519"
@@ -35,6 +35,8 @@ const (
 	SupersedeCredential                        ControlEffectKind = "supersede"
 	RevokeCredential                           ControlEffectKind = "revoke"
 	RotateControlKey                           ControlEffectKind = "rotate_control_key"
+	ConsentObjectScope                         ControlEffectKind = "consent_object_scope"
+	RevokeObjectScopeConsent                   ControlEffectKind = "revoke_object_scope_consent"
 )
 
 // ControlPossessionAnchor proves only possession of one opaque account-control
@@ -139,15 +141,34 @@ func (grant CredentialGrant) ReferenceDigest() (string, error) {
 type ControlEffectKind string
 
 type ControlEffect struct {
-	BackupSetID               *uuid.UUID               `json:"backupSetID,omitempty"`
-	ControlAnchor             *ControlPossessionAnchor `json:"controlAnchor,omitempty"`
-	Grant                     *CredentialGrant         `json:"grant,omitempty"`
-	Kind                      ControlEffectKind        `json:"kind"`
-	PriorGrantReferenceDigest *string                  `json:"priorGrantReferenceDigest,omitempty"`
-	TargetID                  *uuid.UUID               `json:"targetID,omitempty"`
+	BackupSetID                   *uuid.UUID               `json:"backupSetID,omitempty"`
+	ControlAnchor                 *ControlPossessionAnchor `json:"controlAnchor,omitempty"`
+	Grant                         *CredentialGrant         `json:"grant,omitempty"`
+	Kind                          ControlEffectKind        `json:"kind"`
+	ObjectScopeConsent            *ObjectScopeConsent      `json:"objectScopeConsent,omitempty"`
+	PriorGrantReferenceDigest     *string                  `json:"priorGrantReferenceDigest,omitempty"`
+	PriorObjectScopeConsentDigest *string                  `json:"priorObjectScopeConsentDigest,omitempty"`
+	TargetID                      *uuid.UUID               `json:"targetID,omitempty"`
 }
 
 func (effect ControlEffect) Validate() error {
+	if effect.Kind == ConsentObjectScope || effect.Kind == RevokeObjectScopeConsent {
+		if effect.BackupSetID != nil || effect.ControlAnchor != nil || effect.Grant != nil ||
+			effect.PriorGrantReferenceDigest != nil || effect.TargetID != nil {
+			return serviceauthority.ErrInvalid
+		}
+		if effect.Kind == ConsentObjectScope {
+			if effect.ObjectScopeConsent == nil || effect.ObjectScopeConsent.Validate() != nil || effect.PriorObjectScopeConsentDigest != nil {
+				return serviceauthority.ErrInvalid
+			}
+		} else if effect.ObjectScopeConsent != nil || effect.PriorObjectScopeConsentDigest == nil || !validHexDigest(*effect.PriorObjectScopeConsentDigest) {
+			return serviceauthority.ErrInvalid
+		}
+		return nil
+	}
+	if effect.ObjectScopeConsent != nil || effect.PriorObjectScopeConsentDigest != nil {
+		return serviceauthority.ErrInvalid
+	}
 	switch effect.Kind {
 	case CreateTargetWithInitialGrant:
 		if effect.TargetID == nil || *effect.TargetID == uuid.Nil || effect.BackupSetID == nil ||
@@ -199,7 +220,8 @@ func (payload ControlCommandPayload) Validate() error {
 	if payload.Version != CredentialAuthorityVersion || payload.AccountID == uuid.Nil || payload.CommandID == uuid.Nil ||
 		payload.ControlGeneration == 0 || payload.ControlKeyID == uuid.Nil || payload.Sequence == 0 ||
 		!validHexDigest(payload.PredecessorReferenceDigest) || payload.Effect.Validate() != nil ||
-		(payload.Effect.Grant != nil && payload.Effect.Grant.Credential.AccountID != payload.AccountID) {
+		(payload.Effect.Grant != nil && payload.Effect.Grant.Credential.AccountID != payload.AccountID) ||
+		(payload.Effect.ObjectScopeConsent != nil && payload.Effect.ObjectScopeConsent.AccountID != payload.AccountID) {
 		return serviceauthority.ErrInvalid
 	}
 	return nil
@@ -309,6 +331,7 @@ type CredentialAuthorityState struct {
 	Head                AcceptedControlHead
 	Targets             map[uuid.UUID]uuid.UUID
 	Grants              map[string]AcceptedGrant
+	ObjectScopeConsents map[string]AcceptedObjectScopeConsent
 	Records             []SignedControlCommand
 }
 
@@ -331,6 +354,7 @@ func NewCredentialAuthorityState(externallyPinnedInitialAnchor ControlPossession
 			ReferenceDigest:   reference,
 		},
 		Targets: make(map[uuid.UUID]uuid.UUID), Grants: make(map[string]AcceptedGrant),
+		ObjectScopeConsents: make(map[string]AcceptedObjectScopeConsent),
 	}, nil
 }
 
@@ -364,6 +388,7 @@ func (state *CredentialAuthorityState) Apply(record SignedControlCommand) error 
 	}
 	nextTargets := cloneTargets(state.Targets)
 	nextGrants := cloneGrants(state.Grants)
+	nextConsents := cloneObjectScopeConsents(state.ObjectScopeConsents)
 	nextAnchor := state.CurrentAnchor
 	switch payload.Effect.Kind {
 	case CreateTargetWithInitialGrant:
@@ -404,6 +429,19 @@ func (state *CredentialAuthorityState) Apply(record SignedControlCommand) error 
 			return serviceauthority.ErrInvalid
 		}
 		nextAnchor = *payload.Effect.ControlAnchor
+	case ConsentObjectScope:
+		consent := *payload.Effect.ObjectScopeConsent
+		if nextTargets[consent.TargetID] != consent.BackupSetID || insertObjectScopeConsent(nextConsents, consent) != nil {
+			return serviceauthority.ErrInvalid
+		}
+	case RevokeObjectScopeConsent:
+		reference := *payload.Effect.PriorObjectScopeConsentDigest
+		consent, exists := nextConsents[reference]
+		if !exists || consent.Revoked {
+			return serviceauthority.ErrInvalid
+		}
+		consent.Revoked = true
+		nextConsents[reference] = consent
 	default:
 		return serviceauthority.ErrInvalid
 	}
@@ -413,6 +451,7 @@ func (state *CredentialAuthorityState) Apply(record SignedControlCommand) error 
 	}
 	state.Targets = nextTargets
 	state.Grants = nextGrants
+	state.ObjectScopeConsents = nextConsents
 	state.CurrentAnchor = nextAnchor
 	state.Head = AcceptedControlHead{
 		AccountID: payload.AccountID, Sequence: payload.Sequence,

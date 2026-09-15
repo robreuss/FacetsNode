@@ -289,7 +289,10 @@ func (store *BackupCustodyStore) ApplyControlCommand(ctx context.Context, record
 		}
 	case backupcustody.RevokeCredential:
 		err = insertCredentialTransition(ctx, tx, payload.AccountID, *payload.Effect.PriorGrantReferenceDigest, "revoke", nil, reference)
-	case backupcustody.RotateControlKey:
+	case backupcustody.RotateControlKey, backupcustody.ConsentObjectScope, backupcustody.RevokeObjectScopeConsent:
+		// Consent lives only in the signed control log, reconstructed by the
+		// validated reducer. No second unsigned authority projection or object
+		// store mutation is created here.
 	default:
 		err = serviceauthority.ErrInvalid
 	}

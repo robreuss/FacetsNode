@@ -47,7 +47,7 @@ CREATE TABLE backup_custody_control_commands (
     command_reference_digest text NOT NULL CHECK (command_reference_digest ~ '^[0-9a-f]{64}$'),
     command_record bytea NOT NULL,
     acceptance_record bytea NOT NULL,
-    effect_kind text NOT NULL CHECK (effect_kind IN ('create_target_with_initial_grant','grant','supersede','revoke','rotate_control_key')),
+    effect_kind text NOT NULL CHECK (effect_kind IN ('create_target_with_initial_grant','grant','supersede','revoke','rotate_control_key','consent_object_scope','revoke_object_scope_consent')),
     accepted_at_milliseconds bigint NOT NULL CHECK (accepted_at_milliseconds >= 0),
     stored_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (account_id,sequence),
