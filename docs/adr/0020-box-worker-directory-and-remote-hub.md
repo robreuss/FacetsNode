@@ -1,7 +1,8 @@
 # ADR 0020: Box Worker directory and exact remote Worker routing
 
-**Status:** Accepted product direction for unreleased development; no new
-participant, directory, grant, or Job route implemented by this ADR
+**Status:** Accepted product direction for unreleased development; a portable
+participant-proof contract exists, but no operational enrollment, directory,
+grant, or Job route is implemented by this ADR
 
 **Date:** 2026-09-27
 
@@ -23,8 +24,11 @@ grant merely by changing the UI.
 ## Decision
 
 1. Add separately authenticated Box participant/device enrollment. The
-   participant authority is Principal-backed and can cover that participant's
-   authorized Box-enrolled devices. A Persona is a displayed identity
+   participant authority is a distinct Box-scoped credential privately
+   controlled by the user's Principal and can cover that participant's
+   authorized Box-enrolled devices. Independent Boxes must see distinct random
+   participant IDs, root keys, device IDs, and device keys, not the user's
+   stable private Principal identity. A Persona is a displayed identity
    projection, not the credential or authorization subject. Box
    administration, service discovery, participation, and Worker-use grants
    remain distinct scopes.
@@ -76,9 +80,12 @@ participant labels and revocation state, not the user's Persona library.
 ## Current implementation and acceptance boundary
 
 This ADR changes no runtime behavior. The existing `boxcontrol.ConnectionGrant`
-remains a discovery credential. The current Compute Pool HTTP surface remains
-status/deployment-oriented. Live acceptance requires contract fixtures,
-enrollment and revocation tests, a Worker directory, a grant ceremony, exact
-admission, encrypted carriage, distinct receipts, restart recovery, owner
+remains a discovery credential. A Swift/Go Box-scoped participant-proof
+contract and cross-language fixture exist, but do not store owner approval,
+private recovery custody, or consumed challenges. The current Compute Pool
+HTTP surface remains status/deployment-oriented. Live acceptance requires
+durable Box-scoped credential custody, enrollment and revocation tests,
+a Worker directory, a grant ceremony, exact admission, encrypted carriage,
+distinct receipts, restart recovery, owner
 stop, and actual-device demonstrations. A loopback or schema test is not
 evidence of a working shared Worker.

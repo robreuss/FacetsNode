@@ -21,7 +21,7 @@ import (
 
 // This is a pure admission boundary, not an HTTP enrollment route. In
 // particular, a discovery ConnectionGrant cannot create either record below.
-// The operational store must pin the owner-approved root and exact device
+// The operational store must pin the owner-approved Box-scoped root and exact device
 // grant before calling Authorize, and consume challenges durably at admission.
 // V1 accepts only initial generation-1 grants. Chained device rotation needs
 // a complete signed-history reducer on both platforms before this gate widens.
@@ -43,7 +43,7 @@ const (
 type BoxParticipantAnchor struct {
 	BoxID                  uuid.UUID `json:"boxID"`
 	ParticipantID          uuid.UUID `json:"participantID"`
-	PrincipalID            uuid.UUID `json:"principalID"`
+	BoxScopedPrincipalID   uuid.UUID `json:"boxScopedPrincipalID"`
 	RootKeyFingerprint     string    `json:"rootKeyFingerprint"`
 	ApprovedAtMilliseconds int64     `json:"approvedAtMilliseconds"`
 	RevokedAtMilliseconds  int64     `json:"revokedAtMilliseconds"`
@@ -90,7 +90,7 @@ type BoxParticipantProofPayload struct {
 	Version               int       `json:"version"`
 	BoxID                 uuid.UUID `json:"boxID"`
 	ParticipantID         uuid.UUID `json:"participantID"`
-	PrincipalID           uuid.UUID `json:"principalID"`
+	BoxScopedPrincipalID  uuid.UUID `json:"boxScopedPrincipalID"`
 	DeviceID              uuid.UUID `json:"deviceID"`
 	GrantID               uuid.UUID `json:"grantID"`
 	DeviceGeneration      uint64    `json:"deviceGeneration"`
@@ -200,7 +200,7 @@ func verifyBoxParticipantProof(
 	nowMilliseconds int64,
 ) error {
 	if anchor.BoxID == uuid.Nil || anchor.ParticipantID == uuid.Nil ||
-		anchor.PrincipalID == uuid.Nil || expectedChallengeID == uuid.Nil ||
+		anchor.BoxScopedPrincipalID == uuid.Nil || expectedChallengeID == uuid.Nil ||
 		anchor.ApprovedAtMilliseconds <= 0 || anchor.ApprovedAtMilliseconds > nowMilliseconds ||
 		(anchor.RevokedAtMilliseconds > 0 && anchor.RevokedAtMilliseconds <= nowMilliseconds) ||
 		device.ParticipantID != anchor.ParticipantID || device.DeviceID == uuid.Nil ||
@@ -210,7 +210,7 @@ func verifyBoxParticipantProof(
 	}
 	var root boxPrincipalRoot
 	if strictParticipantJSON(rootRecord.Payload, &root) != nil ||
-		root.Version != 1 || root.PrincipalID != anchor.PrincipalID ||
+		root.Version != 1 || root.PrincipalID != anchor.BoxScopedPrincipalID ||
 		root.RootKeyGeneration != 1 || root.CreatedAtMilliseconds < 0 ||
 		root.RootSigningKeyFingerprint != anchor.RootKeyFingerprint {
 		return ErrParticipantAuthority
@@ -258,7 +258,7 @@ func verifyBoxParticipantProof(
 	if strictParticipantJSON(proof.Payload, &payload) != nil || payload.Version != 1 ||
 		!canonicalParticipantProof(proof.Payload) ||
 		payload.BoxID != anchor.BoxID || payload.ParticipantID != anchor.ParticipantID ||
-		payload.PrincipalID != anchor.PrincipalID || payload.DeviceID != device.DeviceID ||
+		payload.BoxScopedPrincipalID != anchor.BoxScopedPrincipalID || payload.DeviceID != device.DeviceID ||
 		payload.GrantID != device.GrantID || payload.DeviceGeneration != device.DeviceGeneration ||
 		payload.ChallengeID != expectedChallengeID ||
 		payload.IssuedAtMilliseconds < grant.NotBeforeMilliseconds ||

@@ -1,6 +1,7 @@
 package boxcontrol
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -98,7 +99,7 @@ func newParticipantFixture(t *testing.T) participantFixture {
 	}, rootKey, rootFingerprint, principalDeviceDomain)
 	proofUnsorted, err := json.Marshal(BoxParticipantProofPayload{
 		Version: 1, BoxID: boxID, ParticipantID: participantID,
-		PrincipalID: principalID, DeviceID: deviceID, GrantID: grantID,
+		BoxScopedPrincipalID: principalID, DeviceID: deviceID, GrantID: grantID,
 		DeviceGeneration: 1, ChallengeID: challengeID,
 		IssuedAtMilliseconds: now - 100, ExpiresAtMilliseconds: now + 30_000,
 	})
@@ -115,7 +116,7 @@ func newParticipantFixture(t *testing.T) participantFixture {
 	}
 	return participantFixture{
 		anchor: BoxParticipantAnchor{BoxID: boxID, ParticipantID: participantID,
-			PrincipalID: principalID, RootKeyFingerprint: rootFingerprint,
+			BoxScopedPrincipalID: principalID, RootKeyFingerprint: rootFingerprint,
 			ApprovedAtMilliseconds: now - 500},
 		device: BoxParticipantDevice{ParticipantID: participantID, DeviceID: deviceID,
 			GrantID: grantID, DeviceGeneration: 1, SigningKeyFingerprint: deviceFingerprint},
@@ -177,7 +178,7 @@ func TestBoxParticipantProofRequiresPinnedPrincipalAndExactEnrolledDevice(t *tes
 	}{
 		{"wrong Box", func(f *participantFixture) { f.anchor.BoxID = uuid.New() }},
 		{"wrong participant", func(f *participantFixture) { f.anchor.ParticipantID = uuid.New() }},
-		{"wrong Principal", func(f *participantFixture) { f.anchor.PrincipalID = uuid.New() }},
+		{"wrong scoped Principal", func(f *participantFixture) { f.anchor.BoxScopedPrincipalID = uuid.New() }},
 		{"unapproved root", func(f *participantFixture) { f.anchor.RootKeyFingerprint = "" }},
 		{"wrong device", func(f *participantFixture) { f.device.DeviceID = uuid.New() }},
 		{"wrong grant", func(f *participantFixture) { f.device.GrantID = uuid.New() }},
@@ -198,6 +199,30 @@ func TestBoxParticipantProofRequiresPinnedPrincipalAndExactEnrolledDevice(t *tes
 	}
 }
 
+func TestIndependentBoxesRejectCrossBoxIdentityAndProof(t *testing.T) {
+	first := newParticipantFixture(t)
+	second := newParticipantFixture(t)
+	if first.anchor.BoxScopedPrincipalID == second.anchor.BoxScopedPrincipalID ||
+		first.anchor.RootKeyFingerprint == second.anchor.RootKeyFingerprint {
+		t.Fatal("independent Box fixtures reused scoped identity or root")
+	}
+	if err := first.authorize(first.verifier(t), nil); err != nil {
+		t.Fatal(err)
+	}
+	first.anchor = second.anchor
+	if err := first.authorize(first.verifier(t), nil); !errors.Is(err, ErrParticipantAuthority) {
+		t.Fatalf("first Box proof presented as second Box participant: %v", err)
+	}
+	encoded, err := json.Marshal(second.anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(`"principalID"`)) ||
+		!bytes.Contains(encoded, []byte(`"boxScopedPrincipalID"`)) {
+		t.Fatalf("Box anchor must expose only its scoped identity: %s", encoded)
+	}
+}
+
 func TestBoxParticipantRejectsMissingCapabilityAndSignedRevocation(t *testing.T) {
 	fixture := newParticipantFixture(t)
 	var grant boxPrincipalDeviceGrant
@@ -212,7 +237,7 @@ func TestBoxParticipantRejectsMissingCapabilityAndSignedRevocation(t *testing.T)
 	}
 	fixture = newParticipantFixture(t)
 	revocation := signParticipantRecord(t, boxPrincipalDeviceRevocation{
-		Version: 1, ID: uuid.New(), PrincipalID: fixture.anchor.PrincipalID,
+		Version: 1, ID: uuid.New(), PrincipalID: fixture.anchor.BoxScopedPrincipalID,
 		DeviceID: fixture.device.DeviceID, RevokedThroughGeneration: 1,
 		IssuedAtMilliseconds: fixture.now - 1, Reason: "userRequested",
 	}, fixture.rootKey, fixture.anchor.RootKeyFingerprint, principalRevocationDomain)
