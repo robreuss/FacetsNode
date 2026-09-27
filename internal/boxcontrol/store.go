@@ -34,6 +34,8 @@ type Store interface {
 	CreateConnectionRequest(context.Context, ConnectionRequest) error
 	ConnectionRequest(context.Context, uuid.UUID) (ConnectionRequest, error)
 	CompleteConnectionRequest(context.Context, uuid.UUID, []byte) error
+	PinOwnerApprovedParticipant(context.Context, BoxParticipantEnrollment, int64) error
+	PinnedParticipant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (BoxParticipantEnrollment, error)
 	IssueParticipantChallenge(context.Context, BoxParticipantChallenge, int64) error
 	ConsumeParticipantChallenge(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, error)
 	AppendAudit(context.Context, AuditEvent) error
@@ -41,25 +43,27 @@ type Store interface {
 }
 
 type MemoryStore struct {
-	mu                    sync.Mutex
-	state                 *State
-	sessions              map[[32]byte]WebSession
-	grants                map[uuid.UUID]ConnectionGrant
-	invitations           map[uuid.UUID]ConnectionInvitation
-	requests              map[uuid.UUID]ConnectionRequest
-	participantChallenges map[uuid.UUID]participantChallengeState
-	throttle              map[string]LoginThrottle
-	audit                 []AuditEvent
+	mu                     sync.Mutex
+	state                  *State
+	sessions               map[[32]byte]WebSession
+	grants                 map[uuid.UUID]ConnectionGrant
+	invitations            map[uuid.UUID]ConnectionInvitation
+	requests               map[uuid.UUID]ConnectionRequest
+	participantEnrollments map[uuid.UUID]BoxParticipantEnrollment
+	participantChallenges  map[uuid.UUID]participantChallengeState
+	throttle               map[string]LoginThrottle
+	audit                  []AuditEvent
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		sessions:              make(map[[32]byte]WebSession),
-		grants:                make(map[uuid.UUID]ConnectionGrant),
-		invitations:           make(map[uuid.UUID]ConnectionInvitation),
-		requests:              make(map[uuid.UUID]ConnectionRequest),
-		participantChallenges: make(map[uuid.UUID]participantChallengeState),
-		throttle:              make(map[string]LoginThrottle),
+		sessions:               make(map[[32]byte]WebSession),
+		grants:                 make(map[uuid.UUID]ConnectionGrant),
+		invitations:            make(map[uuid.UUID]ConnectionInvitation),
+		requests:               make(map[uuid.UUID]ConnectionRequest),
+		participantEnrollments: make(map[uuid.UUID]BoxParticipantEnrollment),
+		participantChallenges:  make(map[uuid.UUID]participantChallengeState),
+		throttle:               make(map[string]LoginThrottle),
 	}
 }
 

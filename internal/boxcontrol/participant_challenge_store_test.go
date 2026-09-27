@@ -209,4 +209,33 @@ func TestPostgresParticipantChallengeSurvivesRestartAndConsumesOnce(t *testing.T
 	if err != nil || consumed {
 		t.Fatal("restart allowed challenge replay", err)
 	}
+
+	fixture := newParticipantFixture(t)
+	enrollment := BoxParticipantEnrollment{
+		Anchor: fixture.anchor, Device: fixture.device,
+		RootRecord: fixture.root, GrantRecord: fixture.grant,
+	}
+	enrollment.Anchor.BoxID = boxID
+	if err := store.PinOwnerApprovedParticipant(ctx, enrollment, fixture.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.PinOwnerApprovedParticipant(ctx, enrollment, fixture.now); err != nil {
+		t.Fatalf("exact enrollment retry: %v", err)
+	}
+	pinned, err := restarted.PinnedParticipant(ctx, boxID,
+		enrollment.Anchor.ParticipantID, enrollment.Device.DeviceID)
+	if err != nil || !sameParticipantEnrollment(pinned, enrollment) {
+		t.Fatal("pinned enrollment did not survive store restart", err)
+	}
+	modified := enrollment
+	modified.Anchor.ApprovedAtMilliseconds++
+	if err := restarted.PinOwnerApprovedParticipant(ctx, modified, fixture.now); !errors.Is(err, ErrParticipantAuthority) {
+		t.Fatalf("changed enrollment replaced pin: %v", err)
+	}
+	duplicateRoot := cloneParticipantEnrollment(enrollment)
+	duplicateRoot.Anchor.ParticipantID = uuid.New()
+	duplicateRoot.Device.ParticipantID = duplicateRoot.Anchor.ParticipantID
+	if err := restarted.PinOwnerApprovedParticipant(ctx, duplicateRoot, fixture.now); !errors.Is(err, ErrParticipantAuthority) {
+		t.Fatalf("second participant reused scoped root: %v", err)
+	}
 }

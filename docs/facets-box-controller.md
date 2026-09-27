@@ -63,8 +63,14 @@ still requires a configured test database. A challenge is not issued by nearby
 discovery or by the app-connection grant. This storage primitive is not yet an
 operational participant-enrollment or proof endpoint: an owner-approved
 Box-scoped root, exact device grant, revocation state, and authenticated
-issuance path still have to be pinned in the live controller before a Worker
-can be shared.
+issuance path still have to be connected in the live controller before a Worker
+can be shared. The internal store can now validate and pin an owner-approved
+Box-scoped public root together with its first exact signed device grant. It
+rejects changed retries and duplicate scoped identities or device keys. That
+operation is not exposed to a discovery/app grant or an HTTP caller. The Box
+stores only public authority records, not the private Principal root or device
+keys. Memory-store verification passes; the PostgreSQL integration test is
+written but requires `FACETS_BOX_TEST_DATABASE_URL` to execute.
 
 ## Nearby discovery and multiple Boxes
 

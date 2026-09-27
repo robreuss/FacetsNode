@@ -21,8 +21,9 @@ import (
 
 // This is a pure admission boundary, not an HTTP enrollment route. In
 // particular, a discovery ConnectionGrant cannot create either record below.
-// The operational store must pin the owner-approved Box-scoped root and exact device
-// grant before calling Authorize, and consume challenges durably at admission.
+// The store can pin an owner-approved Box-scoped root and exact device grant
+// and consume challenges durably. No owner-authenticated enrollment/proof route
+// has been installed to use that storage yet.
 // V1 accepts only initial generation-1 grants. Chained device rotation needs
 // a complete signed-history reducer on both platforms before this gate widens.
 const boxParticipantCapability = "facets.box.participate"
@@ -199,53 +200,16 @@ func verifyBoxParticipantProof(
 	expectedChallengeID uuid.UUID,
 	nowMilliseconds int64,
 ) error {
-	if anchor.BoxID == uuid.Nil || anchor.ParticipantID == uuid.Nil ||
-		anchor.BoxScopedPrincipalID == uuid.Nil || expectedChallengeID == uuid.Nil ||
-		anchor.ApprovedAtMilliseconds <= 0 || anchor.ApprovedAtMilliseconds > nowMilliseconds ||
-		(anchor.RevokedAtMilliseconds > 0 && anchor.RevokedAtMilliseconds <= nowMilliseconds) ||
-		device.ParticipantID != anchor.ParticipantID || device.DeviceID == uuid.Nil ||
-		device.GrantID == uuid.Nil || device.DeviceGeneration != 1 ||
-		device.RevokedThroughGeneration >= device.DeviceGeneration {
-		return ErrParticipantAuthority
-	}
-	var root boxPrincipalRoot
-	if strictParticipantJSON(rootRecord.Payload, &root) != nil ||
-		root.Version != 1 || root.PrincipalID != anchor.BoxScopedPrincipalID ||
-		root.RootKeyGeneration != 1 || root.CreatedAtMilliseconds < 0 ||
-		root.RootSigningKeyFingerprint != anchor.RootKeyFingerprint {
-		return ErrParticipantAuthority
-	}
-	rootKey, err := participantPublicKey(root.RootPublicSigningKeyX963, root.RootSigningKeyFingerprint)
-	if err != nil || verifyPrincipalRecord(rootRecord, rootKey, root.RootSigningKeyFingerprint, principalRootDomain) != nil {
-		return ErrParticipantAuthority
-	}
-	var grant boxPrincipalDeviceGrant
-	if strictParticipantJSON(grantRecord.Payload, &grant) != nil ||
-		grant.Version != 1 || grant.PrincipalID != root.PrincipalID ||
-		grant.ID != device.GrantID || grant.DeviceID != device.DeviceID ||
-		grant.DeviceGeneration != device.DeviceGeneration ||
-		grant.SupersedesGrantID != nil ||
-		grant.SigningKeyFingerprint != device.SigningKeyFingerprint ||
-		grant.IssuedAtMilliseconds < root.CreatedAtMilliseconds ||
-		grant.NotBeforeMilliseconds < grant.IssuedAtMilliseconds ||
-		grant.ExpiresAtMilliseconds <= grant.NotBeforeMilliseconds ||
-		(nowMilliseconds < grant.NotBeforeMilliseconds || nowMilliseconds >= grant.ExpiresAtMilliseconds) ||
-		!hasParticipantCapability(grant.Capabilities) ||
-		verifyPrincipalRecord(grantRecord, rootKey, root.RootSigningKeyFingerprint, principalDeviceDomain) != nil {
-		return ErrParticipantAuthority
-	}
-	deviceKey, err := participantPublicKey(grant.SigningPublicKeyX963, grant.SigningKeyFingerprint)
-	if err != nil {
-		return ErrParticipantAuthority
-	}
-	if _, err := participantPublicKey(grant.KeyAgreementPublicKeyX963, grant.KeyAgreementKeyFingerprint); err != nil {
+	rootKey, deviceKey, grantNotBefore, err := verifyBoxParticipantEnrollment(
+		anchor, device, rootRecord, grantRecord, nowMilliseconds)
+	if err != nil || expectedChallengeID == uuid.Nil {
 		return ErrParticipantAuthority
 	}
 	for _, record := range revocations {
 		var revocation boxPrincipalDeviceRevocation
 		if strictParticipantJSON(record.Payload, &revocation) != nil ||
-			revocation.Version != 1 || revocation.PrincipalID != root.PrincipalID ||
-			verifyPrincipalRecord(record, rootKey, root.RootSigningKeyFingerprint, principalRevocationDomain) != nil {
+			revocation.Version != 1 || revocation.PrincipalID != anchor.BoxScopedPrincipalID ||
+			verifyPrincipalRecord(record, rootKey, anchor.RootKeyFingerprint, principalRevocationDomain) != nil {
 			return ErrParticipantAuthority
 		}
 		if revocation.DeviceID == device.DeviceID &&
@@ -261,7 +225,7 @@ func verifyBoxParticipantProof(
 		payload.BoxScopedPrincipalID != anchor.BoxScopedPrincipalID || payload.DeviceID != device.DeviceID ||
 		payload.GrantID != device.GrantID || payload.DeviceGeneration != device.DeviceGeneration ||
 		payload.ChallengeID != expectedChallengeID ||
-		payload.IssuedAtMilliseconds < grant.NotBeforeMilliseconds ||
+		payload.IssuedAtMilliseconds < grantNotBefore ||
 		payload.IssuedAtMilliseconds > nowMilliseconds ||
 		payload.ExpiresAtMilliseconds <= nowMilliseconds ||
 		payload.ExpiresAtMilliseconds-payload.IssuedAtMilliseconds > maximumParticipantProofAgeMilliseconds ||
@@ -269,6 +233,60 @@ func verifyBoxParticipantProof(
 		return ErrParticipantAuthority
 	}
 	return nil
+}
+
+// Validate the exact public authority being pinned by an owner-approved
+// operation. This does not itself establish owner approval or issue a Worker
+// grant; those are separate admission boundaries.
+func verifyBoxParticipantEnrollment(
+	anchor BoxParticipantAnchor,
+	device BoxParticipantDevice,
+	rootRecord, grantRecord BoxSignedPrincipalRecord,
+	nowMilliseconds int64,
+) (*ecdsa.PublicKey, *ecdsa.PublicKey, int64, error) {
+	if anchor.BoxID == uuid.Nil || anchor.ParticipantID == uuid.Nil ||
+		anchor.BoxScopedPrincipalID == uuid.Nil ||
+		anchor.ApprovedAtMilliseconds <= 0 || anchor.ApprovedAtMilliseconds > nowMilliseconds ||
+		(anchor.RevokedAtMilliseconds > 0 && anchor.RevokedAtMilliseconds <= nowMilliseconds) ||
+		device.ParticipantID != anchor.ParticipantID || device.DeviceID == uuid.Nil ||
+		device.GrantID == uuid.Nil || device.DeviceGeneration != 1 ||
+		device.RevokedThroughGeneration >= device.DeviceGeneration {
+		return nil, nil, 0, ErrParticipantAuthority
+	}
+	var root boxPrincipalRoot
+	if strictParticipantJSON(rootRecord.Payload, &root) != nil ||
+		root.Version != 1 || root.PrincipalID != anchor.BoxScopedPrincipalID ||
+		root.RootKeyGeneration != 1 || root.CreatedAtMilliseconds < 0 ||
+		root.RootSigningKeyFingerprint != anchor.RootKeyFingerprint {
+		return nil, nil, 0, ErrParticipantAuthority
+	}
+	rootKey, err := participantPublicKey(root.RootPublicSigningKeyX963, root.RootSigningKeyFingerprint)
+	if err != nil || verifyPrincipalRecord(rootRecord, rootKey, root.RootSigningKeyFingerprint, principalRootDomain) != nil {
+		return nil, nil, 0, ErrParticipantAuthority
+	}
+	var grant boxPrincipalDeviceGrant
+	if strictParticipantJSON(grantRecord.Payload, &grant) != nil ||
+		grant.Version != 1 || grant.PrincipalID != root.PrincipalID ||
+		grant.ID != device.GrantID || grant.DeviceID != device.DeviceID ||
+		grant.DeviceGeneration != device.DeviceGeneration ||
+		grant.SupersedesGrantID != nil ||
+		grant.SigningKeyFingerprint != device.SigningKeyFingerprint ||
+		grant.IssuedAtMilliseconds < root.CreatedAtMilliseconds ||
+		grant.NotBeforeMilliseconds < grant.IssuedAtMilliseconds ||
+		grant.ExpiresAtMilliseconds <= grant.NotBeforeMilliseconds ||
+		(nowMilliseconds < grant.NotBeforeMilliseconds || nowMilliseconds >= grant.ExpiresAtMilliseconds) ||
+		!hasParticipantCapability(grant.Capabilities) ||
+		verifyPrincipalRecord(grantRecord, rootKey, root.RootSigningKeyFingerprint, principalDeviceDomain) != nil {
+		return nil, nil, 0, ErrParticipantAuthority
+	}
+	deviceKey, err := participantPublicKey(grant.SigningPublicKeyX963, grant.SigningKeyFingerprint)
+	if err != nil {
+		return nil, nil, 0, ErrParticipantAuthority
+	}
+	if _, err := participantPublicKey(grant.KeyAgreementPublicKeyX963, grant.KeyAgreementKeyFingerprint); err != nil {
+		return nil, nil, 0, ErrParticipantAuthority
+	}
+	return rootKey, deviceKey, grant.NotBeforeMilliseconds, nil
 }
 
 func canonicalParticipantProof(data []byte) bool {
@@ -297,6 +315,9 @@ func verifyPrincipalRecord(record BoxSignedPrincipalRecord, key *ecdsa.PublicKey
 }
 
 func verifyParticipantSignature(encoded string, key *ecdsa.PublicKey, domain string, payload []byte) error {
+	if len(encoded) > 128 {
+		return ErrParticipantAuthority
+	}
 	signature, err := participantBase64URL(encoded)
 	if err != nil || len(signature) != 64 || len(payload) == 0 || len(payload) > 65_536 {
 		return ErrParticipantAuthority

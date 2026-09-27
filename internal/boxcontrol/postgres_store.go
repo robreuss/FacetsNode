@@ -92,6 +92,24 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			CHECK (expires_at_milliseconds > issued_at_milliseconds),
 			CHECK (expires_at_milliseconds - issued_at_milliseconds <= 120000)
 		)`,
+		`CREATE TABLE IF NOT EXISTS box_participants (
+			participant_id uuid PRIMARY KEY,
+			box_id uuid NOT NULL REFERENCES box_state(box_id),
+			box_scoped_principal_id uuid NOT NULL UNIQUE,
+			root_key_fingerprint text NOT NULL UNIQUE,
+			approved_at_milliseconds bigint NOT NULL CHECK (approved_at_milliseconds > 0),
+			revoked_at_milliseconds bigint NOT NULL DEFAULT 0 CHECK (revoked_at_milliseconds >= 0),
+			root_record bytea NOT NULL CHECK (octet_length(root_record) BETWEEN 1 AND 131072)
+		)`,
+		`CREATE TABLE IF NOT EXISTS box_participant_devices (
+			device_id uuid PRIMARY KEY,
+			participant_id uuid NOT NULL REFERENCES box_participants(participant_id),
+			grant_id uuid NOT NULL UNIQUE,
+			device_generation bigint NOT NULL CHECK (device_generation = 1),
+			signing_key_fingerprint text NOT NULL UNIQUE,
+			revoked_through_generation bigint NOT NULL DEFAULT 0 CHECK (revoked_through_generation >= 0),
+			grant_record bytea NOT NULL CHECK (octet_length(grant_record) BETWEEN 1 AND 131072)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := store.pool.Exec(ctx, statement); err != nil {
