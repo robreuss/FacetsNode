@@ -34,28 +34,32 @@ type Store interface {
 	CreateConnectionRequest(context.Context, ConnectionRequest) error
 	ConnectionRequest(context.Context, uuid.UUID) (ConnectionRequest, error)
 	CompleteConnectionRequest(context.Context, uuid.UUID, []byte) error
+	IssueParticipantChallenge(context.Context, BoxParticipantChallenge, int64) error
+	ConsumeParticipantChallenge(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, error)
 	AppendAudit(context.Context, AuditEvent) error
 	RecentAudit(context.Context, int) ([]AuditEvent, error)
 }
 
 type MemoryStore struct {
-	mu          sync.Mutex
-	state       *State
-	sessions    map[[32]byte]WebSession
-	grants      map[uuid.UUID]ConnectionGrant
-	invitations map[uuid.UUID]ConnectionInvitation
-	requests    map[uuid.UUID]ConnectionRequest
-	throttle    map[string]LoginThrottle
-	audit       []AuditEvent
+	mu                    sync.Mutex
+	state                 *State
+	sessions              map[[32]byte]WebSession
+	grants                map[uuid.UUID]ConnectionGrant
+	invitations           map[uuid.UUID]ConnectionInvitation
+	requests              map[uuid.UUID]ConnectionRequest
+	participantChallenges map[uuid.UUID]participantChallengeState
+	throttle              map[string]LoginThrottle
+	audit                 []AuditEvent
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		sessions:    make(map[[32]byte]WebSession),
-		grants:      make(map[uuid.UUID]ConnectionGrant),
-		invitations: make(map[uuid.UUID]ConnectionInvitation),
-		requests:    make(map[uuid.UUID]ConnectionRequest),
-		throttle:    make(map[string]LoginThrottle),
+		sessions:              make(map[[32]byte]WebSession),
+		grants:                make(map[uuid.UUID]ConnectionGrant),
+		invitations:           make(map[uuid.UUID]ConnectionInvitation),
+		requests:              make(map[uuid.UUID]ConnectionRequest),
+		participantChallenges: make(map[uuid.UUID]participantChallengeState),
+		throttle:              make(map[string]LoginThrottle),
 	}
 }
 

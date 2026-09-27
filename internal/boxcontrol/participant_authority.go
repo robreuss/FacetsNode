@@ -142,9 +142,9 @@ type boxPrincipalDeviceRevocation struct {
 	Reason                   string    `json:"reason"`
 }
 
-// The production implementation must atomically consume an issued challenge
-// bound to these exact identities and expiry, durably across a Box restart.
-// No such store or HTTP route is installed by this contract checkpoint.
+// The Box controller store atomically consumes an issued challenge bound to
+// these exact identities and expiry, durably across a Box restart. The
+// participant enrollment and proof HTTP routes are not installed yet.
 type BoxParticipantChallengeStore interface {
 	ConsumeParticipantChallenge(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, error)
 }

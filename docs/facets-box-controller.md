@@ -55,6 +55,17 @@ exact request. The app stores the device-bound grant in platform-protected
 storage and uses it only for the generic authenticated service profile. The
 grant cannot administer the Box or enroll the installation in any service.
 
+The separate Box-participant proof path now has a durable one-use challenge
+primitive. A challenge is bound to one claimed Box, participant, and device,
+expires within two minutes, and is atomically consumed once. PostgreSQL stores
+the row independently of the controller process; the live database restart test
+still requires a configured test database. A challenge is not issued by nearby
+discovery or by the app-connection grant. This storage primitive is not yet an
+operational participant-enrollment or proof endpoint: an owner-approved
+Box-scoped root, exact device grant, revocation state, and authenticated
+issuance path still have to be pinned in the live controller before a Worker
+can be shared.
+
 ## Nearby discovery and multiple Boxes
 
 The separate `facets-box-discovery` sidecar verifies the controller's signed

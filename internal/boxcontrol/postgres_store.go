@@ -81,6 +81,17 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			kind text NOT NULL CHECK (octet_length(kind) BETWEEN 1 AND 128),
 			outcome text NOT NULL CHECK (octet_length(outcome) BETWEEN 1 AND 128)
 		)`,
+		`CREATE TABLE IF NOT EXISTS box_participant_challenges (
+			challenge_id uuid PRIMARY KEY,
+			box_id uuid NOT NULL REFERENCES box_state(box_id),
+			participant_id uuid NOT NULL,
+			device_id uuid NOT NULL,
+			issued_at_milliseconds bigint NOT NULL CHECK (issued_at_milliseconds > 0),
+			expires_at_milliseconds bigint NOT NULL,
+			consumed_at_milliseconds bigint,
+			CHECK (expires_at_milliseconds > issued_at_milliseconds),
+			CHECK (expires_at_milliseconds - issued_at_milliseconds <= 120000)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := store.pool.Exec(ctx, statement); err != nil {
@@ -88,6 +99,52 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (store *PostgresStore) IssueParticipantChallenge(
+	ctx context.Context,
+	challenge BoxParticipantChallenge,
+	nowMilliseconds int64,
+) error {
+	if !challenge.validAt(nowMilliseconds) {
+		return ErrParticipantAuthority
+	}
+	result, err := store.pool.Exec(ctx, `
+		INSERT INTO box_participant_challenges
+			(challenge_id, box_id, participant_id, device_id, issued_at_milliseconds, expires_at_milliseconds)
+		SELECT $1, $2, $3, $4, $5, $6 FROM box_state
+		WHERE box_id = $2 AND owner_verifier <> ''
+		ON CONFLICT (challenge_id) DO NOTHING`,
+		challenge.ChallengeID, challenge.BoxID, challenge.ParticipantID, challenge.DeviceID,
+		challenge.IssuedAtMilliseconds, challenge.ExpiresAtMilliseconds)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrParticipantAuthority
+	}
+	return nil
+}
+
+func (store *PostgresStore) ConsumeParticipantChallenge(
+	ctx context.Context,
+	boxID, participantID, deviceID, challengeID uuid.UUID,
+	nowMilliseconds int64,
+) (bool, error) {
+	if nowMilliseconds <= 0 || boxID == uuid.Nil || participantID == uuid.Nil ||
+		deviceID == uuid.Nil || challengeID == uuid.Nil {
+		return false, nil
+	}
+	result, err := store.pool.Exec(ctx, `
+		UPDATE box_participant_challenges SET consumed_at_milliseconds = $5
+		WHERE challenge_id = $1 AND box_id = $2 AND participant_id = $3 AND device_id = $4
+		  AND issued_at_milliseconds <= $5 AND expires_at_milliseconds > $5
+		  AND consumed_at_milliseconds IS NULL`,
+		challengeID, boxID, participantID, deviceID, nowMilliseconds)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, nil
 }
 
 func (store *PostgresStore) Initialize(ctx context.Context, state State) error {
