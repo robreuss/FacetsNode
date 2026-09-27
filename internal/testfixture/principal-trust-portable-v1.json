@@ -1,0 +1,99 @@
+{
+  "authorizationChecks" : [
+    {
+      "atMilliseconds" : 1735689601500,
+      "expected" : "authorized",
+      "requiredCapabilities" : [
+        "facets.replica.send"
+      ]
+    },
+    {
+      "atMilliseconds" : 1735689602500,
+      "expected" : "revokedThroughGeneration:1",
+      "requiredCapabilities" : [
+        "facets.replica.send"
+      ]
+    }
+  ],
+  "cryptography" : {
+    "algorithm" : "ES256",
+    "curve" : "P-256",
+    "fingerprintEncoding" : "SHA-256 of X9.63 public key, lowercase hexadecimal",
+    "hash" : "SHA-256",
+    "payloadBytesInWrapperEncoding" : "padded standard base64",
+    "publicKeyEncoding" : "X9.63 uncompressed, unpadded base64url",
+    "signatureEncoding" : "64-byte raw r || s, unpadded base64url"
+  },
+  "deviceGrant" : {
+    "domainSeparatorBase64URL" : "RmFjZXRzIHByaW5jaXBhbCBkZXZpY2UgZ3JhbnQgdjEA",
+    "signedRecord" : {
+      "payload" : "eyJjYXBhYmlsaXRpZXMiOlsiZmFjZXRzLnJlcGxpY2EuY2hlY2twb2ludC5wdWJsaXNoIiwiZmFjZXRzLnJlcGxpY2EucmVjZWl2ZSIsImZhY2V0cy5yZXBsaWNhLnNlbmQiXSwiZGV2aWNlR2VuZXJhdGlvbiI6MSwiZGV2aWNlSUQiOiI2NjY2NjY2Ni03Nzc3LTg4ODgtOTk5OS1BQUFBQUFBQUFBQUEiLCJkZXZpY2VOYW1lIjoiUG9ydGFibGUgVGVzdCBEZXZpY2UiLCJleHBpcmVzQXRNaWxsaXNlY29uZHMiOjE3NjcyMjU2MDAwMDAsImlkIjoiQUFBQUFBQUEtQkJCQi1DQ0NDLUREREQtRUVFRUVFRUVFRUVFIiwiaXNzdWVkQXRNaWxsaXNlY29uZHMiOjE3MzU2ODk2MDEwMDAsImtleUFncmVlbWVudEtleUZpbmdlcnByaW50IjoiODk4OTYyNjRjNThmY2E1NTM1MDgyNTdiMTg3MDM3ODFmY2Q5OWMyMmE2NjE4NmFhNzRmNTZlNzZmOWIyN2NiZSIsImtleUFncmVlbWVudFB1YmxpY0tleVg5NjMiOiJCRjdMNU5HbU13cEV5UGZ2bFIxTDhXWG14cmNoNzYycGhmdEJaaHZHNV8xc2h6UmtERW1ZXzM0M1N3Yk9HbVNpN05ncXNEWTRUN2c5bW5teEo2SjlVREkiLCJub3RCZWZvcmVNaWxsaXNlY29uZHMiOjE3MzU2ODk2MDEwMDAsInByaW5jaXBhbElEIjoiMTExMTExMTEtMjIyMi0zMzMzLTQ0NDQtNTU1NTU1NTU1NTU1Iiwic2lnbmluZ0tleUZpbmdlcnByaW50IjoiYTlmMzAwZWI1OTYwZTg5MTMzYWY3MzYyMDExYTFlMjZmMGUyZWEyZTM2ZGM0MDJhMDRhZjZjMTkyYjg5MWE4YyIsInNpZ25pbmdQdWJsaWNLZXlYOTYzIjoiQkh6eWV4aU5BMDktaWxJNEF3UzFHc1BBaVduaWRfSWJOYVlMU1B4SFpwbDRCM2RWRU51TzBFQXBQWnJHbjNRdzI3cDlyZVk4NllJcG5nUzNuU0o0YzlFIiwidmVyc2lvbiI6MX0=",
+      "signature" : {
+        "algorithm" : "ES256",
+        "signature" : "wp-JkqSpRaXcpi-AzgHFKrJWNmEv81Rl_uGoQ8WTZl9L4QhSBancviG1yXgWZoqtAjvVjGxMOb7kzCj09J4bMQ",
+        "signingKeyFingerprint" : "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be"
+      }
+    },
+    "signingInputSHA256" : "11c0f6545511e0c6e32a2e18f84471fa5f981933e6f9fd57557d829ccc159700"
+  },
+  "deviceRevocation" : {
+    "domainSeparatorBase64URL" : "RmFjZXRzIHByaW5jaXBhbCBkZXZpY2UgcmV2b2NhdGlvbiB2MQA",
+    "signedRecord" : {
+      "payload" : "eyJkZXZpY2VJRCI6IjY2NjY2NjY2LTc3NzctODg4OC05OTk5LUFBQUFBQUFBQUFBQSIsImlkIjoiMDEyMzQ1NjctODlBQi1DREVGLTAxMjMtNDU2Nzg5QUJDREVGIiwiaXNzdWVkQXRNaWxsaXNlY29uZHMiOjE3MzU2ODk2MDIwMDAsInByaW5jaXBhbElEIjoiMTExMTExMTEtMjIyMi0zMzMzLTQ0NDQtNTU1NTU1NTU1NTU1IiwicmVhc29uIjoiZGV2aWNlTG9zdCIsInJldm9rZWRUaHJvdWdoR2VuZXJhdGlvbiI6MSwidmVyc2lvbiI6MX0=",
+      "signature" : {
+        "algorithm" : "ES256",
+        "signature" : "a44t_4kLb76E6w-ChSqb-zw2wBYu18JNeUG2VRZQ3H3lrPO627xDTz96gOcFw1fISb5qSyk8GMJpe0GLqPAUHw",
+        "signingKeyFingerprint" : "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be"
+      }
+    },
+    "signingInputSHA256" : "da70b5c9c1aaee8cd58edb9841d84f310ad25f3a60028456625aa671716c77d7"
+  },
+  "expectedAuditEvents" : [
+    {
+      "kind" : "rootEstablished",
+      "occurredAtMilliseconds" : 1735689600000,
+      "principalID" : "11111111-2222-3333-4444-555555555555",
+      "recordID" : "root:1"
+    },
+    {
+      "deviceGeneration" : 1,
+      "deviceID" : "66666666-7777-8888-9999-AAAAAAAAAAAA",
+      "kind" : "deviceGranted",
+      "occurredAtMilliseconds" : 1735689601000,
+      "principalID" : "11111111-2222-3333-4444-555555555555",
+      "recordID" : "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    },
+    {
+      "deviceGeneration" : 1,
+      "deviceID" : "66666666-7777-8888-9999-AAAAAAAAAAAA",
+      "kind" : "deviceRevoked",
+      "occurredAtMilliseconds" : 1735689602000,
+      "principalID" : "11111111-2222-3333-4444-555555555555",
+      "recordID" : "01234567-89ab-cdef-0123-456789abcdef"
+    }
+  ],
+  "format" : "facets.principal-trust-fixture.v1",
+  "root" : {
+    "domainSeparatorBase64URL" : "RmFjZXRzIHByaW5jaXBhbCB0cnVzdCByb290IHYxAA",
+    "signedRecord" : {
+      "payload" : "eyJjcmVhdGVkQXRNaWxsaXNlY29uZHMiOjE3MzU2ODk2MDAwMDAsInByaW5jaXBhbElEIjoiMTExMTExMTEtMjIyMi0zMzMzLTQ0NDQtNTU1NTU1NTU1NTU1IiwicHJpbmNpcGFsS2luZCI6Imh1bWFuIiwicm9vdEtleUdlbmVyYXRpb24iOjEsInJvb3RQdWJsaWNTaWduaW5nS2V5WDk2MyI6IkJHc1gwZkxoTEVKSC1Mem01V09rUVBKM0EzMkJMZXN6b1BTaE9VWFltTUtXVC1OQzR2NGFmNXVPNS10S2ZBLWVGaXZPTTFkck1WN095N1pBYURlX1VmVSIsInJvb3RTaWduaW5nS2V5RmluZ2VycHJpbnQiOiI2OThiZWE2M2RjNDRhMzQ0NjYzZmYxNDI5YWVhMTA4NDJkZjI3YjZiOTkxZWYyNTg2NmIyYzZjMDJjZGNjNWJlIiwidmVyc2lvbiI6MX0=",
+      "signature" : {
+        "algorithm" : "ES256",
+        "signature" : "EEEPBu13LZt9sTv0mPv9jkUVGa8wcIILinVf5DbJLGr97Yo2fNtP5gdQK-iR0mEDuZIqo70-AhNx4ckwDssakg",
+        "signingKeyFingerprint" : "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be"
+      }
+    },
+    "signingInputSHA256" : "fc8a4a5b381661ec95c6d6bdd86f6f510214f83bbb3db46757db0eb8c2067fe4"
+  },
+  "signatureDomainSeparatorsBase64URL" : {
+    "deviceGrant" : "RmFjZXRzIHByaW5jaXBhbCBkZXZpY2UgZ3JhbnQgdjEA",
+    "deviceRevocation" : "RmFjZXRzIHByaW5jaXBhbCBkZXZpY2UgcmV2b2NhdGlvbiB2MQA",
+    "root" : "RmFjZXRzIHByaW5jaXBhbCB0cnVzdCByb290IHYxAA"
+  },
+  "testOnlyPrivateKeys" : {
+    "deviceAgreementPrivateKeyRawBase64URL" : "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM",
+    "deviceSigningPrivateKeyRawBase64URL" : "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI",
+    "rootSigningPrivateKeyRawBase64URL" : "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+    "warning" : "TEST FIXTURE ONLY. These private keys are public and must never be used outside conformance tests."
+  }
+}
