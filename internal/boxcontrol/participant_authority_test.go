@@ -28,6 +28,7 @@ type participantFixture struct {
 	challengeID uuid.UUID
 	now         int64
 	rootKey     *ecdsa.PrivateKey
+	deviceKey   *ecdsa.PrivateKey
 }
 
 type fixtureChallengeStore struct {
@@ -136,7 +137,7 @@ func newParticipantFixture(t *testing.T) participantFixture {
 		root: root, grant: grant,
 		proof: BoxSignedParticipantProof{Payload: proofPayload,
 			Signature: signParticipantBytes(t, deviceKey, participantProofDomain, proofPayload)},
-		challengeID: challengeID, now: now, rootKey: rootKey,
+		challengeID: challengeID, now: now, rootKey: rootKey, deviceKey: deviceKey,
 	}
 }
 

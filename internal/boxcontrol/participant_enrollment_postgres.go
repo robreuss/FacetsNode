@@ -30,6 +30,18 @@ func (store *PostgresStore) PinOwnerApprovedParticipant(
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := insertPinnedParticipant(ctx, tx, enrollment, rootRecord, grantRecord); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func insertPinnedParticipant(
+	ctx context.Context,
+	tx pgx.Tx,
+	enrollment BoxParticipantEnrollment,
+	rootRecord, grantRecord []byte,
+) error {
 	result, err := tx.Exec(ctx, `
 		INSERT INTO box_participants
 			(participant_id, box_id, box_scoped_principal_id, root_key_fingerprint,
@@ -49,7 +61,7 @@ func (store *PostgresStore) PinOwnerApprovedParticipant(
 		if readErr != nil || !sameParticipantEnrollment(existing, enrollment) {
 			return ErrParticipantAuthority
 		}
-		return nil // exact retry; the original transaction already committed
+		return nil // exact retry of an already committed pin
 	}
 	result, err = tx.Exec(ctx, `
 		INSERT INTO box_participant_devices
@@ -66,7 +78,7 @@ func (store *PostgresStore) PinOwnerApprovedParticipant(
 	if result.RowsAffected() != 1 {
 		return ErrParticipantAuthority
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 const pinnedParticipantQuery = `

@@ -110,6 +110,18 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			revoked_through_generation bigint NOT NULL DEFAULT 0 CHECK (revoked_through_generation >= 0),
 			grant_record bytea NOT NULL CHECK (octet_length(grant_record) BETWEEN 1 AND 131072)
 		)`,
+		`CREATE TABLE IF NOT EXISTS box_participant_enrollment_requests (
+			request_id uuid PRIMARY KEY,
+			box_id uuid NOT NULL REFERENCES box_state(box_id),
+			connection_grant_id uuid NOT NULL REFERENCES connection_grants(grant_id),
+			participant_id uuid NOT NULL,
+			device_id uuid NOT NULL,
+			proposal bytea NOT NULL CHECK (octet_length(proposal) BETWEEN 1 AND 32768),
+			requested_at_milliseconds bigint NOT NULL CHECK (requested_at_milliseconds > 0),
+			expires_at_milliseconds bigint NOT NULL CHECK (expires_at_milliseconds > requested_at_milliseconds),
+			decision text NOT NULL DEFAULT 'pending' CHECK (decision IN ('pending','approved','rejected')),
+			decided_at_milliseconds bigint NOT NULL DEFAULT 0 CHECK (decided_at_milliseconds >= 0)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := store.pool.Exec(ctx, statement); err != nil {

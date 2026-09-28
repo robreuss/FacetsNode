@@ -46,14 +46,13 @@ Client grants and sync service operation are independent of owner-session expiry
 
 ## App connection
 
-Facets creates a ten-minute request with an ephemeral X25519 key and displays a
-single-use six-digit code. A signed-in Box Owner enters that code in the Box
-dashboard. Codes are unique among active requests, throttled on failure, and
-never appear in URLs, clipboard data, Web history, or logs. The controller
-returns a member grant only through a ChaCha20-Poly1305 envelope bound to the
-exact request. The app stores the device-bound grant in platform-protected
-storage and uses it only for the generic authenticated service profile. The
-grant cannot administer the Box or enroll the installation in any service.
+For an additional installation, a signed-in Box Owner displays a single-use
+six-digit code in the Box dashboard and enters it in Facets. The controller
+returns a connection grant through the encrypted response bound to that exact
+request. Initial Box claim has a separate one-time activation-code flow. The
+app stores its connection grant in platform-protected storage and uses it for
+generic authenticated service discovery. The grant cannot administer the Box
+or enroll the installation in any service by itself.
 
 The separate Box-participant proof path has a durable one-use challenge
 primitive. A challenge is bound to one claimed Box, participant, and device,
@@ -73,15 +72,24 @@ with its first exact signed device grant. It rejects changed retries and
 duplicate scoped identities or device keys. The Box stores only public
 authority records, not the private Principal root or device keys. The proof
 verifier now requires a stored pin and rejects caller-supplied authority that
-differs from it before consuming the challenge. **This is not yet an
-operational participant-enrollment or proof flow.** No pending request/owner
-approval ceremony, authenticated challenge-issuance endpoint, proof endpoint,
-or durable Principal-signed revocation feed has been installed. The existing
-six-digit connection code currently grants discovery only; silently treating
-it or a resulting app grant as participant approval would broaden its meaning.
-Worker sharing remains unavailable until one owner-visible approval flow (not
-a second code) and the live proof path are complete. Memory-store tests pass;
-PostgreSQL integration tests are written but require
+differs from it before consuming the challenge. A connected installation can
+submit a signed, time-limited participant request at
+`POST /v1/participant-enrollment-requests` and poll its decision at
+`GET /v1/participant-enrollment-requests/{requestID}`. The Box Owner sees the
+requesting installation and self-presented name, then explicitly approves or
+rejects it in the dashboard. Approval atomically pins the exact signed root
+and device; connecting with the six-digit code alone still grants discovery
+only. The request ID is also the signed proof challenge ID, so changing it
+cannot replay a proof under a new request. The proof also signs a digest of the
+Box-local presented name and revision, so a connection grant cannot relabel
+another device's signed request. The requesting app's connection
+grant must remain active through approval. Requests expire after 30 minutes.
+
+**This is not yet an operational client-to-Box participant or Worker-sharing
+flow.** Facets does not yet submit this request, and authenticated live
+challenge/proof endpoints and a durable Principal-signed revocation feed are
+still absent. No Worker sharing is enabled by this controller change. Memory
+store and HTTP tests pass; PostgreSQL integration tests require
 `FACETS_BOX_TEST_DATABASE_URL` to execute against a live test database.
 
 ## Nearby discovery and multiple Boxes

@@ -14,10 +14,10 @@ import (
 // record. Calling PinOwnerApprovedParticipant requires separate Box-owner
 // authorization; this internal store API does not perform that ceremony.
 type BoxParticipantEnrollment struct {
-	Anchor      BoxParticipantAnchor
-	Device      BoxParticipantDevice
-	RootRecord  BoxSignedPrincipalRecord
-	GrantRecord BoxSignedPrincipalRecord
+	Anchor      BoxParticipantAnchor     `json:"anchor"`
+	Device      BoxParticipantDevice     `json:"device"`
+	RootRecord  BoxSignedPrincipalRecord `json:"rootRecord"`
+	GrantRecord BoxSignedPrincipalRecord `json:"grantRecord"`
 }
 
 // BoxParticipantSummary is public authority projected for the Box Owner UI.
@@ -80,6 +80,12 @@ func (store *MemoryStore) PinOwnerApprovedParticipant(
 	if store.state == nil || !store.state.Claimed() || store.state.BoxID != enrollment.Anchor.BoxID {
 		return ErrParticipantAuthority
 	}
+	return store.pinParticipantLocked(enrollment)
+}
+
+// Caller holds store.mu and has verified the Box is claimed and the signed
+// public enrollment is current. Shared with the atomic request decision path.
+func (store *MemoryStore) pinParticipantLocked(enrollment BoxParticipantEnrollment) error {
 	if existing, present := store.participantEnrollments[enrollment.Anchor.ParticipantID]; present {
 		if sameParticipantEnrollment(existing, enrollment) {
 			return nil

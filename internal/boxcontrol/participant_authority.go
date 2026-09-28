@@ -96,6 +96,7 @@ type BoxParticipantProofPayload struct {
 	GrantID               uuid.UUID `json:"grantID"`
 	DeviceGeneration      uint64    `json:"deviceGeneration"`
 	ChallengeID           uuid.UUID `json:"challengeID"`
+	PresentationDigest    string    `json:"presentationDigest,omitempty"`
 	IssuedAtMilliseconds  int64     `json:"issuedAtMilliseconds"`
 	ExpiresAtMilliseconds int64     `json:"expiresAtMilliseconds"`
 }

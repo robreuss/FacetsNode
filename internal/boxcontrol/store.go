@@ -37,6 +37,10 @@ type Store interface {
 	PinOwnerApprovedParticipant(context.Context, BoxParticipantEnrollment, int64) error
 	PinnedParticipant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (BoxParticipantEnrollment, error)
 	ListPinnedParticipants(context.Context, uuid.UUID) ([]BoxParticipantSummary, error)
+	CreateParticipantEnrollmentRequest(context.Context, BoxParticipantEnrollmentRequest, int64) error
+	ParticipantEnrollmentRequest(context.Context, uuid.UUID, uuid.UUID, int64) (BoxParticipantEnrollmentRequest, error)
+	PendingParticipantEnrollmentRequests(context.Context, uuid.UUID, int64) ([]BoxParticipantEnrollmentRequest, error)
+	DecideParticipantEnrollmentRequest(context.Context, uuid.UUID, uuid.UUID, bool, int64) error
 	RevokePinnedParticipant(context.Context, uuid.UUID, uuid.UUID, int64) error
 	RevokePinnedParticipantDevice(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error
 	IssueParticipantChallenge(context.Context, BoxParticipantChallenge, int64) error
@@ -54,6 +58,7 @@ type MemoryStore struct {
 	requests               map[uuid.UUID]ConnectionRequest
 	participantEnrollments map[uuid.UUID]BoxParticipantEnrollment
 	participantChallenges  map[uuid.UUID]participantChallengeState
+	participantRequests    map[uuid.UUID]BoxParticipantEnrollmentRequest
 	throttle               map[string]LoginThrottle
 	audit                  []AuditEvent
 }
@@ -66,6 +71,7 @@ func NewMemoryStore() *MemoryStore {
 		requests:               make(map[uuid.UUID]ConnectionRequest),
 		participantEnrollments: make(map[uuid.UUID]BoxParticipantEnrollment),
 		participantChallenges:  make(map[uuid.UUID]participantChallengeState),
+		participantRequests:    make(map[uuid.UUID]BoxParticipantEnrollmentRequest),
 		throttle:               make(map[string]LoginThrottle),
 	}
 }
