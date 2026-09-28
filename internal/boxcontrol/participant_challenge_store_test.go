@@ -252,6 +252,11 @@ func TestPostgresParticipantChallengeSurvivesRestartAndConsumesOnce(t *testing.T
 	if err != nil || !sameParticipantEnrollment(pinned, enrollment) {
 		t.Fatal("pinned enrollment did not survive store restart", err)
 	}
+	summaries, err := restarted.ListPinnedParticipants(ctx, boxID)
+	if err != nil || len(summaries) != 1 || summaries[0].DeviceName != "Test Mac" ||
+		summaries[0].ParticipantID != enrollment.Anchor.ParticipantID {
+		t.Fatal("owner roster did not retain pinned participant", err)
+	}
 	modified := enrollment
 	modified.Anchor.ApprovedAtMilliseconds++
 	if err := restarted.PinOwnerApprovedParticipant(ctx, modified, fixture.now); !errors.Is(err, ErrParticipantAuthority) {

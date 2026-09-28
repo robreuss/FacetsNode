@@ -143,22 +143,23 @@ type boxPrincipalDeviceRevocation struct {
 	Reason                   string    `json:"reason"`
 }
 
-// The Box controller store atomically consumes an issued challenge bound to
-// these exact identities and expiry, durably across a Box restart. The
+// An operational proof must use the Box's stored authority, never accept
+// caller-supplied root or device records as the authority of record. The
 // participant enrollment and proof HTTP routes are not installed yet.
-type BoxParticipantChallengeStore interface {
+type BoxParticipantProofStore interface {
+	PinnedParticipant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (BoxParticipantEnrollment, error)
 	ConsumeParticipantChallenge(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, error)
 }
 
 type BoxParticipantProofVerifier struct {
-	challenges BoxParticipantChallengeStore
+	store BoxParticipantProofStore
 }
 
-func NewBoxParticipantProofVerifier(challenges BoxParticipantChallengeStore) (*BoxParticipantProofVerifier, error) {
-	if challenges == nil {
+func NewBoxParticipantProofVerifier(store BoxParticipantProofStore) (*BoxParticipantProofVerifier, error) {
+	if store == nil {
 		return nil, ErrParticipantAuthority
 	}
-	return &BoxParticipantProofVerifier{challenges: challenges}, nil
+	return &BoxParticipantProofVerifier{store: store}, nil
 }
 
 func (verifier *BoxParticipantProofVerifier) Authorize(
@@ -172,14 +173,20 @@ func (verifier *BoxParticipantProofVerifier) Authorize(
 	expectedChallengeID uuid.UUID,
 	nowMilliseconds int64,
 ) error {
-	if verifier == nil || verifier.challenges == nil {
+	if verifier == nil || verifier.store == nil {
+		return ErrParticipantAuthority
+	}
+	pinned, err := verifier.store.PinnedParticipant(ctx, anchor.BoxID, anchor.ParticipantID, device.DeviceID)
+	if err != nil || !sameParticipantEnrollment(pinned, BoxParticipantEnrollment{
+		Anchor: anchor, Device: device, RootRecord: rootRecord, GrantRecord: grantRecord,
+	}) {
 		return ErrParticipantAuthority
 	}
 	if err := verifyBoxParticipantProof(anchor, device, rootRecord, grantRecord,
 		revocations, proof, expectedChallengeID, nowMilliseconds); err != nil {
 		return err
 	}
-	consumed, err := verifier.challenges.ConsumeParticipantChallenge(ctx, anchor.BoxID,
+	consumed, err := verifier.store.ConsumeParticipantChallenge(ctx, anchor.BoxID,
 		anchor.ParticipantID, device.DeviceID, expectedChallengeID, nowMilliseconds)
 	if err != nil {
 		return err
@@ -268,6 +275,9 @@ func verifyBoxParticipantEnrollment(
 	if strictParticipantJSON(grantRecord.Payload, &grant) != nil ||
 		grant.Version != 1 || grant.PrincipalID != root.PrincipalID ||
 		grant.ID != device.GrantID || grant.DeviceID != device.DeviceID ||
+		grant.DeviceName == "" || len(grant.DeviceName) > 128 ||
+		normalizedDisplayName(grant.DeviceName) != grant.DeviceName ||
+		strings.IndexFunc(grant.DeviceName, unicode.IsControl) >= 0 ||
 		grant.DeviceGeneration != device.DeviceGeneration ||
 		grant.SupersedesGrantID != nil ||
 		grant.SigningKeyFingerprint != device.SigningKeyFingerprint ||

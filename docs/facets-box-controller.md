@@ -62,20 +62,26 @@ consumption now require the same pinned, active signed device grant. Revoking
 the Box-local participant or its exact device grant blocks both new and
 outstanding challenges. The Box Owner can invoke the revocation control with
 an authenticated Web session and CSRF token; an ordinary app-connection grant
-cannot do so. Revocation is a cutoff at this Box, not a claim to revoke the
-Principal's private root or its participation elsewhere.
+cannot do so. The owner dashboard now lists pinned participant/device IDs,
+their self-asserted signed device name, and the separate revocation controls.
+No canonical Persona identity is inferred from this display. Revocation is a
+cutoff at this Box, not a claim to revoke the Principal's private root or its
+participation elsewhere.
 
 The internal store validates and pins an owner-approved Box-scoped public root
 with its first exact signed device grant. It rejects changed retries and
 duplicate scoped identities or device keys. The Box stores only public
-authority records, not the private Principal root or device keys. **This is
-not yet an operational participant-enrollment or proof flow.** No owner-facing
-pending request/approval screen, authenticated challenge-issuance endpoint, or
-proof endpoint has been installed; the owner-only revocation control likewise
-has no participant-roster UI yet. Neither discovery nor the app-connection
-grant can pin a participant. Worker sharing must remain unavailable until the
-owner approval ceremony and live proof path use these records. Memory-store
-tests pass; PostgreSQL integration tests are written but require
+authority records, not the private Principal root or device keys. The proof
+verifier now requires a stored pin and rejects caller-supplied authority that
+differs from it before consuming the challenge. **This is not yet an
+operational participant-enrollment or proof flow.** No pending request/owner
+approval ceremony, authenticated challenge-issuance endpoint, proof endpoint,
+or durable Principal-signed revocation feed has been installed. The existing
+six-digit connection code currently grants discovery only; silently treating
+it or a resulting app grant as participant approval would broaden its meaning.
+Worker sharing remains unavailable until one owner-visible approval flow (not
+a second code) and the live proof path are complete. Memory-store tests pass;
+PostgreSQL integration tests are written but require
 `FACETS_BOX_TEST_DATABASE_URL` to execute against a live test database.
 
 ## Nearby discovery and multiple Boxes

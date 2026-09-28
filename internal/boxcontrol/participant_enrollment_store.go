@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"reflect"
+	"sort"
 
 	"github.com/google/uuid"
 )
@@ -17,6 +18,33 @@ type BoxParticipantEnrollment struct {
 	Device      BoxParticipantDevice
 	RootRecord  BoxSignedPrincipalRecord
 	GrantRecord BoxSignedPrincipalRecord
+}
+
+// BoxParticipantSummary is public authority projected for the Box Owner UI.
+// The device name is self-asserted in the signed grant; it is not a Persona.
+type BoxParticipantSummary struct {
+	ParticipantID      uuid.UUID
+	DeviceID           uuid.UUID
+	DeviceName         string
+	RootKeyFingerprint string
+	ParticipantRevoked bool
+	DeviceRevoked      bool
+}
+
+func participantSummary(enrollment BoxParticipantEnrollment) (BoxParticipantSummary, error) {
+	var grant boxPrincipalDeviceGrant
+	if strictParticipantJSON(enrollment.GrantRecord.Payload, &grant) != nil ||
+		grant.DeviceID != enrollment.Device.DeviceID || grant.ID != enrollment.Device.GrantID {
+		return BoxParticipantSummary{}, ErrParticipantAuthority
+	}
+	return BoxParticipantSummary{
+		ParticipantID:      enrollment.Anchor.ParticipantID,
+		DeviceID:           enrollment.Device.DeviceID,
+		DeviceName:         grant.DeviceName,
+		RootKeyFingerprint: enrollment.Anchor.RootKeyFingerprint,
+		ParticipantRevoked: enrollment.Anchor.RevokedAtMilliseconds != 0,
+		DeviceRevoked:      enrollment.Device.RevokedThroughGeneration >= enrollment.Device.DeviceGeneration,
+	}, nil
 }
 
 func (enrollment BoxParticipantEnrollment) validInitialAt(nowMilliseconds int64) bool {
@@ -84,6 +112,29 @@ func (store *MemoryStore) PinnedParticipant(
 		return BoxParticipantEnrollment{}, ErrParticipantAuthority
 	}
 	return cloneParticipantEnrollment(enrollment), nil
+}
+
+func (store *MemoryStore) ListPinnedParticipants(_ context.Context, boxID uuid.UUID) ([]BoxParticipantSummary, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.state == nil || !store.state.Claimed() || store.state.BoxID != boxID {
+		return nil, ErrParticipantAuthority
+	}
+	results := make([]BoxParticipantSummary, 0, len(store.participantEnrollments))
+	for _, enrollment := range store.participantEnrollments {
+		if enrollment.Anchor.BoxID != boxID {
+			continue
+		}
+		summary, err := participantSummary(enrollment)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, summary)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ParticipantID.String() < results[j].ParticipantID.String()
+	})
+	return results, nil
 }
 
 // RevokePinnedParticipant is an immediate Box-owner service cutoff. It does

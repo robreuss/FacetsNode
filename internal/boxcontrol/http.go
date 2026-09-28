@@ -162,6 +162,7 @@ type pageModel struct {
 	PublicURL                  string
 	Uptime                     string
 	Grants                     []ConnectionGrant
+	Participants               []BoxParticipantSummary
 	Audit                      []AuditEvent
 	DeviceSyncHealthy          bool
 	Error                      string
@@ -192,6 +193,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 <section><h2>Device access</h2><p>Create a time-limited code for another Facets installation. The code grants service discovery, not Box administration or membership in any service.</p><a class="button" href="authorize-device">Authorize another device</a></section>
 <section><h2>Services</h2><div class="grid"><section class="card"><h3>{{.SpacesSyncName}}</h3>{{if .DeviceSyncHealthy}}<p class="good">Available</p>{{else}}<p class="bad">Unavailable</p>{{end}}</section><section class="card"><h3>{{.GroupSpacesName}}</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Backup</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Edge</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Post</h3><p class="quiet">Not configured</p></section><section class="card"><h3>Compute</h3><p class="quiet">Not configured</p></section></div></section>
 <section><h2>Connected Facets installations</h2>{{range .Grants}}<p>{{.DeviceName}} <span class="quiet">last seen {{.LastSeenAt.Format "2006-01-02 15:04 MST"}}</span> {{if .RevokedAt.IsZero}}<form style="display:inline" method="post" action="grants/{{.GrantID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke</button></form>{{else}}<span class="quiet">revoked</span>{{end}}</p>{{else}}<p class="quiet">No app connections yet.</p>{{end}}</section>
+<section><h2>Box participants</h2><p class="quiet">These are Box-local signed device records, not Personas. Device names are supplied by the connecting device. Revoking a participant or device stops new proofs at this Box; it does not erase that person’s private identity or access elsewhere.</p>{{range .Participants}}<div><strong>{{.DeviceName}}</strong> <span class="quiet">(name supplied by device)</span><details class="identity"><summary>Technical identifiers</summary>Participant <code>{{.ParticipantID}}</code><br>Device <code>{{.DeviceID}}</code><br>Root key <code>{{.RootKeyFingerprint}}</code></details>{{if .ParticipantRevoked}}<span class="quiet">Participant revoked</span>{{else}}<form style="display:inline" method="post" action="v1/owner/participants/{{.ParticipantID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke participant</button></form>{{if .DeviceRevoked}} <span class="quiet">Device revoked</span>{{else}} <form style="display:inline" method="post" action="v1/owner/participants/{{.ParticipantID}}/devices/{{.DeviceID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button>Revoke device</button></form>{{end}}{{end}}</div>{{else}}<p class="quiet">No participants enrolled yet.</p>{{end}}</section>
 <section><h2>Change Box Owner password</h2><form method="post" action="password"><input type="hidden" name="csrf" value="{{.CSRF}}"><p><input type="password" name="current_password" autocomplete="current-password" placeholder="Current password" required></p><p><input type="password" name="new_password" autocomplete="new-password" minlength="15" maxlength="128" placeholder="New password" required></p><button>Change and revoke all connections</button></form></section>
 <section><h2>Recent activity</h2>{{range .Audit}}<p><code>{{.OccurredAt.Format "2006-01-02 15:04 MST"}}</code> {{.Kind}} — {{.Outcome}}</p>{{else}}<p class="quiet">No activity yet.</p>{{end}}</section>
 <form method="post" action="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out</button></form>
@@ -241,6 +243,13 @@ func (service *Service) handleHome(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		model.Grants, _ = service.store.ListGrants(request.Context())
+		if state.Claimed() {
+			model.Participants, err = service.store.ListPinnedParticipants(request.Context(), state.BoxID)
+			if err != nil {
+				service.internalError(writer, request, "participant_list", err)
+				return
+			}
+		}
 		model.Audit, _ = service.store.RecentAudit(request.Context(), 20)
 		healthContext, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 		defer cancel()
@@ -285,6 +294,13 @@ func (service *Service) handleAuthorizeDevice(writer http.ResponseWriter, reques
 		model.InvitationCode = code
 		model.InvitationExpires = invitation.ExpiresAt.Format("at 3:04 PM")
 		model.Grants, _ = service.store.ListGrants(request.Context())
+		if state.Claimed() {
+			model.Participants, err = service.store.ListPinnedParticipants(request.Context(), state.BoxID)
+			if err != nil {
+				service.internalError(writer, request, "participant_list", err)
+				return
+			}
+		}
 		model.Audit, _ = service.store.RecentAudit(request.Context(), 20)
 		healthContext, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 		defer cancel()

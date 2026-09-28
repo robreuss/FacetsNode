@@ -128,6 +128,27 @@ func TestParticipantRevocationHTTPRequiresOwnerSessionAndCSRF(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	ownerHome := func(withSession bool) string {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		if withSession {
+			request.AddCookie(&http.Cookie{Name: "facets_box_session", Value: sessionToken})
+			request.AddCookie(&http.Cookie{Name: "facets_box_csrf", Value: csrf})
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("owner page status %d", response.Code)
+		}
+		return response.Body.String()
+	}
+	if strings.Contains(ownerHome(false), fixture.anchor.ParticipantID.String()) {
+		t.Fatal("unauthenticated page exposed participant roster")
+	}
+	if page := ownerHome(true); !strings.Contains(page, fixture.anchor.ParticipantID.String()) ||
+		!strings.Contains(page, "Revoke device") || !strings.Contains(page, "Test Mac") {
+		t.Fatal("owner page omitted pinned device and revocation control")
+	}
 	devicePath := "/v1/owner/participants/" + fixture.anchor.ParticipantID.String() +
 		"/devices/" + fixture.device.DeviceID.String() + "/revoke"
 	post := func(path, formCSRF string, withSession bool, bearerToken string) *httptest.ResponseRecorder {
@@ -166,6 +187,9 @@ func TestParticipantRevocationHTTPRequiresOwnerSessionAndCSRF(t *testing.T) {
 		challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, fixture.now+1)
 	if err != nil || consumed {
 		t.Fatal("owner revocation left challenge usable", err)
+	}
+	if page := ownerHome(true); !strings.Contains(page, "Device revoked") || strings.Contains(page, ">Revoke device</button>") {
+		t.Fatal("owner page did not reflect device revocation")
 	}
 	rootPath := "/v1/owner/participants/" + fixture.anchor.ParticipantID.String() + "/revoke"
 	if result := post(rootPath, csrf, true, ""); result.Code != http.StatusNoContent {

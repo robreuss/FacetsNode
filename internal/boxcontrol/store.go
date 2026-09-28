@@ -36,6 +36,7 @@ type Store interface {
 	CompleteConnectionRequest(context.Context, uuid.UUID, []byte) error
 	PinOwnerApprovedParticipant(context.Context, BoxParticipantEnrollment, int64) error
 	PinnedParticipant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (BoxParticipantEnrollment, error)
+	ListPinnedParticipants(context.Context, uuid.UUID) ([]BoxParticipantSummary, error)
 	RevokePinnedParticipant(context.Context, uuid.UUID, uuid.UUID, int64) error
 	RevokePinnedParticipantDevice(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error
 	IssueParticipantChallenge(context.Context, BoxParticipantChallenge, int64) error

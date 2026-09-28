@@ -36,7 +36,16 @@ type fixtureChallengeStore struct {
 	participantID uuid.UUID
 	deviceID      uuid.UUID
 	challengeID   uuid.UUID
+	enrollment    BoxParticipantEnrollment
 	consumed      bool
+}
+
+func (store *fixtureChallengeStore) PinnedParticipant(_ context.Context,
+	boxID, participantID, deviceID uuid.UUID) (BoxParticipantEnrollment, error) {
+	if boxID != store.boxID || participantID != store.participantID || deviceID != store.deviceID {
+		return BoxParticipantEnrollment{}, ErrParticipantAuthority
+	}
+	return cloneParticipantEnrollment(store.enrollment), nil
 }
 
 func (store *fixtureChallengeStore) ConsumeParticipantChallenge(_ context.Context, boxID,
@@ -56,6 +65,10 @@ func (fixture participantFixture) verifier(t *testing.T) *BoxParticipantProofVer
 	verifier, err := NewBoxParticipantProofVerifier(&fixtureChallengeStore{
 		boxID: fixture.anchor.BoxID, participantID: fixture.anchor.ParticipantID,
 		deviceID: fixture.device.DeviceID, challengeID: fixture.challengeID,
+		enrollment: BoxParticipantEnrollment{
+			Anchor: fixture.anchor, Device: fixture.device,
+			RootRecord: fixture.root, GrantRecord: fixture.grant,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +209,19 @@ func TestBoxParticipantProofRequiresPinnedPrincipalAndExactEnrolledDevice(t *tes
 				t.Fatalf("got %v", err)
 			}
 		})
+	}
+}
+
+func TestBoxParticipantVerifierRejectsUnpinnedApprovalStateBeforeChallengeUse(t *testing.T) {
+	fixture := newParticipantFixture(t)
+	verifier := fixture.verifier(t)
+	substituted := fixture
+	substituted.anchor.ApprovedAtMilliseconds--
+	if err := substituted.authorize(verifier, nil); !errors.Is(err, ErrParticipantAuthority) {
+		t.Fatalf("caller-supplied approval state replaced the Box pin: %v", err)
+	}
+	if err := fixture.authorize(verifier, nil); err != nil {
+		t.Fatalf("valid pinned proof was consumed by substitution attempt: %v", err)
 	}
 }
 
@@ -368,6 +394,10 @@ func TestBoxParticipantPortableSignedFixture(t *testing.T) {
 	verifier, err := NewBoxParticipantProofVerifier(&fixtureChallengeStore{
 		boxID: fixture.Anchor.BoxID, participantID: fixture.Anchor.ParticipantID,
 		deviceID: fixture.Device.DeviceID, challengeID: fixture.ChallengeID,
+		enrollment: BoxParticipantEnrollment{
+			Anchor: fixture.Anchor, Device: fixture.Device,
+			RootRecord: fixture.Root, GrantRecord: fixture.Grant,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

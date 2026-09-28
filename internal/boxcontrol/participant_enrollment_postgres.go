@@ -118,6 +118,39 @@ func (store *PostgresStore) PinnedParticipant(
 		boxID, participantID, deviceID))
 }
 
+func (store *PostgresStore) ListPinnedParticipants(
+	ctx context.Context,
+	boxID uuid.UUID,
+) ([]BoxParticipantSummary, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT p.box_id, p.participant_id, p.box_scoped_principal_id,
+		       p.root_key_fingerprint, p.approved_at_milliseconds, p.revoked_at_milliseconds,
+		       p.root_record, d.participant_id, d.device_id, d.grant_id,
+		       d.device_generation, d.signing_key_fingerprint,
+		       d.revoked_through_generation, d.grant_record
+		FROM box_participants p
+		JOIN box_state s ON s.box_id = p.box_id AND s.owner_verifier <> ''
+		JOIN box_participant_devices d ON d.participant_id = p.participant_id
+		WHERE p.box_id = $1 ORDER BY p.participant_id, d.device_id`, boxID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []BoxParticipantSummary
+	for rows.Next() {
+		enrollment, err := readPinnedParticipant(rows)
+		if err != nil {
+			return nil, err
+		}
+		summary, err := participantSummary(enrollment)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, summary)
+	}
+	return results, rows.Err()
+}
+
 func (store *PostgresStore) RevokePinnedParticipant(
 	ctx context.Context,
 	boxID, participantID uuid.UUID,
