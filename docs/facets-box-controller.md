@@ -55,22 +55,28 @@ exact request. The app stores the device-bound grant in platform-protected
 storage and uses it only for the generic authenticated service profile. The
 grant cannot administer the Box or enroll the installation in any service.
 
-The separate Box-participant proof path now has a durable one-use challenge
+The separate Box-participant proof path has a durable one-use challenge
 primitive. A challenge is bound to one claimed Box, participant, and device,
-expires within two minutes, and is atomically consumed once. PostgreSQL stores
-the row independently of the controller process; the live database restart test
-still requires a configured test database. A challenge is not issued by nearby
-discovery or by the app-connection grant. This storage primitive is not yet an
-operational participant-enrollment or proof endpoint: an owner-approved
-Box-scoped root, exact device grant, revocation state, and authenticated
-issuance path still have to be connected in the live controller before a Worker
-can be shared. The internal store can now validate and pin an owner-approved
-Box-scoped public root together with its first exact signed device grant. It
-rejects changed retries and duplicate scoped identities or device keys. That
-operation is not exposed to a discovery/app grant or an HTTP caller. The Box
-stores only public authority records, not the private Principal root or device
-keys. Memory-store verification passes; the PostgreSQL integration test is
-written but requires `FACETS_BOX_TEST_DATABASE_URL` to execute.
+expires within two minutes, and is atomically consumed once. Issuance and
+consumption now require the same pinned, active signed device grant. Revoking
+the Box-local participant or its exact device grant blocks both new and
+outstanding challenges. The Box Owner can invoke the revocation control with
+an authenticated Web session and CSRF token; an ordinary app-connection grant
+cannot do so. Revocation is a cutoff at this Box, not a claim to revoke the
+Principal's private root or its participation elsewhere.
+
+The internal store validates and pins an owner-approved Box-scoped public root
+with its first exact signed device grant. It rejects changed retries and
+duplicate scoped identities or device keys. The Box stores only public
+authority records, not the private Principal root or device keys. **This is
+not yet an operational participant-enrollment or proof flow.** No owner-facing
+pending request/approval screen, authenticated challenge-issuance endpoint, or
+proof endpoint has been installed; the owner-only revocation control likewise
+has no participant-roster UI yet. Neither discovery nor the app-connection
+grant can pin a participant. Worker sharing must remain unavailable until the
+owner approval ceremony and live proof path use these records. Memory-store
+tests pass; PostgreSQL integration tests are written but require
+`FACETS_BOX_TEST_DATABASE_URL` to execute against a live test database.
 
 ## Nearby discovery and multiple Boxes
 

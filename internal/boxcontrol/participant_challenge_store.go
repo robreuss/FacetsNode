@@ -45,6 +45,12 @@ func (store *MemoryStore) IssueParticipantChallenge(
 	if store.state == nil || !store.state.Claimed() || store.state.BoxID != challenge.BoxID {
 		return ErrParticipantAuthority
 	}
+	enrollment, enrolled := store.participantEnrollments[challenge.ParticipantID]
+	if !enrolled || enrollment.Anchor.BoxID != challenge.BoxID ||
+		enrollment.Device.DeviceID != challenge.DeviceID ||
+		!enrollment.validInitialAt(nowMilliseconds) {
+		return ErrParticipantAuthority
+	}
 	if _, exists := store.participantChallenges[challenge.ChallengeID]; exists {
 		return ErrParticipantAuthority
 	}
@@ -60,9 +66,12 @@ func (store *MemoryStore) ConsumeParticipantChallenge(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	state, exists := store.participantChallenges[challengeID]
+	enrollment, enrolled := store.participantEnrollments[participantID]
 	if !exists || state.consumedAtMilliseconds != 0 ||
 		state.challenge.BoxID != boxID || state.challenge.ParticipantID != participantID ||
-		state.challenge.DeviceID != deviceID || !state.challenge.validAt(nowMilliseconds) {
+		state.challenge.DeviceID != deviceID || !state.challenge.validAt(nowMilliseconds) ||
+		!enrolled || enrollment.Anchor.BoxID != boxID || enrollment.Device.DeviceID != deviceID ||
+		!enrollment.validInitialAt(nowMilliseconds) {
 		return false, nil
 	}
 	state.consumedAtMilliseconds = nowMilliseconds

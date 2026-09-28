@@ -127,11 +127,20 @@ func (store *PostgresStore) IssueParticipantChallenge(
 	if !challenge.validAt(nowMilliseconds) {
 		return ErrParticipantAuthority
 	}
+	enrollment, err := store.PinnedParticipant(ctx, challenge.BoxID,
+		challenge.ParticipantID, challenge.DeviceID)
+	if err != nil || !enrollment.validInitialAt(nowMilliseconds) {
+		return ErrParticipantAuthority
+	}
 	result, err := store.pool.Exec(ctx, `
 		INSERT INTO box_participant_challenges
 			(challenge_id, box_id, participant_id, device_id, issued_at_milliseconds, expires_at_milliseconds)
-		SELECT $1, $2, $3, $4, $5, $6 FROM box_state
-		WHERE box_id = $2 AND owner_verifier <> ''
+		SELECT $1, $2, $3, $4, $5, $6 FROM box_state s
+		JOIN box_participants p ON p.box_id = s.box_id AND p.participant_id = $3
+		JOIN box_participant_devices d ON d.participant_id = p.participant_id AND d.device_id = $4
+		WHERE s.box_id = $2 AND s.owner_verifier <> ''
+		  AND p.revoked_at_milliseconds = 0
+		  AND d.revoked_through_generation < d.device_generation
 		ON CONFLICT (challenge_id) DO NOTHING`,
 		challenge.ChallengeID, challenge.BoxID, challenge.ParticipantID, challenge.DeviceID,
 		challenge.IssuedAtMilliseconds, challenge.ExpiresAtMilliseconds)
@@ -153,13 +162,44 @@ func (store *PostgresStore) ConsumeParticipantChallenge(
 		deviceID == uuid.Nil || challengeID == uuid.Nil {
 		return false, nil
 	}
-	result, err := store.pool.Exec(ctx, `
-		UPDATE box_participant_challenges SET consumed_at_milliseconds = $5
-		WHERE challenge_id = $1 AND box_id = $2 AND participant_id = $3 AND device_id = $4
-		  AND issued_at_milliseconds <= $5 AND expires_at_milliseconds > $5
-		  AND consumed_at_milliseconds IS NULL`,
+	enrollment, err := store.PinnedParticipant(ctx, boxID, participantID, deviceID)
+	if err != nil || !enrollment.validInitialAt(nowMilliseconds) {
+		return false, nil
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	// Hold shared locks on both authority rows through challenge consumption.
+	// Owner revocation takes an exclusive lock, giving the two operations a
+	// definite order instead of authorizing from a stale MVCC snapshot.
+	var active int
+	err = tx.QueryRow(ctx, `
+		SELECT 1 FROM box_participants p
+		JOIN box_participant_devices d ON d.participant_id = p.participant_id
+		JOIN box_state s ON s.box_id = p.box_id AND s.owner_verifier <> ''
+		WHERE p.box_id = $1 AND p.participant_id = $2 AND d.device_id = $3
+		  AND p.revoked_at_milliseconds = 0
+		  AND d.revoked_through_generation < d.device_generation
+		FOR SHARE OF p, d`, boxID, participantID, deviceID).Scan(&active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE box_participant_challenges c SET consumed_at_milliseconds = $5
+		WHERE c.challenge_id = $1 AND c.box_id = $2
+		  AND c.participant_id = $3 AND c.device_id = $4
+		  AND c.issued_at_milliseconds <= $5 AND c.expires_at_milliseconds > $5
+		  AND c.consumed_at_milliseconds IS NULL`,
 		challengeID, boxID, participantID, deviceID, nowMilliseconds)
 	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return result.RowsAffected() == 1, nil

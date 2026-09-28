@@ -91,6 +91,8 @@ func (service *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /password", service.handlePasswordChange)
 	mux.HandleFunc("GET /authorize-device", service.handleAuthorizeDevice)
 	mux.HandleFunc("POST /grants/{grantID}/revoke", service.handleGrantRevocation)
+	mux.HandleFunc("POST /v1/owner/participants/{participantID}/revoke", service.handleParticipantRevocation)
+	mux.HandleFunc("POST /v1/owner/participants/{participantID}/devices/{deviceID}/revoke", service.handleParticipantDeviceRevocation)
 	mux.HandleFunc("POST /v1/claim-connection-requests", service.handleCreateClaimConnectionRequest)
 	mux.HandleFunc("POST /v1/connection-invitations/redeem", service.handleRedeemConnectionInvitation)
 	mux.HandleFunc("GET /v1/connection-requests/{requestID}", service.handlePollConnectionRequest)
@@ -477,6 +479,66 @@ func (service *Service) handleGrantRevocation(writer http.ResponseWriter, reques
 	}
 	service.audit(request.Context(), "connection_grant_revoke", "accepted")
 	http.Redirect(writer, request, service.cookiePath+"/", http.StatusSeeOther)
+}
+
+func (service *Service) handleParticipantRevocation(writer http.ResponseWriter, request *http.Request) {
+	_, session, authenticated := service.webContext(request)
+	if !authenticated || !service.validateCSRF(request, &session) {
+		http.Error(writer, "Request rejected.", http.StatusBadRequest)
+		return
+	}
+	participantID, err := uuid.Parse(request.PathValue("participantID"))
+	if err != nil || participantID == uuid.Nil {
+		http.Error(writer, "Participant not found.", http.StatusNotFound)
+		return
+	}
+	state, err := service.store.State(request.Context())
+	if err != nil {
+		service.internalError(writer, request, "participant_revoke_state", err)
+		return
+	}
+	err = service.store.RevokePinnedParticipant(request.Context(), state.BoxID, participantID, service.now().UnixMilli())
+	if errors.Is(err, ErrParticipantAuthority) {
+		http.Error(writer, "Participant not found.", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		service.internalError(writer, request, "participant_revoke", err)
+		return
+	}
+	service.audit(request.Context(), "participant_revoke", "accepted")
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (service *Service) handleParticipantDeviceRevocation(writer http.ResponseWriter, request *http.Request) {
+	_, session, authenticated := service.webContext(request)
+	if !authenticated || !service.validateCSRF(request, &session) {
+		http.Error(writer, "Request rejected.", http.StatusBadRequest)
+		return
+	}
+	participantID, participantErr := uuid.Parse(request.PathValue("participantID"))
+	deviceID, deviceErr := uuid.Parse(request.PathValue("deviceID"))
+	if participantErr != nil || deviceErr != nil || participantID == uuid.Nil || deviceID == uuid.Nil {
+		http.Error(writer, "Participant device not found.", http.StatusNotFound)
+		return
+	}
+	state, err := service.store.State(request.Context())
+	if err != nil {
+		service.internalError(writer, request, "participant_device_revoke_state", err)
+		return
+	}
+	err = service.store.RevokePinnedParticipantDevice(request.Context(), state.BoxID,
+		participantID, deviceID, service.now().UnixMilli())
+	if errors.Is(err, ErrParticipantAuthority) {
+		http.Error(writer, "Participant device not found.", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		service.internalError(writer, request, "participant_device_revoke", err)
+		return
+	}
+	service.audit(request.Context(), "participant_device_revoke", "accepted")
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 type createConnectionRequestBody struct {

@@ -14,32 +14,37 @@ import (
 )
 
 type participantChallengeStoreForTest interface {
+	PinOwnerApprovedParticipant(context.Context, BoxParticipantEnrollment, int64) error
 	IssueParticipantChallenge(context.Context, BoxParticipantChallenge, int64) error
 	ConsumeParticipantChallenge(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, error)
 }
 
-func testParticipantChallenges(t *testing.T, store participantChallengeStoreForTest, boxID uuid.UUID) {
+func testParticipantChallenges(t *testing.T, store participantChallengeStoreForTest, enrollment BoxParticipantEnrollment, now int64) {
 	t.Helper()
 	ctx := context.Background()
-	challenge := BoxParticipantChallenge{
-		BoxID: boxID, ParticipantID: uuid.New(), DeviceID: uuid.New(), ChallengeID: uuid.New(),
-		IssuedAtMilliseconds: 1_000_000, ExpiresAtMilliseconds: 1_060_000,
-	}
-	if err := store.IssueParticipantChallenge(ctx, challenge, 1_000_000); err != nil {
+	if err := store.PinOwnerApprovedParticipant(ctx, enrollment, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.IssueParticipantChallenge(ctx, challenge, 1_000_000); err == nil {
+	challenge := BoxParticipantChallenge{
+		BoxID: enrollment.Anchor.BoxID, ParticipantID: enrollment.Anchor.ParticipantID,
+		DeviceID: enrollment.Device.DeviceID, ChallengeID: uuid.New(),
+		IssuedAtMilliseconds: now, ExpiresAtMilliseconds: now + 30_000,
+	}
+	if err := store.IssueParticipantChallenge(ctx, challenge, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.IssueParticipantChallenge(ctx, challenge, now); err == nil {
 		t.Fatal("duplicate challenge ID was issued")
 	}
 	for _, wrong := range []struct {
 		box, participant, device uuid.UUID
 	}{
 		{uuid.New(), challenge.ParticipantID, challenge.DeviceID},
-		{boxID, uuid.New(), challenge.DeviceID},
-		{boxID, challenge.ParticipantID, uuid.New()},
+		{challenge.BoxID, uuid.New(), challenge.DeviceID},
+		{challenge.BoxID, challenge.ParticipantID, uuid.New()},
 	} {
 		consumed, err := store.ConsumeParticipantChallenge(ctx,
-			wrong.box, wrong.participant, wrong.device, challenge.ChallengeID, 1_001_000)
+			wrong.box, wrong.participant, wrong.device, challenge.ChallengeID, now+1_000)
 		if err != nil || consumed {
 			t.Fatal("wrong identity consumed the challenge", err)
 		}
@@ -52,7 +57,7 @@ func testParticipantChallenges(t *testing.T, store participantChallengeStoreForT
 		go func() {
 			defer wg.Done()
 			consumed, err := store.ConsumeParticipantChallenge(ctx,
-				boxID, challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, 1_002_000)
+				challenge.BoxID, challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, now+2_000)
 			if err != nil {
 				t.Errorf("consume challenge: %v", err)
 			}
@@ -71,18 +76,18 @@ func testParticipantChallenges(t *testing.T, store participantChallengeStoreForT
 		t.Fatalf("concurrent consumption had %d winners; want 1", winners)
 	}
 	consumed, err := store.ConsumeParticipantChallenge(ctx,
-		boxID, challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, 1_003_000)
+		challenge.BoxID, challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, now+3_000)
 	if err != nil || consumed {
 		t.Fatal("replay consumed the challenge", err)
 	}
 
 	expired := challenge
 	expired.ChallengeID = uuid.New()
-	if err := store.IssueParticipantChallenge(ctx, expired, 1_000_000); err != nil {
+	if err := store.IssueParticipantChallenge(ctx, expired, now); err != nil {
 		t.Fatal(err)
 	}
 	consumed, err = store.ConsumeParticipantChallenge(ctx,
-		boxID, expired.ParticipantID, expired.DeviceID, expired.ChallengeID, expired.ExpiresAtMilliseconds)
+		challenge.BoxID, expired.ParticipantID, expired.DeviceID, expired.ChallengeID, expired.ExpiresAtMilliseconds)
 	if err != nil || consumed {
 		t.Fatal("expired challenge was consumed", err)
 	}
@@ -117,7 +122,16 @@ func TestMemoryParticipantChallengesRequireClaimAndConsumeOnce(t *testing.T) {
 	if err := store.Claim(ctx, "activation", "owner", "Box", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	testParticipantChallenges(t, store, boxID)
+	if err := store.IssueParticipantChallenge(ctx, challenge, challenge.IssuedAtMilliseconds); !errors.Is(err, ErrParticipantAuthority) {
+		t.Fatalf("unapproved participant received a challenge: %v", err)
+	}
+	fixture := newParticipantFixture(t)
+	enrollment := BoxParticipantEnrollment{
+		Anchor: fixture.anchor, Device: fixture.device,
+		RootRecord: fixture.root, GrantRecord: fixture.grant,
+	}
+	enrollment.Anchor.BoxID = boxID
+	testParticipantChallenges(t, store, enrollment, fixture.now)
 }
 
 func TestBoxParticipantProofUsesIssuedMemoryChallenge(t *testing.T) {
@@ -128,6 +142,12 @@ func TestBoxParticipantProofUsesIssuedMemoryChallenge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.Claim(ctx, "activation", "owner", "Box", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PinOwnerApprovedParticipant(ctx, BoxParticipantEnrollment{
+		Anchor: fixture.anchor, Device: fixture.device,
+		RootRecord: fixture.root, GrantRecord: fixture.grant,
+	}, fixture.now); err != nil {
 		t.Fatal(err)
 	}
 	challenge := BoxParticipantChallenge{
@@ -188,11 +208,25 @@ func TestPostgresParticipantChallengeSurvivesRestartAndConsumesOnce(t *testing.T
 	if err := store.Claim(ctx, "activation", "owner", "Box", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	testParticipantChallenges(t, store, boxID)
+	unknown := BoxParticipantChallenge{
+		BoxID: boxID, ParticipantID: uuid.New(), DeviceID: uuid.New(), ChallengeID: uuid.New(),
+		IssuedAtMilliseconds: 1_000_000, ExpiresAtMilliseconds: 1_030_000,
+	}
+	if err := store.IssueParticipantChallenge(ctx, unknown, unknown.IssuedAtMilliseconds); !errors.Is(err, ErrParticipantAuthority) {
+		t.Fatalf("unapproved participant received a challenge: %v", err)
+	}
+	fixture := newParticipantFixture(t)
+	enrollment := BoxParticipantEnrollment{
+		Anchor: fixture.anchor, Device: fixture.device,
+		RootRecord: fixture.root, GrantRecord: fixture.grant,
+	}
+	enrollment.Anchor.BoxID = boxID
+	testParticipantChallenges(t, store, enrollment, fixture.now)
 
 	challenge := BoxParticipantChallenge{
-		BoxID: boxID, ParticipantID: uuid.New(), DeviceID: uuid.New(), ChallengeID: uuid.New(),
-		IssuedAtMilliseconds: 2_000_000, ExpiresAtMilliseconds: 2_060_000,
+		BoxID: boxID, ParticipantID: enrollment.Anchor.ParticipantID,
+		DeviceID: enrollment.Device.DeviceID, ChallengeID: uuid.New(),
+		IssuedAtMilliseconds: fixture.now, ExpiresAtMilliseconds: fixture.now + 30_000,
 	}
 	if err := store.IssueParticipantChallenge(ctx, challenge, challenge.IssuedAtMilliseconds); err != nil {
 		t.Fatal(err)
@@ -200,25 +234,16 @@ func TestPostgresParticipantChallengeSurvivesRestartAndConsumesOnce(t *testing.T
 	// A newly constructed service store sees the same unconsumed database row.
 	restarted := NewPostgresStore(pool)
 	consumed, err := restarted.ConsumeParticipantChallenge(ctx, boxID,
-		challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, 2_001_000)
+		challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, fixture.now+1_000)
 	if err != nil || !consumed {
 		t.Fatal("challenge did not survive store restart", err)
 	}
 	consumed, err = store.ConsumeParticipantChallenge(ctx, boxID,
-		challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, 2_002_000)
+		challenge.ParticipantID, challenge.DeviceID, challenge.ChallengeID, fixture.now+2_000)
 	if err != nil || consumed {
 		t.Fatal("restart allowed challenge replay", err)
 	}
 
-	fixture := newParticipantFixture(t)
-	enrollment := BoxParticipantEnrollment{
-		Anchor: fixture.anchor, Device: fixture.device,
-		RootRecord: fixture.root, GrantRecord: fixture.grant,
-	}
-	enrollment.Anchor.BoxID = boxID
-	if err := store.PinOwnerApprovedParticipant(ctx, enrollment, fixture.now); err != nil {
-		t.Fatal(err)
-	}
 	if err := restarted.PinOwnerApprovedParticipant(ctx, enrollment, fixture.now); err != nil {
 		t.Fatalf("exact enrollment retry: %v", err)
 	}
@@ -237,5 +262,36 @@ func TestPostgresParticipantChallengeSurvivesRestartAndConsumesOnce(t *testing.T
 	duplicateRoot.Device.ParticipantID = duplicateRoot.Anchor.ParticipantID
 	if err := restarted.PinOwnerApprovedParticipant(ctx, duplicateRoot, fixture.now); !errors.Is(err, ErrParticipantAuthority) {
 		t.Fatalf("second participant reused scoped root: %v", err)
+	}
+	pending := challenge
+	pending.ChallengeID = uuid.New()
+	if err := store.IssueParticipantChallenge(ctx, pending, fixture.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.RevokePinnedParticipantDevice(ctx, boxID,
+		enrollment.Anchor.ParticipantID, enrollment.Device.DeviceID, fixture.now+500); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.RevokePinnedParticipantDevice(ctx, boxID,
+		enrollment.Anchor.ParticipantID, enrollment.Device.DeviceID, fixture.now+600); err != nil {
+		t.Fatalf("device revocation retry: %v", err)
+	}
+	consumed, err = store.ConsumeParticipantChallenge(ctx, boxID,
+		pending.ParticipantID, pending.DeviceID, pending.ChallengeID, fixture.now+1_000)
+	if err != nil || consumed {
+		t.Fatal("outstanding challenge survived device revocation", err)
+	}
+	pending.ChallengeID = uuid.New()
+	if err := store.IssueParticipantChallenge(ctx, pending, fixture.now+1_000); !errors.Is(err, ErrParticipantAuthority) {
+		t.Fatalf("revoked device received new challenge: %v", err)
+	}
+	if err := store.RevokePinnedParticipant(ctx, boxID, enrollment.Anchor.ParticipantID, fixture.now+1_500); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err = restarted.PinnedParticipant(ctx, boxID,
+		enrollment.Anchor.ParticipantID, enrollment.Device.DeviceID)
+	if err != nil || pinned.Anchor.RevokedAtMilliseconds != fixture.now+1_500 ||
+		pinned.Device.RevokedThroughGeneration != 1 {
+		t.Fatal("revocations did not survive store restart", err)
 	}
 }

@@ -117,3 +117,53 @@ func (store *PostgresStore) PinnedParticipant(
 	return readPinnedParticipant(store.pool.QueryRow(ctx, pinnedParticipantQuery,
 		boxID, participantID, deviceID))
 }
+
+func (store *PostgresStore) RevokePinnedParticipant(
+	ctx context.Context,
+	boxID, participantID uuid.UUID,
+	nowMilliseconds int64,
+) error {
+	if boxID == uuid.Nil || participantID == uuid.Nil || nowMilliseconds <= 0 {
+		return ErrParticipantAuthority
+	}
+	result, err := store.pool.Exec(ctx, `
+		UPDATE box_participants p
+		SET revoked_at_milliseconds = CASE WHEN p.revoked_at_milliseconds = 0
+			THEN $3 ELSE p.revoked_at_milliseconds END
+		FROM box_state s
+		WHERE p.box_id = $1 AND p.participant_id = $2
+		  AND s.box_id = p.box_id AND s.owner_verifier <> ''`,
+		boxID, participantID, nowMilliseconds)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrParticipantAuthority
+	}
+	return nil
+}
+
+func (store *PostgresStore) RevokePinnedParticipantDevice(
+	ctx context.Context,
+	boxID, participantID, deviceID uuid.UUID,
+	nowMilliseconds int64,
+) error {
+	if boxID == uuid.Nil || participantID == uuid.Nil || deviceID == uuid.Nil || nowMilliseconds <= 0 {
+		return ErrParticipantAuthority
+	}
+	result, err := store.pool.Exec(ctx, `
+		UPDATE box_participant_devices d
+		SET revoked_through_generation = GREATEST(d.revoked_through_generation, d.device_generation)
+		FROM box_participants p, box_state s
+		WHERE d.device_id = $3 AND d.participant_id = $2
+		  AND p.participant_id = d.participant_id AND p.box_id = $1
+		  AND s.box_id = p.box_id AND s.owner_verifier <> ''`,
+		boxID, participantID, deviceID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrParticipantAuthority
+	}
+	return nil
+}

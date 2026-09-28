@@ -85,3 +85,52 @@ func (store *MemoryStore) PinnedParticipant(
 	}
 	return cloneParticipantEnrollment(enrollment), nil
 }
+
+// RevokePinnedParticipant is an immediate Box-owner service cutoff. It does
+// not revoke the Principal root at other Boxes or in the client's custody.
+func (store *MemoryStore) RevokePinnedParticipant(
+	_ context.Context,
+	boxID, participantID uuid.UUID,
+	nowMilliseconds int64,
+) error {
+	if boxID == uuid.Nil || participantID == uuid.Nil || nowMilliseconds <= 0 {
+		return ErrParticipantAuthority
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	enrollment, present := store.participantEnrollments[participantID]
+	if !present || store.state == nil || !store.state.Claimed() ||
+		store.state.BoxID != boxID || enrollment.Anchor.BoxID != boxID {
+		return ErrParticipantAuthority
+	}
+	if enrollment.Anchor.RevokedAtMilliseconds == 0 {
+		enrollment.Anchor.RevokedAtMilliseconds = nowMilliseconds
+		store.participantEnrollments[participantID] = enrollment
+	}
+	return nil
+}
+
+// RevokePinnedParticipantDevice cuts off one exact signed grant. The first
+// enrollment pins only generation 1; later rotation needs signed history.
+func (store *MemoryStore) RevokePinnedParticipantDevice(
+	_ context.Context,
+	boxID, participantID, deviceID uuid.UUID,
+	nowMilliseconds int64,
+) error {
+	if boxID == uuid.Nil || participantID == uuid.Nil || deviceID == uuid.Nil || nowMilliseconds <= 0 {
+		return ErrParticipantAuthority
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	enrollment, present := store.participantEnrollments[participantID]
+	if !present || store.state == nil || !store.state.Claimed() ||
+		store.state.BoxID != boxID || enrollment.Anchor.BoxID != boxID ||
+		enrollment.Device.DeviceID != deviceID {
+		return ErrParticipantAuthority
+	}
+	if enrollment.Device.RevokedThroughGeneration < enrollment.Device.DeviceGeneration {
+		enrollment.Device.RevokedThroughGeneration = enrollment.Device.DeviceGeneration
+		store.participantEnrollments[participantID] = enrollment
+	}
+	return nil
+}
