@@ -69,6 +69,17 @@ func participantRequestFixture(t *testing.T) (participantFixture, *MemoryStore, 
 	return fixture, store, request, grantToken
 }
 
+func TestParticipantPresentationDigestPortableVector(t *testing.T) {
+	presentation := BoxParticipantPresentation{
+		ParticipantID: uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+		DisplayName:   "Sue", Revision: 1,
+	}
+	const want = "d99a7429c569d5ff4c6c64e6fbd27a0409854c7b4b52832673238ef4a9f4ba6e"
+	if got := participantPresentationDigest(presentation); got != want {
+		t.Fatalf("portable presentation digest: %s", got)
+	}
+}
+
 func TestParticipantRequestStoreApprovalRequiresLiveGrantAndExactSignedProof(t *testing.T) {
 	fixture, store, request, _ := participantRequestFixture(t)
 	ctx := context.Background()
