@@ -62,6 +62,17 @@ func sharedWorkerAccessStoreFixture(
 	return owner, requester, store, worker, request, code
 }
 
+func TestSharedWorkerAccessCodeDigestPortableVector(t *testing.T) {
+	digest, err := SharedWorkerAccessCodeDigest("135790")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "91be4fd002acb3958c021e50c11cfeb583b1fc9c7dd0df586d65bcfcb3817ea1"
+	if got := sharedWorkerAccessCodeDigestString(digest); got != want {
+		t.Fatalf("portable access code digest: %s", got)
+	}
+}
+
 func sharedWorkerAccessGrant(
 	owner, requester participantFixture,
 	worker BoxSharedWorkerAdvertisement,
