@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,10 +126,6 @@ func advertiseSharedWorkerHTTP(
 	)
 	body, err := json.Marshal(sharedWorkerAdvertisementBody{
 		Version: 1, AdvertisementPayload: payload,
-		Enrollment: BoxParticipantEnrollment{
-			Anchor: fixture.anchor, Device: fixture.device,
-			RootRecord: fixture.root, GrantRecord: fixture.grant,
-		},
 		ChallengeID: fixture.challengeID, Proof: proof,
 	})
 	if err != nil {
@@ -195,6 +192,47 @@ func TestSharedWorkerDirectoryRequiresExactParticipantActionProof(t *testing.T) 
 	}
 }
 
+func TestSharedWorkerDirectoryVerifiesClientCanonicalBytesWithoutReencoding(t *testing.T) {
+	fixture, _, service, token := sharedWorkerHTTPFixture(t)
+	handler := service.Handler()
+	issueParticipantChallengeHTTP(t, handler, token, &fixture)
+	advertisement := sharedWorkerAdvertisement(fixture)
+	payload, err := json.Marshal(advertisement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uuid.UUID{
+		advertisement.BoxID, advertisement.WorkerID,
+		advertisement.OwnerParticipantID, advertisement.OwnerDeviceID,
+	} {
+		payload = bytes.ReplaceAll(
+			payload, []byte(id.String()), []byte(strings.ToUpper(id.String())),
+		)
+	}
+	proof := signedParticipantActionProof(
+		t, fixture, ParticipantActionAdvertiseWorker, payload,
+	)
+	body, err := json.Marshal(sharedWorkerAdvertisementBody{
+		Version: 1, AdvertisementPayload: payload,
+		ChallengeID: fixture.challengeID, Proof: proof,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/shared-workers/"+advertisement.WorkerID.String()+"/advertisement",
+		bytes.NewReader(body),
+	)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("client canonical advertisement status %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestSharedWorkerWithdrawalIsOwnerBoundAndRevisioned(t *testing.T) {
 	fixture, _, service, token := sharedWorkerHTTPFixture(t)
 	handler := service.Handler()
@@ -221,10 +259,6 @@ func TestSharedWorkerWithdrawalIsOwnerBoundAndRevisioned(t *testing.T) {
 	)
 	body, err := json.Marshal(sharedWorkerWithdrawalBody{
 		Version: 1, WithdrawalPayload: canonical,
-		Enrollment: BoxParticipantEnrollment{
-			Anchor: fixture.anchor, Device: fixture.device,
-			RootRecord: fixture.root, GrantRecord: fixture.grant,
-		},
 		ChallengeID: fixture.challengeID, Proof: proof,
 	})
 	if err != nil {

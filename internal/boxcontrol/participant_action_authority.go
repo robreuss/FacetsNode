@@ -127,6 +127,53 @@ func (verifier *BoxParticipantProofVerifier) AuthorizeAction(
 	return nil
 }
 
+// AuthorizePresentedAction derives all public authority from the Box's pinned
+// participant records. The caller supplies only the signed proof and exact
+// operation bytes; it cannot invent or stale-copy an enrollment record.
+func (verifier *BoxParticipantProofVerifier) AuthorizePresentedAction(
+	ctx context.Context,
+	proof BoxSignedParticipantActionProof,
+	expectedChallengeID uuid.UUID,
+	expectedAction BoxParticipantAction,
+	canonicalRequest []byte,
+	nowMilliseconds int64,
+) (BoxParticipantEnrollment, error) {
+	if verifier == nil || verifier.store == nil || expectedChallengeID == uuid.Nil {
+		return BoxParticipantEnrollment{}, ErrParticipantAuthority
+	}
+	var payload BoxParticipantActionProofPayload
+	if strictParticipantJSON(proof.Payload, &payload) != nil || payload.Version != 1 ||
+		!canonicalParticipantActionProof(proof.Payload) ||
+		payload.BoxID == uuid.Nil || payload.ParticipantID == uuid.Nil ||
+		payload.DeviceID == uuid.Nil || payload.ChallengeID != expectedChallengeID {
+		return BoxParticipantEnrollment{}, ErrParticipantAuthority
+	}
+	pinned, err := verifier.store.PinnedParticipant(
+		ctx, payload.BoxID, payload.ParticipantID, payload.DeviceID,
+	)
+	if err != nil {
+		return BoxParticipantEnrollment{}, ErrParticipantAuthority
+	}
+	if err := verifyBoxParticipantActionProof(
+		pinned.Anchor, pinned.Device, pinned.RootRecord, pinned.GrantRecord, nil,
+		proof, expectedChallengeID, expectedAction, canonicalRequest,
+		nowMilliseconds,
+	); err != nil {
+		return BoxParticipantEnrollment{}, err
+	}
+	consumed, err := verifier.store.ConsumeParticipantChallenge(
+		ctx, payload.BoxID, payload.ParticipantID, payload.DeviceID,
+		expectedChallengeID, nowMilliseconds,
+	)
+	if err != nil {
+		return BoxParticipantEnrollment{}, err
+	}
+	if !consumed {
+		return BoxParticipantEnrollment{}, ErrParticipantReplay
+	}
+	return pinned, nil
+}
+
 func verifyBoxParticipantActionProof(
 	anchor BoxParticipantAnchor,
 	device BoxParticipantDevice,

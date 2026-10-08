@@ -67,7 +67,6 @@ func (service *Service) handleCreateParticipantChallenge(writer http.ResponseWri
 type sharedWorkerAdvertisementBody struct {
 	Version              int                             `json:"version"`
 	AdvertisementPayload []byte                          `json:"advertisementPayload"`
-	Enrollment           BoxParticipantEnrollment        `json:"enrollment"`
 	ChallengeID          uuid.UUID                       `json:"challengeID"`
 	Proof                BoxSignedParticipantActionProof `json:"proof"`
 }
@@ -85,9 +84,7 @@ func (service *Service) handleAdvertiseSharedWorker(writer http.ResponseWriter, 
 		len(body.AdvertisementPayload) == 0 ||
 		len(body.AdvertisementPayload) > maximumWorkerCapabilitiesBytes+4096 ||
 		strictParticipantJSON(body.AdvertisementPayload, &advertisement) != nil ||
-		advertisement.WorkerID != workerID ||
-		advertisement.OwnerParticipantID != body.Enrollment.Anchor.ParticipantID ||
-		advertisement.OwnerDeviceID != body.Enrollment.Device.DeviceID {
+		advertisement.WorkerID != workerID {
 		http.Error(writer, "SHARED-WORKER-FORMAT: The Worker advertisement is invalid.", http.StatusBadRequest)
 		return
 	}
@@ -97,9 +94,8 @@ func (service *Service) handleAdvertiseSharedWorker(writer http.ResponseWriter, 
 		return
 	}
 	now := service.now().UnixMilli()
-	err = verifier.AuthorizeAction(
-		request.Context(), body.Enrollment.Anchor, body.Enrollment.Device,
-		body.Enrollment.RootRecord, body.Enrollment.GrantRecord, nil, body.Proof,
+	enrollment, err := verifier.AuthorizePresentedAction(
+		request.Context(), body.Proof,
 		body.ChallengeID, ParticipantActionAdvertiseWorker,
 		body.AdvertisementPayload, now,
 	)
@@ -109,6 +105,12 @@ func (service *Service) handleAdvertiseSharedWorker(writer http.ResponseWriter, 
 	}
 	if err != nil {
 		service.internalError(writer, request, "shared_worker_authorize", err)
+		return
+	}
+	if advertisement.BoxID != enrollment.Anchor.BoxID ||
+		advertisement.OwnerParticipantID != enrollment.Anchor.ParticipantID ||
+		advertisement.OwnerDeviceID != enrollment.Device.DeviceID {
+		http.Error(writer, "SHARED-WORKER-AUTHORITY: The signed Worker owner does not match this participant device.", http.StatusForbidden)
 		return
 	}
 	if err := service.store.UpsertSharedWorker(request.Context(), advertisement, now); err != nil {
@@ -156,7 +158,6 @@ type sharedWorkerWithdrawal struct {
 type sharedWorkerWithdrawalBody struct {
 	Version           int                             `json:"version"`
 	WithdrawalPayload []byte                          `json:"withdrawalPayload"`
-	Enrollment        BoxParticipantEnrollment        `json:"enrollment"`
 	ChallengeID       uuid.UUID                       `json:"challengeID"`
 	Proof             BoxSignedParticipantActionProof `json:"proof"`
 }
@@ -174,9 +175,7 @@ func (service *Service) handleWithdrawSharedWorker(writer http.ResponseWriter, r
 		len(body.WithdrawalPayload) == 0 || len(body.WithdrawalPayload) > 4096 ||
 		strictParticipantJSON(body.WithdrawalPayload, &withdrawal) != nil ||
 		withdrawal.Version != 1 || withdrawal.WorkerID != workerID ||
-		withdrawal.Revision == 0 ||
-		withdrawal.OwnerParticipantID != body.Enrollment.Anchor.ParticipantID ||
-		withdrawal.OwnerDeviceID != body.Enrollment.Device.DeviceID {
+		withdrawal.Revision == 0 {
 		http.Error(writer, "SHARED-WORKER-FORMAT: The Worker withdrawal is invalid.", http.StatusBadRequest)
 		return
 	}
@@ -186,9 +185,8 @@ func (service *Service) handleWithdrawSharedWorker(writer http.ResponseWriter, r
 		return
 	}
 	now := service.now().UnixMilli()
-	err = verifier.AuthorizeAction(
-		request.Context(), body.Enrollment.Anchor, body.Enrollment.Device,
-		body.Enrollment.RootRecord, body.Enrollment.GrantRecord, nil, body.Proof,
+	enrollment, err := verifier.AuthorizePresentedAction(
+		request.Context(), body.Proof,
 		body.ChallengeID, ParticipantActionWithdrawWorker,
 		body.WithdrawalPayload, now,
 	)
@@ -198,6 +196,12 @@ func (service *Service) handleWithdrawSharedWorker(writer http.ResponseWriter, r
 	}
 	if err != nil {
 		service.internalError(writer, request, "shared_worker_withdraw_authorize", err)
+		return
+	}
+	if withdrawal.BoxID != enrollment.Anchor.BoxID ||
+		withdrawal.OwnerParticipantID != enrollment.Anchor.ParticipantID ||
+		withdrawal.OwnerDeviceID != enrollment.Device.DeviceID {
+		http.Error(writer, "SHARED-WORKER-AUTHORITY: The signed Worker owner does not match this participant device.", http.StatusForbidden)
 		return
 	}
 	err = service.store.WithdrawSharedWorker(
