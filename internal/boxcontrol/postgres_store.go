@@ -122,6 +122,21 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			decision text NOT NULL DEFAULT 'pending' CHECK (decision IN ('pending','approved','rejected')),
 			decided_at_milliseconds bigint NOT NULL DEFAULT 0 CHECK (decided_at_milliseconds >= 0)
 		)`,
+		`CREATE TABLE IF NOT EXISTS box_shared_workers (
+			worker_id uuid PRIMARY KEY,
+			box_id uuid NOT NULL REFERENCES box_state(box_id),
+			owner_participant_id uuid NOT NULL REFERENCES box_participants(participant_id),
+			owner_device_id uuid NOT NULL REFERENCES box_participant_devices(device_id),
+			display_name text NOT NULL CHECK (octet_length(display_name) BETWEEN 1 AND 128),
+			availability text NOT NULL CHECK (availability IN ('available','busy','unavailable','paused')),
+			revision bigint NOT NULL CHECK (revision > 0),
+			capabilities bytea NOT NULL CHECK (octet_length(capabilities) BETWEEN 1 AND 16384),
+			capabilities_digest text NOT NULL CHECK (octet_length(capabilities_digest) = 64),
+			updated_at_milliseconds bigint NOT NULL CHECK (updated_at_milliseconds > 0),
+			expires_at_milliseconds bigint NOT NULL,
+			CHECK (expires_at_milliseconds > updated_at_milliseconds),
+			CHECK (expires_at_milliseconds - updated_at_milliseconds <= 300000)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := store.pool.Exec(ctx, statement); err != nil {

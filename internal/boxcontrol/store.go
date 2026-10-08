@@ -45,6 +45,9 @@ type Store interface {
 	RevokePinnedParticipantDevice(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64) error
 	IssueParticipantChallenge(context.Context, BoxParticipantChallenge, int64) error
 	ConsumeParticipantChallenge(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, error)
+	UpsertSharedWorker(context.Context, BoxSharedWorkerAdvertisement, int64) error
+	ListSharedWorkers(context.Context, uuid.UUID, int64) ([]BoxSharedWorkerAdvertisement, error)
+	WithdrawSharedWorker(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uint64, int64) error
 	AppendAudit(context.Context, AuditEvent) error
 	RecentAudit(context.Context, int) ([]AuditEvent, error)
 }
@@ -59,6 +62,7 @@ type MemoryStore struct {
 	participantEnrollments map[uuid.UUID]BoxParticipantEnrollment
 	participantChallenges  map[uuid.UUID]participantChallengeState
 	participantRequests    map[uuid.UUID]BoxParticipantEnrollmentRequest
+	sharedWorkers          map[uuid.UUID]BoxSharedWorkerAdvertisement
 	throttle               map[string]LoginThrottle
 	audit                  []AuditEvent
 }
@@ -72,6 +76,7 @@ func NewMemoryStore() *MemoryStore {
 		participantEnrollments: make(map[uuid.UUID]BoxParticipantEnrollment),
 		participantChallenges:  make(map[uuid.UUID]participantChallengeState),
 		participantRequests:    make(map[uuid.UUID]BoxParticipantEnrollmentRequest),
+		sharedWorkers:          make(map[uuid.UUID]BoxSharedWorkerAdvertisement),
 		throttle:               make(map[string]LoginThrottle),
 	}
 }

@@ -85,11 +85,21 @@ Box-local presented name and revision, so a connection grant cannot relabel
 another device's signed request. The requesting app's connection
 grant must remain active through approval. Requests expire after 30 minutes.
 
-**This is not yet an operational client-to-Box participant or Worker-sharing
-flow.** Facets does not yet submit this request, and authenticated live
-challenge/proof endpoints and a durable Principal-signed revocation feed are
-still absent. No Worker sharing is enabled by this controller change. Memory
-store and HTTP tests pass; PostgreSQL integration tests require
+Facets now submits and polls the owner-approved participant request. The
+controller also exposes an authenticated, durable one-use participant challenge
+and a first shared-Worker directory. An active enrolled participant can publish
+or withdraw one exact Worker advertisement by signing the canonical operation
+and capabilities digest with its pinned device key. The Box rejects action or
+payload substitution, replay, owner/device changes, stale revisions, expiry,
+and revoked participant authority. Connected installations may list only
+current advertisements. The capabilities payload is bounded opaque data: the
+Box carries it but does not become a model-runtime authority.
+
+**Directory listing is not permission to execute work.** The six-character
+owner-confirmed Worker access request/grant, encrypted Job carriage, Worker
+claim, cancellation, and durable Principal-signed revocation feed remain
+absent. No shared Job route is enabled by the directory. Memory store and HTTP
+tests pass; PostgreSQL integration tests require
 `FACETS_BOX_TEST_DATABASE_URL` to execute against a live test database.
 
 ## Nearby discovery and multiple Boxes
