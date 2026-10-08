@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -266,6 +267,173 @@ func TestProfileSharedWorkerOperationLoopbackTLS(t *testing.T) {
 				profileDuration(endToEnd, 0.50), profileDuration(endToEnd, 0.95),
 			)
 		})
+	}
+}
+
+// This profile measures transport packing separately from backend inference
+// batching. Each logical item contributes the same request and response bytes;
+// only the number of items carried by one protected operation changes. The
+// result therefore exposes how much fixed participant-proof and HTTP custody
+// work can be amortized without assuming that a model can evaluate a tensor
+// batch of the same size.
+func TestProfileSharedWorkerOperationPackAmortizationLoopbackTLS(t *testing.T) {
+	if os.Getenv("FACETS_BOX_WORKER_CARRIAGE_PROFILE") != "1" {
+		t.Skip("set FACETS_BOX_WORKER_CARRIAGE_PROFILE=1 to run")
+	}
+	const (
+		logicalItemsPerRun   = 64
+		requestBytesPerItem  = 16 * 1_024
+		responseBytesPerItem = 4 * 1_024
+		iterations           = 5
+	)
+	for _, itemsPerPack := range []int{1, 4, 8, 16} {
+		t.Run("pack-"+strconv.Itoa(itemsPerPack), func(t *testing.T) {
+			owner, requester, _, handler, ownerToken, requesterToken, worker := sharedWorkerAccessHTTPFixture(t)
+			grant := approveSharedWorkerAccessHTTP(
+				t, handler, ownerToken, requesterToken, &owner, &requester, worker,
+			)
+			server := httptest.NewTLSServer(handler)
+			defer server.Close()
+			client := server.Client()
+			requestBytes := bytes.Repeat(
+				[]byte{0x91, 0x22, 0x00, 0xff},
+				(requestBytesPerItem*itemsPerPack+3)/4,
+			)[:requestBytesPerItem*itemsPerPack]
+			responseBytes := bytes.Repeat(
+				[]byte{0x44, 0x00, 0xac},
+				(responseBytesPerItem*itemsPerPack+2)/3,
+			)[:responseBytesPerItem*itemsPerPack]
+			operationsPerRun := logicalItemsPerRun / itemsPerPack
+			var runDurations, perItemDurations []time.Duration
+			for iteration := 0; iteration < iterations; iteration++ {
+				started := time.Now()
+				for operationIndex := 0; operationIndex < operationsPerRun; operationIndex++ {
+					profileCompleteSharedWorkerOperationLoopbackTLS(
+						t, client, server.URL, ownerToken, requesterToken,
+						&owner, &requester, worker, grant, requestBytes, responseBytes,
+						uint64(iteration*operationsPerRun+operationIndex+1),
+					)
+				}
+				duration := time.Since(started)
+				runDurations = append(runDurations, duration)
+				perItemDurations = append(
+					perItemDurations,
+					time.Duration(int64(duration)/int64(logicalItemsPerRun)),
+				)
+			}
+			t.Logf(
+				"pack amortization loopback TLS+HTTP+memory: items_per_pack=%d operations_per_run=%d logical_items=%d request_per_item=%d response_per_item=%d run_p50=%s run_p95=%s per_item_p50=%s per_item_p95=%s",
+				itemsPerPack, operationsPerRun, logicalItemsPerRun,
+				requestBytesPerItem, responseBytesPerItem,
+				profileDuration(runDurations, 0.50), profileDuration(runDurations, 0.95),
+				profileDuration(perItemDurations, 0.50), profileDuration(perItemDurations, 0.95),
+			)
+		})
+	}
+}
+
+func profileCompleteSharedWorkerOperationLoopbackTLS(
+	t *testing.T,
+	client *http.Client,
+	baseURL string,
+	ownerToken, requesterToken string,
+	owner, requester *participantFixture,
+	worker BoxSharedWorkerAdvertisement,
+	grant BoxSharedWorkerAccessGrant,
+	requestBytes, responseBytes []byte,
+	attempt uint64,
+) {
+	t.Helper()
+	operation := BoxSharedWorkerOperation{
+		Version: 1, OperationID: uuid.New(), BoxID: worker.BoxID,
+		WorkerID: worker.WorkerID, AccessGrantID: grant.GrantID,
+		RequesterParticipantID: requester.anchor.ParticipantID,
+		RequesterDeviceID:      requester.device.DeviceID,
+		JobID:                  uuid.New(), RunID: uuid.New(), Attempt: attempt,
+		CapabilitiesDigest: worker.CapabilitiesDigest,
+		RequestDigest:      SharedWorkerOperationDigest(requestBytes), RequestBytes: requestBytes,
+		RequestedAtMilliseconds: requester.now,
+		ExpiresAtMilliseconds:   requester.now + 60_000,
+	}
+	operationPayload, err := json.Marshal(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileIssueParticipantChallenge(t, client, baseURL, requesterToken, requester)
+	enqueueBody := sharedWorkerOperationEnqueueBody{
+		Version: 1, OperationPayload: operationPayload, ChallengeID: requester.challengeID,
+		Proof: signedParticipantActionProof(
+			t, *requester, ParticipantActionEnqueueWorkerOperation, operationPayload,
+		),
+	}
+	statusCode, _ := profileNetworkJSON(
+		t, client, baseURL, http.MethodPost,
+		"/v1/shared-workers/"+worker.WorkerID.String()+"/operations",
+		requesterToken, enqueueBody,
+	)
+	if statusCode != http.StatusCreated {
+		t.Fatalf("enqueue status %d", statusCode)
+	}
+
+	claimValue := BoxSharedWorkerOperationClaim{
+		Version: 1, ClaimID: uuid.New(), BoxID: worker.BoxID, WorkerID: worker.WorkerID,
+		OwnerParticipantID: owner.anchor.ParticipantID, OwnerDeviceID: owner.device.DeviceID,
+		RequestedAtMilliseconds: owner.now, ExpiresAtMilliseconds: owner.now + 30_000,
+	}
+	claimPayload, err := json.Marshal(claimValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileIssueParticipantChallenge(t, client, baseURL, ownerToken, owner)
+	claimBody := sharedWorkerOperationClaimBody{
+		Version: 1, ClaimPayload: claimPayload, ChallengeID: owner.challengeID,
+		Proof: signedParticipantActionProof(
+			t, *owner, ParticipantActionClaimWorkerOperation, claimPayload,
+		),
+	}
+	statusCode, _ = profileNetworkJSON(
+		t, client, baseURL, http.MethodPost,
+		"/v1/shared-workers/"+worker.WorkerID.String()+"/operation-claims",
+		ownerToken, claimBody,
+	)
+	if statusCode != http.StatusOK {
+		t.Fatalf("claim status %d", statusCode)
+	}
+
+	responseValue := BoxSharedWorkerOperationResponse{
+		Version: 1, OperationID: operation.OperationID, ClaimID: claimValue.ClaimID,
+		BoxID: worker.BoxID, WorkerID: worker.WorkerID,
+		OwnerParticipantID: owner.anchor.ParticipantID, OwnerDeviceID: owner.device.DeviceID,
+		ResponseDigest: SharedWorkerOperationDigest(responseBytes), ResponseBytes: responseBytes,
+		RespondedAtMilliseconds: owner.now,
+	}
+	responsePayload, err := json.Marshal(responseValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileIssueParticipantChallenge(t, client, baseURL, ownerToken, owner)
+	responseBody := sharedWorkerOperationResponseBody{
+		Version: 1, ResponsePayload: responsePayload, ChallengeID: owner.challengeID,
+		Proof: signedParticipantActionProof(
+			t, *owner, ParticipantActionRespondWorkerOperation, responsePayload,
+		),
+	}
+	statusCode, _ = profileNetworkJSON(
+		t, client, baseURL, http.MethodPost,
+		"/v1/shared-worker-operations/"+operation.OperationID.String()+"/response",
+		ownerToken, responseBody,
+	)
+	if statusCode != http.StatusNoContent {
+		t.Fatalf("response status %d", statusCode)
+	}
+
+	statusCode, _ = profileNetworkJSON(
+		t, client, baseURL, http.MethodGet,
+		"/v1/shared-worker-operations/"+operation.OperationID.String(),
+		requesterToken, nil,
+	)
+	if statusCode != http.StatusOK {
+		t.Fatalf("status code %d", statusCode)
 	}
 }
 
