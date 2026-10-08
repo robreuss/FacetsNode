@@ -137,6 +137,44 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			CHECK (expires_at_milliseconds > updated_at_milliseconds),
 			CHECK (expires_at_milliseconds - updated_at_milliseconds <= 300000)
 		)`,
+		`CREATE TABLE IF NOT EXISTS box_shared_worker_access_requests (
+			request_id uuid PRIMARY KEY,
+			box_id uuid NOT NULL REFERENCES box_state(box_id),
+			worker_id uuid NOT NULL,
+			requester_participant_id uuid NOT NULL REFERENCES box_participants(participant_id),
+			requester_device_id uuid NOT NULL REFERENCES box_participant_devices(device_id),
+			connection_grant_id uuid NOT NULL REFERENCES connection_grants(grant_id),
+			capabilities_digest text NOT NULL CHECK (octet_length(capabilities_digest) = 64),
+			confirmation_code_digest bytea NOT NULL CHECK (octet_length(confirmation_code_digest) = 32),
+			requested_at_milliseconds bigint NOT NULL CHECK (requested_at_milliseconds > 0),
+			expires_at_milliseconds bigint NOT NULL,
+			failed_code_attempts integer NOT NULL DEFAULT 0 CHECK (failed_code_attempts BETWEEN 0 AND 5),
+			decision text NOT NULL DEFAULT 'pending' CHECK (decision IN ('pending','approved','rejected','expired','revoked')),
+			decided_at_milliseconds bigint NOT NULL DEFAULT 0 CHECK (decided_at_milliseconds >= 0),
+			CHECK (expires_at_milliseconds > requested_at_milliseconds),
+			CHECK (expires_at_milliseconds - requested_at_milliseconds <= 600000)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS box_shared_worker_access_active_code
+			ON box_shared_worker_access_requests (confirmation_code_digest)
+			WHERE decision = 'pending'`,
+		`CREATE TABLE IF NOT EXISTS box_shared_worker_access_grants (
+			grant_id uuid PRIMARY KEY,
+			request_id uuid NOT NULL UNIQUE REFERENCES box_shared_worker_access_requests(request_id),
+			box_id uuid NOT NULL REFERENCES box_state(box_id),
+			worker_id uuid NOT NULL,
+			owner_participant_id uuid NOT NULL REFERENCES box_participants(participant_id),
+			owner_device_id uuid NOT NULL REFERENCES box_participant_devices(device_id),
+			grantee_participant_id uuid NOT NULL REFERENCES box_participants(participant_id),
+			capabilities_digest text NOT NULL CHECK (octet_length(capabilities_digest) = 64),
+			confirmation_code_digest text NOT NULL CHECK (octet_length(confirmation_code_digest) = 64),
+			revision bigint NOT NULL CHECK (revision > 0),
+			granted_at_milliseconds bigint NOT NULL CHECK (granted_at_milliseconds > 0),
+			expires_at_milliseconds bigint NOT NULL,
+			revoked_at_milliseconds bigint NOT NULL DEFAULT 0 CHECK (revoked_at_milliseconds >= 0),
+			CHECK (owner_participant_id <> grantee_participant_id),
+			CHECK (expires_at_milliseconds > granted_at_milliseconds),
+			CHECK (expires_at_milliseconds - granted_at_milliseconds <= 15552000000)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := store.pool.Exec(ctx, statement); err != nil {

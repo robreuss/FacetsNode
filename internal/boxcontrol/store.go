@@ -48,6 +48,10 @@ type Store interface {
 	UpsertSharedWorker(context.Context, BoxSharedWorkerAdvertisement, int64) error
 	ListSharedWorkers(context.Context, uuid.UUID, int64) ([]BoxSharedWorkerAdvertisement, error)
 	WithdrawSharedWorker(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uint64, int64) error
+	CreateSharedWorkerAccessRequest(context.Context, BoxSharedWorkerAccessRequest, int64) error
+	SharedWorkerAccessRequest(context.Context, uuid.UUID, uuid.UUID, int64) (BoxSharedWorkerAccessRequestStatus, error)
+	ConfirmSharedWorkerAccess(context.Context, BoxSharedWorkerAccessGrant, [32]byte, int64) error
+	RevokeSharedWorkerAccess(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uint64, int64) error
 	AppendAudit(context.Context, AuditEvent) error
 	RecentAudit(context.Context, int) ([]AuditEvent, error)
 }
@@ -63,6 +67,8 @@ type MemoryStore struct {
 	participantChallenges  map[uuid.UUID]participantChallengeState
 	participantRequests    map[uuid.UUID]BoxParticipantEnrollmentRequest
 	sharedWorkers          map[uuid.UUID]BoxSharedWorkerAdvertisement
+	sharedWorkerRequests   map[uuid.UUID]BoxSharedWorkerAccessRequest
+	sharedWorkerGrants     map[uuid.UUID]BoxSharedWorkerAccessGrant
 	throttle               map[string]LoginThrottle
 	audit                  []AuditEvent
 }
@@ -77,6 +83,8 @@ func NewMemoryStore() *MemoryStore {
 		participantChallenges:  make(map[uuid.UUID]participantChallengeState),
 		participantRequests:    make(map[uuid.UUID]BoxParticipantEnrollmentRequest),
 		sharedWorkers:          make(map[uuid.UUID]BoxSharedWorkerAdvertisement),
+		sharedWorkerRequests:   make(map[uuid.UUID]BoxSharedWorkerAccessRequest),
+		sharedWorkerGrants:     make(map[uuid.UUID]BoxSharedWorkerAccessGrant),
 		throttle:               make(map[string]LoginThrottle),
 	}
 }
