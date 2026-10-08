@@ -1,7 +1,6 @@
 package boxcontrol
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -66,11 +65,11 @@ func (service *Service) handleCreateParticipantChallenge(writer http.ResponseWri
 }
 
 type sharedWorkerAdvertisementBody struct {
-	Version       int                             `json:"version"`
-	Advertisement BoxSharedWorkerAdvertisement    `json:"advertisement"`
-	Enrollment    BoxParticipantEnrollment        `json:"enrollment"`
-	ChallengeID   uuid.UUID                       `json:"challengeID"`
-	Proof         BoxSignedParticipantActionProof `json:"proof"`
+	Version              int                             `json:"version"`
+	AdvertisementPayload []byte                          `json:"advertisementPayload"`
+	Enrollment           BoxParticipantEnrollment        `json:"enrollment"`
+	ChallengeID          uuid.UUID                       `json:"challengeID"`
+	Proof                BoxSignedParticipantActionProof `json:"proof"`
 }
 
 func (service *Service) handleAdvertiseSharedWorker(writer http.ResponseWriter, request *http.Request) {
@@ -80,16 +79,15 @@ func (service *Service) handleAdvertiseSharedWorker(writer http.ResponseWriter, 
 	}
 	workerID, err := uuid.Parse(request.PathValue("workerID"))
 	var body sharedWorkerAdvertisementBody
+	var advertisement BoxSharedWorkerAdvertisement
 	if err != nil || workerID == uuid.Nil || decodeJSON(request, &body) != nil ||
 		body.Version != 1 || body.ChallengeID == uuid.Nil ||
-		body.Advertisement.WorkerID != workerID ||
-		body.Advertisement.OwnerParticipantID != body.Enrollment.Anchor.ParticipantID ||
-		body.Advertisement.OwnerDeviceID != body.Enrollment.Device.DeviceID {
-		http.Error(writer, "SHARED-WORKER-FORMAT: The Worker advertisement is invalid.", http.StatusBadRequest)
-		return
-	}
-	canonical, err := json.Marshal(body.Advertisement)
-	if err != nil {
+		len(body.AdvertisementPayload) == 0 ||
+		len(body.AdvertisementPayload) > maximumWorkerCapabilitiesBytes+4096 ||
+		strictParticipantJSON(body.AdvertisementPayload, &advertisement) != nil ||
+		advertisement.WorkerID != workerID ||
+		advertisement.OwnerParticipantID != body.Enrollment.Anchor.ParticipantID ||
+		advertisement.OwnerDeviceID != body.Enrollment.Device.DeviceID {
 		http.Error(writer, "SHARED-WORKER-FORMAT: The Worker advertisement is invalid.", http.StatusBadRequest)
 		return
 	}
@@ -102,7 +100,8 @@ func (service *Service) handleAdvertiseSharedWorker(writer http.ResponseWriter, 
 	err = verifier.AuthorizeAction(
 		request.Context(), body.Enrollment.Anchor, body.Enrollment.Device,
 		body.Enrollment.RootRecord, body.Enrollment.GrantRecord, nil, body.Proof,
-		body.ChallengeID, ParticipantActionAdvertiseWorker, canonical, now,
+		body.ChallengeID, ParticipantActionAdvertiseWorker,
+		body.AdvertisementPayload, now,
 	)
 	if errors.Is(err, ErrParticipantAuthority) || errors.Is(err, ErrParticipantReplay) {
 		http.Error(writer, "SHARED-WORKER-AUTHORITY: The signed Worker advertisement was rejected. Request a fresh challenge.", http.StatusForbidden)
@@ -112,7 +111,7 @@ func (service *Service) handleAdvertiseSharedWorker(writer http.ResponseWriter, 
 		service.internalError(writer, request, "shared_worker_authorize", err)
 		return
 	}
-	if err := service.store.UpsertSharedWorker(request.Context(), body.Advertisement, now); err != nil {
+	if err := service.store.UpsertSharedWorker(request.Context(), advertisement, now); err != nil {
 		if errors.Is(err, ErrSharedWorkerAuthority) {
 			http.Error(writer, "SHARED-WORKER-REVISION: The Worker owner, revision, availability, or expiry was rejected.", http.StatusConflict)
 			return
@@ -121,7 +120,7 @@ func (service *Service) handleAdvertiseSharedWorker(writer http.ResponseWriter, 
 		return
 	}
 	service.audit(request.Context(), "shared_worker_advertisement", "accepted")
-	writeJSON(writer, http.StatusCreated, body.Advertisement)
+	writeJSON(writer, http.StatusCreated, advertisement)
 }
 
 func (service *Service) handleListSharedWorkers(writer http.ResponseWriter, request *http.Request) {
@@ -155,11 +154,11 @@ type sharedWorkerWithdrawal struct {
 }
 
 type sharedWorkerWithdrawalBody struct {
-	Version     int                             `json:"version"`
-	Withdrawal  sharedWorkerWithdrawal          `json:"withdrawal"`
-	Enrollment  BoxParticipantEnrollment        `json:"enrollment"`
-	ChallengeID uuid.UUID                       `json:"challengeID"`
-	Proof       BoxSignedParticipantActionProof `json:"proof"`
+	Version           int                             `json:"version"`
+	WithdrawalPayload []byte                          `json:"withdrawalPayload"`
+	Enrollment        BoxParticipantEnrollment        `json:"enrollment"`
+	ChallengeID       uuid.UUID                       `json:"challengeID"`
+	Proof             BoxSignedParticipantActionProof `json:"proof"`
 }
 
 func (service *Service) handleWithdrawSharedWorker(writer http.ResponseWriter, request *http.Request) {
@@ -169,16 +168,15 @@ func (service *Service) handleWithdrawSharedWorker(writer http.ResponseWriter, r
 	}
 	workerID, err := uuid.Parse(request.PathValue("workerID"))
 	var body sharedWorkerWithdrawalBody
+	var withdrawal sharedWorkerWithdrawal
 	if err != nil || workerID == uuid.Nil || decodeJSON(request, &body) != nil ||
-		body.Version != 1 || body.ChallengeID == uuid.Nil || body.Withdrawal.Version != 1 ||
-		body.Withdrawal.WorkerID != workerID || body.Withdrawal.Revision == 0 ||
-		body.Withdrawal.OwnerParticipantID != body.Enrollment.Anchor.ParticipantID ||
-		body.Withdrawal.OwnerDeviceID != body.Enrollment.Device.DeviceID {
-		http.Error(writer, "SHARED-WORKER-FORMAT: The Worker withdrawal is invalid.", http.StatusBadRequest)
-		return
-	}
-	canonical, err := json.Marshal(body.Withdrawal)
-	if err != nil {
+		body.Version != 1 || body.ChallengeID == uuid.Nil ||
+		len(body.WithdrawalPayload) == 0 || len(body.WithdrawalPayload) > 4096 ||
+		strictParticipantJSON(body.WithdrawalPayload, &withdrawal) != nil ||
+		withdrawal.Version != 1 || withdrawal.WorkerID != workerID ||
+		withdrawal.Revision == 0 ||
+		withdrawal.OwnerParticipantID != body.Enrollment.Anchor.ParticipantID ||
+		withdrawal.OwnerDeviceID != body.Enrollment.Device.DeviceID {
 		http.Error(writer, "SHARED-WORKER-FORMAT: The Worker withdrawal is invalid.", http.StatusBadRequest)
 		return
 	}
@@ -191,7 +189,8 @@ func (service *Service) handleWithdrawSharedWorker(writer http.ResponseWriter, r
 	err = verifier.AuthorizeAction(
 		request.Context(), body.Enrollment.Anchor, body.Enrollment.Device,
 		body.Enrollment.RootRecord, body.Enrollment.GrantRecord, nil, body.Proof,
-		body.ChallengeID, ParticipantActionWithdrawWorker, canonical, now,
+		body.ChallengeID, ParticipantActionWithdrawWorker,
+		body.WithdrawalPayload, now,
 	)
 	if errors.Is(err, ErrParticipantAuthority) || errors.Is(err, ErrParticipantReplay) {
 		http.Error(writer, "SHARED-WORKER-AUTHORITY: The signed Worker withdrawal was rejected. Request a fresh challenge.", http.StatusForbidden)
@@ -202,9 +201,9 @@ func (service *Service) handleWithdrawSharedWorker(writer http.ResponseWriter, r
 		return
 	}
 	err = service.store.WithdrawSharedWorker(
-		request.Context(), body.Withdrawal.BoxID, body.Withdrawal.WorkerID,
-		body.Withdrawal.OwnerParticipantID, body.Withdrawal.OwnerDeviceID,
-		body.Withdrawal.Revision, now,
+		request.Context(), withdrawal.BoxID, withdrawal.WorkerID,
+		withdrawal.OwnerParticipantID, withdrawal.OwnerDeviceID,
+		withdrawal.Revision, now,
 	)
 	if errors.Is(err, ErrSharedWorkerAuthority) {
 		http.Error(writer, "SHARED-WORKER-REVISION: The Worker owner or revision was rejected.", http.StatusConflict)

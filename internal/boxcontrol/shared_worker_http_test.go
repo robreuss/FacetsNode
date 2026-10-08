@@ -116,11 +116,15 @@ func advertiseSharedWorkerHTTP(
 	if err != nil {
 		t.Fatal(err)
 	}
+	payload, err := json.Marshal(advertisement)
+	if err != nil {
+		t.Fatal(err)
+	}
 	proof := signedParticipantActionProof(
 		t, fixture, ParticipantActionAdvertiseWorker, canonical,
 	)
 	body, err := json.Marshal(sharedWorkerAdvertisementBody{
-		Version: 1, Advertisement: advertisement,
+		Version: 1, AdvertisementPayload: payload,
 		Enrollment: BoxParticipantEnrollment{
 			Anchor: fixture.anchor, Device: fixture.device,
 			RootRecord: fixture.root, GrantRecord: fixture.grant,
@@ -216,7 +220,7 @@ func TestSharedWorkerWithdrawalIsOwnerBoundAndRevisioned(t *testing.T) {
 		t, fixture, ParticipantActionWithdrawWorker, canonical,
 	)
 	body, err := json.Marshal(sharedWorkerWithdrawalBody{
-		Version: 1, Withdrawal: withdrawal,
+		Version: 1, WithdrawalPayload: canonical,
 		Enrollment: BoxParticipantEnrollment{
 			Anchor: fixture.anchor, Device: fixture.device,
 			RootRecord: fixture.root, GrantRecord: fixture.grant,
