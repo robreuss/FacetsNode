@@ -389,7 +389,11 @@ func participantBase64URL(value string) ([]byte, error) {
 }
 
 func strictParticipantJSON(data []byte, target any) error {
-	if len(data) == 0 || len(data) > 65_536 {
+	return strictBoundedJSON(data, target, 65_536)
+}
+
+func strictBoundedJSON(data []byte, target any, maximumBytes int) error {
+	if len(data) == 0 || len(data) > maximumBytes {
 		return ErrParticipantAuthority
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))

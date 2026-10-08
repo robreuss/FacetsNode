@@ -52,6 +52,10 @@ type Store interface {
 	SharedWorkerAccessRequest(context.Context, uuid.UUID, uuid.UUID, int64) (BoxSharedWorkerAccessRequestStatus, error)
 	ConfirmSharedWorkerAccess(context.Context, BoxSharedWorkerAccessGrant, [32]byte, int64) error
 	RevokeSharedWorkerAccess(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uint64, int64) error
+	EnqueueSharedWorkerOperation(context.Context, BoxSharedWorkerOperation, int64) error
+	ClaimSharedWorkerOperation(context.Context, BoxSharedWorkerOperationClaim, int64) (*BoxSharedWorkerOperation, error)
+	CompleteSharedWorkerOperation(context.Context, BoxSharedWorkerOperationResponse, int64) error
+	SharedWorkerOperationStatus(context.Context, uuid.UUID, uuid.UUID, int64) (BoxSharedWorkerOperationStatus, error)
 	AppendAudit(context.Context, AuditEvent) error
 	RecentAudit(context.Context, int) ([]AuditEvent, error)
 }
@@ -69,6 +73,7 @@ type MemoryStore struct {
 	sharedWorkers          map[uuid.UUID]BoxSharedWorkerAdvertisement
 	sharedWorkerRequests   map[uuid.UUID]BoxSharedWorkerAccessRequest
 	sharedWorkerGrants     map[uuid.UUID]BoxSharedWorkerAccessGrant
+	sharedWorkerOperations map[uuid.UUID]BoxSharedWorkerOperation
 	throttle               map[string]LoginThrottle
 	audit                  []AuditEvent
 }
@@ -85,6 +90,7 @@ func NewMemoryStore() *MemoryStore {
 		sharedWorkers:          make(map[uuid.UUID]BoxSharedWorkerAdvertisement),
 		sharedWorkerRequests:   make(map[uuid.UUID]BoxSharedWorkerAccessRequest),
 		sharedWorkerGrants:     make(map[uuid.UUID]BoxSharedWorkerAccessGrant),
+		sharedWorkerOperations: make(map[uuid.UUID]BoxSharedWorkerOperation),
 		throttle:               make(map[string]LoginThrottle),
 	}
 }

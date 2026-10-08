@@ -175,6 +175,42 @@ func (store *PostgresStore) Migrate(ctx context.Context) error {
 			CHECK (expires_at_milliseconds > granted_at_milliseconds),
 			CHECK (expires_at_milliseconds - granted_at_milliseconds <= 15552000000)
 		)`,
+		`CREATE TABLE IF NOT EXISTS box_shared_worker_operations (
+			operation_id uuid PRIMARY KEY,
+			box_id uuid NOT NULL REFERENCES box_state(box_id),
+			worker_id uuid NOT NULL,
+			access_grant_id uuid NOT NULL REFERENCES box_shared_worker_access_grants(grant_id),
+			requester_participant_id uuid NOT NULL REFERENCES box_participants(participant_id),
+			requester_device_id uuid NOT NULL REFERENCES box_participant_devices(device_id),
+			connection_grant_id uuid NOT NULL REFERENCES connection_grants(grant_id),
+			job_id uuid NOT NULL,
+			run_id uuid NOT NULL,
+			attempt bigint NOT NULL CHECK (attempt > 0),
+			capabilities_digest text NOT NULL CHECK (octet_length(capabilities_digest) = 64),
+			request_digest text NOT NULL CHECK (octet_length(request_digest) = 64),
+			request_bytes bytea NOT NULL CHECK (octet_length(request_bytes) BETWEEN 1 AND 2097152),
+			requested_at_milliseconds bigint NOT NULL CHECK (requested_at_milliseconds > 0),
+			expires_at_milliseconds bigint NOT NULL,
+			state text NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','claimed','response-ready','expired')),
+			claim_id uuid,
+			claimed_at_milliseconds bigint NOT NULL DEFAULT 0 CHECK (claimed_at_milliseconds >= 0),
+			claim_expires_at_milliseconds bigint NOT NULL DEFAULT 0 CHECK (claim_expires_at_milliseconds >= 0),
+			response_owner_participant_id uuid,
+			response_owner_device_id uuid,
+			response_digest text NOT NULL DEFAULT '',
+			response_bytes bytea NOT NULL DEFAULT ''::bytea CHECK (octet_length(response_bytes) <= 2097152),
+			responded_at_milliseconds bigint NOT NULL DEFAULT 0 CHECK (responded_at_milliseconds >= 0),
+			CHECK (expires_at_milliseconds > requested_at_milliseconds),
+			CHECK (expires_at_milliseconds - requested_at_milliseconds <= 900000),
+			CHECK ((state IN ('claimed','response-ready')) = (claim_id IS NOT NULL)),
+			CHECK ((state = 'response-ready') = (octet_length(response_bytes) > 0)),
+			CHECK ((state = 'response-ready') = (response_owner_participant_id IS NOT NULL)),
+			CHECK ((state = 'response-ready') = (response_owner_device_id IS NOT NULL)),
+			CHECK ((octet_length(response_bytes) = 0) = (response_digest = ''))
+		)`,
+		`CREATE INDEX IF NOT EXISTS box_shared_worker_operations_claimable
+			ON box_shared_worker_operations (worker_id, requested_at_milliseconds, operation_id)
+			WHERE state = 'queued'`,
 	}
 	for _, statement := range statements {
 		if _, err := store.pool.Exec(ctx, statement); err != nil {

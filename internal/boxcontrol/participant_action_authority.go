@@ -21,6 +21,10 @@ const (
 	ParticipantActionRequestWorkerAccess      BoxParticipantAction = "worker.access.request"
 	ParticipantActionGrantWorkerAccess        BoxParticipantAction = "worker.access.grant"
 	ParticipantActionRevokeWorkerAccess       BoxParticipantAction = "worker.access.revoke"
+	ParticipantActionEnqueueWorkerOperation   BoxParticipantAction = "worker.operation.enqueue"
+	ParticipantActionClaimWorkerOperation     BoxParticipantAction = "worker.operation.claim"
+	ParticipantActionRespondWorkerOperation   BoxParticipantAction = "worker.operation.respond"
+	ParticipantActionCancelWorkerOperation    BoxParticipantAction = "worker.operation.cancel"
 )
 
 func (action BoxParticipantAction) valid() bool {
@@ -30,7 +34,11 @@ func (action BoxParticipantAction) valid() bool {
 		ParticipantActionWithdrawWorker,
 		ParticipantActionRequestWorkerAccess,
 		ParticipantActionGrantWorkerAccess,
-		ParticipantActionRevokeWorkerAccess:
+		ParticipantActionRevokeWorkerAccess,
+		ParticipantActionEnqueueWorkerOperation,
+		ParticipantActionClaimWorkerOperation,
+		ParticipantActionRespondWorkerOperation,
+		ParticipantActionCancelWorkerOperation:
 		return true
 	default:
 		return false

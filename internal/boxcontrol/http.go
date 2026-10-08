@@ -104,6 +104,10 @@ func (service *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/shared-worker-access-requests/{requestID}", service.handleSharedWorkerAccessRequestStatus)
 	mux.HandleFunc("POST /v1/shared-workers/{workerID}/access-grants", service.handleGrantSharedWorkerAccess)
 	mux.HandleFunc("POST /v1/shared-worker-access-grants/{grantID}/revoke", service.handleRevokeSharedWorkerAccess)
+	mux.HandleFunc("POST /v1/shared-workers/{workerID}/operations", service.handleEnqueueSharedWorkerOperation)
+	mux.HandleFunc("POST /v1/shared-workers/{workerID}/operation-claims", service.handleClaimSharedWorkerOperation)
+	mux.HandleFunc("POST /v1/shared-worker-operations/{operationID}/response", service.handleCompleteSharedWorkerOperation)
+	mux.HandleFunc("GET /v1/shared-worker-operations/{operationID}", service.handleSharedWorkerOperationStatus)
 	mux.HandleFunc("POST /v1/claim-connection-requests", service.handleCreateClaimConnectionRequest)
 	mux.HandleFunc("POST /v1/connection-invitations/redeem", service.handleRedeemConnectionInvitation)
 	mux.HandleFunc("GET /v1/connection-requests/{requestID}", service.handlePollConnectionRequest)
@@ -111,7 +115,11 @@ func (service *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/services/device-sync/groups", service.handleDeviceSyncGroups)
 	mux.HandleFunc("POST /v1/services/device-sync/account-admissions", service.handleDeviceSyncAccountAdmission)
 	return securityHeaders(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.ContentLength > MaximumRequestBytes {
+		maximumBytes := int64(MaximumRequestBytes)
+		if sharedWorkerOperationRequest(request) {
+			maximumBytes = maximumSharedWorkerOperationHTTPBytes
+		}
+		if request.ContentLength > maximumBytes {
 			http.Error(writer, "Request is too large.", http.StatusRequestEntityTooLarge)
 			return
 		}
@@ -1114,7 +1122,11 @@ func (service *Service) clearSessionCookies(writer http.ResponseWriter) {
 }
 
 func decodeJSON(request *http.Request, destination any) error {
-	decoder := json.NewDecoder(io.LimitReader(request.Body, MaximumRequestBytes+1))
+	return decodeBoundedJSON(request, destination, MaximumRequestBytes)
+}
+
+func decodeBoundedJSON(request *http.Request, destination any, maximumBytes int) error {
+	decoder := json.NewDecoder(io.LimitReader(request.Body, int64(maximumBytes)+1))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err
@@ -1124,6 +1136,16 @@ func decodeJSON(request *http.Request, destination any) error {
 		return errors.New("request must contain one JSON value")
 	}
 	return nil
+}
+
+func sharedWorkerOperationRequest(request *http.Request) bool {
+	if request.Method != http.MethodPost {
+		return false
+	}
+	path := request.URL.Path
+	return strings.HasPrefix(path, "/v1/shared-workers/") &&
+		(strings.HasSuffix(path, "/operations") || strings.HasSuffix(path, "/operation-claims")) ||
+		strings.HasPrefix(path, "/v1/shared-worker-operations/") && strings.HasSuffix(path, "/response")
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {
