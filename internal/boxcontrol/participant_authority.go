@@ -208,23 +208,10 @@ func verifyBoxParticipantProof(
 	expectedChallengeID uuid.UUID,
 	nowMilliseconds int64,
 ) error {
-	rootKey, deviceKey, grantNotBefore, err := verifyBoxParticipantEnrollment(
-		anchor, device, rootRecord, grantRecord, nowMilliseconds)
+	deviceKey, grantNotBefore, err := verifyBoxParticipantIdentity(
+		anchor, device, rootRecord, grantRecord, revocations, nowMilliseconds)
 	if err != nil || expectedChallengeID == uuid.Nil {
 		return ErrParticipantAuthority
-	}
-	for _, record := range revocations {
-		var revocation boxPrincipalDeviceRevocation
-		if strictParticipantJSON(record.Payload, &revocation) != nil ||
-			revocation.Version != 1 || revocation.PrincipalID != anchor.BoxScopedPrincipalID ||
-			verifyPrincipalRecord(record, rootKey, anchor.RootKeyFingerprint, principalRevocationDomain) != nil {
-			return ErrParticipantAuthority
-		}
-		if revocation.DeviceID == device.DeviceID &&
-			revocation.IssuedAtMilliseconds <= nowMilliseconds &&
-			revocation.RevokedThroughGeneration >= device.DeviceGeneration {
-			return ErrParticipantAuthority
-		}
 	}
 	var payload BoxParticipantProofPayload
 	if strictParticipantJSON(proof.Payload, &payload) != nil || payload.Version != 1 ||
@@ -241,6 +228,35 @@ func verifyBoxParticipantProof(
 		return ErrParticipantAuthority
 	}
 	return nil
+}
+
+func verifyBoxParticipantIdentity(
+	anchor BoxParticipantAnchor,
+	device BoxParticipantDevice,
+	rootRecord BoxSignedPrincipalRecord,
+	grantRecord BoxSignedPrincipalRecord,
+	revocations []BoxSignedPrincipalRecord,
+	nowMilliseconds int64,
+) (*ecdsa.PublicKey, int64, error) {
+	rootKey, deviceKey, grantNotBefore, err := verifyBoxParticipantEnrollment(
+		anchor, device, rootRecord, grantRecord, nowMilliseconds)
+	if err != nil {
+		return nil, 0, ErrParticipantAuthority
+	}
+	for _, record := range revocations {
+		var revocation boxPrincipalDeviceRevocation
+		if strictParticipantJSON(record.Payload, &revocation) != nil ||
+			revocation.Version != 1 || revocation.PrincipalID != anchor.BoxScopedPrincipalID ||
+			verifyPrincipalRecord(record, rootKey, anchor.RootKeyFingerprint, principalRevocationDomain) != nil {
+			return nil, 0, ErrParticipantAuthority
+		}
+		if revocation.DeviceID == device.DeviceID &&
+			revocation.IssuedAtMilliseconds <= nowMilliseconds &&
+			revocation.RevokedThroughGeneration >= device.DeviceGeneration {
+			return nil, 0, ErrParticipantAuthority
+		}
+	}
+	return deviceKey, grantNotBefore, nil
 }
 
 // Validate the exact public authority being pinned by an owner-approved
