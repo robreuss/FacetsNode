@@ -80,7 +80,7 @@ type BoxSharedWorkerAccessGrant struct {
 	Revision               uint64    `json:"revision"`
 	GrantedAtMilliseconds  int64     `json:"grantedAtMilliseconds"`
 	ExpiresAtMilliseconds  int64     `json:"expiresAtMilliseconds"`
-	RevokedAtMilliseconds  int64     `json:"revokedAtMilliseconds,omitempty"`
+	RevokedAtMilliseconds  int64     `json:"revokedAtMilliseconds"`
 }
 
 func (value BoxSharedWorkerAccessGrant) validAt(nowMilliseconds int64) bool {
