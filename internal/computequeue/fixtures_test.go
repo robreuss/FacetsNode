@@ -126,6 +126,90 @@ type directLocalFixture struct {
 	Transitions     []AttemptTransition `json:"transitions"`
 }
 
+type resultEvidenceFixture struct {
+	ProtocolVersion int                      `json:"protocolVersion"`
+	Scenario        string                   `json:"scenario"`
+	Attempt         AttemptRecord            `json:"attempt"`
+	Assignment      AssignmentRecord         `json:"assignment"`
+	Manifest        AssignmentResultManifest `json:"manifest"`
+	Items           []ItemRecord             `json:"items"`
+	Errors          []ErrorRecord            `json:"errors"`
+}
+
+func (value resultEvidenceFixture) Validate() error {
+	if err := requireProtocol(value.ProtocolVersion); err != nil {
+		return err
+	}
+	if value.Scenario != "assignmentResultEvidence" {
+		return invalid("fixture.scenario")
+	}
+	if err := value.Attempt.Validate(); err != nil {
+		return err
+	}
+	if err := value.Assignment.ValidateAuthorizedBy(newAuthorizedAttempt(value.Attempt), nil); err != nil {
+		return err
+	}
+	if err := value.Manifest.ValidateAuthorizedBy(value.Assignment, value.Attempt.OccurrenceID); err != nil {
+		return err
+	}
+	if len(value.Items) != len(value.Assignment.ItemIDs) {
+		return invalid("fixture.items")
+	}
+	for index, item := range value.Items {
+		if err := item.Validate(); err != nil {
+			return err
+		}
+		if item.ID != value.Assignment.ItemIDs[index] {
+			return invalid("fixture.items")
+		}
+	}
+	if err := value.Manifest.ValidateAgainstItems(value.Items); err != nil {
+		return err
+	}
+	if len(value.Errors) > len(value.Items) {
+		return invalid("fixture.errors")
+	}
+	errorsByID := make(map[ErrorID]ErrorRecord, len(value.Errors))
+	previousErrorID := ErrorID("")
+	for _, record := range value.Errors {
+		if err := record.Validate(); err != nil {
+			return err
+		}
+		if previousErrorID != "" && record.ID <= previousErrorID {
+			return invalid("fixture.errors")
+		}
+		if record.OccurrenceID != value.Attempt.OccurrenceID || record.AttemptID == nil || *record.AttemptID != value.Attempt.ID || record.AssignmentID == nil || *record.AssignmentID != value.Assignment.ID {
+			return invalid("fixture.errors")
+		}
+		if _, duplicate := errorsByID[record.ID]; duplicate {
+			return duplicateValue("fixture.errors")
+		}
+		errorsByID[record.ID] = record
+		previousErrorID = record.ID
+	}
+	failedErrorIDs := make(map[ErrorID]struct{}, len(value.Errors))
+	for _, entry := range value.Manifest.Entries {
+		if entry.Outcome != "failed" {
+			continue
+		}
+		if entry.ErrorID == nil || entry.ErrorDigest == nil {
+			return invalid("fixture.errors")
+		}
+		if _, duplicate := failedErrorIDs[*entry.ErrorID]; duplicate {
+			return duplicateValue("fixture.errors")
+		}
+		failedErrorIDs[*entry.ErrorID] = struct{}{}
+		record, present := errorsByID[*entry.ErrorID]
+		if !present || record.ItemID == nil || *record.ItemID != entry.ItemID || record.Digest() != *entry.ErrorDigest {
+			return invalid("fixture.errors")
+		}
+	}
+	if len(failedErrorIDs) != len(errorsByID) {
+		return invalid("fixture.errors")
+	}
+	return nil
+}
+
 func (value directLocalFixture) Validate() error {
 	if err := requireProtocol(value.ProtocolVersion); err != nil {
 		return err
@@ -428,6 +512,7 @@ func TestAuthoritativeSwiftFixturesRoundTrip(t *testing.T) {
 		run  func(*testing.T, []byte)
 	}{
 		{"compute-queue-direct-local-lifecycle-v1.json", roundTripFixture[directLocalFixture]},
+		{"compute-queue-assignment-result-evidence-v1.json", roundTripFixture[resultEvidenceFixture]},
 		{"compute-queue-immediate-occurrence-v1.json", roundTripFixture[scheduleOccurrenceFixture]},
 		{"compute-queue-mixed-terminal-report-v1.json", roundTripFixture[mixedTerminalFixture]},
 		{"compute-queue-recurring-occurrence-v1.json", roundTripFixture[scheduleOccurrenceFixture]},
