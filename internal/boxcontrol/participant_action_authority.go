@@ -25,6 +25,7 @@ const (
 	ParticipantActionClaimWorkerOperation     BoxParticipantAction = "worker.operation.claim"
 	ParticipantActionRespondWorkerOperation   BoxParticipantAction = "worker.operation.respond"
 	ParticipantActionCancelWorkerOperation    BoxParticipantAction = "worker.operation.cancel"
+	ParticipantActionIssueJobCustodyPermit    BoxParticipantAction = "job-custody.permit.issue"
 )
 
 func (action BoxParticipantAction) valid() bool {
@@ -38,7 +39,8 @@ func (action BoxParticipantAction) valid() bool {
 		ParticipantActionEnqueueWorkerOperation,
 		ParticipantActionClaimWorkerOperation,
 		ParticipantActionRespondWorkerOperation,
-		ParticipantActionCancelWorkerOperation:
+		ParticipantActionCancelWorkerOperation,
+		ParticipantActionIssueJobCustodyPermit:
 		return true
 	default:
 		return false

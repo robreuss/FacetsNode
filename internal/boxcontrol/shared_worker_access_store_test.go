@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/robreuss/FacetsNode/internal/computequeue"
 )
 
 func sharedWorkerAccessStoreFixture(
@@ -247,5 +249,15 @@ func TestPostgresSharedWorkerAccessSurvivesRestart(t *testing.T) {
 	if err != nil || status.Decision != SharedWorkerAccessApproved || status.Grant == nil ||
 		status.Grant.GrantID != grant.GrantID {
 		t.Fatalf("approved after restart: %v %+v", err, status)
+	}
+	permitRequest, _ := jobCustodyAdmissionPermitRequestForTest(
+		t, owner.now, requester, worker, grant,
+	)
+	permitRequest.ConnectionGrantID = connectionID
+	authority, err := store.AuthorizeJobCustodyAdmission(ctx, permitRequest, owner.now)
+	if err != nil || authority.requesterAuthorityDigest.Validate() != nil ||
+		authority.workerAccessGrantDigest.Validate() != nil ||
+		authority.workerCapabilitiesDigest != computequeue.Digest(worker.CapabilitiesDigest) {
+		t.Fatalf("Job Custody route authority after restart: %v %+v", err, authority)
 	}
 }

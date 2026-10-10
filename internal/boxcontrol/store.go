@@ -52,6 +52,7 @@ type Store interface {
 	SharedWorkerAccessRequest(context.Context, uuid.UUID, uuid.UUID, int64) (BoxSharedWorkerAccessRequestStatus, error)
 	ConfirmSharedWorkerAccess(context.Context, BoxSharedWorkerAccessGrant, [32]byte, int64) error
 	RevokeSharedWorkerAccess(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uint64, int64) error
+	AuthorizeJobCustodyAdmission(context.Context, BoxJobCustodyAdmissionPermitRequest, int64) (BoxJobCustodyRouteAuthority, error)
 	EnqueueSharedWorkerOperation(context.Context, BoxSharedWorkerOperation, int64) error
 	ClaimSharedWorkerOperation(context.Context, BoxSharedWorkerOperationClaim, int64) (*BoxSharedWorkerOperation, error)
 	CompleteSharedWorkerOperation(context.Context, BoxSharedWorkerOperationResponse, int64) error

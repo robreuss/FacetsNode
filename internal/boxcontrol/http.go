@@ -104,6 +104,7 @@ func (service *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/shared-worker-access-requests/{requestID}", service.handleSharedWorkerAccessRequestStatus)
 	mux.HandleFunc("POST /v1/shared-workers/{workerID}/access-grants", service.handleGrantSharedWorkerAccess)
 	mux.HandleFunc("POST /v1/shared-worker-access-grants/{grantID}/revoke", service.handleRevokeSharedWorkerAccess)
+	mux.HandleFunc("POST /v1/job-custody/admission-permits", service.handleIssueJobCustodyAdmissionPermit)
 	mux.HandleFunc("POST /v1/shared-workers/{workerID}/operations", service.handleEnqueueSharedWorkerOperation)
 	mux.HandleFunc("POST /v1/shared-workers/{workerID}/operation-claims", service.handleClaimSharedWorkerOperation)
 	mux.HandleFunc("POST /v1/shared-worker-operations/{operationID}/response", service.handleCompleteSharedWorkerOperation)
@@ -118,6 +119,8 @@ func (service *Service) Handler() http.Handler {
 		maximumBytes := int64(MaximumRequestBytes)
 		if sharedWorkerOperationRequest(request) {
 			maximumBytes = maximumSharedWorkerOperationHTTPBytes
+		} else if jobCustodyPermitRequest(request) {
+			maximumBytes = maximumJobCustodyAdmissionPermitHTTPBytes
 		}
 		if request.ContentLength > maximumBytes {
 			http.Error(writer, "Request is too large.", http.StatusRequestEntityTooLarge)
@@ -1146,6 +1149,10 @@ func sharedWorkerOperationRequest(request *http.Request) bool {
 	return strings.HasPrefix(path, "/v1/shared-workers/") &&
 		(strings.HasSuffix(path, "/operations") || strings.HasSuffix(path, "/operation-claims")) ||
 		strings.HasPrefix(path, "/v1/shared-worker-operations/") && strings.HasSuffix(path, "/response")
+}
+
+func jobCustodyPermitRequest(request *http.Request) bool {
+	return request.Method == http.MethodPost && request.URL.Path == "/v1/job-custody/admission-permits"
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {
