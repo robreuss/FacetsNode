@@ -128,8 +128,9 @@ func prepareJobCustodyRuntime(
 		Capacity: jobCustodyCapacityAuthority{
 			client: capacityClient, lifetime: configuration.StorageCapacityReservationTTL,
 		},
-		Verifier: verifier,
-		Clock:    clock,
+		Verifier:      verifier,
+		ReceiptSigner: signer,
+		Clock:         clock,
 	}
 	return runtime, nil
 }

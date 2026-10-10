@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/robreuss/FacetsNode/internal/computequeue"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
@@ -24,19 +27,22 @@ const (
 // protected bytes. It intentionally has no Space, object, prompt, model,
 // operation, result, credential, label, or caller-selected path field.
 type AdmissionRecord struct {
-	EnvelopeBytes   []byte
-	Header          computequeue.JobCustodyAdmissionHeader
-	ExpectedSigner  computequeue.ReceiptSignerBinding
-	AcceptedAt      computequeue.Timestamp
-	CommittedBytes  int64
-	State           AdmissionState
-	ObjectPath      string
-	UpdatedAtMillis int64
+	EnvelopeBytes         []byte
+	Header                computequeue.JobCustodyAdmissionHeader
+	ExpectedSigner        computequeue.ReceiptSignerBinding
+	AdmissionPermitDigest computequeue.Digest
+	AcceptedAt            computequeue.Timestamp
+	CommittedBytes        int64
+	State                 AdmissionState
+	ObjectPath            string
+	CustodyReceiptBytes   []byte
+	UpdatedAtMillis       int64
 }
 
 func (record AdmissionRecord) ValidateStored() error {
 	if len(record.EnvelopeBytes) == 0 || record.Header.Validate() != nil ||
 		record.ExpectedSigner.Validate() != nil || record.AcceptedAt.Validate() != nil ||
+		record.AdmissionPermitDigest.Validate() != nil ||
 		record.AcceptedAt < record.Header.NotBeforeAt || record.AcceptedAt >= record.Header.ExpiresAt ||
 		record.CommittedBytes < 0 || record.CommittedBytes > record.Header.ProtectedObject.ByteCount ||
 		record.UpdatedAtMillis < int64(record.AcceptedAt) {
@@ -50,12 +56,13 @@ func (record AdmissionRecord) ValidateStored() error {
 	expectedPath := filepath.Join("objects", string(record.Header.CapsuleID))
 	switch record.State {
 	case AdmissionStaging:
-		if record.ObjectPath != "" {
+		if record.ObjectPath != "" || len(record.CustodyReceiptBytes) != 0 {
 			return ErrInvalid
 		}
 	case AdmissionRetained:
 		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
-			record.ObjectPath != expectedPath {
+			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
+			validateCustodyReceiptRecord(record, nil) != nil {
 			return ErrInvalid
 		}
 	default:
@@ -122,7 +129,7 @@ type AppendLease interface {
 
 type FinalizationLease interface {
 	Admission() AdmissionRecord
-	Commit(context.Context, string) (AdmissionRecord, error)
+	Commit(context.Context, string, []byte, int64) (AdmissionRecord, error)
 	Abort(context.Context) error
 }
 
@@ -138,17 +145,29 @@ type CapacityReservation interface {
 
 type Clock interface{ Now() time.Time }
 
+type ReceiptSigner interface {
+	DeploymentID() uuid.UUID
+	PublicSigningKeyX963() string
+	SigningKeyFingerprint() string
+	SignJobCustodyReceipt(
+		serviceauthority.JobCustodyReceiptPayload,
+	) (serviceauthority.JobCustodyReceipt, error)
+}
+
 type Coordinator struct {
-	Ledger   Ledger
-	Content  *ContentStore
-	Capacity CapacityAuthority
-	Verifier AdmissionVerifier
-	Clock    Clock
+	Ledger        Ledger
+	Content       *ContentStore
+	Capacity      CapacityAuthority
+	Verifier      AdmissionVerifier
+	ReceiptSigner ReceiptSigner
+	Clock         Clock
 }
 
 func (coordinator *Coordinator) validate() error {
 	if coordinator == nil || coordinator.Ledger == nil || coordinator.Content == nil ||
-		coordinator.Capacity == nil || coordinator.Verifier == nil || coordinator.Clock == nil {
+		coordinator.Capacity == nil || coordinator.Verifier == nil ||
+		coordinator.ReceiptSigner == nil || coordinator.ReceiptSigner.DeploymentID() == uuid.Nil ||
+		coordinator.Clock == nil {
 		return ErrInvalid
 	}
 	return nil
@@ -222,12 +241,13 @@ func (coordinator *Coordinator) AdmitAuthorized(
 		return AdmissionHandle{}, err
 	}
 	candidate := AdmissionRecord{
-		EnvelopeBytes:   bytes.Clone(envelopeBytes),
-		Header:          verified.Header(),
-		ExpectedSigner:  verified.ExpectedSigner(),
-		AcceptedAt:      acceptedAt,
-		State:           AdmissionStaging,
-		UpdatedAtMillis: int64(acceptedAt),
+		EnvelopeBytes:         bytes.Clone(envelopeBytes),
+		Header:                verified.Header(),
+		ExpectedSigner:        verified.ExpectedSigner(),
+		AdmissionPermitDigest: authorization.permitDigest,
+		AcceptedAt:            acceptedAt,
+		State:                 AdmissionStaging,
+		UpdatedAtMillis:       int64(acceptedAt),
 	}
 	if err := candidate.ValidateStored(); err != nil {
 		return AdmissionHandle{}, err
@@ -266,6 +286,9 @@ func (coordinator *Coordinator) openAdmission(
 			return AdmissionHandle{}, err
 		}
 	} else if record.State == AdmissionRetained {
+		if validateCustodyReceiptRecord(record, coordinator.ReceiptSigner) != nil {
+			return AdmissionHandle{}, ErrInvalid
+		}
 		file, err := coordinator.Content.OpenObject(record.Header.CapsuleID, record.Header.ProtectedObject)
 		if err != nil {
 			return AdmissionHandle{}, err
@@ -399,6 +422,9 @@ func (coordinator *Coordinator) Finalize(
 		return AdmissionRecord{}, ErrConflict
 	}
 	if record.State == AdmissionRetained {
+		if validateCustodyReceiptRecord(record, coordinator.ReceiptSigner) != nil {
+			return AdmissionRecord{}, ErrInvalid
+		}
 		file, err := coordinator.Content.OpenObject(header.CapsuleID, header.ProtectedObject)
 		if err != nil {
 			return AdmissionRecord{}, err
@@ -419,9 +445,20 @@ func (coordinator *Coordinator) Finalize(
 	if err != nil {
 		return AdmissionRecord{}, err
 	}
+	committedAt := coordinator.Clock.Now().UnixMilli()
+	if committedAt < record.UpdatedAtMillis {
+		committedAt = record.UpdatedAtMillis
+	}
+	if committedAt > int64(header.RetentionUntil) {
+		return AdmissionRecord{}, ErrConflict
+	}
+	receiptBytes, err := coordinator.signCustodyReceipt(record, committedAt)
+	if err != nil {
+		return AdmissionRecord{}, err
+	}
 	criticalContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	committedRecord, err := lease.Commit(criticalContext, objectPath)
+	committedRecord, err := lease.Commit(criticalContext, objectPath, receiptBytes, committedAt)
 	if err != nil {
 		return AdmissionRecord{}, err
 	}
@@ -430,8 +467,80 @@ func (coordinator *Coordinator) Finalize(
 		!sameAdmission(committedRecord, record) ||
 		committedRecord.State != AdmissionRetained ||
 		committedRecord.CommittedBytes != header.ProtectedObject.ByteCount ||
-		committedRecord.ObjectPath != objectPath {
+		committedRecord.ObjectPath != objectPath ||
+		validateCustodyReceiptRecord(committedRecord, coordinator.ReceiptSigner) != nil {
 		return AdmissionRecord{}, ErrInvalid
 	}
 	return committedRecord, nil
+}
+
+func (coordinator *Coordinator) signCustodyReceipt(
+	record AdmissionRecord,
+	committedAt int64,
+) ([]byte, error) {
+	capsuleID, capsuleErr := uuid.Parse(string(record.Header.CapsuleID))
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	envelopeDigest, digestErr := AdmissionEnvelopeDigest(record.EnvelopeBytes)
+	if capsuleErr != nil || assignmentErr != nil || digestErr != nil {
+		return nil, ErrInvalid
+	}
+	payload := serviceauthority.JobCustodyReceiptPayload{
+		AdmissionEnvelopeDigest:         string(envelopeDigest),
+		AdmissionIdempotencyKey:         string(record.Header.IdempotencyKey),
+		AdmissionPermitDigest:           string(record.AdmissionPermitDigest),
+		AssignmentID:                    assignmentID,
+		CapsuleID:                       capsuleID,
+		CommittedAtMilliseconds:         committedAt,
+		DeploymentID:                    coordinator.ReceiptSigner.DeploymentID(),
+		Kind:                            serviceauthority.JobCustodyCommittedReceiptKind,
+		ProtectedObjectByteCount:        record.Header.ProtectedObject.ByteCount,
+		ProtectedObjectDescriptorDigest: string(record.Header.ProtectedObject.Digest()),
+		ProtectedObjectSHA256:           string(record.Header.ProtectedObject.SHA256),
+		RetentionUntilMilliseconds:      int64(record.Header.RetentionUntil),
+		Version:                         serviceauthority.JobCustodyReceiptVersion,
+	}
+	receipt, err := coordinator.ReceiptSigner.SignJobCustodyReceipt(payload)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	return encoded, nil
+}
+
+func validateCustodyReceiptRecord(record AdmissionRecord, signer ReceiptSigner) error {
+	receipt, err := serviceauthority.DecodeJobCustodyReceipt(record.CustodyReceiptBytes)
+	if err != nil {
+		return ErrInvalid
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil {
+		return ErrInvalid
+	}
+	capsuleID, capsuleErr := uuid.Parse(string(record.Header.CapsuleID))
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	envelopeDigest, digestErr := AdmissionEnvelopeDigest(record.EnvelopeBytes)
+	if capsuleErr != nil || assignmentErr != nil || digestErr != nil ||
+		payload.CapsuleID != capsuleID || payload.AssignmentID != assignmentID ||
+		payload.AdmissionEnvelopeDigest != string(envelopeDigest) ||
+		payload.AdmissionIdempotencyKey != string(record.Header.IdempotencyKey) ||
+		payload.AdmissionPermitDigest != string(record.AdmissionPermitDigest) ||
+		payload.ProtectedObjectByteCount != record.Header.ProtectedObject.ByteCount ||
+		payload.ProtectedObjectDescriptorDigest != string(record.Header.ProtectedObject.Digest()) ||
+		payload.ProtectedObjectSHA256 != string(record.Header.ProtectedObject.SHA256) ||
+		payload.RetentionUntilMilliseconds != int64(record.Header.RetentionUntil) ||
+		payload.CommittedAtMilliseconds != record.UpdatedAtMillis {
+		return ErrInvalid
+	}
+	if signer != nil {
+		if payload.DeploymentID != signer.DeploymentID() ||
+			receipt.Signature.SignerID != signer.DeploymentID() ||
+			receipt.Signature.PublicSigningKeyX963 != signer.PublicSigningKeyX963() ||
+			receipt.Signature.SigningKeyFingerprint != signer.SigningKeyFingerprint() {
+			return ErrInvalid
+		}
+	}
+	return nil
 }

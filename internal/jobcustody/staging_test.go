@@ -16,7 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/robreuss/FacetsNode/internal/computequeue"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 )
 
 func TestCoordinatorStagesExactAdmissionThroughSharedCapacity(t *testing.T) {
@@ -26,7 +29,8 @@ func TestCoordinatorStagesExactAdmissionThroughSharedCapacity(t *testing.T) {
 	fixture := newStagingFixture(t, []byte("opaque-protected-capsule-with-several-chunks"), 9)
 	coordinator := &Coordinator{
 		Ledger: ledger, Content: content, Capacity: capacity,
-		Verifier: fixture.verifier, Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
+		Verifier: fixture.verifier, ReceiptSigner: testJobCustodyReceiptSigner(t),
+		Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
 	}
 
 	handle, err := coordinator.AdmitAuthorized(
@@ -83,8 +87,21 @@ func TestCoordinatorStagesExactAdmissionThroughSharedCapacity(t *testing.T) {
 	if retained.State != AdmissionRetained || retained.CommittedBytes != int64(len(fixture.protectedBytes)) {
 		t.Fatalf("retained record=%+v", retained)
 	}
+	receipt, err := serviceauthority.DecodeJobCustodyReceipt(retained.CustodyReceiptBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil || payload.CapsuleID.String() != string(fixture.header.CapsuleID) ||
+		payload.AssignmentID.String() != string(fixture.header.AssignmentID) ||
+		payload.ProtectedObjectSHA256 != string(fixture.header.ProtectedObject.SHA256) ||
+		payload.AdmissionPermitDigest != string(handle.Record().AdmissionPermitDigest) {
+		t.Fatalf("custody receipt payload=%+v err=%v", payload, err)
+	}
 	if retry, err := coordinator.Finalize(context.Background(), handle); err != nil || retry.ObjectPath != retained.ObjectPath {
 		t.Fatalf("finalization retry=%+v err=%v", retry, err)
+	} else if !bytes.Equal(retry.CustodyReceiptBytes, retained.CustodyReceiptBytes) {
+		t.Fatal("exact finalization replay returned different signed receipt bytes")
 	}
 
 	coordinator.Clock = fixedJobCustodyClock{time.UnixMilli(1_800_000_300_000)}
@@ -105,7 +122,8 @@ func TestCoordinatorReleasesCapacityBeforeLedgerCommitAndReconcilesRetry(t *test
 	fixture := newStagingFixture(t, []byte("single-opaque-chunk"), 64)
 	coordinator := &Coordinator{
 		Ledger: ledger, Content: content, Capacity: capacity,
-		Verifier: fixture.verifier, Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
+		Verifier: fixture.verifier, ReceiptSigner: testJobCustodyReceiptSigner(t),
+		Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
 	}
 	handle, err := coordinator.AdmitAuthorized(
 		context.Background(), fixture.envelopeBytes,
@@ -141,7 +159,8 @@ func TestCoordinatorRejectsConflictingAdmissionAndChunkGeometry(t *testing.T) {
 	fixture := newStagingFixture(t, []byte("opaque-protected-capsule"), 8)
 	coordinator := &Coordinator{
 		Ledger: ledger, Content: content, Capacity: capacity,
-		Verifier: fixture.verifier, Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
+		Verifier: fixture.verifier, ReceiptSigner: testJobCustodyReceiptSigner(t),
+		Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
 	}
 	handle, err := coordinator.AdmitAuthorized(
 		context.Background(), fixture.envelopeBytes,
@@ -182,9 +201,81 @@ func TestCoordinatorRejectsConflictingAdmissionAndChunkGeometry(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRejectsSelfConsistentReceiptFromSubstitutedDeploymentKey(t *testing.T) {
+	content, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
+	fixture := newStagingFixture(t, []byte("opaque-protected-capsule"), 64)
+	coordinator := &Coordinator{
+		Ledger: ledger, Content: content, Capacity: &memoryCapacityAuthority{},
+		Verifier: fixture.verifier, ReceiptSigner: testJobCustodyReceiptSigner(t),
+		Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
+	}
+	handle, err := coordinator.AdmitAuthorized(
+		context.Background(), fixture.envelopeBytes, fixture.authorization(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.AppendChunk(
+		context.Background(), handle, 0, fixture.protectedBytes,
+		digestBytes(fixture.protectedBytes),
+	); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := coordinator.Finalize(context.Background(), handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyReceipt(retained.CustodyReceiptBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	attackerSeed := bytes.Repeat([]byte{0}, 32)
+	attackerSeed[31] = 9
+	attacker, err := serviceauthority.NewDeploymentSigner(payload.DeploymentID, attackerSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, err := attacker.SignJobCustodyReceipt(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedBytes, err := forged.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.mu.Lock()
+	forgedRecord := ledger.records[fixture.header.CapsuleID]
+	forgedRecord.CustodyReceiptBytes = forgedBytes
+	ledger.records[fixture.header.CapsuleID] = forgedRecord
+	ledger.mu.Unlock()
+	if _, err := coordinator.AdmitAuthorized(
+		context.Background(), fixture.envelopeBytes, fixture.authorization(),
+	); err == nil {
+		t.Fatal("receipt signed by substituted deployment key reopened custody")
+	}
+}
+
 type fixedJobCustodyClock struct{ value time.Time }
 
 func (clock fixedJobCustodyClock) Now() time.Time { return clock.value }
+
+func testJobCustodyReceiptSigner(t *testing.T) *serviceauthority.DeploymentSigner {
+	t.Helper()
+	seed := bytes.Repeat([]byte{0}, 32)
+	seed[31] = 7
+	signer, err := serviceauthority.NewDeploymentSigner(
+		uuid.MustParse("8b000000-0000-0000-0000-000000000001"), seed,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
 
 type stagingFixture struct {
 	privateKey     *ecdsa.PrivateKey
@@ -520,8 +611,10 @@ func (lease *memoryFinalizationLease) Admission() AdmissionRecord {
 func (lease *memoryFinalizationLease) Commit(
 	_ context.Context,
 	objectPath string,
+	receiptBytes []byte,
+	committedAt int64,
 ) (AdmissionRecord, error) {
-	if lease.closed {
+	if lease.closed || len(receiptBytes) == 0 || committedAt < lease.record.UpdatedAtMillis {
 		return AdmissionRecord{}, ErrConflict
 	}
 	lease.closed = true
@@ -529,7 +622,8 @@ func (lease *memoryFinalizationLease) Commit(
 	record := lease.ledger.records[lease.record.Header.CapsuleID]
 	record.State = AdmissionRetained
 	record.ObjectPath = objectPath
-	record.UpdatedAtMillis++
+	record.CustodyReceiptBytes = bytes.Clone(receiptBytes)
+	record.UpdatedAtMillis = committedAt
 	lease.ledger.records[lease.record.Header.CapsuleID] = record
 	return cloneAdmission(record), nil
 }
@@ -544,5 +638,6 @@ func (lease *memoryFinalizationLease) Abort(context.Context) error {
 
 func cloneAdmission(record AdmissionRecord) AdmissionRecord {
 	record.EnvelopeBytes = bytes.Clone(record.EnvelopeBytes)
+	record.CustodyReceiptBytes = bytes.Clone(record.CustodyReceiptBytes)
 	return record
 }

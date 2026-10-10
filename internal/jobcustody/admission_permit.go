@@ -286,6 +286,13 @@ func admissionPermitEnvelopeDigest(envelopeBytes []byte) (computequeue.Digest, e
 	return digest, nil
 }
 
+// AdmissionEnvelopeDigest exposes the exact content-blind envelope commitment
+// used by route permits so a durable custody receipt can bind the same bytes
+// without learning encrypted Job semantics.
+func AdmissionEnvelopeDigest(envelopeBytes []byte) (computequeue.Digest, error) {
+	return admissionPermitEnvelopeDigest(envelopeBytes)
+}
+
 func admissionPermitSigningBytes(payload []byte) []byte {
 	result := make([]byte, 0, len(admissionPermitSignatureDomain)+len(payload))
 	result = append(result, admissionPermitSignatureDomain...)

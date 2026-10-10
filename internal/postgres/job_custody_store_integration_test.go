@@ -16,6 +16,7 @@ import (
 	"github.com/robreuss/FacetsNode/internal/computequeue"
 	"github.com/robreuss/FacetsNode/internal/jobcustody"
 	postgresstore "github.com/robreuss/FacetsNode/internal/postgres"
+	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/testpostgres"
 )
 
@@ -104,7 +105,11 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retained, err := finalization.Commit(ctx, "objects/"+string(record.Header.CapsuleID))
+	committedAt := int64(1_800_000_000_010)
+	receiptBytes := postgresJobCustodyReceipt(t, record, committedAt)
+	retained, err := finalization.Commit(
+		ctx, "objects/"+string(record.Header.CapsuleID), receiptBytes, committedAt,
+	)
 	if err != nil || retained.State != jobcustody.AdmissionRetained {
 		t.Fatalf("retained=%+v err=%v", retained, err)
 	}
@@ -190,6 +195,9 @@ func postgresJobCustodyAdmission(
 	}
 	record := jobcustody.AdmissionRecord{
 		EnvelopeBytes: envelopeBytes, Header: header, ExpectedSigner: signer,
+		AdmissionPermitDigest: computequeue.SHA256Digest(
+			"postgres-job-custody-permit", string(capsuleID),
+		),
 		AcceptedAt: 1_800_000_000_010, State: jobcustody.AdmissionStaging,
 		UpdatedAtMillis: 1_800_000_000_010,
 	}
@@ -197,6 +205,50 @@ func postgresJobCustodyAdmission(
 		t.Fatal(err)
 	}
 	return record
+}
+
+func postgresJobCustodyReceipt(
+	t *testing.T,
+	record jobcustody.AdmissionRecord,
+	committedAt int64,
+) []byte {
+	t.Helper()
+	seed := make([]byte, 32)
+	seed[31] = 7
+	deploymentID := uuid.MustParse("8b000000-0000-0000-0000-000000000001")
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsuleID := uuid.MustParse(string(record.Header.CapsuleID))
+	assignmentID := uuid.MustParse(string(record.Header.AssignmentID))
+	envelopeDigest, err := jobcustody.AdmissionEnvelopeDigest(record.EnvelopeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := signer.SignJobCustodyReceipt(serviceauthority.JobCustodyReceiptPayload{
+		AdmissionEnvelopeDigest:         string(envelopeDigest),
+		AdmissionIdempotencyKey:         string(record.Header.IdempotencyKey),
+		AdmissionPermitDigest:           string(record.AdmissionPermitDigest),
+		AssignmentID:                    assignmentID,
+		CapsuleID:                       capsuleID,
+		CommittedAtMilliseconds:         committedAt,
+		DeploymentID:                    deploymentID,
+		Kind:                            serviceauthority.JobCustodyCommittedReceiptKind,
+		ProtectedObjectByteCount:        record.Header.ProtectedObject.ByteCount,
+		ProtectedObjectDescriptorDigest: string(record.Header.ProtectedObject.Digest()),
+		ProtectedObjectSHA256:           string(record.Header.ProtectedObject.SHA256),
+		RetentionUntilMilliseconds:      int64(record.Header.RetentionUntil),
+		Version:                         serviceauthority.JobCustodyReceiptVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func postgresJobCustodyDigest(value []byte) computequeue.Digest {
