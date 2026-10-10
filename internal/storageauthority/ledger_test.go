@@ -129,10 +129,14 @@ func TestSchemaIsDedicatedAndContentBlind(t *testing.T) {
 		"storage_capacity_reservations",
 		"storage_capacity_operations",
 		"storage_capacity_readiness",
+		"storage_capacity_events",
 	} {
 		if strings.Count(lower, "create table "+table) != 1 {
 			t.Fatalf("missing or duplicate table %s", table)
 		}
+	}
+	if strings.Count(lower, "create table ") != ledgerTableCount {
+		t.Fatalf("schema has %d tables, expected %d", strings.Count(lower, "create table "), ledgerTableCount)
 	}
 	for _, forbidden := range []string{
 		"space_id", "object_id", "content_id", "account_id", "participant_id",
@@ -141,6 +145,45 @@ func TestSchemaIsDedicatedAndContentBlind(t *testing.T) {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("authority schema contains semantic/cascading field %q", forbidden)
 		}
+	}
+}
+
+func TestReadinessClassificationHysteresisAndTransitions(t *testing.T) {
+	poolID := uuid.New()
+	physical := storagecapacity.Snapshot{TotalBytes: 100 << 30, AvailableBytes: 10 << 30}
+	pressure := buildReadiness(poolID, storagecapacity.ReadinessSnapshot{}, false, physical, nil, 0, 1_000)
+	if pressure.State != storagecapacity.ReadinessStoragePressure || pressure.AdmissibleBytes != 0 {
+		t.Fatalf("pressure=%+v", pressure)
+	}
+	pressure.Revision = 1
+	event, ok := readinessTransition(storagecapacity.ReadinessSnapshot{}, false, pressure)
+	event.Sequence = 1
+	if !ok || event.Kind != storagecapacity.ReadinessEventPressure || event.Validate() != nil {
+		t.Fatalf("pressure event=%+v ok=%v", event, ok)
+	}
+
+	physical.AvailableBytes = (10 << 30) + RecoveryHysteresisBytes - 1
+	stillPressure := buildReadiness(poolID, pressure, true, physical, nil, 0, 1_100)
+	if stillPressure.State != storagecapacity.ReadinessStoragePressure {
+		t.Fatalf("pressure flapped early: %+v", stillPressure)
+	}
+	physical.AvailableBytes++
+	recovered := buildReadiness(poolID, pressure, true, physical, nil, 0, 1_200)
+	if recovered.State != storagecapacity.ReadinessReady || recovered.AdmissibleBytes != RecoveryHysteresisBytes {
+		t.Fatalf("recovered=%+v", recovered)
+	}
+	recovered.Revision = 2
+	event, ok = readinessTransition(pressure, true, recovered)
+	event.Sequence = 2
+	if !ok || event.Kind != storagecapacity.ReadinessEventRecovered || event.Validate() != nil {
+		t.Fatalf("recovery event=%+v ok=%v", event, ok)
+	}
+
+	unavailable := buildReadiness(poolID, recovered, true, storagecapacity.Snapshot{}, storagecapacity.ErrUnavailable, 42, 1_300)
+	if unavailable.State != storagecapacity.ReadinessCapacityUnavailable || unavailable.TotalBytes != 0 ||
+		unavailable.AvailableBytes != 0 || unavailable.OperatingReserveBytes != 0 ||
+		unavailable.AdmissibleBytes != 0 || unavailable.ReservedBytes != 42 {
+		t.Fatalf("unavailable leaked stale capacity: %+v", unavailable)
 	}
 }
 
@@ -328,5 +371,62 @@ func TestCapacityFailureExpiryAndDedicatedSchemaFailClosed(t *testing.T) {
 	}
 	if _, err = Open(ctx, f.pool, f.poolID, f.provider); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("schema with unrelated table adopted: %v", err)
+	}
+}
+
+func TestRevisionedReadinessAndDeduplicatedOwnerEvents(t *testing.T) {
+	f := newFixture(t, 90<<30)
+	ctx := context.Background()
+	if _, err := f.ledger.Readiness(ctx); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("unobserved readiness: %v", err)
+	}
+	ready, err := f.ledger.RefreshReadiness(ctx, 1_000)
+	if err != nil || ready.State != storagecapacity.ReadinessReady || ready.Revision != 1 {
+		t.Fatalf("ready=%+v err=%v", ready, err)
+	}
+	same, err := f.ledger.RefreshReadiness(ctx, 1_001)
+	if err != nil || same.Revision != ready.Revision || same.ObservedAtMilliseconds != 1_001 {
+		t.Fatalf("same=%+v err=%v", same, err)
+	}
+	coarse, err := f.ledger.CoarseReadiness(ctx)
+	if err != nil || coarse.Revision != same.Revision || coarse.State != same.State {
+		t.Fatalf("coarse=%+v err=%v", coarse, err)
+	}
+
+	reservationRequest := request(f.poolID, 1<<20, 1_010, 2_000)
+	if _, err = f.ledger.Reserve(ctx, reservationRequest, token(t)); err != nil {
+		t.Fatal(err)
+	}
+	f.provider.set(10<<30, nil)
+	pressure, err := f.ledger.RefreshReadiness(ctx, 1_100)
+	if err != nil || pressure.State != storagecapacity.ReadinessStoragePressure || pressure.Revision != 2 {
+		t.Fatalf("pressure=%+v err=%v", pressure, err)
+	}
+	f.provider.set((10<<30)+RecoveryHysteresisBytes, nil)
+	stillPressure, err := f.ledger.RefreshReadiness(ctx, 1_200)
+	if err != nil || stillPressure.State != storagecapacity.ReadinessStoragePressure || stillPressure.Revision != 3 {
+		t.Fatalf("hysteresis=%+v err=%v", stillPressure, err)
+	}
+	f.provider.set((10<<30)+RecoveryHysteresisBytes+(2<<20), nil)
+	recovered, err := f.ledger.RefreshReadiness(ctx, 1_300)
+	if err != nil || recovered.State != storagecapacity.ReadinessReady || recovered.Revision != 4 {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	f.provider.set(0, storagecapacity.ErrUnavailable)
+	unavailable, err := f.ledger.RefreshReadiness(ctx, 1_400)
+	if err != nil || unavailable.State != storagecapacity.ReadinessCapacityUnavailable || unavailable.Revision != 5 ||
+		unavailable.TotalBytes != 0 || unavailable.AvailableBytes != 0 || unavailable.AdmissibleBytes != 0 {
+		t.Fatalf("unavailable=%+v err=%v", unavailable, err)
+	}
+	events, err := f.ledger.ReadinessEvents(ctx, 0, 32)
+	if err != nil || len(events) != 3 ||
+		events[0].Kind != storagecapacity.ReadinessEventPressure ||
+		events[1].Kind != storagecapacity.ReadinessEventRecovered ||
+		events[2].Kind != storagecapacity.ReadinessEventCapacityUnavailable {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	remaining, err := f.ledger.ReadinessEvents(ctx, events[1].Sequence, 32)
+	if err != nil || len(remaining) != 1 || remaining[0] != events[2] {
+		t.Fatalf("remaining=%+v err=%v", remaining, err)
 	}
 }

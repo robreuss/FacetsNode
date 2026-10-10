@@ -59,3 +59,27 @@ CREATE TABLE storage_capacity_readiness (
         OR (total_bytes = 0 AND available_bytes = 0
             AND operating_reserve_bytes = 0 AND admissible_bytes = 0))
 );
+
+CREATE TABLE storage_capacity_events (
+    event_id uuid PRIMARY KEY,
+    event_sequence bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
+    readiness_revision bigint NOT NULL CHECK (readiness_revision > 0),
+    deduplication_digest text NOT NULL UNIQUE CHECK (deduplication_digest ~ '^[0-9a-f]{64}$'),
+    kind text NOT NULL CHECK (kind IN ('pressure', 'capacityUnavailable', 'recovered')),
+    state text NOT NULL CHECK (state IN ('ready', 'storagePressure', 'capacityUnavailable', 'degraded')),
+    observed_at_milliseconds bigint NOT NULL CHECK (observed_at_milliseconds > 0),
+    total_bytes bigint NOT NULL CHECK (total_bytes >= 0),
+    available_bytes bigint NOT NULL CHECK (available_bytes >= 0),
+    reserved_bytes bigint NOT NULL CHECK (reserved_bytes >= 0),
+    operating_reserve_bytes bigint NOT NULL CHECK (operating_reserve_bytes >= 0),
+    admissible_bytes bigint NOT NULL CHECK (admissible_bytes >= 0),
+    CHECK ((kind = 'recovered' AND state = 'ready')
+        OR (kind = 'capacityUnavailable' AND state = 'capacityUnavailable')
+        OR (kind = 'pressure' AND state IN ('storagePressure', 'degraded'))),
+    CHECK (available_bytes <= total_bytes),
+    CHECK (operating_reserve_bytes <= total_bytes),
+    CHECK (admissible_bytes <= available_bytes),
+    CHECK (state <> 'capacityUnavailable'
+        OR (total_bytes = 0 AND available_bytes = 0
+            AND operating_reserve_bytes = 0 AND admissible_bytes = 0))
+);

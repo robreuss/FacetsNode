@@ -252,6 +252,55 @@ type CoarseReadinessSnapshot struct {
 	ObservedAtMilliseconds int64          `json:"observedAtMilliseconds"`
 }
 
+type ReadinessEventKind string
+
+const (
+	ReadinessEventPressure            ReadinessEventKind = "pressure"
+	ReadinessEventCapacityUnavailable ReadinessEventKind = "capacityUnavailable"
+	ReadinessEventRecovered           ReadinessEventKind = "recovered"
+)
+
+func (value ReadinessEventKind) valid() bool {
+	switch value {
+	case ReadinessEventPressure, ReadinessEventCapacityUnavailable, ReadinessEventRecovered:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReadinessEvent is an owner-only, content-blind transition record. Its exact
+// byte counts must not be exposed through participant readiness APIs.
+type ReadinessEvent struct {
+	ProtocolVersion int                `json:"protocolVersion"`
+	Sequence        uint64             `json:"sequence"`
+	EventID         uuid.UUID          `json:"eventID"`
+	Kind            ReadinessEventKind `json:"kind"`
+	Snapshot        ReadinessSnapshot  `json:"snapshot"`
+}
+
+func (value ReadinessEvent) Validate() error {
+	if value.ProtocolVersion != AuthorityProtocolVersion || value.Sequence == 0 || value.EventID == uuid.Nil ||
+		!value.Kind.valid() || value.Snapshot.Validate() != nil {
+		return ErrInvalidAuthorityContract
+	}
+	switch value.Kind {
+	case ReadinessEventPressure:
+		if value.Snapshot.State != ReadinessStoragePressure && value.Snapshot.State != ReadinessDegraded {
+			return ErrInvalidAuthorityContract
+		}
+	case ReadinessEventCapacityUnavailable:
+		if value.Snapshot.State != ReadinessCapacityUnavailable {
+			return ErrInvalidAuthorityContract
+		}
+	case ReadinessEventRecovered:
+		if value.Snapshot.State != ReadinessReady {
+			return ErrInvalidAuthorityContract
+		}
+	}
+	return nil
+}
+
 func (value ReadinessSnapshot) Coarse() (CoarseReadinessSnapshot, error) {
 	if value.Validate() != nil {
 		return CoarseReadinessSnapshot{}, ErrInvalidAuthorityContract

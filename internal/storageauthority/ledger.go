@@ -30,7 +30,7 @@ var (
 	ErrUnavailable = errors.New("storage authority ledger is unavailable")
 )
 
-const ledgerTableCount = 4
+const ledgerTableCount = 5
 
 type Ledger struct {
 	pool        *pgxpool.Pool

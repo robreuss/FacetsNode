@@ -148,6 +148,43 @@ func TestReadinessSeparatesOwnerBytesFromCoarseProjection(t *testing.T) {
 	}
 }
 
+func TestReadinessEventsBindOnlyValidStateTransitions(t *testing.T) {
+	snapshot := ReadinessSnapshot{
+		ProtocolVersion:        AuthorityProtocolVersion,
+		PoolID:                 uuid.New(),
+		Revision:               1,
+		State:                  ReadinessStoragePressure,
+		ObservedAtMilliseconds: 1_000,
+		TotalBytes:             100,
+		AvailableBytes:         10,
+		ReservedBytes:          0,
+		OperatingReserveBytes:  10,
+		AdmissibleBytes:        0,
+	}
+	event := ReadinessEvent{
+		ProtocolVersion: AuthorityProtocolVersion,
+		Sequence:        1,
+		EventID:         uuid.New(),
+		Kind:            ReadinessEventPressure,
+		Snapshot:        snapshot,
+	}
+	if err := event.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	event.Kind = ReadinessEventRecovered
+	if event.Validate() == nil {
+		t.Fatal("recovery event accepted a pressure snapshot")
+	}
+	event.Kind = ReadinessEventCapacityUnavailable
+	event.Snapshot.State = ReadinessCapacityUnavailable
+	event.Snapshot.TotalBytes = 0
+	event.Snapshot.AvailableBytes = 0
+	event.Snapshot.OperatingReserveBytes = 0
+	if err := event.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAuthorityContractsRejectUnknownServiceMalformedTokenAndInvalidTime(t *testing.T) {
 	request := ReservationRequest{
 		ProtocolVersion:       AuthorityProtocolVersion,
