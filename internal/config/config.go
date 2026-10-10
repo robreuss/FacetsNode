@@ -474,6 +474,10 @@ func Load(service Service) (Config, error) {
 		}
 	}
 	if service == JobCustody {
+		configuration.PublicURL = strings.TrimSpace(configuration.PublicURL)
+		if configuration.PublicURL == "" {
+			return Config{}, fmt.Errorf("%s_PUBLIC_URL is required", prefix)
+		}
 		if !filepath.IsAbs(configuration.JobCustodyRoot) ||
 			filepath.Clean(configuration.JobCustodyRoot) != configuration.JobCustodyRoot ||
 			configuration.JobCustodyRoot == string(filepath.Separator) {

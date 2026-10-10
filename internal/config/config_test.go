@@ -307,6 +307,7 @@ func TestBackupCustodyRequiresPrivateCapacityAuthorityOriginAndBoundedLease(t *t
 
 func TestJobCustodyRequiresIndependentAuthorityAndBoundedQuotas(t *testing.T) {
 	t.Setenv("FACETS_JOB_CUSTODY_DATABASE_URL", "postgres://example.invalid/job_custody")
+	t.Setenv("FACETS_JOB_CUSTODY_PUBLIC_URL", "https://job-custody.example")
 	if _, err := config.Load(config.JobCustody); err == nil {
 		t.Fatal("Job custody without independent authority accepted")
 	}
@@ -555,6 +556,7 @@ func configureBackupCustody(t *testing.T) {
 func configureJobCustody(t *testing.T) {
 	t.Helper()
 	t.Setenv("FACETS_JOB_CUSTODY_DATABASE_URL", "postgres://example.invalid/job_custody")
+	t.Setenv("FACETS_JOB_CUSTODY_PUBLIC_URL", "https://job-custody.example")
 	t.Setenv("FACETS_JOB_CUSTODY_DEPLOYMENT_ID", "8b000000-0000-0000-0000-000000000001")
 	t.Setenv("FACETS_JOB_CUSTODY_DEPLOYMENT_SIGNING_KEY_FILE", "/var/lib/facets-job-custody/deployment-signing-key")
 	t.Setenv("FACETS_JOB_CUSTODY_DEPLOYMENT_ROUTE_POLICY_FILE", "/var/lib/facets-job-custody/deployment-route-policy.json")
