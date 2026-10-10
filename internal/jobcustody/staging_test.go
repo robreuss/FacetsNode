@@ -29,9 +29,9 @@ func TestCoordinatorStagesExactAdmissionThroughSharedCapacity(t *testing.T) {
 		Verifier: fixture.verifier, Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
 	}
 
-	handle, err := coordinator.Admit(
-		context.Background(), fixture.envelopeBytes, fixture.header,
-		fixture.signer,
+	handle, err := coordinator.AdmitAuthorized(
+		context.Background(), fixture.envelopeBytes,
+		fixture.authorization(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -88,9 +88,9 @@ func TestCoordinatorStagesExactAdmissionThroughSharedCapacity(t *testing.T) {
 	}
 
 	coordinator.Clock = fixedJobCustodyClock{time.UnixMilli(1_800_000_300_000)}
-	reopened, err := coordinator.Admit(
-		context.Background(), fixture.envelopeBytes, fixture.header,
-		fixture.signer,
+	reopened, err := coordinator.AdmitAuthorized(
+		context.Background(), fixture.envelopeBytes,
+		fixture.authorization(),
 	)
 	if err != nil || reopened.Record().State != AdmissionRetained {
 		t.Fatalf("historical exact admission retry=%+v err=%v", reopened.Record(), err)
@@ -107,9 +107,9 @@ func TestCoordinatorReleasesCapacityBeforeLedgerCommitAndReconcilesRetry(t *test
 		Ledger: ledger, Content: content, Capacity: capacity,
 		Verifier: fixture.verifier, Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
 	}
-	handle, err := coordinator.Admit(
-		context.Background(), fixture.envelopeBytes, fixture.header,
-		fixture.signer,
+	handle, err := coordinator.AdmitAuthorized(
+		context.Background(), fixture.envelopeBytes,
+		fixture.authorization(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -143,9 +143,9 @@ func TestCoordinatorRejectsConflictingAdmissionAndChunkGeometry(t *testing.T) {
 		Ledger: ledger, Content: content, Capacity: capacity,
 		Verifier: fixture.verifier, Clock: fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)},
 	}
-	handle, err := coordinator.Admit(
-		context.Background(), fixture.envelopeBytes, fixture.header,
-		fixture.signer,
+	handle, err := coordinator.AdmitAuthorized(
+		context.Background(), fixture.envelopeBytes,
+		fixture.authorization(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -174,9 +174,9 @@ func TestCoordinatorRejectsConflictingAdmissionAndChunkGeometry(t *testing.T) {
 		t.Fatal(err)
 	}
 	changedBytes := signAdmission(t, fixture.privateKey, fixture.signer, changedHeader)
-	if _, err := coordinator.Admit(
-		context.Background(), changedBytes, changedHeader,
-		fixture.signer,
+	if _, err := coordinator.AdmitAuthorized(
+		context.Background(), changedBytes,
+		testAdmissionAuthorization(changedHeader, fixture.signer),
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("conflicting capsule admission error=%v", err)
 	}
@@ -193,6 +193,24 @@ type stagingFixture struct {
 	header         computequeue.JobCustodyAdmissionHeader
 	envelopeBytes  []byte
 	protectedBytes []byte
+}
+
+func (fixture stagingFixture) authorization() AdmissionAuthorization {
+	return testAdmissionAuthorization(fixture.header, fixture.signer)
+}
+
+func testAdmissionAuthorization(
+	header computequeue.JobCustodyAdmissionHeader,
+	signer computequeue.ReceiptSignerBinding,
+) AdmissionAuthorization {
+	return AdmissionAuthorization{
+		header: header, expectedSigner: signer,
+		permitDigest: computequeue.SHA256Digest(
+			"job-custody-staging-tests",
+			string(header.CapsuleID),
+			string(header.IdempotencyKey),
+		),
+	}
 }
 
 func newStagingFixture(t *testing.T, protectedBytes []byte, chunkBytes int64) stagingFixture {

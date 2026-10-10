@@ -171,13 +171,21 @@ func (handle AdmissionHandle) Record() AdmissionRecord {
 	return result
 }
 
-func (coordinator *Coordinator) Admit(
+// AdmitAuthorized accepts only route authority produced by the Box permit
+// verifier. HTTP or other transport adapters must not recreate expected
+// signer/header values from requester-controlled fields.
+func (coordinator *Coordinator) AdmitAuthorized(
 	ctx context.Context,
 	envelopeBytes []byte,
-	expectedHeader computequeue.JobCustodyAdmissionHeader,
-	expectedSigner computequeue.ReceiptSignerBinding,
+	authorization AdmissionAuthorization,
 ) (AdmissionHandle, error) {
+	expectedHeader := authorization.header
+	expectedSigner := authorization.expectedSigner
 	if coordinator.validate() != nil || ctx == nil || len(envelopeBytes) == 0 {
+		return AdmissionHandle{}, ErrInvalid
+	}
+	if expectedHeader.Validate() != nil || expectedSigner.Validate() != nil ||
+		authorization.permitDigest.Validate() != nil {
 		return AdmissionHandle{}, ErrInvalid
 	}
 	envelope, err := computequeue.DecodeJobCustodyAdmissionCanonical(envelopeBytes)
