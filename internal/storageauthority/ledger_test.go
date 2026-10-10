@@ -237,6 +237,23 @@ func TestDigestsBindEveryRequestAndDecisionFieldWithoutBearerDisclosure(t *testi
 	}
 }
 
+func TestBoundServiceRejectsSelfAssertedOrInvalidBinding(t *testing.T) {
+	binding := storagecapacity.ServiceBinding{Kind: storagecapacity.ServiceJobCustody, InstanceID: uuid.New()}
+	request := request(uuid.New(), 1, 1_000, 2_000)
+	request.Service = binding
+	service := &BoundService{binding: binding}
+	request.Service.InstanceID = uuid.New()
+	if _, err := service.Reserve(context.Background(), request, token(t)); !errors.Is(err, ErrRejected) {
+		t.Fatalf("self-asserted service binding accepted: %v", err)
+	}
+	if _, err := BindService(nil, binding); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil ledger binding accepted: %v", err)
+	}
+	if _, err := BindService(&Ledger{}, storagecapacity.ServiceBinding{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid service binding accepted: %v", err)
+	}
+}
+
 func TestDurableReservationRestartRetryAndTerminalFence(t *testing.T) {
 	f := newFixture(t, 90<<30)
 	ctx := context.Background()
@@ -245,6 +262,15 @@ func TestDurableReservationRestartRetryAndTerminalFence(t *testing.T) {
 	first, err := f.ledger.Reserve(ctx, request, bearer)
 	if err != nil {
 		t.Fatal(err)
+	}
+	otherService, err := BindService(f.ledger, storagecapacity.ServiceBinding{
+		Kind: storagecapacity.ServiceBackupCustody, InstanceID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = otherService.Reservation(ctx, request.ReservationID); !errors.Is(err, ErrRejected) {
+		t.Fatalf("cross-service reservation disclosed: %v", err)
 	}
 	retry, err := f.ledger.Reserve(ctx, request, bearer)
 	if err != nil || retry != first {
@@ -319,10 +345,18 @@ func TestConcurrentReservationsSerializeAcrossAuthorityInstances(t *testing.T) {
 	var group sync.WaitGroup
 	for index, ledger := range ledgers {
 		bearer := tokens[index]
+		candidate := request(f.poolID, 80, int64(1_000+index), 2_000)
+		if index == 1 {
+			candidate.Service.Kind = storagecapacity.ServiceBackupCustody
+		}
+		service, err := BindService(ledger, candidate.Service)
+		if err != nil {
+			t.Fatal(err)
+		}
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			_, reserveErr := ledger.Reserve(ctx, request(f.poolID, 80, int64(1_000+index), 2_000), bearer)
+			_, reserveErr := service.Reserve(ctx, candidate, bearer)
 			if reserveErr == nil {
 				accepted.Add(1)
 			} else if !errors.Is(reserveErr, storagecapacity.ErrPressure) {
