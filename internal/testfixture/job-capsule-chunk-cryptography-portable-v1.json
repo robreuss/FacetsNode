@@ -1,0 +1,12 @@
+{
+  "bindingSHA256" : "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "contentKeyHex" : "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "cryptographicProfile" : "HKDF-SHA256+A256GCM",
+  "derivedChunkKeyHex" : "d734ea64a07ce3947745a0b6096ef47d191d39f92b334670375414dd68d8cc83",
+  "headerCanonicalJSON" : "{\"chunkCount\":3,\"chunkIndex\":1,\"payloadID\":\"56565656-5656-4656-8656-565656565656\",\"plaintextByteCount\":34,\"protocolVersion\":1}",
+  "nonceHex" : "a0a1a2a3a4a5a6a7a8a9aaab",
+  "plaintextUTF8" : "Facets Job Capsule chunk vector #1",
+  "protocolVersion" : 1,
+  "sealedCombinedBase64URL" : "oKGio6SlpqeoqaqrrYEktULW38ZcMdWnAv4iRd5FuwCseYZZouOHb9HU6Wmp5TqyZPQCN8RCpMQyd518Fss",
+  "syntheticTestOnly" : true
+}
