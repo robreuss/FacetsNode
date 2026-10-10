@@ -4,11 +4,21 @@ The initial foundation image is Ubuntu 24.04 minimal ARM64 with private virtio-s
 
 `build-foundation.sh` exports an explicitly selected committed revision, cross-builds the private guest agent, verifies the pinned upstream image checksum, converts it to a 16 GiB raw system disk, and signs the result using `fbdctl`. Its build-only dependencies are Go, qemu-img, curl, and the host CLI; installation requires none of these. The script reads no uncommitted source. The seed ISO containing installation credentials is generated privately by the host, never distributed.
 
+Every newly built Desktop foundation now carries the committed
+`deploy/appliance/fbd-arm64.json` as a signed `appliance-profile.json` artifact.
+The host validates its closed schema and FBD adapter boundary before signing or
+staging it, and the seed installs those exact bytes for the strict Go guest
+validator. Runtime preparation consumes the profile's architecture, package
+versions and durable data root. Service-release format 2 binds its OCI evidence
+to the same profile ID and byte digest; the Proxmox adapter produces the same
+record shape from its AMD64 profile. This is source and unit-test convergence,
+not a newly signed appliance or installed-runtime acceptance result.
+
 The data disk is a separate raw image with an ext4 filesystem whose UUID is the host's expected data identity. Only initial installation may format a blank disk; subsequent system images require the existing identity. Missing, mismatched, or unrecognized storage fails closed. A persistent installation marker and random sentinel establish cross-boot continuity. Named authenticated guest operations use AF_VSOCK port 4050 from host CID 2. There is no IP management listener, SSH account, arbitrary guest command/path interface, workload Docker socket exposure, or new Facets service.
 
 ## Stage 2 implementation in progress
 
-`guest-runtime.sh` pins Docker Engine/CLI 29.8.0, containerd 2.3.5, Compose 5.5.1 and Buildx 0.31.1. Developer preparation uses authenticated official repositories and exports the complete downloaded dependency set with package versions and hashes. A prepared `runtimeKit.tar` can be passed to the artifact builder using `FBD_RUNTIME_KIT`. It is signed with the release, carried on the read-only seed and hash-verified before extraction. Offline installation uses dpkg unpack/configure, not repository access. Ordinary installation does not need Docker Desktop, Homebrew or Linux commands.
+`guest-runtime.sh` consumes the committed profile pins for Docker Engine/CLI, containerd, Compose and the durable Docker root; Buildx remains fixed by the reviewed recipe. Developer preparation uses authenticated official repositories and exports the complete downloaded dependency set with package versions and hashes. A prepared `runtimeKit.tar` can be passed to the artifact builder using `FBD_RUNTIME_KIT`. It is signed with the release, carried on the read-only seed and hash-verified before extraction. Offline installation uses dpkg unpack/configure, not repository access. Ordinary installation does not need Docker Desktop, Homebrew or Linux commands.
 
 `fbd-data.service` mounts and checks the identified ext4 data disk; Docker and containerd require that unit, and both daemons recheck identity before starting. The early Unix socket does not start a daemon without these checks and is not exposed to workloads. Their durable roots are `/srv/facets-box-data/docker` and `/srv/facets-box-data/containerd`. The guest health channel remains available when storage initialization fails. No containers are automatically deployed by runtime preparation.
 

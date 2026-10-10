@@ -2,6 +2,7 @@ package applianceprofile
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,19 +62,33 @@ type ContainerRuntime struct {
 }
 
 func Read(path string) (Profile, error) {
+	profile, _, err := ReadWithSHA256(path)
+	return profile, err
+}
+
+// ReadWithSHA256 binds callers to the exact committed profile bytes in addition
+// to the decoded policy. The digest is intentionally over the file, not a
+// re-encoding, so signed host artifacts and guest service releases can compare
+// one unambiguous value.
+func ReadWithSHA256(path string) (Profile, string, error) {
 	var profile Profile
 	info, err := os.Lstat(path)
 	if err != nil {
-		return profile, err
+		return profile, "", err
 	}
 	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > MaximumProfileBytes {
-		return profile, errors.New("invalid appliance profile file")
+		return profile, "", errors.New("invalid appliance profile file")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return profile, err
+		return profile, "", err
 	}
-	return Decode(data)
+	profile, err = Decode(data)
+	if err != nil {
+		return Profile{}, "", err
+	}
+	digest := sha256.Sum256(data)
+	return profile, fmt.Sprintf("%x", digest), nil
 }
 
 func Decode(data []byte) (Profile, error) {

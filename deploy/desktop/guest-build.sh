@@ -8,11 +8,14 @@ build_root=$1
 revision=$2
 tree=$3
 recipe_root=/opt/fbd/recipes
-case ${FACETS_SERVICE_KIT_HOST_ADAPTER:-fbd-virtualization-framework} in
+selected_adapter=${FACETS_SERVICE_KIT_HOST_ADAPTER:-fbd-virtualization-framework}
+case $selected_adapter in
   fbd-virtualization-framework)
+    expected_profile_id=facets-box-desktop-arm64
     /opt/fbd/guest-agent check-storage
     ;;
   proxmox-qemu)
+    expected_profile_id=facets-box-proxmox-development-amd64
     /usr/local/libexec/facets-service-kit portable-service-kit check-storage
     recipe_root="$build_root/source/deploy/desktop"
     ;;
@@ -21,6 +24,13 @@ esac
 [[ $(df --output=avail -B1 /srv/facets-box-data | tail -1) -gt 12884901888 ]]
 architecture=$(dpkg --print-architecture)
 case $architecture in arm64|amd64) ;; *) exit 1;; esac
+IFS=$'\t' read -r profile_id profile_architecture profile_adapter engine_version compose_version containerd_version data_root profile_sha256 < <(
+  case $selected_adapter in
+    fbd-virtualization-framework) /opt/fbd/guest-agent appliance-profile ;;
+    proxmox-qemu) /usr/local/libexec/facets-service-kit appliance-profile ;;
+  esac
+)
+[[ $profile_id == "$expected_profile_id" && $profile_architecture == "$architecture" && $profile_adapter == "$selected_adapter" && $profile_sha256 =~ ^[0-9a-f]{64}$ ]] || exit 1
 platform="linux/$architecture"
 kit="$build_root/kit"
 install -d -m 0700 "$kit/images" "$kit/recipes"
@@ -77,7 +87,7 @@ for name in device-sync box-controller shared-spaces tor postgres caddy; do
   jq --arg name "$name" --arg digest "$digest" --arg config "$config" --arg ref "$ref" '. + {($name):{digest:$digest,config:$config,reference:$ref}}' "$kit/images.json" > "$kit/images.json.new"
   mv "$kit/images.json.new" "$kit/images.json"
 done
-jq -n --arg architecture "$architecture" --arg revision "$revision" --arg tree "$tree" --slurpfile images "$kit/images.json" \
- '{version:1,architecture:$architecture,sourceRevision:$revision,sourceTree:$tree,images:$images[0],acceptance:{dockerfileTests:"passed",serviceRuntime:"not-run",spacesSync:"not-run"}}' > "$kit/service-release.json"
+jq -n --arg architecture "$architecture" --arg profileID "$profile_id" --arg profileSHA256 "$profile_sha256" --arg revision "$revision" --arg tree "$tree" --slurpfile images "$kit/images.json" \
+ '{version:2,architecture:$architecture,applianceProfileID:$profileID,applianceProfileSHA256:$profileSHA256,sourceRevision:$revision,sourceTree:$tree,images:$images[0],acceptance:{dockerfileTests:"passed",serviceRuntime:"not-run",spacesSync:"not-run"}}' > "$kit/service-release.json"
 # The agent verifies the entire kit and the rendered deployment boundary before
 # publishing an export. A failed build must not publish a partly accepted kit.

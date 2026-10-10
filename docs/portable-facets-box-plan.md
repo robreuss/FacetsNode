@@ -77,6 +77,15 @@ from a reviewed handoff.
   FBD acceptance at release checkpoints. Passing one adapter does not establish
   runtime acceptance on the other.
 
+Source checkpoint, October 10, 2026: the FBD builder carries the committed ARM64
+profile into the signed release; the standalone host validates and seeds it;
+the Linux guest consumes it for runtime preparation; and service-release format
+2 binds both FBD and Proxmox image evidence to the selected profile ID and exact
+profile SHA-256. Go tests, an ARM64 Linux guest cross-build and the standalone
+FBD core tests passed. No new foundation/service kit was signed, no installed
+FBD or Proxmox runtime was changed, and cross-adapter runtime acceptance remains
+a release-checkpoint gate.
+
 ### 5. Carriage, identity, Sync, and Shared Spaces integration
 
 - Integrate the reviewed Carriage envelope/key contract as the common E2EE

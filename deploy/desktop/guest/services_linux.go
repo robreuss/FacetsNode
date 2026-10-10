@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -96,7 +95,11 @@ func prepareServiceKit(c configuration) (serviceRelease, error) {
 	} else if err != nil {
 		return release, err
 	}
-	release, err := verifyServiceKit(destination, c.ServiceImages, runtime.GOARCH)
+	_, binding, err := currentApplianceProfile()
+	if err != nil {
+		return release, err
+	}
+	release, err = verifyServiceKit(destination, c.ServiceImages, binding)
 	if err != nil {
 		return release, err
 	}

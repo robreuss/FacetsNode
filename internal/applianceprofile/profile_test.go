@@ -2,6 +2,8 @@ package applianceprofile
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -75,5 +77,33 @@ func TestDecodeIsStrict(t *testing.T) {
 	}
 	if _, err = Decode(append(encoded, []byte("{}")...)); err == nil {
 		t.Fatal("profile with trailing object accepted")
+	}
+}
+
+func TestReadWithSHA256BindsExactProfileBytes(t *testing.T) {
+	encoded, err := json.Marshal(validProfile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "profile.json")
+	if err = os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile, digest, err := ReadWithSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ProfileID != validProfile().ProfileID || digest != "3761b29ff41157a464001dcac6a56f4576b16d50a7ee0bd306f665f1cfd25735" {
+		t.Fatalf("unexpected profile binding: id=%s digest=%s", profile.ProfileID, digest)
+	}
+	if err = os.WriteFile(path, append(encoded, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := ReadWithSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == digest {
+		t.Fatal("profile byte change did not change digest")
 	}
 }

@@ -37,4 +37,9 @@ func TestStorageGatesDaemonsWithoutOrderingEarlySocketAfterBasicTarget(t *testin
 	if verify < 0 || start <= verify {
 		t.Fatal("runtime preparation must verify the installed unit graph before starting daemons")
 	}
+	for _, required := range []string{"guest-agent appliance-profile", "engine_version", "compose_version", "containerd_version", "profile_sha256"} {
+		if !strings.Contains(string(runtime), required) {
+			t.Fatalf("runtime preparation does not consume appliance profile field %q", required)
+		}
+	}
 }

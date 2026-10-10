@@ -36,6 +36,7 @@ type portableStorage struct {
 	InstallationID string
 	ProfileID      string
 	Architecture   string
+	ProfileSHA256  string
 }
 
 type portableServiceInstallation struct {
@@ -43,6 +44,7 @@ type portableServiceInstallation struct {
 	InstalledAt          string            `json:"installedAt"`
 	InstallationID       string            `json:"installationID"`
 	ProfileID            string            `json:"profileID"`
+	ProfileSHA256        string            `json:"profileSHA256"`
 	Architecture         string            `json:"architecture"`
 	InstallerSHA256      string            `json:"installerSHA256"`
 	SourceRevision       string            `json:"sourceRevision"`
@@ -57,6 +59,7 @@ type portableServiceSummary struct {
 	Version        int               `json:"version"`
 	InstallationID string            `json:"installationID"`
 	ProfileID      string            `json:"profileID"`
+	ProfileSHA256  string            `json:"profileSHA256"`
 	Architecture   string            `json:"architecture"`
 	SourceRevision string            `json:"sourceRevision,omitempty"`
 	SourceTree     string            `json:"sourceTree,omitempty"`
@@ -103,7 +106,7 @@ func writePortableSummary(summary portableServiceSummary) error {
 
 func checkPortableStorage() (portableStorage, error) {
 	var result portableStorage
-	profile, err := applianceprofile.Read(portableProfilePath)
+	profile, digest, err := applianceprofile.ReadWithSHA256(portableProfilePath)
 	if err != nil || profile.ProfileID != portableServiceProfileID || profile.HostAdapter != portableServiceHostAdapter || profile.Architecture != "amd64" {
 		return result, errors.New("portable appliance profile mismatch")
 	}
@@ -137,7 +140,7 @@ func checkPortableStorage() (portableStorage, error) {
 	if err != nil || strings.TrimSpace(string(b)) != profile.Runtime.ComposeVersion {
 		return result, errors.New("Compose runtime profile mismatch")
 	}
-	return portableStorage{InstallationID: id, ProfileID: profile.ProfileID, Architecture: profile.Architecture}, nil
+	return portableStorage{InstallationID: id, ProfileID: profile.ProfileID, Architecture: profile.Architecture, ProfileSHA256: digest}, nil
 }
 
 func readPortableSource() (transferArtifact, error) {
@@ -249,7 +252,8 @@ func installPortableServiceKit() (portableServiceSummary, error) {
 		return summary, errors.New("built service release evidence mismatch")
 	}
 	expected := serviceReleaseImages(release)
-	if _, err = verifyServiceKit(kitRoot, expected, storage.Architecture); err != nil {
+	binding := applianceReleaseBinding{Architecture: storage.Architecture, ProfileID: storage.ProfileID, ProfileSHA256: storage.ProfileSHA256}
+	if _, err = verifyServiceKit(kitRoot, expected, binding); err != nil {
 		return summary, err
 	}
 	if err = validateBuiltServiceKit(ctx, work, release); err != nil {
@@ -262,7 +266,7 @@ func installPortableServiceKit() (portableServiceSummary, error) {
 	if err != nil || json.Unmarshal(releaseBytes, &release) != nil || !portableAcceptanceComplete(release.Acceptance) {
 		return summary, errors.New("accepted service release record unavailable")
 	}
-	if _, err = verifyServiceKit(kitRoot, expected, storage.Architecture); err != nil {
+	if _, err = verifyServiceKit(kitRoot, expected, binding); err != nil {
 		return summary, err
 	}
 	if err = verifyPortableDormancy(ctx); err != nil {
@@ -288,7 +292,7 @@ func installPortableServiceKit() (portableServiceSummary, error) {
 	}
 	record := portableServiceInstallation{
 		Version: 1, InstalledAt: time.Now().UTC().Format(time.RFC3339), InstallationID: storage.InstallationID,
-		ProfileID: storage.ProfileID, Architecture: storage.Architecture, InstallerSHA256: installerHash, SourceRevision: release.SourceRevision,
+		ProfileID: storage.ProfileID, ProfileSHA256: storage.ProfileSHA256, Architecture: storage.Architecture, InstallerSHA256: installerHash, SourceRevision: release.SourceRevision,
 		SourceTree: release.SourceTree, SourceArchiveSHA256: artifact.SHA256, ServiceReleaseSHA256: releaseHash,
 		Images: expected, Activation: "withheld",
 	}
@@ -345,7 +349,7 @@ func verifyPortableServiceKit() (portableServiceSummary, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(b))
 	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&record); err != nil || decoder.Decode(&struct{}{}) != io.EOF || record.Version != 1 || record.InstallationID != storage.InstallationID || record.ProfileID != storage.ProfileID || record.Architecture != storage.Architecture || record.Activation != "withheld" || len(record.Images) != len(imageNames) || !validHex(record.InstallerSHA256, 32) || !validHex(record.SourceArchiveSHA256, 32) || !validHex(record.ServiceReleaseSHA256, 32) {
+	if err = decoder.Decode(&record); err != nil || decoder.Decode(&struct{}{}) != io.EOF || record.Version != 1 || record.InstallationID != storage.InstallationID || record.ProfileID != storage.ProfileID || record.ProfileSHA256 != storage.ProfileSHA256 || record.Architecture != storage.Architecture || record.Activation != "withheld" || len(record.Images) != len(imageNames) || !validHex(record.InstallerSHA256, 32) || !validHex(record.SourceArchiveSHA256, 32) || !validHex(record.ServiceReleaseSHA256, 32) {
 		return summary, errors.New("invalid portable service installation record")
 	}
 	executable, err := os.Executable()
@@ -360,7 +364,8 @@ func verifyPortableServiceKit() (portableServiceSummary, error) {
 	if err != nil || releaseHash != record.ServiceReleaseSHA256 {
 		return summary, errors.New("installed service release hash mismatch")
 	}
-	release, err := verifyServiceKit(portableServiceKitRoot, record.Images, storage.Architecture)
+	binding := applianceReleaseBinding{Architecture: storage.Architecture, ProfileID: storage.ProfileID, ProfileSHA256: storage.ProfileSHA256}
+	release, err := verifyServiceKit(portableServiceKitRoot, record.Images, binding)
 	if err != nil || release.SourceRevision != record.SourceRevision || release.SourceTree != record.SourceTree || !portableAcceptanceComplete(release.Acceptance) {
 		return summary, errors.New("installed service release evidence mismatch")
 	}
@@ -423,7 +428,7 @@ func portableRuntimeFixture(name string) bool {
 
 func portableSummary(storage portableStorage, release serviceRelease) portableServiceSummary {
 	return portableServiceSummary{
-		Version: 1, InstallationID: storage.InstallationID, ProfileID: storage.ProfileID,
+		Version: 1, InstallationID: storage.InstallationID, ProfileID: storage.ProfileID, ProfileSHA256: storage.ProfileSHA256,
 		Architecture: storage.Architecture, SourceRevision: release.SourceRevision, SourceTree: release.SourceTree,
 		Images: serviceReleaseImages(release), Activation: "withheld",
 	}

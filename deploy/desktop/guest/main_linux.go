@@ -41,6 +41,10 @@ type configuration struct {
 
 func load() (configuration, error) {
 	var c configuration
+	profile, _, err := currentApplianceProfile()
+	if err != nil || profile.ProfileID != "facets-box-desktop-arm64" || profile.HostAdapter != "fbd-virtualization-framework" || profile.ManagementTransport != "virtio-socket" {
+		return c, errors.New("desktop appliance profile mismatch")
+	}
 	b, err := os.ReadFile("/opt/fbd/installation.json")
 	if err != nil {
 		return c, err
@@ -349,6 +353,17 @@ func serve(c configuration) error {
 	}
 }
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "appliance-profile" {
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "Appliance profile: usage: appliance-profile")
+			os.Exit(64)
+		}
+		if err := printCurrentApplianceProfile(); err != nil {
+			fmt.Fprintln(os.Stderr, "Appliance profile:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "portable-service-kit" {
 		if err := runPortableServiceKit(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "Portable service kit:", err)

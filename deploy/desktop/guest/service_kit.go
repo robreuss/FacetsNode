@@ -16,12 +16,20 @@ type serviceImage struct {
 	Reference string `json:"reference"`
 }
 type serviceRelease struct {
-	Version        int                     `json:"version"`
-	Architecture   string                  `json:"architecture"`
-	SourceRevision string                  `json:"sourceRevision"`
-	SourceTree     string                  `json:"sourceTree"`
-	Images         map[string]serviceImage `json:"images"`
-	Acceptance     map[string]string       `json:"acceptance,omitempty"`
+	Version                int                     `json:"version"`
+	Architecture           string                  `json:"architecture"`
+	ApplianceProfileID     string                  `json:"applianceProfileID"`
+	ApplianceProfileSHA256 string                  `json:"applianceProfileSHA256"`
+	SourceRevision         string                  `json:"sourceRevision"`
+	SourceTree             string                  `json:"sourceTree"`
+	Images                 map[string]serviceImage `json:"images"`
+	Acceptance             map[string]string       `json:"acceptance,omitempty"`
+}
+
+type applianceReleaseBinding struct {
+	Architecture  string
+	ProfileID     string
+	ProfileSHA256 string
 }
 
 func digestPath(root, digest string) (string, error) {
@@ -49,13 +57,13 @@ func supportedServiceArchitecture(architecture string) bool {
 	return architecture == "arm64" || architecture == "amd64"
 }
 
-func verifyServiceKit(root string, expected map[string]string, expectedArchitecture string) (serviceRelease, error) {
+func verifyServiceKit(root string, expected map[string]string, binding applianceReleaseBinding) (serviceRelease, error) {
 	var release serviceRelease
 	b, e := os.ReadFile(filepath.Join(root, "service-release.json"))
 	if e != nil || len(b) > 65536 || json.Unmarshal(b, &release) != nil {
 		return release, errors.New("invalid service release")
 	}
-	if !supportedServiceArchitecture(expectedArchitecture) || release.Version != 1 || release.Architecture != expectedArchitecture || !validHex(release.SourceRevision, 20) || !validHex(release.SourceTree, 20) || len(release.Images) != len(imageNames) || len(expected) != len(imageNames) {
+	if !supportedServiceArchitecture(binding.Architecture) || release.Version != 2 || release.Architecture != binding.Architecture || release.ApplianceProfileID != binding.ProfileID || release.ApplianceProfileSHA256 != binding.ProfileSHA256 || binding.ProfileID == "" || !validHex(binding.ProfileSHA256, 32) || !validHex(release.SourceRevision, 20) || !validHex(release.SourceTree, 20) || len(release.Images) != len(imageNames) || len(expected) != len(imageNames) {
 		return release, errors.New("incompatible service release")
 	}
 	for _, name := range imageNames {
