@@ -122,7 +122,8 @@ func TestReadinessSeparatesOwnerBytesFromCoarseProjection(t *testing.T) {
 		AdmissibleBytes:        0,
 	}
 	coarse, err := snapshot.Coarse()
-	if err != nil || coarse.Revision != snapshot.Revision || coarse.State != snapshot.State {
+	if err != nil || coarse.Revision != snapshot.Revision || coarse.State != snapshot.State ||
+		coarse.RetryAfterMilliseconds != DefaultReadinessRetryAfterMilliseconds || coarse.Validate() != nil {
 		t.Fatalf("coarse=%+v err=%v", coarse, err)
 	}
 	wire, err := json.Marshal(coarse)
@@ -145,6 +146,13 @@ func TestReadinessSeparatesOwnerBytesFromCoarseProjection(t *testing.T) {
 	unavailable.OperatingReserveBytes = 0
 	if unavailable.Validate() != nil {
 		t.Fatal("redacted unavailable readiness rejected")
+	}
+	ready := snapshot
+	ready.State = ReadinessReady
+	ready.AdmissibleBytes = 1
+	coarse, err = ready.Coarse()
+	if err != nil || coarse.RetryAfterMilliseconds != 0 || coarse.Validate() != nil {
+		t.Fatalf("ready coarse=%+v err=%v", coarse, err)
 	}
 }
 

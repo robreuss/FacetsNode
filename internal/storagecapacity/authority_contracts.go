@@ -13,6 +13,7 @@ import (
 )
 
 const AuthorityProtocolVersion = 1
+const DefaultReadinessRetryAfterMilliseconds = int64(30_000)
 
 var ErrInvalidAuthorityContract = errors.New("invalid storage capacity authority contract")
 
@@ -250,6 +251,17 @@ type CoarseReadinessSnapshot struct {
 	Revision               uint64         `json:"revision"`
 	State                  ReadinessState `json:"state"`
 	ObservedAtMilliseconds int64          `json:"observedAtMilliseconds"`
+	RetryAfterMilliseconds int64          `json:"retryAfterMilliseconds"`
+}
+
+func (value CoarseReadinessSnapshot) Validate() error {
+	if value.ProtocolVersion != AuthorityProtocolVersion || value.Revision == 0 ||
+		!value.State.valid() || value.ObservedAtMilliseconds <= 0 || value.RetryAfterMilliseconds < 0 ||
+		(value.State == ReadinessReady && value.RetryAfterMilliseconds != 0) ||
+		(value.State != ReadinessReady && value.RetryAfterMilliseconds == 0) {
+		return ErrInvalidAuthorityContract
+	}
+	return nil
 }
 
 type ReadinessEventKind string
@@ -305,12 +317,19 @@ func (value ReadinessSnapshot) Coarse() (CoarseReadinessSnapshot, error) {
 	if value.Validate() != nil {
 		return CoarseReadinessSnapshot{}, ErrInvalidAuthorityContract
 	}
-	return CoarseReadinessSnapshot{
+	coarse := CoarseReadinessSnapshot{
 		ProtocolVersion:        value.ProtocolVersion,
 		Revision:               value.Revision,
 		State:                  value.State,
 		ObservedAtMilliseconds: value.ObservedAtMilliseconds,
-	}, nil
+	}
+	if value.State != ReadinessReady {
+		coarse.RetryAfterMilliseconds = DefaultReadinessRetryAfterMilliseconds
+	}
+	if coarse.Validate() != nil {
+		return CoarseReadinessSnapshot{}, ErrInvalidAuthorityContract
+	}
+	return coarse, nil
 }
 
 func validReservationToken(value string) bool {
