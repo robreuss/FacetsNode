@@ -51,6 +51,11 @@ type Config struct {
 	BackupMaximumGenerationBytes    int64
 	BackupMaximumStagingBytes       int64
 	BackupMaximumCommittedBytes     int64
+	JobCustodyRoot                  string
+	JobCustodyAdmissionKeysFile     string
+	JobCustodyMaximumAdmissions     int64
+	JobCustodyMaximumStagingBytes   int64
+	JobCustodyMaximumCustodyBytes   int64
 	TrafficLimits                   traffic.Limits
 	DeploymentID                    uuid.UUID
 	DeploymentSigningKeyFile        string
@@ -73,6 +78,7 @@ const (
 	SharedSpaces             Service = "facets-shared-spaces-server"
 	ComputePool              Service = "facets-compute-pool-server"
 	BackupCustody            Service = "facets-backup-custody-server"
+	JobCustody               Service = "facets-job-custody-server"
 	StorageCapacityAuthority Service = "facets-storage-capacity-authority"
 )
 
@@ -86,6 +92,8 @@ func (service Service) EnvironmentPrefix() (string, error) {
 		return "FACETS_COMPUTE_POOL", nil
 	case BackupCustody:
 		return "FACETS_BACKUP_CUSTODY", nil
+	case JobCustody:
+		return "FACETS_JOB_CUSTODY", nil
 	case StorageCapacityAuthority:
 		return "FACETS_STORAGE_CAPACITY_AUTHORITY", nil
 	default:
@@ -158,6 +166,9 @@ func Load(service Service) (Config, error) {
 		BackupMaximumGenerationBytes:    1 << 40,
 		BackupMaximumStagingBytes:       2 << 40,
 		BackupMaximumCommittedBytes:     20 << 40,
+		JobCustodyMaximumAdmissions:     100_000,
+		JobCustodyMaximumStagingBytes:   2 << 40,
+		JobCustodyMaximumCustodyBytes:   20 << 40,
 		TrafficLimits:                   traffic.DefaultLimits(),
 		StorageCapacityReadinessPeriod:  30 * time.Second,
 		StorageCapacityReservationTTL:   5 * time.Minute,
@@ -179,6 +190,24 @@ func Load(service Service) (Config, error) {
 		)
 		configuration.BackupAccountAdmissionKeyFile = strings.TrimSpace(
 			os.Getenv(prefix + "_ACCOUNT_ADMISSION_KEY_FILE"),
+		)
+		configuration.StorageCapacityAuthorityURL = strings.TrimSpace(
+			os.Getenv(prefix + "_STORAGE_CAPACITY_AUTHORITY_URL"),
+		)
+		poolIDName := prefix + "_STORAGE_CAPACITY_POOL_ID"
+		configuration.StorageCapacityPoolID, err = uuid.Parse(strings.TrimSpace(os.Getenv(poolIDName)))
+		if err != nil || configuration.StorageCapacityPoolID == uuid.Nil {
+			return Config{}, fmt.Errorf("%s must be a nonzero UUID", poolIDName)
+		}
+	}
+	if service == JobCustody {
+		configuration.BlobRoot = ""
+		configuration.JobCustodyRoot = environment(
+			prefix+"_CUSTODY_ROOT",
+			"/var/lib/facets-job-custody/custody",
+		)
+		configuration.JobCustodyAdmissionKeysFile = strings.TrimSpace(
+			os.Getenv(prefix + "_ADMISSION_KEYS_FILE"),
 		)
 		configuration.StorageCapacityAuthorityURL = strings.TrimSpace(
 			os.Getenv(prefix + "_STORAGE_CAPACITY_AUTHORITY_URL"),
@@ -312,6 +341,15 @@ func Load(service Service) (Config, error) {
 			bindingFileName,
 		)
 	}
+	if service == JobCustody && configuredDeploymentValues != 4 {
+		return Config{}, fmt.Errorf(
+			"%s, %s, %s, and %s are required for the Job Custody Service",
+			deploymentIDName,
+			deploymentKeyFileName,
+			deploymentRoutePolicyFileName,
+			bindingFileName,
+		)
+	}
 	if service == DeviceSync && configuredDeploymentValues != 4 {
 		return Config{}, fmt.Errorf(
 			"%s, %s, %s, and %s are required for the Device Sync Service",
@@ -435,6 +473,36 @@ func Load(service Service) (Config, error) {
 			return Config{}, err
 		}
 	}
+	if service == JobCustody {
+		if !filepath.IsAbs(configuration.JobCustodyRoot) ||
+			filepath.Clean(configuration.JobCustodyRoot) != configuration.JobCustodyRoot ||
+			configuration.JobCustodyRoot == string(filepath.Separator) {
+			return Config{}, fmt.Errorf("%s_CUSTODY_ROOT must be an absolute non-root canonical path", prefix)
+		}
+		if !filepath.IsAbs(configuration.JobCustodyAdmissionKeysFile) ||
+			filepath.Clean(configuration.JobCustodyAdmissionKeysFile) != configuration.JobCustodyAdmissionKeysFile {
+			return Config{}, fmt.Errorf("%s_ADMISSION_KEYS_FILE must be an absolute canonical path", prefix)
+		}
+		if configuration.StorageCapacityAuthorityURL == "" {
+			return Config{}, fmt.Errorf("%s_STORAGE_CAPACITY_AUTHORITY_URL is required", prefix)
+		}
+		capacityURL, parseErr := url.Parse(configuration.StorageCapacityAuthorityURL)
+		if parseErr != nil || capacityURL.Scheme != "https" || capacityURL.Host == "" ||
+			capacityURL.User != nil || capacityURL.RawQuery != "" || capacityURL.Fragment != "" ||
+			(capacityURL.Path != "" && capacityURL.Path != "/") {
+			return Config{}, fmt.Errorf("%s_STORAGE_CAPACITY_AUTHORITY_URL must be an HTTPS origin", prefix)
+		}
+		if value := os.Getenv(prefix + "_STORAGE_CAPACITY_RESERVATION_TTL"); value != "" {
+			period, err := time.ParseDuration(value)
+			if err != nil || period < time.Minute || period > time.Hour {
+				return Config{}, fmt.Errorf("%s_STORAGE_CAPACITY_RESERVATION_TTL must be between one minute and one hour", prefix)
+			}
+			configuration.StorageCapacityReservationTTL = period
+		}
+		if err := loadJobCustodyLimits(&configuration, prefix); err != nil {
+			return Config{}, err
+		}
+	}
 	if err := loadTrafficLimits(&configuration, prefix); err != nil {
 		return Config{}, err
 	}
@@ -504,6 +572,32 @@ func loadBackupCustodyLimits(configuration *Config, prefix string) error {
 		configuration.BackupMaximumStagingBytes > configuration.BackupMaximumCommittedBytes ||
 		int64(configuration.BackupMaximumChunksPerUpload) < requiredChunks {
 		return fmt.Errorf("%s Backup custody byte limits are inconsistent", prefix)
+	}
+	return nil
+}
+
+func loadJobCustodyLimits(configuration *Config, prefix string) error {
+	values := []struct {
+		name        string
+		destination *int64
+	}{
+		{prefix + "_MAXIMUM_ADMISSIONS", &configuration.JobCustodyMaximumAdmissions},
+		{prefix + "_MAXIMUM_STAGING_BYTES", &configuration.JobCustodyMaximumStagingBytes},
+		{prefix + "_MAXIMUM_CUSTODY_BYTES", &configuration.JobCustodyMaximumCustodyBytes},
+	}
+	for _, value := range values {
+		raw := os.Getenv(value.name)
+		if raw == "" {
+			continue
+		}
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 {
+			return fmt.Errorf("%s must be a positive integer", value.name)
+		}
+		*value.destination = parsed
+	}
+	if configuration.JobCustodyMaximumStagingBytes > configuration.JobCustodyMaximumCustodyBytes {
+		return fmt.Errorf("%s Job custody byte limits are inconsistent", prefix)
 	}
 	return nil
 }

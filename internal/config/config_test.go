@@ -157,6 +157,8 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	t.Setenv("FACETS_COMPUTE_POOL_LISTEN_ADDR", ":8083")
 	configureBackupCustody(t)
 	t.Setenv("FACETS_BACKUP_CUSTODY_LISTEN_ADDR", ":8084")
+	configureJobCustody(t)
+	t.Setenv("FACETS_JOB_CUSTODY_LISTEN_ADDR", ":8086")
 	configureStorageCapacityAuthority(t)
 	t.Setenv("FACETS_STORAGE_CAPACITY_AUTHORITY_LISTEN_ADDR", ":8085")
 
@@ -173,6 +175,10 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	backupCustody, err := config.Load(config.BackupCustody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobCustody, err := config.Load(config.JobCustody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +201,13 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 		backupCustody.StorageCapacityAuthorityURL != "https://capacity.example" ||
 		backupCustody.StorageCapacityPoolID == uuid.Nil || backupCustody.StorageCapacityReservationTTL != 5*time.Minute {
 		t.Fatalf("Backup custody configuration=%+v", backupCustody)
+	}
+	if jobCustody.Service != config.JobCustody || jobCustody.ListenAddress != ":8086" ||
+		jobCustody.BlobRoot != "" || jobCustody.JobCustodyRoot != "/var/lib/facets-job-custody/custody" ||
+		jobCustody.JobCustodyAdmissionKeysFile != "/var/lib/facets-job-custody/admission-keys.json" ||
+		jobCustody.StorageCapacityAuthorityURL != "https://capacity.example" ||
+		jobCustody.StorageCapacityPoolID == uuid.Nil || jobCustody.StorageCapacityReservationTTL != 5*time.Minute {
+		t.Fatalf("Job custody configuration=%+v", jobCustody)
 	}
 	if storageAuthority.Service != config.StorageCapacityAuthority || storageAuthority.ListenAddress != ":8085" ||
 		storageAuthority.BlobRoot != "" || storageAuthority.StorageCapacityPoolID == uuid.Nil ||
@@ -286,6 +299,66 @@ func TestBackupCustodyRequiresPrivateCapacityAuthorityOriginAndBoundedLease(t *t
 			configureBackupCustody(t)
 			t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_RESERVATION_TTL", value)
 			if _, err := config.Load(config.BackupCustody); err == nil {
+				t.Fatalf("capacity reservation TTL %q accepted", value)
+			}
+		})
+	}
+}
+
+func TestJobCustodyRequiresIndependentAuthorityAndBoundedQuotas(t *testing.T) {
+	t.Setenv("FACETS_JOB_CUSTODY_DATABASE_URL", "postgres://example.invalid/job_custody")
+	if _, err := config.Load(config.JobCustody); err == nil {
+		t.Fatal("Job custody without independent authority accepted")
+	}
+	configureJobCustody(t)
+	t.Setenv("FACETS_JOB_CUSTODY_CUSTODY_ROOT", "/srv/facets-job-custody/custody")
+	t.Setenv("FACETS_JOB_CUSTODY_MAXIMUM_ADMISSIONS", "12")
+	t.Setenv("FACETS_JOB_CUSTODY_MAXIMUM_STAGING_BYTES", "4096")
+	t.Setenv("FACETS_JOB_CUSTODY_MAXIMUM_CUSTODY_BYTES", "8192")
+	configuration, err := config.Load(config.JobCustody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.JobCustodyRoot != "/srv/facets-job-custody/custody" ||
+		configuration.JobCustodyMaximumAdmissions != 12 ||
+		configuration.JobCustodyMaximumStagingBytes != 4096 ||
+		configuration.JobCustodyMaximumCustodyBytes != 8192 {
+		t.Fatalf("Job custody limits=%+v", configuration)
+	}
+	for name, value := range map[string]string{
+		"FACETS_JOB_CUSTODY_CUSTODY_ROOT":          "/",
+		"FACETS_JOB_CUSTODY_ADMISSION_KEYS_FILE":   "relative.json",
+		"FACETS_JOB_CUSTODY_MAXIMUM_ADMISSIONS":    "0",
+		"FACETS_JOB_CUSTODY_MAXIMUM_STAGING_BYTES": "8193",
+		"FACETS_JOB_CUSTODY_MAXIMUM_CUSTODY_BYTES": "4095",
+	} {
+		t.Run(name, func(t *testing.T) {
+			configureJobCustody(t)
+			t.Setenv("FACETS_JOB_CUSTODY_MAXIMUM_STAGING_BYTES", "4096")
+			t.Setenv("FACETS_JOB_CUSTODY_MAXIMUM_CUSTODY_BYTES", "8192")
+			t.Setenv(name, value)
+			if _, err := config.Load(config.JobCustody); err == nil {
+				t.Fatalf("invalid %s=%s accepted", name, value)
+			}
+		})
+	}
+}
+
+func TestJobCustodyRequiresPrivateCapacityAuthorityOriginAndBoundedLease(t *testing.T) {
+	for _, value := range []string{"", "http://capacity.example", "https://user@capacity.example", "https://capacity.example/private", "https://capacity.example?pool=1"} {
+		t.Run(value, func(t *testing.T) {
+			configureJobCustody(t)
+			t.Setenv("FACETS_JOB_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL", value)
+			if _, err := config.Load(config.JobCustody); err == nil {
+				t.Fatalf("capacity authority URL %q accepted", value)
+			}
+		})
+	}
+	for _, value := range []string{"59s", "1h1s"} {
+		t.Run(value, func(t *testing.T) {
+			configureJobCustody(t)
+			t.Setenv("FACETS_JOB_CUSTODY_STORAGE_CAPACITY_RESERVATION_TTL", value)
+			if _, err := config.Load(config.JobCustody); err == nil {
 				t.Fatalf("capacity reservation TTL %q accepted", value)
 			}
 		})
@@ -477,6 +550,18 @@ func configureBackupCustody(t *testing.T) {
 	t.Setenv("FACETS_BACKUP_CUSTODY_ACCOUNT_ADMISSION_KEY_FILE", "/var/lib/facets-backup-custody/account-admission-key")
 	t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL", "https://capacity.example")
 	t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_POOL_ID", "8a000000-0000-0000-0000-000000000001")
+}
+
+func configureJobCustody(t *testing.T) {
+	t.Helper()
+	t.Setenv("FACETS_JOB_CUSTODY_DATABASE_URL", "postgres://example.invalid/job_custody")
+	t.Setenv("FACETS_JOB_CUSTODY_DEPLOYMENT_ID", "8b000000-0000-0000-0000-000000000001")
+	t.Setenv("FACETS_JOB_CUSTODY_DEPLOYMENT_SIGNING_KEY_FILE", "/var/lib/facets-job-custody/deployment-signing-key")
+	t.Setenv("FACETS_JOB_CUSTODY_DEPLOYMENT_ROUTE_POLICY_FILE", "/var/lib/facets-job-custody/deployment-route-policy.json")
+	t.Setenv("FACETS_JOB_CUSTODY_SERVICE_AUTHORITY_BINDINGS_FILE", "/var/lib/facets-job-custody/service-authority-bindings.json")
+	t.Setenv("FACETS_JOB_CUSTODY_ADMISSION_KEYS_FILE", "/var/lib/facets-job-custody/admission-keys.json")
+	t.Setenv("FACETS_JOB_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL", "https://capacity.example")
+	t.Setenv("FACETS_JOB_CUSTODY_STORAGE_CAPACITY_POOL_ID", "8a000000-0000-0000-0000-000000000001")
 }
 
 func configureStorageCapacityAuthority(t *testing.T) {
