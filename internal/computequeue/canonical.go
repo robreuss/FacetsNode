@@ -136,6 +136,33 @@ func DecodeCustodyCanonical(data []byte) (SignedReceiptEnvelope, error) {
 	})
 }
 
+// EncodeJobCustodyAdmissionCanonical preserves the separate, bounded
+// Box-visible admission surface without widening the receipt-only custody
+// codec above.
+func EncodeJobCustodyAdmissionCanonical(value JobCustodySignedAdmissionEnvelope) ([]byte, error) {
+	if err := value.Validate(); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidRecord, err)
+	}
+	return canonicalizeWithBounds(encoded, custodyJSONBounds())
+}
+
+func DecodeJobCustodyAdmissionCanonical(data []byte) (JobCustodySignedAdmissionEnvelope, error) {
+	return decodeCanonicalWithBounds[JobCustodySignedAdmissionEnvelope](data, custodyJSONBounds())
+}
+
+func custodyJSONBounds() jsonBounds {
+	return jsonBounds{
+		maximumDocumentBytes:    maximumCustodyDocumentBytes,
+		maximumDepth:            maximumCustodyDepth,
+		maximumContainerEntries: maximumCustodyContainerEntries,
+		maximumNodeCount:        maximumCustodyNodeCount,
+	}
+}
+
 func sourceJSONBounds() jsonBounds {
 	return jsonBounds{
 		maximumDocumentBytes:    MaximumDocumentBytes,
