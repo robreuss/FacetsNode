@@ -118,3 +118,29 @@ func TestAPIClientRejectsUnsafeCredentialAndMutationResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestAPIClientReportsInvalidResponseMetadataWithoutBody(t *testing.T) {
+	server, fingerprint := pinnedTestServer(t, http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/plain")
+		response.WriteHeader(http.StatusNotImplemented)
+		_, _ = io.WriteString(response, "sensitive upstream detail")
+	}))
+	client, err := NewAPIClient(server.URL, fingerprint, "test@pve!automation", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target any
+	err = client.get(context.Background(), "/version", nil, &target)
+	if err == nil {
+		t.Fatal("invalid response accepted")
+	}
+	message := err.Error()
+	for _, wanted := range []string{"method=GET", "path=/api2/json/version", "status=501", `content-type="text/plain"`} {
+		if !strings.Contains(message, wanted) {
+			t.Fatalf("missing %q in %q", wanted, message)
+		}
+	}
+	if strings.Contains(message, "sensitive upstream detail") {
+		t.Fatalf("response body leaked in error: %q", message)
+	}
+}

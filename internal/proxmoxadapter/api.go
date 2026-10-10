@@ -205,7 +205,13 @@ func (client *APIClient) do(request *http.Request) (json.RawMessage, error) {
 	}
 	var envelope apiEnvelope
 	if err = json.Unmarshal(data, &envelope); err != nil {
-		return nil, errors.New("invalid Proxmox API response")
+		return nil, fmt.Errorf(
+			"invalid Proxmox API response: method=%s path=%s status=%d content-type=%q",
+			request.Method,
+			request.URL.Path,
+			response.StatusCode,
+			response.Header.Get("Content-Type"),
+		)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message := strings.TrimSpace(envelope.Message)
