@@ -229,9 +229,28 @@ func (client *APIClient) do(request *http.Request) (json.RawMessage, error) {
 		if message == "" {
 			message = http.StatusText(response.StatusCode)
 		}
+		if fields := apiErrorFieldNames(envelope.Errors); fields != "" {
+			message += " (fields=" + fields + ")"
+		}
 		return nil, fmt.Errorf("Proxmox API %s %s: %d %s", request.Method, request.URL.Path, response.StatusCode, message)
 	}
 	return envelope.Data, nil
+}
+
+func apiErrorFieldNames(data json.RawMessage) string {
+	var fields map[string]json.RawMessage
+	if len(data) == 0 || json.Unmarshal(data, &fields) != nil || len(fields) == 0 || len(fields) > 32 {
+		return ""
+	}
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		if key == "" || len(key) > 64 || !identifierPattern.MatchString(key) {
+			return ""
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 func taskID(data json.RawMessage) (string, error) {

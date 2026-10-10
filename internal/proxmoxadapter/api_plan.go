@@ -212,7 +212,7 @@ func APIOperations(plan APIPlan, publicKey string) []APIOperation {
 			Name: "configure-cloud-init", Method: "PUT", Path: vmPath + "/config",
 			Form: map[string]string{
 				"ide2": plan.Storage + ":cloudinit", "boot": "order=scsi0", "ciuser": plan.AdminUser,
-				"sshkeys": publicKey, "ipconfig0": "ip=dhcp",
+				"sshkeys": url.PathEscape(publicKey), "ipconfig0": "ip=dhcp",
 			},
 		},
 		{Name: "start-vm", Method: "POST", Path: vmPath + "/status/start"},

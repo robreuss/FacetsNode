@@ -164,3 +164,23 @@ func TestAPIClientReportsInvalidResponseMetadataWithoutBody(t *testing.T) {
 		t.Fatalf("response body leaked in error: %q", message)
 	}
 }
+
+func TestAPIClientReportsErrorFieldNamesWithoutValues(t *testing.T) {
+	server, fingerprint := pinnedTestServer(t, http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(response, `{"data":null,"message":"Parameter verification failed.","errors":{"ide2":"sensitive validation detail"}}`)
+	}))
+	client, err := NewAPIClient(server.URL, fingerprint, "test@pve!automation", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target any
+	err = client.get(context.Background(), "/version", nil, &target)
+	if err == nil || !strings.Contains(err.Error(), "fields=ide2") {
+		t.Fatalf("missing error field name: %v", err)
+	}
+	if strings.Contains(err.Error(), "sensitive validation detail") {
+		t.Fatalf("error value leaked: %v", err)
+	}
+}

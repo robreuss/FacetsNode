@@ -27,7 +27,8 @@ func TestAPIPlanBindsPinnedInputsAndNonDestructiveOperations(t *testing.T) {
 	if err := plan.Validate(proxmoxProfile()); err != nil {
 		t.Fatal(err)
 	}
-	operations := APIOperations(plan, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJeodct0V0EeaDSJQAwgqpqW7rMaucm/Ag5B0QFGp3J")
+	publicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJeodct0V0EeaDSJQAwgqpqW7rMaucm/Ag5B0QFGp3J"
+	operations := APIOperations(plan, publicKey)
 	if len(operations) != 7 {
 		t.Fatalf("unexpected operation count: %d", len(operations))
 	}
@@ -61,6 +62,9 @@ func TestAPIPlanBindsPinnedInputsAndNonDestructiveOperations(t *testing.T) {
 	}
 	if strings.Contains(encoded, "/qemu/180") || strings.Contains(encoded, "/qemu/190") {
 		t.Fatalf("retained VM entered API operations:\n%s", encoded)
+	}
+	if got := operations[5].Form["sshkeys"]; got != "ssh-ed25519%20AAAAC3NzaC1lZDI1NTE5AAAAIEJeodct0V0EeaDSJQAwgqpqW7rMaucm%2FAg5B0QFGp3J" {
+		t.Fatalf("public key is not encoded for Proxmox's urlencoded field: %q", got)
 	}
 }
 
