@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -763,6 +764,12 @@ func writeBackupOperationError(writer http.ResponseWriter, err error) {
 		writeBackupError(writer, http.StatusUnauthorized, "unauthorized")
 	case errors.Is(err, ErrClockRollback):
 		writeBackupError(writer, http.StatusConflict, "clock_rollback")
+	case errors.Is(err, storagecapacity.ErrPressure):
+		writer.Header().Set("Retry-After", strconv.FormatInt(storagecapacity.DefaultReadinessRetryAfterMilliseconds/1_000, 10))
+		writeBackupError(writer, http.StatusInsufficientStorage, "storage_pressure")
+	case errors.Is(err, storagecapacity.ErrUnavailable):
+		writer.Header().Set("Retry-After", strconv.FormatInt(storagecapacity.DefaultReadinessRetryAfterMilliseconds/1_000, 10))
+		writeBackupError(writer, http.StatusInsufficientStorage, "capacity_unavailable")
 	case errors.Is(err, serviceauthority.ErrInvalid):
 		writeBackupError(writer, http.StatusBadRequest, "invalid_request")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):

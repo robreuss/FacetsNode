@@ -30,6 +30,8 @@ import (
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storageauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/testpostgres"
 )
 
@@ -55,6 +57,15 @@ func TestBackupCustodyStoreLimitsAreMappedWithoutRelayFallback(t *testing.T) {
 		limits.MaximumCommittedBytes != 10 || limits.MaximumControlRecords != 11 ||
 		limits.MaximumCredentialLifetimeMilliseconds != 12 {
 		t.Fatalf("mapped Backup limits=%+v", limits)
+	}
+}
+
+func TestBackupCapacityTransportOutageIsCoarseCapacityUnavailable(t *testing.T) {
+	if err := backupCapacityError(storageauthority.ErrUnavailable); !errors.Is(err, storagecapacity.ErrUnavailable) {
+		t.Fatalf("transport outage mapped to %v", err)
+	}
+	if err := backupCapacityError(storageauthority.ErrInvalid); !errors.Is(err, storageauthority.ErrInvalid) {
+		t.Fatalf("authority contract failure was hidden: %v", err)
 	}
 }
 

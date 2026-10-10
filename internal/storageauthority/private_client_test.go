@@ -79,3 +79,90 @@ func TestPrivateCapacityClientRequiresTLSAndMatchingDeploymentIdentity(t *testin
 		t.Fatal("signer authorized a different service instance")
 	}
 }
+
+func TestPrivateCapacityLeaseOwnsReserveRecheckAndTerminalLifecycle(t *testing.T) {
+	fixture := newPrivateHTTPFixture(t)
+	now := fixture.now
+	fixture.handler.now = func() time.Time { return now }
+	server := httptest.NewTLSServer(fixture.handler.Handler())
+	defer server.Close()
+	client, err := NewPrivateHTTPClient(server.URL, server.Client(), fixture.signer, fixture.binding, fixture.poolID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.now = func() time.Time { return now }
+	lease, err := client.Acquire(context.Background(), 12_345, 10*time.Second)
+	if err != nil || fixture.service.reserve.ByteCeiling != 12_345 || fixture.service.reserve.Service != fixture.binding {
+		t.Fatalf("acquire lease=%+v reserve=%+v err=%v", lease, fixture.service.reserve, err)
+	}
+	now = now.Add(time.Second)
+	if err := lease.Recheck(context.Background()); err != nil || fixture.service.recheckID != fixture.service.reserve.ReservationID {
+		t.Fatalf("recheck id=%s err=%v", fixture.service.recheckID, err)
+	}
+	now = now.Add(time.Second)
+	if err := lease.Commit(context.Background()); err != nil || fixture.service.state != storagecapacity.ReservationCommitted {
+		t.Fatalf("commit state=%s err=%v", fixture.service.state, err)
+	}
+	if err := lease.Release(context.Background()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("terminal lease reused: %v", err)
+	}
+
+	now = fixture.now
+	releaseLease, err := client.Acquire(context.Background(), 4_096, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	if err := releaseLease.Release(context.Background()); err != nil || fixture.service.state != storagecapacity.ReservationReleased {
+		t.Fatalf("release state=%s err=%v", fixture.service.state, err)
+	}
+}
+
+func TestPrivateCapacityLeaseRejectsInvalidBoundsBeforeRemoteAdmission(t *testing.T) {
+	fixture := newPrivateHTTPFixture(t)
+	server := httptest.NewTLSServer(fixture.handler.Handler())
+	defer server.Close()
+	client, err := NewPrivateHTTPClient(server.URL, server.Client(), fixture.signer, fixture.binding, fixture.poolID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		bytes    int64
+		lifetime time.Duration
+	}{
+		{0, time.Minute}, {1, 0}, {1, MaximumPrivateReservationLifetime + time.Second},
+	} {
+		if _, err := client.Acquire(context.Background(), item.bytes, item.lifetime); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Acquire(%d,%s) err=%v", item.bytes, item.lifetime, err)
+		}
+	}
+	if fixture.service.reserve.ReservationID != uuid.Nil {
+		t.Fatal("invalid lease reached authority")
+	}
+}
+
+func TestPrivateCapacityLeaseReconcilesLostTerminalResponse(t *testing.T) {
+	fixture := newPrivateHTTPFixture(t)
+	now := fixture.now
+	fixture.handler.now = func() time.Time { return now }
+	server := httptest.NewTLSServer(fixture.handler.Handler())
+	defer server.Close()
+	client, err := NewPrivateHTTPClient(server.URL, server.Client(), fixture.signer, fixture.binding, fixture.poolID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.now = func() time.Time { return now }
+	lease, err := client.Acquire(context.Background(), 8_192, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.decisionErrOnce = true
+	now = now.Add(time.Second)
+	if err := lease.Commit(context.Background()); err != nil {
+		t.Fatalf("lost commit response was not reconciled: %v", err)
+	}
+	if fixture.service.reservationID != fixture.service.reserve.ReservationID ||
+		fixture.service.state != storagecapacity.ReservationCommitted {
+		t.Fatalf("reconciliation state=%s read=%s reserve=%s", fixture.service.state, fixture.service.reservationID, fixture.service.reserve.ReservationID)
+	}
+}

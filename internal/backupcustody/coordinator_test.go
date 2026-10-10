@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 func TestCoordinatorReadUsesDurableAuthoritySnapshotAndVerifiesObject(t *testing.T) {
@@ -98,7 +99,7 @@ func TestCoordinatorReadUsesDurableAuthoritySnapshotAndVerifiesObject(t *testing
 	binding := serviceauthority.RequestBinding{Scope: scope, AuthorityRevision: 1,
 		AuthorityDigest: authorityDigest, DeploymentID: deploymentID,
 		RouteID: uuid.New(), TrafficClass: serviceauthority.TrafficBulk}
-	coordinator := Coordinator{Store: store, Content: content, Registry: registry, Signer: signer,
+	coordinator := Coordinator{Store: store, Content: content, Capacity: allowingCapacity{}, Registry: registry, Signer: signer,
 		AuthorityHistory: unusedAuthorityHistory{}, Clock: fixedBackupClock{time.UnixMilli(1_100)},
 		MaximumChunkBytes: 1024, MaximumGenerationBytes: 4096, NewID: uuid.New}
 	request := ReadRequest{Version: Version, RequestID: uuid.New(), RequestedAtMilliseconds: 1_100,
@@ -298,6 +299,76 @@ func TestCoordinatorAppendRepairsLostOffsetCommitAndRejectsConflictingReplay(t *
 	next, err = harness.coordinator.AppendUploadChunk(context.Background(), harness.credential, harness.binding, uploadID, 0, chunk, digest)
 	if err != nil || next != uint64(len(chunk)) {
 		t.Fatalf("tail reconciliation next=%d err=%v", next, err)
+	}
+}
+
+func TestCoordinatorAppendComposesBackupQuotaWithSharedPhysicalCapacity(t *testing.T) {
+	harness := newCoordinatorHarness(t, []Capability{Publish})
+	defer harness.content.Close()
+	capacity := &recordingCapacity{}
+	harness.coordinator.Capacity = capacity
+	chunk := []byte("capacity bounded encrypted chunk")
+	digest := fmt.Sprintf("%x", sha256.Sum256(chunk))
+	uploadID := uuid.New()
+	harness.store.upload = UploadRecord{AccountID: harness.target.AccountID, TargetID: harness.target.TargetID,
+		BackupSetID: harness.target.BackupSetID, UploadID: uploadID,
+		Request: PublishRequest{Version: Version, RequestID: uuid.New(), RequestedAtMilliseconds: 1_100,
+			Credential: harness.credential.Reference, Generation: 1}, MaximumChunkCount: 10}
+	if err := harness.content.PrepareUpload(uploadID); err != nil {
+		t.Fatal(err)
+	}
+	next, err := harness.coordinator.AppendUploadChunk(context.Background(), harness.credential, harness.binding, uploadID, 0, chunk, digest)
+	wantCeiling, _ := storagecapacity.AppendReservation(int64(len(chunk)))
+	if err != nil || next != uint64(len(chunk)) || capacity.reserved != 1 || capacity.ceiling != wantCeiling ||
+		capacity.lease.rechecked != 1 || capacity.lease.committed != 1 || capacity.lease.released != 0 {
+		t.Fatalf("next=%d err=%v capacity=%+v lease=%+v", next, err, capacity, capacity.lease)
+	}
+	if _, err := harness.coordinator.AppendUploadChunk(context.Background(), harness.credential, harness.binding, uploadID, 0, chunk, digest); err != nil {
+		t.Fatal(err)
+	}
+	if capacity.reserved != 1 {
+		t.Fatalf("exact replay reserved capacity again: %+v", capacity)
+	}
+}
+
+func TestCoordinatorAppendReleasesCapacityBeforeDurableOffsetAndFailsClosedOnPressure(t *testing.T) {
+	for _, item := range []struct {
+		name       string
+		reserveErr error
+		commitFail bool
+	}{
+		{name: "physical pressure", reserveErr: storagecapacity.ErrPressure},
+		{name: "offset commit failure", commitFail: true},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			harness := newCoordinatorHarness(t, []Capability{Publish})
+			defer harness.content.Close()
+			capacity := &recordingCapacity{reserveErr: item.reserveErr}
+			harness.coordinator.Capacity = capacity
+			harness.store.failAppendBeforeCommitOnce = item.commitFail
+			chunk := []byte("encrypted bytes")
+			digest := fmt.Sprintf("%x", sha256.Sum256(chunk))
+			uploadID := uuid.New()
+			harness.store.upload = UploadRecord{AccountID: harness.target.AccountID, TargetID: harness.target.TargetID,
+				BackupSetID: harness.target.BackupSetID, UploadID: uploadID,
+				Request: PublishRequest{Version: Version, RequestID: uuid.New(), RequestedAtMilliseconds: 1_100,
+					Credential: harness.credential.Reference, Generation: 1}, MaximumChunkCount: 10}
+			if err := harness.content.PrepareUpload(uploadID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := harness.coordinator.AppendUploadChunk(context.Background(), harness.credential, harness.binding, uploadID, 0, chunk, digest); err == nil {
+				t.Fatal("rejected append reported success")
+			}
+			if harness.store.upload.CommittedBytes != 0 || capacity.lease.committed != 0 {
+				t.Fatalf("rejected append committed: offset=%d lease=%+v", harness.store.upload.CommittedBytes, capacity.lease)
+			}
+			if item.reserveErr != nil && (capacity.lease.rechecked != 0 || capacity.lease.released != 0) {
+				t.Fatalf("failed reservation obtained a lease: %+v", capacity.lease)
+			}
+			if item.commitFail && capacity.lease.released != 1 {
+				t.Fatalf("precommit failure did not release capacity: %+v", capacity.lease)
+			}
+		})
 	}
 }
 
@@ -582,7 +653,7 @@ func newCoordinatorHarness(t *testing.T, capabilities []Capability) coordinatorH
 		t.Fatal(err)
 	}
 	clock := &scriptedBackupClock{times: []time.Time{time.UnixMilli(1_100)}, last: time.UnixMilli(1_100)}
-	coordinator := Coordinator{Store: store, Content: content, Registry: registry, Signer: signer,
+	coordinator := Coordinator{Store: store, Content: content, Capacity: allowingCapacity{}, Registry: registry, Signer: signer,
 		AuthorityHistory: fixedAuthorityHistory{anchor: enrollment.Anchor, manifest: enrollment.Manifest}, Clock: clock,
 		MaximumChunkBytes: 2 * 1024 * 1024, MaximumGenerationBytes: 8 * 1024 * 1024, NewID: uuid.New}
 	return coordinatorHarness{coordinator: coordinator, store: store, content: content, root: root,
@@ -711,6 +782,53 @@ type faultingUploadAppend struct {
 	digest   string
 	length   uint64
 	existing *uint64
+}
+
+type allowingCapacity struct{}
+
+func (allowingCapacity) Reserve(context.Context, int64) (CapacityReservation, error) {
+	return allowingCapacityReservation{}, nil
+}
+
+type allowingCapacityReservation struct{}
+
+func (allowingCapacityReservation) Recheck(context.Context) error { return nil }
+func (allowingCapacityReservation) Commit(context.Context) error  { return nil }
+func (allowingCapacityReservation) Release(context.Context) error { return nil }
+
+type recordingCapacity struct {
+	reserved   int
+	ceiling    int64
+	reserveErr error
+	lease      recordingCapacityReservation
+}
+
+func (capacity *recordingCapacity) Reserve(_ context.Context, ceiling int64) (CapacityReservation, error) {
+	capacity.reserved++
+	capacity.ceiling = ceiling
+	if capacity.reserveErr != nil {
+		return nil, capacity.reserveErr
+	}
+	return &capacity.lease, nil
+}
+
+type recordingCapacityReservation struct {
+	rechecked int
+	committed int
+	released  int
+}
+
+func (lease *recordingCapacityReservation) Recheck(context.Context) error {
+	lease.rechecked++
+	return nil
+}
+func (lease *recordingCapacityReservation) Commit(context.Context) error {
+	lease.committed++
+	return nil
+}
+func (lease *recordingCapacityReservation) Release(context.Context) error {
+	lease.released++
+	return nil
 }
 
 func (lease *faultingUploadAppend) Upload() UploadRecord { return lease.upload }

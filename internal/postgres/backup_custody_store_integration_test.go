@@ -196,7 +196,7 @@ func TestPostgresBackupCustodyDurableAuthorityReceiptsReplayAndQuotas(t *testing
 	if _, err := control.Submit(ctx, createCommand, controlBinding); err != nil {
 		t.Fatal(err)
 	}
-	coordinator := backupcustody.Coordinator{Store: store, Content: content, Registry: registry, Signer: signer,
+	coordinator := backupcustody.Coordinator{Store: store, Content: content, Capacity: backupIntegrationCapacity{}, Registry: registry, Signer: signer,
 		AuthorityHistory: backupIntegrationAuthorityHistory{anchor: enrollment.Anchor, manifest: enrollment.Manifest},
 		Clock:            clock, MaximumChunkBytes: 2 * 1024 * 1024, MaximumGenerationBytes: 8 * 1024 * 1024, NewID: uuid.New}
 	wire := backupIntegrationOuterWire(t, targetCredential.Reference.BackupSetID)
@@ -1096,6 +1096,18 @@ type backupIntegrationAuthorityHistory struct {
 	anchor   serviceauthority.TrustAnchor
 	manifest serviceauthority.Manifest
 }
+
+type backupIntegrationCapacity struct{}
+
+func (backupIntegrationCapacity) Reserve(context.Context, int64) (backupcustody.CapacityReservation, error) {
+	return backupIntegrationCapacityReservation{}, nil
+}
+
+type backupIntegrationCapacityReservation struct{}
+
+func (backupIntegrationCapacityReservation) Recheck(context.Context) error { return nil }
+func (backupIntegrationCapacityReservation) Commit(context.Context) error  { return nil }
+func (backupIntegrationCapacityReservation) Release(context.Context) error { return nil }
 
 func (history backupIntegrationAuthorityHistory) ResolveBackupCustodyAuthority(_ context.Context, authority serviceauthority.BackupCustodyAuthorityContext) (serviceauthority.TrustAnchor, serviceauthority.Manifest, error) {
 	digest, err := history.manifest.ReferenceDigest()

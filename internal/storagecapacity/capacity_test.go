@@ -67,6 +67,18 @@ func TestUploadReservationsIncludePublicationCopyAndMetadataWithoutDoubleChargin
 	}
 }
 
+func TestAppendReservationChargesOnlyNextBytesAndMetadata(t *testing.T) {
+	got, err := AppendReservation(1_000)
+	if err != nil || got != 1_000+ChunkMetadataAllowance+MutationMetadataAllowance {
+		t.Fatalf("append reservation=%d error=%v", got, err)
+	}
+	for _, value := range []int64{0, -1, math.MaxInt64} {
+		if _, err := AppendReservation(value); !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("append bytes %d accepted: %v", value, err)
+		}
+	}
+}
+
 func TestFileSystemProbeAndUnavailablePath(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("filesystem probe is not supported on this server platform")

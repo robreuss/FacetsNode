@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 type AuthorityHistory interface {
@@ -25,6 +26,7 @@ type Clock interface{ Now() time.Time }
 type Coordinator struct {
 	Store                  Store
 	Content                *ContentStore
+	Capacity               CapacityAuthority
 	Registry               *serviceauthority.BindingRegistry
 	Signer                 *serviceauthority.DeploymentSigner
 	AuthorityHistory       AuthorityHistory
@@ -35,7 +37,7 @@ type Coordinator struct {
 }
 
 func (coordinator *Coordinator) validate() error {
-	if coordinator == nil || coordinator.Store == nil || coordinator.Content == nil ||
+	if coordinator == nil || coordinator.Store == nil || coordinator.Content == nil || coordinator.Capacity == nil ||
 		coordinator.Registry == nil || coordinator.Signer == nil || coordinator.Clock == nil ||
 		coordinator.AuthorityHistory == nil ||
 		coordinator.MaximumChunkBytes == 0 || coordinator.MaximumGenerationBytes == 0 ||
@@ -153,6 +155,23 @@ func (coordinator *Coordinator) AppendUploadChunk(
 	if upload.TargetID != credential.Reference.TargetID || upload.CommittedBytes != offset {
 		return 0, ErrConflict
 	}
+	byteCeiling, err := storagecapacity.AppendReservation(int64(len(chunk)))
+	if err != nil {
+		return 0, err
+	}
+	capacityLease, err := coordinator.Capacity.Reserve(ctx, byteCeiling)
+	if err != nil {
+		return 0, err
+	}
+	releaseCapacity := true
+	defer func() {
+		if releaseCapacity {
+			_ = capacityLease.Release(context.WithoutCancel(ctx))
+		}
+	}()
+	if err := capacityLease.Recheck(ctx); err != nil {
+		return 0, err
+	}
 	next, err := coordinator.Content.ReconcileAndAppend(
 		uploadID, offset, chunk, coordinator.MaximumChunkBytes, coordinator.MaximumGenerationBytes,
 	)
@@ -162,6 +181,13 @@ func (coordinator *Coordinator) AppendUploadChunk(
 	criticalContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := appendLease.Commit(criticalContext, next); err != nil {
+		return 0, err
+	}
+	// Once Backup's durable offset commits, never issue a conflicting release:
+	// an ambiguous authority response is safely reconciled or expires while the
+	// physical probe already accounts for the written bytes.
+	releaseCapacity = false
+	if err := capacityLease.Commit(criticalContext); err != nil {
 		return 0, err
 	}
 	committed = true

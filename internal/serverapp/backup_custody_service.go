@@ -22,11 +22,52 @@ import (
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/postgres"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storageauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 type backupCustodyWallClock struct{}
 
 func (backupCustodyWallClock) Now() time.Time { return time.Now() }
+
+type backupCapacityAuthority struct {
+	client   *storageauthority.PrivateHTTPClient
+	lifetime time.Duration
+}
+
+func (authority backupCapacityAuthority) Reserve(
+	ctx context.Context,
+	byteCeiling int64,
+) (backupcustody.CapacityReservation, error) {
+	lease, err := authority.client.Acquire(ctx, byteCeiling, authority.lifetime)
+	if err != nil {
+		return nil, backupCapacityError(err)
+	}
+	return backupCapacityReservation{lease: lease}, nil
+}
+
+type backupCapacityReservation struct {
+	lease *storageauthority.PrivateReservationLease
+}
+
+func (reservation backupCapacityReservation) Recheck(ctx context.Context) error {
+	return backupCapacityError(reservation.lease.Recheck(ctx))
+}
+
+func (reservation backupCapacityReservation) Commit(ctx context.Context) error {
+	return backupCapacityError(reservation.lease.Commit(ctx))
+}
+
+func (reservation backupCapacityReservation) Release(ctx context.Context) error {
+	return backupCapacityError(reservation.lease.Release(ctx))
+}
+
+func backupCapacityError(err error) error {
+	if errors.Is(err, storageauthority.ErrUnavailable) {
+		return storagecapacity.ErrUnavailable
+	}
+	return err
+}
 
 type backupCustodyStandby struct {
 	accountID  uuid.UUID
@@ -123,6 +164,20 @@ func runBackupCustodyService(
 	if err != nil {
 		return fmt.Errorf("Backup account admission authority rejected: %w", err)
 	}
+	privateTransport := http.DefaultTransport.(*http.Transport).Clone()
+	privateTransport.Proxy = nil
+	capacityClient, err := storageauthority.NewPrivateHTTPClient(
+		configuration.StorageCapacityAuthorityURL,
+		&http.Client{Transport: privateTransport, Timeout: 15 * time.Second},
+		signer,
+		storagecapacity.ServiceBinding{
+			Kind: storagecapacity.ServiceBackupCustody, InstanceID: configuration.DeploymentID,
+		},
+		configuration.StorageCapacityPoolID,
+	)
+	if err != nil {
+		return fmt.Errorf("Backup storage capacity authority rejected: %w", err)
+	}
 	content, err := backupcustody.OpenContentStore(configuration.BackupCustodyRoot)
 	if err != nil {
 		return fmt.Errorf("Backup ciphertext custody rejected: %w", err)
@@ -210,8 +265,11 @@ func runBackupCustodyService(
 		return authorityHealth.reconcileAfterProvision()
 	}
 	coordinator := &backupcustody.Coordinator{
-		Store:                  store,
-		Content:                content,
+		Store:   store,
+		Content: content,
+		Capacity: backupCapacityAuthority{
+			client: capacityClient, lifetime: configuration.StorageCapacityReservationTTL,
+		},
 		Registry:               bindings,
 		Signer:                 signer,
 		AuthorityHistory:       store,
@@ -343,6 +401,9 @@ func validateBackupCustodyConfiguration(configuration config.Config) error {
 		configuration.DeploymentID == uuid.Nil || configuration.DeploymentSigningKeyFile == "" ||
 		configuration.DeploymentRoutePolicyFile == "" || configuration.ServiceAuthorityBindingsFile == "" ||
 		configuration.BackupAccountAdmissionKeyFile == "" || configuration.BackupCustodyRoot == "" ||
+		configuration.StorageCapacityAuthorityURL == "" || configuration.StorageCapacityPoolID == uuid.Nil ||
+		configuration.StorageCapacityReservationTTL < storageauthority.MinimumPrivateReservationLifetime ||
+		configuration.StorageCapacityReservationTTL > storageauthority.MaximumPrivateReservationLifetime ||
 		configuration.BlobRoot != "" || configuration.BackupMaximumChunkBytes <= 0 ||
 		configuration.BackupMaximumGenerationBytes <= 0 || configuration.TransferPeriod <= 0 {
 		return serviceauthority.ErrInvalid

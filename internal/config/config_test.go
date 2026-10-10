@@ -191,7 +191,9 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 		t.Fatalf("Compute Pool configuration=%+v", computePool)
 	}
 	if backupCustody.Service != config.BackupCustody || backupCustody.ListenAddress != ":8084" ||
-		backupCustody.BlobRoot != "" || backupCustody.BackupCustodyRoot != "/var/lib/facets-backup-custody/custody" {
+		backupCustody.BlobRoot != "" || backupCustody.BackupCustodyRoot != "/var/lib/facets-backup-custody/custody" ||
+		backupCustody.StorageCapacityAuthorityURL != "https://capacity.example" ||
+		backupCustody.StorageCapacityPoolID == uuid.Nil || backupCustody.StorageCapacityReservationTTL != 5*time.Minute {
 		t.Fatalf("Backup custody configuration=%+v", backupCustody)
 	}
 	if storageAuthority.Service != config.StorageCapacityAuthority || storageAuthority.ListenAddress != ":8085" ||
@@ -264,6 +266,27 @@ func TestBackupCustodyRequiresIndependentAuthorityAndBoundedQuotas(t *testing.T)
 			}
 			if value == "67108865" && err == nil {
 				t.Fatal("chunk size above 64 MiB hard cap accepted")
+			}
+		})
+	}
+}
+
+func TestBackupCustodyRequiresPrivateCapacityAuthorityOriginAndBoundedLease(t *testing.T) {
+	for _, value := range []string{"", "http://capacity.example", "https://user@capacity.example", "https://capacity.example/private", "https://capacity.example?pool=1"} {
+		t.Run(value, func(t *testing.T) {
+			configureBackupCustody(t)
+			t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL", value)
+			if _, err := config.Load(config.BackupCustody); err == nil {
+				t.Fatalf("capacity authority URL %q accepted", value)
+			}
+		})
+	}
+	for _, value := range []string{"59s", "1h1s"} {
+		t.Run(value, func(t *testing.T) {
+			configureBackupCustody(t)
+			t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_RESERVATION_TTL", value)
+			if _, err := config.Load(config.BackupCustody); err == nil {
+				t.Fatalf("capacity reservation TTL %q accepted", value)
 			}
 		})
 	}
@@ -452,6 +475,8 @@ func configureBackupCustody(t *testing.T) {
 	t.Setenv("FACETS_BACKUP_CUSTODY_DEPLOYMENT_ROUTE_POLICY_FILE", "/var/lib/facets-backup-custody/deployment-route-policy.json")
 	t.Setenv("FACETS_BACKUP_CUSTODY_SERVICE_AUTHORITY_BINDINGS_FILE", "/var/lib/facets-backup-custody/service-authority-bindings.json")
 	t.Setenv("FACETS_BACKUP_CUSTODY_ACCOUNT_ADMISSION_KEY_FILE", "/var/lib/facets-backup-custody/account-admission-key")
+	t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL", "https://capacity.example")
+	t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_POOL_ID", "8a000000-0000-0000-0000-000000000001")
 }
 
 func configureStorageCapacityAuthority(t *testing.T) {

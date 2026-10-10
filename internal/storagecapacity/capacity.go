@@ -76,3 +76,14 @@ func UploadReservation(byteCount, committedOffset, chunkCount int64) (int64, err
 	}
 	return base + chunkCount*ChunkMetadataAllowance, nil
 }
+
+// AppendReservation covers one bounded durable append plus its conservative
+// chunk and mutation metadata. The physical probe already includes bytes from
+// earlier committed appends, so callers reserve only the next append.
+func AppendReservation(byteCount int64) (int64, error) {
+	overhead := ChunkMetadataAllowance + MutationMetadataAllowance
+	if byteCount <= 0 || byteCount > math.MaxInt64-overhead {
+		return 0, ErrUnavailable
+	}
+	return byteCount + overhead, nil
+}

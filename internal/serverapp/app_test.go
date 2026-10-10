@@ -28,6 +28,9 @@ func TestBackupCustodyServiceConfigurationIsDedicated(t *testing.T) {
 		BackupMaximumChunkBytes:       1,
 		BackupMaximumGenerationBytes:  1,
 		TransferPeriod:                time.Minute,
+		StorageCapacityAuthorityURL:   "https://capacity.example",
+		StorageCapacityPoolID:         uuid.New(),
+		StorageCapacityReservationTTL: 5 * time.Minute,
 	}
 	if err := validateBackupCustodyConfiguration(configuration); err != nil {
 		t.Fatal(err)

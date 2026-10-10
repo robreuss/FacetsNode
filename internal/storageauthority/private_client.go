@@ -18,12 +18,14 @@ import (
 )
 
 type PrivateHTTPClient struct {
-	baseURL string
-	http    *http.Client
-	signer  *serviceauthority.DeploymentSigner
-	binding storagecapacity.ServiceBinding
-	poolID  uuid.UUID
-	now     func() time.Time
+	baseURL  string
+	http     *http.Client
+	signer   *serviceauthority.DeploymentSigner
+	binding  storagecapacity.ServiceBinding
+	poolID   uuid.UUID
+	now      func() time.Time
+	newID    func() uuid.UUID
+	newToken func() (string, error)
 }
 
 // NewPrivateHTTPClient requires HTTPS even when the HTTP transport dials a
@@ -46,6 +48,7 @@ func NewPrivateHTTPClient(
 	return &PrivateHTTPClient{
 		baseURL: strings.TrimSuffix(baseURL, "/"), http: httpClient,
 		signer: signer, binding: binding, poolID: poolID, now: time.Now,
+		newID: uuid.New, newToken: storagecapacity.NewReservationToken,
 	}, nil
 }
 

@@ -77,6 +77,8 @@ func TestBackupAccountBootstrapUsesDeploymentOfferBoundDerivedBearer(t *testing.
 	t.Setenv("FACETS_BACKUP_CUSTODY_DEPLOYMENT_ROUTE_POLICY_FILE", policyPath)
 	t.Setenv("FACETS_BACKUP_CUSTODY_SERVICE_AUTHORITY_BINDINGS_FILE", filepath.Join(root, "bindings.json"))
 	t.Setenv("FACETS_BACKUP_CUSTODY_ACCOUNT_ADMISSION_KEY_FILE", keyPath)
+	t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL", "https://capacity.example")
+	t.Setenv("FACETS_BACKUP_CUSTODY_STORAGE_CAPACITY_POOL_ID", "8a000000-0000-0000-0000-000000000001")
 
 	var output bytes.Buffer
 	now := time.UnixMilli(1_000)

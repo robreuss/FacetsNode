@@ -40,6 +40,9 @@ type recordingCapacityService struct {
 	decision        storagecapacity.ReservationDecision
 	reservationID   uuid.UUID
 	readiness       storagecapacity.CoarseReadinessSnapshot
+	state           storagecapacity.ReservationState
+	revision        uint64
+	decisionErrOnce bool
 	err             error
 }
 
@@ -48,6 +51,7 @@ func (service *recordingCapacityService) Reserve(_ context.Context, request stor
 	if service.err != nil {
 		return storagecapacity.ReservationRecord{}, service.err
 	}
+	service.state, service.revision = storagecapacity.ReservationReserved, 1
 	return testPrivateRecord(request.ReservationID, request.ByteCeiling, request.ExpiresAtMilliseconds, request.IssuedAtMilliseconds), nil
 }
 
@@ -61,7 +65,23 @@ func (service *recordingCapacityService) Decide(_ context.Context, decision stor
 	if service.err != nil {
 		return storagecapacity.ReservationRecord{}, service.err
 	}
-	return testPrivateRecord(decision.ReservationID, 4096, 20_000, decision.ObservedAtMilliseconds), nil
+	bytes, expires := int64(4096), int64(20_000)
+	if service.reserve.ReservationID == decision.ReservationID {
+		bytes, expires = service.reserve.ByteCeiling, service.reserve.ExpiresAtMilliseconds
+	}
+	record := testPrivateRecord(decision.ReservationID, bytes, expires, decision.ObservedAtMilliseconds)
+	record.Revision = decision.ExpectedRevision + 1
+	if decision.Kind == storagecapacity.DecisionCommit {
+		record.State = storagecapacity.ReservationCommitted
+	} else {
+		record.State = storagecapacity.ReservationReleased
+	}
+	service.state, service.revision = record.State, record.Revision
+	if service.decisionErrOnce {
+		service.decisionErrOnce = false
+		return storagecapacity.ReservationRecord{}, ErrUnavailable
+	}
+	return record, nil
 }
 
 func (service *recordingCapacityService) Reservation(_ context.Context, id uuid.UUID) (storagecapacity.ReservationRecord, error) {
@@ -69,7 +89,18 @@ func (service *recordingCapacityService) Reservation(_ context.Context, id uuid.
 	if service.err != nil {
 		return storagecapacity.ReservationRecord{}, service.err
 	}
-	return testPrivateRecord(id, 4096, 20_000, 11_000), nil
+	bytes, expires := int64(4096), int64(20_000)
+	if service.reserve.ReservationID == id {
+		bytes, expires = service.reserve.ByteCeiling, service.reserve.ExpiresAtMilliseconds
+	}
+	record := testPrivateRecord(id, bytes, expires, 11_000)
+	if service.state != "" {
+		record.State = service.state
+	}
+	if service.revision != 0 {
+		record.Revision = service.revision
+	}
+	return record, nil
 }
 
 func (service *recordingCapacityService) CoarseReadiness(context.Context) (storagecapacity.CoarseReadinessSnapshot, error) {

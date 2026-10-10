@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -139,7 +140,7 @@ func TestBackupHTTPProvisionRunsDurableReconciliationOutsideCallerCancellation(t
 				Store: store, Journal: journal, Registry: registry, Signer: signer, Clock: clock,
 			}
 			coordinator := &Coordinator{
-				Store: store, Content: content, Registry: registry, Signer: signer,
+				Store: store, Content: content, Capacity: allowingCapacity{}, Registry: registry, Signer: signer,
 				AuthorityHistory: fixedAuthorityHistory{anchor: enrollment.Anchor, manifest: enrollment.Manifest},
 				Clock:            clock, MaximumChunkBytes: 1024, MaximumGenerationBytes: 4096, NewID: uuid.New,
 			}
@@ -500,6 +501,23 @@ func TestBackupHTTPUploadFinalizeReadAndRetentionVertical(t *testing.T) {
 	handler.Handler().ServeHTTP(retentionResponse, retentionRequest)
 	if retentionResponse.Code != http.StatusOK || store.retention.ValidateStored() != nil {
 		t.Fatalf("retention status=%d body=%s", retentionResponse.Code, retentionResponse.Body.String())
+	}
+}
+
+func TestBackupHTTPMapsPhysicalCapacityFailuresToCoarseRetryable507(t *testing.T) {
+	for _, item := range []struct {
+		err  error
+		code string
+	}{
+		{storagecapacity.ErrPressure, "storage_pressure"},
+		{storagecapacity.ErrUnavailable, "capacity_unavailable"},
+	} {
+		recorder := httptest.NewRecorder()
+		writeBackupOperationError(recorder, item.err)
+		if recorder.Code != http.StatusInsufficientStorage || recorder.Header().Get("Retry-After") != "30" ||
+			!strings.Contains(recorder.Body.String(), `"code":"`+item.code+`"`) {
+			t.Fatalf("error=%v status=%d headers=%v body=%q", item.err, recorder.Code, recorder.Header(), recorder.Body.String())
+		}
 	}
 }
 

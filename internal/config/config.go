@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -61,6 +62,8 @@ type Config struct {
 	StorageCapacityPoolRoot         string
 	StorageCapacityPeerRegistryFile string
 	StorageCapacityReadinessPeriod  time.Duration
+	StorageCapacityAuthorityURL     string
+	StorageCapacityReservationTTL   time.Duration
 }
 
 type Service string
@@ -157,6 +160,7 @@ func Load(service Service) (Config, error) {
 		BackupMaximumCommittedBytes:     20 << 40,
 		TrafficLimits:                   traffic.DefaultLimits(),
 		StorageCapacityReadinessPeriod:  30 * time.Second,
+		StorageCapacityReservationTTL:   5 * time.Minute,
 	}
 	if service == DeviceSync || service == SharedSpaces {
 		name := prefix + "_CANDIDATE_MAINTENANCE"
@@ -176,6 +180,14 @@ func Load(service Service) (Config, error) {
 		configuration.BackupAccountAdmissionKeyFile = strings.TrimSpace(
 			os.Getenv(prefix + "_ACCOUNT_ADMISSION_KEY_FILE"),
 		)
+		configuration.StorageCapacityAuthorityURL = strings.TrimSpace(
+			os.Getenv(prefix + "_STORAGE_CAPACITY_AUTHORITY_URL"),
+		)
+		poolIDName := prefix + "_STORAGE_CAPACITY_POOL_ID"
+		configuration.StorageCapacityPoolID, err = uuid.Parse(strings.TrimSpace(os.Getenv(poolIDName)))
+		if err != nil || configuration.StorageCapacityPoolID == uuid.Nil {
+			return Config{}, fmt.Errorf("%s must be a nonzero UUID", poolIDName)
+		}
 	}
 	if service == StorageCapacityAuthority {
 		configuration.BlobRoot = ""
@@ -402,6 +414,22 @@ func Load(service Service) (Config, error) {
 		}
 		if configuration.BackupAccountAdmissionKeyFile == "" {
 			return Config{}, fmt.Errorf("%s_ACCOUNT_ADMISSION_KEY_FILE is required", prefix)
+		}
+		if configuration.StorageCapacityAuthorityURL == "" {
+			return Config{}, fmt.Errorf("%s_STORAGE_CAPACITY_AUTHORITY_URL is required", prefix)
+		}
+		capacityURL, parseErr := url.Parse(configuration.StorageCapacityAuthorityURL)
+		if parseErr != nil || capacityURL.Scheme != "https" || capacityURL.Host == "" ||
+			capacityURL.User != nil || capacityURL.RawQuery != "" || capacityURL.Fragment != "" ||
+			(capacityURL.Path != "" && capacityURL.Path != "/") {
+			return Config{}, fmt.Errorf("%s_STORAGE_CAPACITY_AUTHORITY_URL must be an HTTPS origin", prefix)
+		}
+		if value := os.Getenv(prefix + "_STORAGE_CAPACITY_RESERVATION_TTL"); value != "" {
+			period, err := time.ParseDuration(value)
+			if err != nil || period < time.Minute || period > time.Hour {
+				return Config{}, fmt.Errorf("%s_STORAGE_CAPACITY_RESERVATION_TTL must be between one minute and one hour", prefix)
+			}
+			configuration.StorageCapacityReservationTTL = period
 		}
 		if err := loadBackupCustodyLimits(&configuration, prefix); err != nil {
 			return Config{}, err
