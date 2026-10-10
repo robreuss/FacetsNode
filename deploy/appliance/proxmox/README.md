@@ -155,6 +155,7 @@ the new 64 GiB data disk by its stable `/dev/disk/by-id` name containing the
 planned `facets-data` serial and inspect it with `lsblk`, then run:
 
 ```sh
+sudo install -d -m 0755 /usr/local/libexec
 sudo install -m 0755 facets-appliance-profile /usr/local/libexec/facets-appliance-profile
 sudo ./bootstrap-runtime.sh prepare \
   /path/to/proxmox-development-amd64.json \
