@@ -47,6 +47,7 @@ type fixture struct {
 	pool     *pgxpool.Pool
 	provider *testCapacity
 	poolID   uuid.UUID
+	root     string
 }
 
 func newFixture(t *testing.T, available int64) *fixture {
@@ -89,15 +90,16 @@ func newFixture(t *testing.T, available int64) *fixture {
 		admin.Close()
 	})
 	poolID := uuid.New()
-	if err = Initialize(ctx, pool, poolID); err != nil {
+	root := t.TempDir()
+	if err = InitializePhysicalPool(ctx, pool, root, poolID); err != nil {
 		t.Fatal(err)
 	}
 	provider := &testCapacity{total: 100 << 30, available: available}
-	ledger, err := Open(ctx, pool, poolID, provider)
+	ledger, err := OpenPhysicalPool(ctx, pool, root, provider)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &fixture{ledger: ledger, pool: pool, provider: provider, poolID: poolID}
+	return &fixture{ledger: ledger, pool: pool, provider: provider, poolID: poolID, root: root}
 }
 
 func request(poolID uuid.UUID, ceiling, issuedAt, expiresAt int64) storagecapacity.ReservationRequest {
@@ -259,7 +261,7 @@ func TestDurableReservationRestartRetryAndTerminalFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer secondPool.Close()
-	reopened, err := Open(ctx, secondPool, f.poolID, f.provider)
+	reopened, err := OpenPhysicalPool(ctx, secondPool, f.root, f.provider)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +308,7 @@ func TestConcurrentReservationsSerializeAcrossAuthorityInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer secondPool.Close()
-	second, err := Open(ctx, secondPool, f.poolID, f.provider)
+	second, err := OpenPhysicalPool(ctx, secondPool, f.root, f.provider)
 	if err != nil {
 		t.Fatal(err)
 	}
