@@ -179,6 +179,48 @@ func TestAdmissionPermitRejectsControllerSignedRouteMismatch(t *testing.T) {
 	}
 }
 
+func TestAdmissionPermitMayRenewExistingCustodyUntilRetention(t *testing.T) {
+	fixture := newAdmissionPermitFixture(t)
+	issuedAt := fixture.admission.header.ExpiresAt + 1
+	expiresAt := issuedAt + 1_000
+	payload, err := NewAdmissionPermitPayload(
+		fixture.authorityID,
+		uuid.New(),
+		fixture.payload.RequesterAuthorityDigest,
+		fixture.payload.WorkerAccessGrantDigest,
+		fixture.payload.WorkerCapabilitiesDigest,
+		fixture.admission.signer,
+		fixture.admission.envelopeBytes,
+		issuedAt,
+		expiresAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit, err := fixture.signer.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.verifier.Verify(
+		permit, fixture.admission.envelopeBytes, issuedAt,
+	); err != nil {
+		t.Fatalf("retained-custody renewal rejected: %v", err)
+	}
+	if _, err := NewAdmissionPermitPayload(
+		fixture.authorityID,
+		uuid.New(),
+		fixture.payload.RequesterAuthorityDigest,
+		fixture.payload.WorkerAccessGrantDigest,
+		fixture.payload.WorkerCapabilitiesDigest,
+		fixture.admission.signer,
+		fixture.admission.envelopeBytes,
+		issuedAt,
+		fixture.admission.header.RetentionUntil+1,
+	); err == nil {
+		t.Fatal("route permit extended beyond bound custody retention")
+	}
+}
+
 func TestAdmissionPermitTrustRejectsIdentityAndKeyAliases(t *testing.T) {
 	fixture := newAdmissionPermitFixture(t)
 	publicKey := fixture.privateKey.Public().(ed25519.PublicKey)

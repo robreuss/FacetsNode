@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"runtime"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +24,111 @@ import (
 type jobCustodyWallClock struct{}
 
 func (jobCustodyWallClock) Now() time.Time { return time.Now() }
+
+func runJobCustodyService(
+	rootContext context.Context,
+	pool *pgxpool.Pool,
+	configuration config.Config,
+	logger *slog.Logger,
+) error {
+	if rootContext == nil || pool == nil || logger == nil ||
+		validateJobCustodyConfiguration(configuration) != nil {
+		return serviceauthority.ErrInvalid
+	}
+	startupContext, startupCancel := context.WithTimeout(rootContext, 30*time.Second)
+	defer startupCancel()
+	runtimeState, err := prepareJobCustodyRuntime(startupContext, pool, configuration)
+	if err != nil {
+		return err
+	}
+	releaseCustody := true
+	defer func() {
+		if releaseCustody {
+			_ = runtimeState.Close()
+		}
+	}()
+	readiness := func(ctx context.Context) error {
+		readinessContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		return pool.Ping(readinessContext)
+	}
+	handler, err := jobcustody.NewHTTPHandler(
+		runtimeState.Coordinator,
+		runtimeState.AdmissionPermits,
+		configuration.TrafficLimits,
+		readiness,
+	)
+	if err != nil {
+		return fmt.Errorf("Job custody HTTP authority rejected: %w", err)
+	}
+	server := newJobCustodyHTTPServer(configuration, handler.Handler())
+	serverErrors := make(chan error, 1)
+	go func() {
+		logger.Info(
+			"Facets Job Custody Service listening",
+			"address", configuration.ListenAddress,
+			"go_version", runtime.Version(),
+			"deployment_id", configuration.DeploymentID,
+			"signing_key_fingerprint", runtimeState.Coordinator.ReceiptSigner.SigningKeyFingerprint(),
+		)
+		serverErrors <- server.ListenAndServe()
+	}()
+	retainCustody, err := finishJobCustodyHTTPServer(
+		rootContext, server, serverErrors, configuration.ShutdownPeriod,
+	)
+	if retainCustody {
+		// A forced-close handler may still own the database or private content
+		// root. Keep process-scoped custody until Main exits rather than admit a
+		// second writer over an unwinding request.
+		releaseCustody = false
+	}
+	if err != nil {
+		return err
+	}
+	logger.Info("Job custody shutdown complete")
+	return nil
+}
+
+func newJobCustodyHTTPServer(
+	configuration config.Config,
+	handler http.Handler,
+) *http.Server {
+	return &http.Server{
+		Addr:              configuration.ListenAddress,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       configuration.TransferPeriod,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1024,
+	}
+}
+
+func finishJobCustodyHTTPServer(
+	rootContext context.Context,
+	server *http.Server,
+	serverErrors <-chan error,
+	shutdownPeriod time.Duration,
+) (bool, error) {
+	var serveErr error
+	select {
+	case <-rootContext.Done():
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			serveErr = fmt.Errorf("Job custody HTTP server failed: %w", err)
+		}
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownPeriod)
+	defer cancel()
+	if err := server.Shutdown(shutdownContext); err != nil {
+		_ = server.Close()
+		return true, errors.Join(
+			serveErr,
+			fmt.Errorf("Job custody graceful shutdown failed: %w", err),
+		)
+	}
+	return false, serveErr
+}
 
 // jobCustodyRuntime owns the service-local database, private filesystem, trust
 // configuration, and physical-capacity client. It deliberately has no HTTP
@@ -172,7 +279,8 @@ func validateJobCustodyConfiguration(configuration config.Config) error {
 		configuration.JobCustodyMaximumStagingBytes <= 0 ||
 		configuration.JobCustodyMaximumCustodyBytes <= 0 ||
 		configuration.JobCustodyMaximumStagingBytes > configuration.JobCustodyMaximumCustodyBytes ||
-		configuration.BlobRoot != "" {
+		configuration.BlobRoot != "" || configuration.TransferPeriod <= 0 ||
+		configuration.ShutdownPeriod <= 0 {
 		return serviceauthority.ErrInvalid
 	}
 	return nil

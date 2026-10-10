@@ -1,6 +1,6 @@
 # Facets Servers
 
-This repository contains the shared Go foundation for three independently
+This repository contains the shared Go foundation for independently
 deployed Facets services:
 
 | Service | Executable / image target | Compose application | Configuration prefix |
@@ -8,6 +8,8 @@ deployed Facets services:
 | Facets Device Sync Server | `facets-device-sync-server` / `device-sync` | `compose.yaml` | `FACETS_DEVICE_SYNC_` |
 | Facets Shared Spaces Server | `facets-shared-spaces-server` / `shared-spaces` | `deploy/shared-spaces/compose.yaml` | `FACETS_SHARED_SPACES_` |
 | Facets Compute Pool Service | `facets-compute-pool-server` / `compute-pool` | Not packaged yet | `FACETS_COMPUTE_POOL_` |
+| Facets Backup Custody Service | `facets-backup-custody-server` / `backup-custody` | Not packaged yet | `FACETS_BACKUP_CUSTODY_` |
+| Facets Job Custody Service | `facets-job-custody-server` / `job-custody` | Not packaged yet | `FACETS_JOB_CUSTODY_` |
 
 The services share opaque envelope routing, PostgreSQL persistence, encrypted
 blob custody, cursors, receipts, checkpoints, wake hints, quotas, audit facts,

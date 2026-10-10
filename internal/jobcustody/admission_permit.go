@@ -121,7 +121,7 @@ func NewAdmissionPermitPayload(
 		WorkerCapabilitiesDigest:     workerCapabilitiesDigest,
 	}
 	if value.Validate() != nil || value.AdmissionSigner.SignatureProfileID != envelope.SignatureProfileID ||
-		issuedAt < envelope.Header.NotBeforeAt || expiresAt > envelope.Header.ExpiresAt {
+		issuedAt < envelope.Header.NotBeforeAt || expiresAt > envelope.Header.RetentionUntil {
 		return AdmissionPermitPayload{}, ErrAdmissionPermitAuthentication
 	}
 	return value, nil
@@ -256,7 +256,7 @@ func (verifier *AdmissionPermitVerifier) Verify(
 	if err != nil || envelope.SignatureProfileID != payload.AdmissionSigner.SignatureProfileID ||
 		envelope.Header.RouteRecipientWorkerID != payload.RouteRecipientWorkerID ||
 		envelope.Header.RouteRecipientKeyFingerprint != payload.RouteRecipientKeyFingerprint ||
-		payload.IssuedAt < envelope.Header.NotBeforeAt || payload.ExpiresAt > envelope.Header.ExpiresAt {
+		payload.IssuedAt < envelope.Header.NotBeforeAt || payload.ExpiresAt > envelope.Header.RetentionUntil {
 		return AdmissionAuthorization{}, ErrAdmissionPermitAuthentication
 	}
 	permitDigest, err := computequeue.ExactBytesDigest(

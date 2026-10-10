@@ -173,6 +173,18 @@ func Main(service config.Service) {
 		}
 		return
 	}
+	if service == config.JobCustody {
+		if err := runJobCustodyService(
+			rootContext,
+			pool,
+			configuration,
+			logger,
+		); err != nil {
+			logger.Error("Job Custody Service failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := postgres.Migrate(startupContext, pool); err != nil {
 		logger.Error("database migration failed", "error", err)
 		os.Exit(1)

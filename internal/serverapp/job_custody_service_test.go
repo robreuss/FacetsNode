@@ -35,6 +35,8 @@ func TestJobCustodyConfigurationAndStoreLimitsRemainServiceLocal(t *testing.T) {
 		JobCustodyAdmissionAuthoritiesFile: "/config/admission-authorities.json",
 		StorageCapacityAuthorityURL:        "https://capacity.example", StorageCapacityPoolID: uuid.New(),
 		StorageCapacityReservationTTL: 5 * time.Minute,
+		TransferPeriod:                time.Minute,
+		ShutdownPeriod:                5 * time.Second,
 		JobCustodyMaximumAdmissions:   11, JobCustodyMaximumStagingBytes: 12,
 		JobCustodyMaximumCustodyBytes: 13,
 	}
@@ -221,6 +223,8 @@ func writeJobCustodyRuntimeConfiguration(t *testing.T, databaseURL string) confi
 		StorageCapacityAuthorityURL:        "https://capacity.example",
 		StorageCapacityPoolID:              uuid.MustParse("8a000000-0000-0000-0000-000000000001"),
 		StorageCapacityReservationTTL:      5 * time.Minute,
+		TransferPeriod:                     time.Minute,
+		ShutdownPeriod:                     5 * time.Second,
 		JobCustodyMaximumAdmissions:        10, JobCustodyMaximumStagingBytes: 1 << 20,
 		JobCustodyMaximumCustodyBytes: 2 << 20,
 	}

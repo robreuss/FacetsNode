@@ -24,13 +24,16 @@ RUN for value in "$FACETS_SERVER_SOURCE_REVISION" "$FACETS_SERVER_SOURCE_TREE"; 
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
         -o /out/facets-backup-custody-server ./cmd/facets-backup-custody-server && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+        -o /out/facets-job-custody-server ./cmd/facets-job-custody-server && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
         -o /out/facets-box-controller ./cmd/facets-box-controller && \
 	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
 		-o /out/facets-box-discovery ./cmd/facets-box-discovery && \
-    mkdir -p /out/blobs /out/backup-custody/custody /out/box-controller && \
+    mkdir -p /out/blobs /out/backup-custody/custody /out/job-custody/custody /out/box-controller && \
     chmod 0700 /out/backup-custody /out/backup-custody/custody && \
+    chmod 0700 /out/job-custody /out/job-custody/custody && \
     chmod 0700 /out/box-controller && \
-    chown -R 65532:65532 /out/blobs /out/backup-custody /out/box-controller
+    chown -R 65532:65532 /out/blobs /out/backup-custody /out/job-custody /out/box-controller
 
 FROM scratch AS device-sync
 ARG FACETS_SERVER_SOURCE_REVISION
@@ -83,6 +86,19 @@ COPY --chown=65532:65532 --from=build /out/backup-custody /var/lib/facets-backup
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/facets-backup-custody-server"]
+
+FROM scratch AS job-custody
+ARG FACETS_SERVER_SOURCE_REVISION
+ARG FACETS_SERVER_SOURCE_TREE
+LABEL org.opencontainers.image.title="Facets Job Custody Service" \
+      org.opencontainers.image.revision="$FACETS_SERVER_SOURCE_REVISION" \
+      org.opencontainers.image.source-tree="$FACETS_SERVER_SOURCE_TREE"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/facets-job-custody-server /facets-job-custody-server
+COPY --chown=65532:65532 --from=build /out/job-custody /var/lib/facets-job-custody
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/facets-job-custody-server"]
 
 FROM scratch AS box-controller
 ARG FACETS_SERVER_SOURCE_REVISION

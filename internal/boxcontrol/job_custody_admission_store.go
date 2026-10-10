@@ -74,7 +74,7 @@ func (value BoxJobCustodyAdmissionPermitRequest) validateAt(nowMilliseconds int6
 	if err != nil || envelope.SignatureProfileID != value.AdmissionSigner.SignatureProfileID ||
 		envelope.Header.RouteRecipientWorkerID != computequeue.WorkerID(value.WorkerID.String()) ||
 		nowMilliseconds < int64(envelope.Header.NotBeforeAt) ||
-		value.ExpiresAtMilliseconds > int64(envelope.Header.ExpiresAt) {
+		value.ExpiresAtMilliseconds > int64(envelope.Header.RetentionUntil) {
 		return ErrJobCustodyRouteAuthority
 	}
 	return nil
