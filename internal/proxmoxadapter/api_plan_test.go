@@ -43,8 +43,9 @@ func TestAPIPlanBindsPinnedInputsAndNonDestructiveOperations(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"facets-box-ubuntu-24.04-minimal-20260905-vm200-46b0dbaf.img",
-		"zfs-nvme:0,import-from=local:iso/",
+		"content=import",
+		"facets-box-ubuntu-24.04-minimal-20260905-vm200-46b0dbaf.qcow2",
+		"zfs-nvme:0,import-from=local:import/",
 		"serial=facets-system",
 		"disk=scsi0",
 		"size=16G",
@@ -70,6 +71,7 @@ func TestAPIPlanRejectsEndpointEvidenceAndIdentityDrift(t *testing.T) {
 	}{
 		{"retained vm", func(plan *APIPlan) { plan.VMID = 190 }},
 		{"vm filename mismatch", func(plan *APIPlan) { plan.ImageFilename = "ubuntu.img" }},
+		{"image content mismatch", func(plan *APIPlan) { plan.ImageContent = "iso" }},
 		{"unpinned image", func(plan *APIPlan) { plan.CloudImage.SHA256 = strings.Repeat("e", 64) }},
 		{"http endpoint", func(plan *APIPlan) { plan.Endpoint = "http://192.0.2.10:8006" }},
 		{"endpoint path", func(plan *APIPlan) { plan.Endpoint = "https://192.0.2.10:8006/api2/json" }},

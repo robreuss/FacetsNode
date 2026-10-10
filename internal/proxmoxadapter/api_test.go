@@ -57,26 +57,46 @@ func TestAPIClientStreamsUploadAndWaitsForTask(t *testing.T) {
 		response.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
 		case "/api2/json/nodes/pve/storage/local/upload":
-			if err := request.ParseMultipartForm(1 << 20); err != nil {
+			reader, err := request.MultipartReader()
+			if err != nil {
 				t.Error(err)
 				http.Error(response, "bad upload", http.StatusBadRequest)
 				return
 			}
-			if request.FormValue("content") != "iso" || request.FormValue("checksum-algorithm") != "sha256" || request.FormValue("checksum") != "abc" {
-				t.Errorf("unexpected upload fields: %#v", request.MultipartForm.Value)
+			var order []string
+			for {
+				part, partErr := reader.NextPart()
+				if partErr == io.EOF {
+					break
+				}
+				if partErr != nil {
+					t.Fatal(partErr)
+				}
+				order = append(order, part.FormName())
+				data, _ := io.ReadAll(part)
+				switch part.FormName() {
+				case "content":
+					if string(data) != "import" {
+						t.Errorf("unexpected content: %q", data)
+					}
+				case "checksum-algorithm":
+					if string(data) != "sha256" {
+						t.Errorf("unexpected checksum algorithm: %q", data)
+					}
+				case "checksum":
+					if string(data) != "abc" {
+						t.Errorf("unexpected checksum: %q", data)
+					}
+				case "filename":
+					if part.FileName() != "pinned.qcow2" || string(data) != "cloud-image" {
+						t.Errorf("unexpected upload: filename=%q data=%q", part.FileName(), data)
+					}
+					uploadChecked = true
+				}
 			}
-			file, header, err := request.FormFile("filename")
-			if err != nil {
-				t.Error(err)
-				http.Error(response, "missing upload", http.StatusBadRequest)
-				return
+			if got := strings.Join(order, ","); got != "content,checksum-algorithm,checksum,filename" {
+				t.Errorf("unexpected multipart order: %s", got)
 			}
-			defer file.Close()
-			data, _ := io.ReadAll(file)
-			if header.Filename != "pinned.img" || string(data) != "cloud-image" {
-				t.Errorf("unexpected upload: filename=%q data=%q", header.Filename, data)
-			}
-			uploadChecked = true
 			_, _ = io.WriteString(response, `{"data":"UPID:pve:00000001:test"}`)
 		case "/api2/json/nodes/pve/tasks/UPID:pve:00000001:test/status":
 			_, _ = io.WriteString(response, `{"data":{"status":"stopped","exitstatus":"OK"}}`)
@@ -95,8 +115,8 @@ func TestAPIClientStreamsUploadAndWaitsForTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	upid, err := client.upload(context.Background(), "/nodes/pve/storage/local/upload", map[string]string{
-		"content": "iso", "checksum": "abc", "checksum-algorithm": "sha256",
-	}, source, "pinned.img")
+		"content": "import", "checksum": "abc", "checksum-algorithm": "sha256",
+	}, source, "pinned.qcow2")
 	if err != nil {
 		t.Fatal(err)
 	}

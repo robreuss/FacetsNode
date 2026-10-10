@@ -36,8 +36,10 @@ install -d -m 0700 /private/staging/directory
 
 Create an API plan from live inventory. The VM ID, node, storages, bridge, API
 origin, certificate digest, and public key are review inputs; none is inferred
-from an existing Box VM. `api-plan` refuses retained VM IDs 180 and 190 and
-binds the exact source image and SSH public-key hashes:
+from an existing Box VM. The image staging storage must be directory-backed and
+have Proxmox's `import` content type enabled so the pinned raw cloud image is
+kept separate from ISO media. `api-plan` refuses retained VM IDs 180 and 190
+and binds the exact source image and SSH public-key hashes:
 
 ```sh
 facets-proxmox-vm api-plan \
@@ -46,7 +48,7 @@ facets-proxmox-vm api-plan \
   --endpoint https://PVE_HOST:8006 \
   --tls-cert-sha256 LOWERCASE_LEAF_CERT_SHA256 \
   --node PVE_NODE --vmid UNUSED_ID --name facets-box-portable-dev \
-  --storage PVE_IMAGE_STORAGE --image-storage PVE_ISO_STORAGE \
+  --storage PVE_IMAGE_STORAGE --image-storage PVE_IMPORT_STORAGE \
   --bridge PVE_BRIDGE --admin-user facets-admin \
   --cloud-image /private/staging/directory/ubuntu-24.04-minimal-cloudimg-amd64-20260905.img \
   --ssh-public-key /private/key/location/facets-infrastructure-ed25519.pub

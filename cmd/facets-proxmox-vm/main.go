@@ -59,7 +59,7 @@ func makeAPIPlan(arguments []string) error {
 	vmID := flags.Int("vmid", 0, "unused PVE VM ID")
 	name := flags.String("name", "", "new VM name")
 	storage := flags.String("storage", "", "PVE VM storage ID")
-	imageStorage := flags.String("image-storage", "", "PVE ISO upload storage ID")
+	imageStorage := flags.String("image-storage", "", "PVE image-import storage ID")
 	bridge := flags.String("bridge", "", "PVE bridge ID")
 	adminUser := flags.String("admin-user", "facets-admin", "non-root guest administrator")
 	cloudImage := flags.String("cloud-image", "", "local pinned Ubuntu cloud image")

@@ -142,10 +142,21 @@ func (client *APIClient) upload(ctx context.Context, apiPath string, fields map[
 	var prefix bytes.Buffer
 	writer := multipart.NewWriter(&prefix)
 	keys := make([]string, 0, len(fields))
-	for key := range fields {
-		keys = append(keys, key)
+	seen := make(map[string]bool, len(fields))
+	for _, key := range []string{"content", "checksum-algorithm", "checksum"} {
+		if _, ok := fields[key]; ok {
+			keys = append(keys, key)
+			seen[key] = true
+		}
 	}
-	sort.Strings(keys)
+	var remaining []string
+	for key := range fields {
+		if !seen[key] {
+			remaining = append(remaining, key)
+		}
+	}
+	sort.Strings(remaining)
+	keys = append(keys, remaining...)
 	for _, key := range keys {
 		if err = writer.WriteField(key, fields[key]); err != nil {
 			return "", err
@@ -383,7 +394,7 @@ func PreflightAPI(ctx context.Context, client *APIClient, plan APIPlan) (string,
 		return "", errors.New("insufficient PVE VM storage for appliance plan")
 	}
 	var imageStorage storageStatus
-	if err = client.get(ctx, "/nodes/"+plan.Node+"/storage/"+plan.ImageStorage+"/status", nil, &imageStorage); err != nil || !bool(imageStorage.Active) || !bool(imageStorage.Enabled) || !containsCSV(imageStorage.Content, "iso") {
+	if err = client.get(ctx, "/nodes/"+plan.Node+"/storage/"+plan.ImageStorage+"/status", nil, &imageStorage); err != nil || !bool(imageStorage.Active) || !bool(imageStorage.Enabled) || !containsCSV(imageStorage.Content, plan.ImageContent) {
 		return "", errors.New("planned PVE upload storage is unavailable")
 	}
 	imageInfo, err := os.Stat(plan.CloudImage.Path)
@@ -407,7 +418,7 @@ func PreflightAPI(ctx context.Context, client *APIClient, plan APIPlan) (string,
 	if err = client.get(ctx, "/nodes/"+plan.Node+"/storage/"+plan.ImageStorage+"/content", nil, &contents); err != nil {
 		return "", errors.New("PVE upload inventory unavailable")
 	}
-	wantedVolume := plan.ImageStorage + ":iso/" + plan.ImageFilename
+	wantedVolume := plan.ImageStorage + ":" + plan.ImageContent + "/" + plan.ImageFilename
 	for _, content := range contents {
 		if content.VolumeID == wantedVolume {
 			return "", errors.New("planned PVE upload target already exists")

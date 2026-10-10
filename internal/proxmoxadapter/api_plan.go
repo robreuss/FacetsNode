@@ -31,6 +31,7 @@ type APIPlan struct {
 	Name                 string       `json:"name"`
 	Storage              string       `json:"storage"`
 	ImageStorage         string       `json:"imageStorage"`
+	ImageContent         string       `json:"imageContent"`
 	ImageFilename        string       `json:"imageFilename"`
 	Bridge               string       `json:"bridge"`
 	AdminUser            string       `json:"adminUser"`
@@ -54,10 +55,10 @@ type APIOperation struct {
 
 func NewAPIPlan(profile applianceprofile.Profile, endpoint, tlsCertificateSHA256, node string, vmID int, name, storage, imageStorage, bridge, adminUser string, cloudImage, sshPublicKey FileEvidence) APIPlan {
 	return APIPlan{
-		SchemaVersion: 1, ProfileID: profile.ProfileID, Architecture: profile.Architecture,
+		SchemaVersion: 2, ProfileID: profile.ProfileID, Architecture: profile.Architecture,
 		Endpoint: endpoint, TLSCertificateSHA256: tlsCertificateSHA256,
 		Node: node, VMID: vmID, Name: name, Storage: storage, ImageStorage: imageStorage,
-		ImageFilename: apiImageFilename(vmID), Bridge: bridge, AdminUser: adminUser,
+		ImageContent: "import", ImageFilename: apiImageFilename(vmID), Bridge: bridge, AdminUser: adminUser,
 		CloudImage: cloudImage, SSHPublicKey: sshPublicKey,
 		CPUCount: profile.Resources.CPUCount, MemoryMiB: profile.Resources.MemoryMiB,
 		SystemDiskGiB: profile.Storage.System.MinimumGiB, DataDiskGiB: profile.Storage.Data.MinimumGiB,
@@ -72,7 +73,7 @@ func (plan APIPlan) Validate(profile applianceprofile.Profile) error {
 	if profile.HostAdapter != "proxmox-qemu" || profile.ManagementTransport != "private-ssh" || profile.Architecture != "amd64" {
 		return errors.New("profile is not a supported Proxmox API adapter")
 	}
-	if plan.SchemaVersion != 1 || plan.ProfileID != profile.ProfileID || plan.Architecture != profile.Architecture {
+	if plan.SchemaVersion != 2 || plan.ProfileID != profile.ProfileID || plan.Architecture != profile.Architecture {
 		return errors.New("API plan does not match appliance profile")
 	}
 	if plan.VMID < 100 || plan.VMID > 999999 || plan.VMID == 180 || plan.VMID == 190 {
@@ -93,7 +94,7 @@ func (plan APIPlan) Validate(profile applianceprofile.Profile) error {
 	if !validHex(plan.TLSCertificateSHA256, 64) {
 		return errors.New("invalid Proxmox TLS certificate digest")
 	}
-	if plan.ImageFilename != apiImageFilename(plan.VMID) || filepath.Base(plan.ImageFilename) != plan.ImageFilename {
+	if plan.ImageContent != "import" || plan.ImageFilename != apiImageFilename(plan.VMID) || filepath.Base(plan.ImageFilename) != plan.ImageFilename {
 		return errors.New("invalid Proxmox image filename")
 	}
 	if !validFileEvidence(plan.CloudImage) || plan.CloudImage.SHA256 != PinnedUbuntuImageSHA256 || !validFileEvidence(plan.SSHPublicKey) {
@@ -122,7 +123,7 @@ func normalizeAPIEndpoint(value string) (string, error) {
 }
 
 func apiImageFilename(vmID int) string {
-	return "facets-box-ubuntu-24.04-minimal-20260905-vm" + strconv.Itoa(vmID) + "-46b0dbaf.img"
+	return "facets-box-ubuntu-24.04-minimal-20260905-vm" + strconv.Itoa(vmID) + "-46b0dbaf.qcow2"
 }
 
 func ReadAPIPlan(path string, profile applianceprofile.Profile) (APIPlan, error) {
@@ -179,11 +180,11 @@ func EncodeAPIPlan(plan APIPlan) ([]byte, error) {
 func APIOperations(plan APIPlan, publicKey string) []APIOperation {
 	vmID := strconv.Itoa(plan.VMID)
 	vmPath := "/nodes/" + plan.Node + "/qemu/" + vmID
-	sourceVolume := plan.ImageStorage + ":iso/" + plan.ImageFilename
+	sourceVolume := plan.ImageStorage + ":" + plan.ImageContent + "/" + plan.ImageFilename
 	return []APIOperation{
 		{
 			Name: "upload-cloud-image", Method: "POST", Path: "/nodes/" + plan.Node + "/storage/" + plan.ImageStorage + "/upload",
-			Form:       map[string]string{"content": "iso", "checksum": plan.CloudImage.SHA256, "checksum-algorithm": "sha256"},
+			Form:       map[string]string{"content": plan.ImageContent, "checksum": plan.CloudImage.SHA256, "checksum-algorithm": "sha256"},
 			UploadPath: plan.CloudImage.Path, UploadFilename: plan.ImageFilename,
 		},
 		{
@@ -222,7 +223,7 @@ func ReviewAPIPlan(plan APIPlan) map[string]any {
 	return map[string]any{
 		"endpoint": plan.Endpoint, "tlsCertificateSHA256": plan.TLSCertificateSHA256,
 		"vmID": plan.VMID, "name": plan.Name, "node": plan.Node, "profileID": plan.ProfileID,
-		"imageSourceURL": PinnedUbuntuImageURL, "operations": APIOperations(plan, "<verified-ed25519-public-key>"),
+		"imageSourceURL": PinnedUbuntuImageURL, "imageContent": plan.ImageContent, "operations": APIOperations(plan, "<verified-ed25519-public-key>"),
 		"retainedVMIDsExcluded": []int{180, 190},
 		"hostSafetyGates":       []string{"no-active-backup", "bounded-load", "unused-vm-id-and-name", "active-capable-storage-and-bridge", "absent-upload-target"},
 		"partialFailurePolicy":  "leave-upload-and-created-vm-for-explicit-review; never auto-delete",
