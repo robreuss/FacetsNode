@@ -178,4 +178,11 @@ func TestReservationTokensAreCanonicalAndFresh(t *testing.T) {
 	if err != nil || !validReservationToken(second) || second == first {
 		t.Fatalf("second token: %q %v", second, err)
 	}
+	digest, err := ReservationTokenDigest(first)
+	if err != nil || digest != reservationTokenDigest(first) || digest == first {
+		t.Fatalf("digest: %q %v", digest, err)
+	}
+	if _, err := ReservationTokenDigest("not-a-token"); !errors.Is(err, ErrInvalidAuthorityContract) {
+		t.Fatalf("malformed token digest accepted: %v", err)
+	}
 }

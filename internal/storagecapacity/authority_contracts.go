@@ -280,6 +280,15 @@ func NewReservationToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
+// ReservationTokenDigest validates and hashes a canonical bearer token for
+// durable comparison. Callers persist only this digest, never the token.
+func ReservationTokenDigest(value string) (string, error) {
+	if !validReservationToken(value) {
+		return "", ErrInvalidAuthorityContract
+	}
+	return reservationTokenDigest(value), nil
+}
+
 func reservationTokenDigest(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
