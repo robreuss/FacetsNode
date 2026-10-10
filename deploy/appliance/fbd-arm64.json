@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "profileID": "facets-box-desktop-arm64",
+  "architecture": "arm64",
+  "hostAdapter": "fbd-virtualization-framework",
+  "managementTransport": "virtio-socket",
+  "guest": {
+    "os": "linux",
+    "distribution": "ubuntu",
+    "release": "24.04",
+    "agentProtocol": 1
+  },
+  "resources": {
+    "cpuCount": 4,
+    "memoryMiB": 8192
+  },
+  "storage": {
+    "system": {
+      "minimumGiB": 16,
+      "disposition": "replaceable"
+    },
+    "data": {
+      "minimumGiB": 64,
+      "disposition": "retained-authority",
+      "mountPath": "/srv/facets-box-data"
+    }
+  },
+  "runtime": {
+    "engineVersion": "29.8.0",
+    "composeVersion": "5.5.1",
+    "containerdVersion": "2.3.5",
+    "dataRoot": "/srv/facets-box-data/docker"
+  }
+}

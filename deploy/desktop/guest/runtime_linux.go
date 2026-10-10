@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -235,7 +236,7 @@ func startServiceBuild(c configuration) error {
 				for name, image := range produced.Images {
 					expected[name] = image.Digest
 				}
-				_, err = verifyServiceKit(filepath.Join(work, "kit"), expected)
+				_, err = verifyServiceKit(filepath.Join(work, "kit"), expected, runtime.GOARCH)
 				if err == nil {
 					err = validateBuiltServiceKit(ctx, work, produced)
 				}

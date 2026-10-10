@@ -45,13 +45,17 @@ func verifiedBlob(root, digest string, size int64) ([]byte, error) {
 	}
 	return os.ReadFile(path)
 }
-func verifyServiceKit(root string, expected map[string]string) (serviceRelease, error) {
+func supportedServiceArchitecture(architecture string) bool {
+	return architecture == "arm64" || architecture == "amd64"
+}
+
+func verifyServiceKit(root string, expected map[string]string, expectedArchitecture string) (serviceRelease, error) {
 	var release serviceRelease
 	b, e := os.ReadFile(filepath.Join(root, "service-release.json"))
 	if e != nil || len(b) > 65536 || json.Unmarshal(b, &release) != nil {
 		return release, errors.New("invalid service release")
 	}
-	if release.Version != 1 || release.Architecture != "arm64" || !validHex(release.SourceRevision, 20) || !validHex(release.SourceTree, 20) || len(release.Images) != len(imageNames) || len(expected) != len(imageNames) {
+	if !supportedServiceArchitecture(expectedArchitecture) || release.Version != 1 || release.Architecture != expectedArchitecture || !validHex(release.SourceRevision, 20) || !validHex(release.SourceTree, 20) || len(release.Images) != len(imageNames) || len(expected) != len(imageNames) {
 		return release, errors.New("incompatible service release")
 	}
 	for _, name := range imageNames {
@@ -90,7 +94,7 @@ func verifyServiceKit(root string, expected map[string]string) (serviceRelease, 
 				Labels map[string]string `json:"Labels"`
 			} `json:"config"`
 		}
-		if json.Unmarshal(config, &platform) != nil || platform.OS != "linux" || platform.Architecture != "arm64" {
+		if json.Unmarshal(config, &platform) != nil || platform.OS != "linux" || platform.Architecture != release.Architecture {
 			return release, errors.New("wrong OCI platform")
 		}
 		if name == "device-sync" || name == "box-controller" || name == "shared-spaces" {

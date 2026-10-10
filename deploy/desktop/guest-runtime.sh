@@ -3,7 +3,8 @@
 set -euo pipefail
 [[ ${1:-} == prepare ]] || exit 64
 /opt/fbd/guest-agent check-storage
-[[ $(dpkg --print-architecture) == arm64 ]] || exit 1
+architecture=$(dpkg --print-architecture)
+case $architecture in arm64|amd64) ;; *) exit 1;; esac
 export DEBIAN_FRONTEND=noninteractive
 runtime_root=/srv/facets-box-data/runtime
 if [[ -d /opt/fbd/runtime-kit ]]; then runtime_root=/opt/fbd/runtime-kit; fi
@@ -31,7 +32,7 @@ install -d -m 0755 /etc/apt/keyrings
 curl --fail --location --retry 3 https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 gpg --show-keys --with-colons /etc/apt/keyrings/docker.asc | grep -q '^fpr:::::::::9DC858229FC7DD38854AE2D88D81803C0EBFCD88:'
 chmod 0644 /etc/apt/keyrings/docker.asc
-printf '%s\n' 'deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable' > /etc/apt/sources.list.d/docker.list
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable\n' "$architecture" > /etc/apt/sources.list.d/docker.list
 apt-get update
 apt-get install -y \
  'docker-ce=5:29.8.0-1~ubuntu.24.04~noble' \

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -95,7 +96,7 @@ func prepareServiceKit(c configuration) (serviceRelease, error) {
 	} else if err != nil {
 		return release, err
 	}
-	release, err := verifyServiceKit(destination, c.ServiceImages)
+	release, err := verifyServiceKit(destination, c.ServiceImages, runtime.GOARCH)
 	if err != nil {
 		return release, err
 	}
@@ -143,7 +144,7 @@ func importServiceImagesAt(ctx context.Context, release serviceRelease, kit stri
 		}
 		// Only the exact verified manifest can be used in a deployment; tags in
 		// the portable archive are never launch authority.
-		b, err := privateOutput(ctx, "/usr/bin/docker", "image", "inspect", "--platform", "linux/arm64", "--format", "{{.Id}}", image.Digest)
+		b, err := privateOutput(ctx, "/usr/bin/docker", "image", "inspect", "--platform", "linux/"+release.Architecture, "--format", "{{.Id}}", image.Digest)
 		if err != nil || strings.TrimSpace(string(b)) != image.Digest {
 			return nil, errors.New("imported image identity mismatch")
 		}
@@ -401,7 +402,7 @@ func validateBuiltServiceKit(ctx context.Context, work string, release serviceRe
 			return e
 		}
 	}
-	// The fixed pulled reference was bound to its ARM64 manifest during export.
+	// The fixed pulled reference was bound to its declared platform manifest during export.
 	// This validation container has no network, runtime socket or appliance data.
 	if err := validateRecipesAt(ctx, filepath.Join(work, "kit"), root, images, "caddy:2.10.2-alpine"); err != nil {
 		return err
