@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +16,51 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/computequeue"
 )
+
+func TestSwiftPortableAdmissionPermitFixtureVerifiesExactly(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(
+		"testdata", "job-custody-admission-permit-portable-v1.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		AuthorityID        uuid.UUID             `json:"authorityID"`
+		AuthorityPublicKey []byte                `json:"authorityPublicKey"`
+		AdmissionEnvelope  []byte                `json:"admissionEnvelope"`
+		Permit             SignedAdmissionPermit `json:"permit"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	key, err := NewAdmissionPermitVerificationKey(
+		fixture.AuthorityID, ed25519.PublicKey(fixture.AuthorityPublicKey),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewAdmissionPermitVerifier(
+		[]AdmissionPermitVerificationKey{key},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := verifier.Verify(
+		fixture.Permit, fixture.AdmissionEnvelope,
+		computequeue.Timestamp(1_800_000_000_001),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorization.Header().RouteRecipientWorkerID !=
+		computequeue.WorkerID("abcdefab-cdef-4abc-8def-abcdefabcdef") {
+		t.Fatalf("unexpected route: %+v", authorization.Header())
+	}
+	payload, err := computequeue.DecodeCanonical[AdmissionPermitPayload](fixture.Permit.Payload)
+	if err != nil || payload.AuthorityID != fixture.AuthorityID {
+		t.Fatalf("portable payload: %v %+v", err, payload)
+	}
+}
 
 func TestAdmissionPermitDerivesSignerAndRouteFromBoxAuthority(t *testing.T) {
 	fixture := newAdmissionPermitFixture(t)
