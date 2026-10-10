@@ -157,6 +157,8 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	t.Setenv("FACETS_COMPUTE_POOL_LISTEN_ADDR", ":8083")
 	configureBackupCustody(t)
 	t.Setenv("FACETS_BACKUP_CUSTODY_LISTEN_ADDR", ":8084")
+	configureStorageCapacityAuthority(t)
+	t.Setenv("FACETS_STORAGE_CAPACITY_AUTHORITY_LISTEN_ADDR", ":8085")
 
 	deviceSync, err := config.Load(config.DeviceSync)
 	if err != nil {
@@ -174,6 +176,10 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	storageAuthority, err := config.Load(config.StorageCapacityAuthority)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if deviceSync.Service != config.DeviceSync || deviceSync.ListenAddress != ":8081" || deviceSync.BlobRoot != "/var/lib/facets-device-sync/blobs" {
 		t.Fatalf("device sync configuration=%+v", deviceSync)
 	}
@@ -187,6 +193,12 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	if backupCustody.Service != config.BackupCustody || backupCustody.ListenAddress != ":8084" ||
 		backupCustody.BlobRoot != "" || backupCustody.BackupCustodyRoot != "/var/lib/facets-backup-custody/custody" {
 		t.Fatalf("Backup custody configuration=%+v", backupCustody)
+	}
+	if storageAuthority.Service != config.StorageCapacityAuthority || storageAuthority.ListenAddress != ":8085" ||
+		storageAuthority.BlobRoot != "" || storageAuthority.StorageCapacityPoolID == uuid.Nil ||
+		storageAuthority.StorageCapacityPoolRoot != "/srv/facets-box-data" ||
+		storageAuthority.StorageCapacityPeerRegistryFile != "/var/lib/facets-storage-capacity-authority/peers.json" {
+		t.Fatalf("storage capacity authority configuration=%+v", storageAuthority)
 	}
 	if !bytes.Equal(sharedSpaces.ManagedKeyEncryptionKey, bytes.Repeat([]byte{0x42}, 32)) {
 		t.Fatal("Shared Spaces managed key-encryption key was not decoded")
@@ -276,6 +288,36 @@ func TestComputePoolRequiresIndependentOperatorAndDeploymentAuthority(t *testing
 	}
 	if configuration.DeploymentID == uuid.Nil || configuration.OperatorToken == "" {
 		t.Fatalf("Compute Pool authority configuration=%+v", configuration)
+	}
+}
+
+func TestStorageCapacityAuthorityRequiresDedicatedPoolAndPeerConfiguration(t *testing.T) {
+	t.Setenv("FACETS_STORAGE_CAPACITY_AUTHORITY_DATABASE_URL", "postgres://example.invalid/storage_capacity")
+	if _, err := config.Load(config.StorageCapacityAuthority); err == nil {
+		t.Fatal("storage authority accepted missing pool configuration")
+	}
+	configureStorageCapacityAuthority(t)
+	configuration, err := config.Load(config.StorageCapacityAuthority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.DatabaseConns < 2 || configuration.StorageCapacityReadinessPeriod != 30*time.Second {
+		t.Fatalf("storage authority defaults=%+v", configuration)
+	}
+	for name, value := range map[string]string{
+		"FACETS_STORAGE_CAPACITY_AUTHORITY_POOL_ID":            "not-a-uuid",
+		"FACETS_STORAGE_CAPACITY_AUTHORITY_POOL_ROOT":          "/",
+		"FACETS_STORAGE_CAPACITY_AUTHORITY_PEER_REGISTRY_FILE": "relative.json",
+		"FACETS_STORAGE_CAPACITY_AUTHORITY_READINESS_PERIOD":   "500ms",
+		"FACETS_STORAGE_CAPACITY_AUTHORITY_DATABASE_CONNS":     "1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			configureStorageCapacityAuthority(t)
+			t.Setenv(name, value)
+			if _, err := config.Load(config.StorageCapacityAuthority); err == nil {
+				t.Fatalf("invalid %s accepted", name)
+			}
+		})
 	}
 }
 
@@ -410,6 +452,15 @@ func configureBackupCustody(t *testing.T) {
 	t.Setenv("FACETS_BACKUP_CUSTODY_DEPLOYMENT_ROUTE_POLICY_FILE", "/var/lib/facets-backup-custody/deployment-route-policy.json")
 	t.Setenv("FACETS_BACKUP_CUSTODY_SERVICE_AUTHORITY_BINDINGS_FILE", "/var/lib/facets-backup-custody/service-authority-bindings.json")
 	t.Setenv("FACETS_BACKUP_CUSTODY_ACCOUNT_ADMISSION_KEY_FILE", "/var/lib/facets-backup-custody/account-admission-key")
+}
+
+func configureStorageCapacityAuthority(t *testing.T) {
+	t.Helper()
+	t.Setenv("FACETS_STORAGE_CAPACITY_AUTHORITY_LISTEN_ADDR", "127.0.0.1:8085")
+	t.Setenv("FACETS_STORAGE_CAPACITY_AUTHORITY_DATABASE_URL", "postgres://example.invalid/storage_capacity")
+	t.Setenv("FACETS_STORAGE_CAPACITY_AUTHORITY_POOL_ID", "8a000000-0000-0000-0000-000000000001")
+	t.Setenv("FACETS_STORAGE_CAPACITY_AUTHORITY_POOL_ROOT", "/srv/facets-box-data")
+	t.Setenv("FACETS_STORAGE_CAPACITY_AUTHORITY_PEER_REGISTRY_FILE", "/var/lib/facets-storage-capacity-authority/peers.json")
 }
 
 func TestDeploymentAuthenticationConfigurationIsAllOrNothing(t *testing.T) {

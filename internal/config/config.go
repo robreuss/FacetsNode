@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -56,15 +57,20 @@ type Config struct {
 	ServiceAuthorityBindingsFile    string
 	OnionIngressToken               []byte
 	BoxControllerToken              []byte
+	StorageCapacityPoolID           uuid.UUID
+	StorageCapacityPoolRoot         string
+	StorageCapacityPeerRegistryFile string
+	StorageCapacityReadinessPeriod  time.Duration
 }
 
 type Service string
 
 const (
-	DeviceSync    Service = "facets-device-sync-server"
-	SharedSpaces  Service = "facets-shared-spaces-server"
-	ComputePool   Service = "facets-compute-pool-server"
-	BackupCustody Service = "facets-backup-custody-server"
+	DeviceSync               Service = "facets-device-sync-server"
+	SharedSpaces             Service = "facets-shared-spaces-server"
+	ComputePool              Service = "facets-compute-pool-server"
+	BackupCustody            Service = "facets-backup-custody-server"
+	StorageCapacityAuthority Service = "facets-storage-capacity-authority"
 )
 
 func (service Service) EnvironmentPrefix() (string, error) {
@@ -77,6 +83,8 @@ func (service Service) EnvironmentPrefix() (string, error) {
 		return "FACETS_COMPUTE_POOL", nil
 	case BackupCustody:
 		return "FACETS_BACKUP_CUSTODY", nil
+	case StorageCapacityAuthority:
+		return "FACETS_STORAGE_CAPACITY_AUTHORITY", nil
 	default:
 		return "", fmt.Errorf("unsupported Facets server service %q", service)
 	}
@@ -101,15 +109,19 @@ func Load(service Service) (Config, error) {
 		return Config{}, err
 	}
 	defaultBlobRoot := ""
-	if service != BackupCustody {
+	if service == DeviceSync || service == SharedSpaces || service == ComputePool {
 		defaultBlobRoot, err = service.BlobRoot()
 		if err != nil {
 			return Config{}, err
 		}
 	}
+	defaultListenAddress := ":8080"
+	if service == StorageCapacityAuthority {
+		defaultListenAddress = ""
+	}
 	configuration := Config{
 		Service:        service,
-		ListenAddress:  environment(prefix+"_LISTEN_ADDR", ":8080"),
+		ListenAddress:  environment(prefix+"_LISTEN_ADDR", defaultListenAddress),
 		DatabaseURL:    os.Getenv(prefix + "_DATABASE_URL"),
 		ShutdownPeriod: 10 * time.Second,
 		CleanupPeriod:  time.Minute,
@@ -144,6 +156,7 @@ func Load(service Service) (Config, error) {
 		BackupMaximumStagingBytes:       2 << 40,
 		BackupMaximumCommittedBytes:     20 << 40,
 		TrafficLimits:                   traffic.DefaultLimits(),
+		StorageCapacityReadinessPeriod:  30 * time.Second,
 	}
 	if service == DeviceSync || service == SharedSpaces {
 		name := prefix + "_CANDIDATE_MAINTENANCE"
@@ -163,6 +176,30 @@ func Load(service Service) (Config, error) {
 		configuration.BackupAccountAdmissionKeyFile = strings.TrimSpace(
 			os.Getenv(prefix + "_ACCOUNT_ADMISSION_KEY_FILE"),
 		)
+	}
+	if service == StorageCapacityAuthority {
+		configuration.BlobRoot = ""
+		if strings.TrimSpace(configuration.ListenAddress) == "" {
+			return Config{}, fmt.Errorf("%s_LISTEN_ADDR is required for the private service plane", prefix)
+		}
+		poolIDName := prefix + "_POOL_ID"
+		configuration.StorageCapacityPoolID, err = uuid.Parse(strings.TrimSpace(os.Getenv(poolIDName)))
+		if err != nil || configuration.StorageCapacityPoolID == uuid.Nil {
+			return Config{}, fmt.Errorf("%s must be a nonzero UUID", poolIDName)
+		}
+		rootName := prefix + "_POOL_ROOT"
+		configuration.StorageCapacityPoolRoot = strings.TrimSpace(os.Getenv(rootName))
+		if !filepath.IsAbs(configuration.StorageCapacityPoolRoot) ||
+			filepath.Clean(configuration.StorageCapacityPoolRoot) != configuration.StorageCapacityPoolRoot ||
+			configuration.StorageCapacityPoolRoot == string(filepath.Separator) {
+			return Config{}, fmt.Errorf("%s must be an absolute non-root canonical path", rootName)
+		}
+		peerName := prefix + "_PEER_REGISTRY_FILE"
+		configuration.StorageCapacityPeerRegistryFile = strings.TrimSpace(os.Getenv(peerName))
+		if !filepath.IsAbs(configuration.StorageCapacityPeerRegistryFile) ||
+			filepath.Clean(configuration.StorageCapacityPeerRegistryFile) != configuration.StorageCapacityPeerRegistryFile {
+			return Config{}, fmt.Errorf("%s must be an absolute canonical path", peerName)
+		}
 	}
 	deploymentIDName := prefix + "_DEPLOYMENT_ID"
 	deploymentKeyFileName := prefix + "_DEPLOYMENT_SIGNING_KEY_FILE"
@@ -339,7 +376,7 @@ func Load(service Service) (Config, error) {
 	if value := os.Getenv(prefix + "_DATABASE_CONNS"); value != "" {
 		count, err := strconv.ParseInt(value, 10, 32)
 		minimum := int64(1)
-		if service == DeviceSync {
+		if service == DeviceSync || service == StorageCapacityAuthority {
 			minimum = 2
 		}
 		if err != nil || count < minimum || count > 100 {
@@ -348,6 +385,15 @@ func Load(service Service) (Config, error) {
 			)
 		}
 		configuration.DatabaseConns = int32(count)
+	}
+	if service == StorageCapacityAuthority {
+		if value := os.Getenv(prefix + "_READINESS_PERIOD"); value != "" {
+			period, err := time.ParseDuration(value)
+			if err != nil || period < time.Second || period > time.Hour {
+				return Config{}, fmt.Errorf("%s_READINESS_PERIOD must be between one second and one hour", prefix)
+			}
+			configuration.StorageCapacityReadinessPeriod = period
+		}
 	}
 	if service == BackupCustody {
 		configuration.PublicURL = strings.TrimSpace(configuration.PublicURL)

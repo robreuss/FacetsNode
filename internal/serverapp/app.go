@@ -131,6 +131,24 @@ func Main(service config.Service) {
 		logger.Error("database unavailable", "error", err)
 		os.Exit(1)
 	}
+	if service == config.StorageCapacityAuthority {
+		initialize := len(os.Args) == 2 && os.Args[1] == "initialize"
+		if len(os.Args) > 1 && !initialize {
+			logger.Error("unsupported Storage Capacity Authority command", "command", os.Args[1])
+			os.Exit(1)
+		}
+		if err := runStorageCapacityAuthorityService(
+			rootContext,
+			pool,
+			configuration,
+			logger,
+			initialize,
+		); err != nil {
+			logger.Error("Storage Capacity Authority failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if service == config.ComputePool {
 		if err := runComputePoolService(
 			rootContext,
