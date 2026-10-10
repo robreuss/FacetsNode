@@ -17,7 +17,69 @@ The workflow has two independently reviewed changes:
 Neither step deploys Device Sync, Shared Spaces, Box Controller, Tor, Carriage,
 Principal, Persona, or Worker state.
 
-## Build the host tools
+The preferred development path uses the dedicated Proxmox API automation token
+from the operator workstation. It pins the PVE leaf-certificate SHA-256, keeps
+the token secret out of plans and command-line arguments, uploads a checksum-
+bound cloud image, and refuses to run during a PVE backup or excessive host
+load. The root-local `qm` path remains available for an attended host-console
+workflow, but is not required for normal provisioning.
+
+## API-token workflow
+
+Create a private local staging directory and fetch the pinned image. The fetch
+script works on Linux and macOS and refuses to overwrite an existing artifact:
+
+```sh
+install -d -m 0700 /private/staging/directory
+./fetch-cloud-image.sh /private/staging/directory
+```
+
+Create an API plan from live inventory. The VM ID, node, storages, bridge, API
+origin, certificate digest, and public key are review inputs; none is inferred
+from an existing Box VM. `api-plan` refuses retained VM IDs 180 and 190 and
+binds the exact source image and SSH public-key hashes:
+
+```sh
+facets-proxmox-vm api-plan \
+  --profile deploy/appliance/proxmox-development-amd64.json \
+  --output /private/staging/directory/facets-box-api-plan.json \
+  --endpoint https://PVE_HOST:8006 \
+  --tls-cert-sha256 LOWERCASE_LEAF_CERT_SHA256 \
+  --node PVE_NODE --vmid UNUSED_ID --name facets-box-portable-dev \
+  --storage PVE_IMAGE_STORAGE --image-storage PVE_ISO_STORAGE \
+  --bridge PVE_BRIDGE --admin-user facets-admin \
+  --cloud-image /private/staging/directory/ubuntu-24.04-minimal-cloudimg-amd64-20260905.img \
+  --ssh-public-key /private/key/location/facets-infrastructure-ed25519.pub
+
+facets-proxmox-vm api-review \
+  --profile deploy/appliance/proxmox-development-amd64.json \
+  --plan /private/staging/directory/facets-box-api-plan.json
+```
+
+Load the token secret from a protected credential store into the process
+environment, run the read-only preflight, then apply the exact approval digest
+printed by `api-plan`:
+
+```sh
+export FACETS_PROXMOX_API_TOKEN_ID='USER@REALM!TOKEN'
+export FACETS_PROXMOX_API_TOKEN_SECRET='FROM_PROTECTED_CREDENTIAL_STORE'
+facets-proxmox-vm api-check \
+  --profile deploy/appliance/proxmox-development-amd64.json \
+  --plan /private/staging/directory/facets-box-api-plan.json
+facets-proxmox-vm api-apply \
+  --profile deploy/appliance/proxmox-development-amd64.json \
+  --plan /private/staging/directory/facets-box-api-plan.json \
+  --approval EXACT_PLAN_SHA256
+unset FACETS_PROXMOX_API_TOKEN_SECRET
+```
+
+The apply path uploads the image, creates and configures the VM, and starts it.
+If any operation fails, it reports the failed gate and leaves the uploaded image
+or partial VM in place for explicit review; it never deletes infrastructure.
+
+## Root-local host workflow
+
+### Build the host tools
 
 From the committed FacetsNode checkout:
 
@@ -42,7 +104,7 @@ Ubuntu image into that directory with:
 The script pins the official 2026-09-05 Ubuntu 24.04 minimal AMD64 image by its
 published SHA-256 and refuses to replace an existing file.
 
-## Inventory and plan on the PVE node
+### Inventory and plan on the PVE node
 
 All inventory values are live inputs, not repository defaults:
 
