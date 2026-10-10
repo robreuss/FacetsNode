@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/computequeue"
 	"github.com/robreuss/FacetsNode/internal/config"
+	"github.com/robreuss/FacetsNode/internal/jobcustody"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
 	"github.com/robreuss/FacetsNode/internal/testpostgres"
 )
@@ -30,7 +32,8 @@ func TestJobCustodyConfigurationAndStoreLimitsRemainServiceLocal(t *testing.T) {
 		DeploymentID: uuid.New(), DeploymentSigningKeyFile: "/keys/deployment",
 		DeploymentRoutePolicyFile: "/config/route.json", ServiceAuthorityBindingsFile: "/config/bindings.json",
 		JobCustodyRoot: "/custody", JobCustodyAdmissionKeysFile: "/config/admission-keys.json",
-		StorageCapacityAuthorityURL: "https://capacity.example", StorageCapacityPoolID: uuid.New(),
+		JobCustodyAdmissionAuthoritiesFile: "/config/admission-authorities.json",
+		StorageCapacityAuthorityURL:        "https://capacity.example", StorageCapacityPoolID: uuid.New(),
 		StorageCapacityReservationTTL: 5 * time.Minute,
 		JobCustodyMaximumAdmissions:   11, JobCustodyMaximumStagingBytes: 12,
 		JobCustodyMaximumCustodyBytes: 13,
@@ -118,7 +121,8 @@ func TestJobCustodyRuntimeAssemblyReopensExactIsolatedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.Coordinator == nil || runtime.content == nil || runtime.bindings == nil {
+	if runtime.Coordinator == nil || runtime.AdmissionPermits == nil ||
+		runtime.content == nil || runtime.bindings == nil {
 		t.Fatal("Job custody runtime omitted a required authority or custody component")
 	}
 	if _, err := prepareJobCustodyRuntime(ctx, pool, configuration); err == nil {
@@ -171,6 +175,7 @@ func writeJobCustodyRuntimeConfiguration(t *testing.T, databaseURL string) confi
 	routePath := filepath.Join(root, "deployment-route-policy.json")
 	bindingPath := filepath.Join(root, "service-authority-bindings.json")
 	admissionPath := filepath.Join(root, "admission-keys.json")
+	authoritiesPath := filepath.Join(root, "admission-authorities.json")
 	if err := os.WriteFile(signingPath, []byte(base64.RawURLEncoding.EncodeToString(seed)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -195,16 +200,28 @@ func writeJobCustodyRuntimeConfiguration(t *testing.T, databaseURL string) confi
 		}},
 		Version: computequeue.JobCustodyAdmissionKeyFileVersion,
 	}, true)
+	controllerPublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProtectedJSON(t, authoritiesPath, jobcustody.AdmissionPermitKeyFile{
+		Authorities: []jobcustody.AdmissionPermitKeyFileEntry{{
+			AuthorityID: uuid.MustParse("8c000000-0000-0000-0000-000000000001"),
+			PublicKey:   base64.RawURLEncoding.EncodeToString(controllerPublicKey),
+		}},
+		Version: jobcustody.AdmissionPermitKeyFileVersion,
+	}, true)
 	return config.Config{
 		Service: config.JobCustody, ListenAddress: "127.0.0.1:8080",
 		DatabaseURL: databaseURL, PublicURL: endpoint,
 		DeploymentID: deploymentID, DeploymentSigningKeyFile: signingPath,
 		DeploymentRoutePolicyFile: routePath, ServiceAuthorityBindingsFile: bindingPath,
 		JobCustodyRoot: filepath.Join(root, "custody"), JobCustodyAdmissionKeysFile: admissionPath,
-		StorageCapacityAuthorityURL:   "https://capacity.example",
-		StorageCapacityPoolID:         uuid.MustParse("8a000000-0000-0000-0000-000000000001"),
-		StorageCapacityReservationTTL: 5 * time.Minute,
-		JobCustodyMaximumAdmissions:   10, JobCustodyMaximumStagingBytes: 1 << 20,
+		JobCustodyAdmissionAuthoritiesFile: authoritiesPath,
+		StorageCapacityAuthorityURL:        "https://capacity.example",
+		StorageCapacityPoolID:              uuid.MustParse("8a000000-0000-0000-0000-000000000001"),
+		StorageCapacityReservationTTL:      5 * time.Minute,
+		JobCustodyMaximumAdmissions:        10, JobCustodyMaximumStagingBytes: 1 << 20,
 		JobCustodyMaximumCustodyBytes: 2 << 20,
 	}
 }

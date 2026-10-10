@@ -21,54 +21,55 @@ type Config struct {
 	Service Service
 	// CandidateMaintenance permits startup recovery/schema migration and health
 	// checks, but withholds application serving and background maintenance.
-	CandidateMaintenance            bool
-	ListenAddress                   string
-	DatabaseURL                     string
-	ShutdownPeriod                  time.Duration
-	CleanupPeriod                   time.Duration
-	TransferPeriod                  time.Duration
-	DatabaseConns                   int32
-	OperatorToken                   string
-	ManagedKeyEncryptionKey         []byte
-	ComputeCapabilitySigningSeed    []byte
-	PublicURL                       string
-	FacetsBoxServiceEndpoints       map[string]string
-	BlobRoot                        string
-	BlobUploadTTL                   time.Duration
-	BlobOrphanGrace                 time.Duration
-	CheckpointFenceTTL              time.Duration
-	BackupCustodyRoot               string
-	BackupAccountAdmissionKeyFile   string
-	BackupMaximumCredentialLifetime time.Duration
-	BackupMaximumActiveUploads      int
-	BackupMaximumTargets            int
-	BackupMaximumGenerations        int
-	BackupMaximumRequests           int
-	BackupMaximumRetentionProofs    int
-	BackupMaximumControlRecords     int
-	BackupMaximumChunksPerUpload    int
-	BackupMaximumChunkBytes         int64
-	BackupMaximumGenerationBytes    int64
-	BackupMaximumStagingBytes       int64
-	BackupMaximumCommittedBytes     int64
-	JobCustodyRoot                  string
-	JobCustodyAdmissionKeysFile     string
-	JobCustodyMaximumAdmissions     int64
-	JobCustodyMaximumStagingBytes   int64
-	JobCustodyMaximumCustodyBytes   int64
-	TrafficLimits                   traffic.Limits
-	DeploymentID                    uuid.UUID
-	DeploymentSigningKeyFile        string
-	DeploymentRoutePolicyFile       string
-	ServiceAuthorityBindingsFile    string
-	OnionIngressToken               []byte
-	BoxControllerToken              []byte
-	StorageCapacityPoolID           uuid.UUID
-	StorageCapacityPoolRoot         string
-	StorageCapacityPeerRegistryFile string
-	StorageCapacityReadinessPeriod  time.Duration
-	StorageCapacityAuthorityURL     string
-	StorageCapacityReservationTTL   time.Duration
+	CandidateMaintenance               bool
+	ListenAddress                      string
+	DatabaseURL                        string
+	ShutdownPeriod                     time.Duration
+	CleanupPeriod                      time.Duration
+	TransferPeriod                     time.Duration
+	DatabaseConns                      int32
+	OperatorToken                      string
+	ManagedKeyEncryptionKey            []byte
+	ComputeCapabilitySigningSeed       []byte
+	PublicURL                          string
+	FacetsBoxServiceEndpoints          map[string]string
+	BlobRoot                           string
+	BlobUploadTTL                      time.Duration
+	BlobOrphanGrace                    time.Duration
+	CheckpointFenceTTL                 time.Duration
+	BackupCustodyRoot                  string
+	BackupAccountAdmissionKeyFile      string
+	BackupMaximumCredentialLifetime    time.Duration
+	BackupMaximumActiveUploads         int
+	BackupMaximumTargets               int
+	BackupMaximumGenerations           int
+	BackupMaximumRequests              int
+	BackupMaximumRetentionProofs       int
+	BackupMaximumControlRecords        int
+	BackupMaximumChunksPerUpload       int
+	BackupMaximumChunkBytes            int64
+	BackupMaximumGenerationBytes       int64
+	BackupMaximumStagingBytes          int64
+	BackupMaximumCommittedBytes        int64
+	JobCustodyRoot                     string
+	JobCustodyAdmissionKeysFile        string
+	JobCustodyAdmissionAuthoritiesFile string
+	JobCustodyMaximumAdmissions        int64
+	JobCustodyMaximumStagingBytes      int64
+	JobCustodyMaximumCustodyBytes      int64
+	TrafficLimits                      traffic.Limits
+	DeploymentID                       uuid.UUID
+	DeploymentSigningKeyFile           string
+	DeploymentRoutePolicyFile          string
+	ServiceAuthorityBindingsFile       string
+	OnionIngressToken                  []byte
+	BoxControllerToken                 []byte
+	StorageCapacityPoolID              uuid.UUID
+	StorageCapacityPoolRoot            string
+	StorageCapacityPeerRegistryFile    string
+	StorageCapacityReadinessPeriod     time.Duration
+	StorageCapacityAuthorityURL        string
+	StorageCapacityReservationTTL      time.Duration
 }
 
 type Service string
@@ -208,6 +209,9 @@ func Load(service Service) (Config, error) {
 		)
 		configuration.JobCustodyAdmissionKeysFile = strings.TrimSpace(
 			os.Getenv(prefix + "_ADMISSION_KEYS_FILE"),
+		)
+		configuration.JobCustodyAdmissionAuthoritiesFile = strings.TrimSpace(
+			os.Getenv(prefix + "_ADMISSION_AUTHORITIES_FILE"),
 		)
 		configuration.StorageCapacityAuthorityURL = strings.TrimSpace(
 			os.Getenv(prefix + "_STORAGE_CAPACITY_AUTHORITY_URL"),
@@ -486,6 +490,10 @@ func Load(service Service) (Config, error) {
 		if !filepath.IsAbs(configuration.JobCustodyAdmissionKeysFile) ||
 			filepath.Clean(configuration.JobCustodyAdmissionKeysFile) != configuration.JobCustodyAdmissionKeysFile {
 			return Config{}, fmt.Errorf("%s_ADMISSION_KEYS_FILE must be an absolute canonical path", prefix)
+		}
+		if !filepath.IsAbs(configuration.JobCustodyAdmissionAuthoritiesFile) ||
+			filepath.Clean(configuration.JobCustodyAdmissionAuthoritiesFile) != configuration.JobCustodyAdmissionAuthoritiesFile {
+			return Config{}, fmt.Errorf("%s_ADMISSION_AUTHORITIES_FILE must be an absolute canonical path", prefix)
 		}
 		if configuration.StorageCapacityAuthorityURL == "" {
 			return Config{}, fmt.Errorf("%s_STORAGE_CAPACITY_AUTHORITY_URL is required", prefix)

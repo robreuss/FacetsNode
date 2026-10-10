@@ -28,9 +28,10 @@ func (jobCustodyWallClock) Now() time.Time { return time.Now() }
 // admission handler: transport authentication must supply the expected signer
 // and route grant rather than accepting requester-echoed trust fields.
 type jobCustodyRuntime struct {
-	Coordinator *jobcustody.Coordinator
-	content     *jobcustody.ContentStore
-	bindings    *serviceauthority.BindingRegistry
+	Coordinator      *jobcustody.Coordinator
+	AdmissionPermits *jobcustody.AdmissionPermitVerifier
+	content          *jobcustody.ContentStore
+	bindings         *serviceauthority.BindingRegistry
 }
 
 func (runtime *jobCustodyRuntime) Close() error {
@@ -87,6 +88,13 @@ func prepareJobCustodyRuntime(
 	if err != nil {
 		return nil, fmt.Errorf("Job custody admission trust rejected: %w", err)
 	}
+	permitVerifier, err := jobcustody.LoadAdmissionPermitVerifier(
+		configuration.JobCustodyAdmissionAuthoritiesFile,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("Job custody Box admission authority rejected: %w", err)
+	}
+	runtime.AdmissionPermits = permitVerifier
 	privateTransport := http.DefaultTransport.(*http.Transport).Clone()
 	privateTransport.Proxy = nil
 	capacityClient, err := storageauthority.NewPrivateHTTPClient(
@@ -155,6 +163,7 @@ func validateJobCustodyConfiguration(configuration config.Config) error {
 		configuration.DeploymentID == uuid.Nil || configuration.DeploymentSigningKeyFile == "" ||
 		configuration.DeploymentRoutePolicyFile == "" || configuration.ServiceAuthorityBindingsFile == "" ||
 		configuration.JobCustodyRoot == "" || configuration.JobCustodyAdmissionKeysFile == "" ||
+		configuration.JobCustodyAdmissionAuthoritiesFile == "" ||
 		configuration.StorageCapacityAuthorityURL == "" || configuration.StorageCapacityPoolID == uuid.Nil ||
 		configuration.StorageCapacityReservationTTL < storageauthority.MinimumPrivateReservationLifetime ||
 		configuration.StorageCapacityReservationTTL > storageauthority.MaximumPrivateReservationLifetime ||

@@ -205,6 +205,7 @@ func TestServicesUseIndependentEnvironmentNamespaces(t *testing.T) {
 	if jobCustody.Service != config.JobCustody || jobCustody.ListenAddress != ":8086" ||
 		jobCustody.BlobRoot != "" || jobCustody.JobCustodyRoot != "/var/lib/facets-job-custody/custody" ||
 		jobCustody.JobCustodyAdmissionKeysFile != "/var/lib/facets-job-custody/admission-keys.json" ||
+		jobCustody.JobCustodyAdmissionAuthoritiesFile != "/var/lib/facets-job-custody/admission-authorities.json" ||
 		jobCustody.StorageCapacityAuthorityURL != "https://capacity.example" ||
 		jobCustody.StorageCapacityPoolID == uuid.Nil || jobCustody.StorageCapacityReservationTTL != 5*time.Minute {
 		t.Fatalf("Job custody configuration=%+v", jobCustody)
@@ -327,11 +328,12 @@ func TestJobCustodyRequiresIndependentAuthorityAndBoundedQuotas(t *testing.T) {
 		t.Fatalf("Job custody limits=%+v", configuration)
 	}
 	for name, value := range map[string]string{
-		"FACETS_JOB_CUSTODY_CUSTODY_ROOT":          "/",
-		"FACETS_JOB_CUSTODY_ADMISSION_KEYS_FILE":   "relative.json",
-		"FACETS_JOB_CUSTODY_MAXIMUM_ADMISSIONS":    "0",
-		"FACETS_JOB_CUSTODY_MAXIMUM_STAGING_BYTES": "8193",
-		"FACETS_JOB_CUSTODY_MAXIMUM_CUSTODY_BYTES": "4095",
+		"FACETS_JOB_CUSTODY_CUSTODY_ROOT":               "/",
+		"FACETS_JOB_CUSTODY_ADMISSION_KEYS_FILE":        "relative.json",
+		"FACETS_JOB_CUSTODY_ADMISSION_AUTHORITIES_FILE": "relative-authorities.json",
+		"FACETS_JOB_CUSTODY_MAXIMUM_ADMISSIONS":         "0",
+		"FACETS_JOB_CUSTODY_MAXIMUM_STAGING_BYTES":      "8193",
+		"FACETS_JOB_CUSTODY_MAXIMUM_CUSTODY_BYTES":      "4095",
 	} {
 		t.Run(name, func(t *testing.T) {
 			configureJobCustody(t)
@@ -562,6 +564,7 @@ func configureJobCustody(t *testing.T) {
 	t.Setenv("FACETS_JOB_CUSTODY_DEPLOYMENT_ROUTE_POLICY_FILE", "/var/lib/facets-job-custody/deployment-route-policy.json")
 	t.Setenv("FACETS_JOB_CUSTODY_SERVICE_AUTHORITY_BINDINGS_FILE", "/var/lib/facets-job-custody/service-authority-bindings.json")
 	t.Setenv("FACETS_JOB_CUSTODY_ADMISSION_KEYS_FILE", "/var/lib/facets-job-custody/admission-keys.json")
+	t.Setenv("FACETS_JOB_CUSTODY_ADMISSION_AUTHORITIES_FILE", "/var/lib/facets-job-custody/admission-authorities.json")
 	t.Setenv("FACETS_JOB_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL", "https://capacity.example")
 	t.Setenv("FACETS_JOB_CUSTODY_STORAGE_CAPACITY_POOL_ID", "8a000000-0000-0000-0000-000000000001")
 }
