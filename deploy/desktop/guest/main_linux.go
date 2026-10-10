@@ -349,6 +349,13 @@ func serve(c configuration) error {
 	}
 }
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "portable-service-kit" {
+		if err := runPortableServiceKit(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "Portable service kit:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	c, err := load()
 	if err == nil && len(os.Args) == 2 && os.Args[1] == "prepare" {
 		err = prepare(c)

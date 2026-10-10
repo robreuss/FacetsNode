@@ -167,3 +167,38 @@ Record the resulting installation ID, data-filesystem UUID, exact FacetsNode
 revision, profile digest, cloud-image digest, plan digest, and VM ID. At this
 gate the correct runtime state is Docker healthy with no Facets workloads or
 service identities installed.
+
+## Build and install a dormant service kit
+
+From a clean FacetsNode checkout whose `HEAD` exactly matches `origin/main`,
+produce a private AMD64 bundle in a new directory:
+
+```sh
+./build-service-kit-bundle.sh "$(git rev-parse HEAD)" /private/service-kit-bundle
+```
+
+The producer archives the exact pushed commit, builds the Linux AMD64 installer
+from that archive, and records hashes for every transfer artifact. Copy the
+bundle over the VM's authenticated private SSH path, then run the included
+installer as root:
+
+```sh
+sudo ./install-service-kit.sh install /private/service-kit-bundle
+```
+
+The installer runs the same Dockerfile tests, OCI verification, rendered
+Compose boundary checks, private controller HTTPS check, disposable persistent-
+volume/recreation checks, and offline Tor identity check as FBD. It imports only
+the verified AMD64 image manifests and retains the accepted kit on the data
+disk. Disposable acceptance identities, containers, and volumes are removed.
+The command fails if durable service configuration, activation state, service
+containers, or service volumes exist.
+
+This is an installation checkpoint, not activation. A successful result has an
+installation record with `activation: withheld`, no running Facets workload,
+no real onion identity, and no Box/service/Principal/Persona authority. After a
+guest reboot, verify that exact dormant state and the imported image identities:
+
+```sh
+sudo /usr/local/libexec/facets-service-kit portable-service-kit verify
+```

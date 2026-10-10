@@ -101,6 +101,7 @@ unit/integration tests, signed artifact verification, installed-VM runtime,
 client functional acceptance, recovery/relocation acceptance, and deployment
 readiness. Historical acceptance records remain evidence, not current proof.
 
-The immediate implementation scope is checkpoints 1 and 2. Service activation
-and identity creation begin only after the fresh VM boundary is verified and the
-active Facets work supplies stable integration contracts.
+The immediate implementation scope includes checkpoint 3's dormant service-kit
+installation and restart proof. Service activation and durable identity creation
+remain a separate attended checkpoint after the active Facets work supplies
+stable integration contracts.

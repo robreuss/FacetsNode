@@ -7,7 +7,17 @@ trap 'printf "Service build stopped at recipe line %s (status %s).\n" "$LINENO" 
 build_root=$1
 revision=$2
 tree=$3
-/opt/fbd/guest-agent check-storage
+recipe_root=/opt/fbd/recipes
+case ${FACETS_SERVICE_KIT_HOST_ADAPTER:-fbd-virtualization-framework} in
+  fbd-virtualization-framework)
+    /opt/fbd/guest-agent check-storage
+    ;;
+  proxmox-qemu)
+    /usr/local/libexec/facets-service-kit portable-service-kit check-storage
+    recipe_root="$build_root/source/deploy/desktop"
+    ;;
+  *) exit 64;;
+esac
 [[ $(df --output=avail -B1 /srv/facets-box-data | tail -1) -gt 12884901888 ]]
 architecture=$(dpkg --print-architecture)
 case $architecture in arm64|amd64) ;; *) exit 1;; esac
@@ -18,9 +28,9 @@ cp "$build_root/source/compose.yaml" "$kit/recipes/device-sync.compose.yaml"
 cp "$build_root/source/deploy/shared-spaces/compose.yaml" "$kit/recipes/shared-spaces.compose.yaml"
 cp "$build_root/source/deploy/onion/device-sync.compose.yaml" "$kit/recipes/device-sync.onion.yaml"
 cp "$build_root/source/deploy/onion/shared-spaces.compose.yaml" "$kit/recipes/shared-spaces.onion.yaml"
-cp /opt/fbd/recipes/device-sync.compose.yaml "$kit/recipes/device-sync.desktop.yaml"
-cp /opt/fbd/recipes/shared-spaces.compose.yaml "$kit/recipes/shared-spaces.desktop.yaml"
-cp /opt/fbd/recipes/*.Caddyfile "$kit/recipes/"
+cp "$recipe_root/device-sync.compose.yaml" "$kit/recipes/device-sync.desktop.yaml"
+cp "$recipe_root/shared-spaces.compose.yaml" "$kit/recipes/shared-spaces.desktop.yaml"
+cp "$recipe_root"/*.Caddyfile "$kit/recipes/"
 # The builder is infrastructure, with a finite CPU/memory envelope. No ordinary
 # Facets container is created here and no workload receives the Docker socket.
 if ! docker buildx inspect fbd-builder >/dev/null 2>&1; then
