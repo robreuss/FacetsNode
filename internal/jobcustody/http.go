@@ -66,6 +66,8 @@ type HTTPWorkerResultStatus struct {
 	CommittedBytes               int64                                            `json:"committedBytes"`
 	CustodyReceipt               json.RawMessage                                  `json:"custodyReceipt,omitempty"`
 	DeliveryAcknowledgedAt       *computequeue.Timestamp                          `json:"deliveryAcknowledgedAt,omitempty"`
+	ExpiryReceipt                json.RawMessage                                  `json:"expiryReceipt,omitempty"`
+	ExpiryStartedAt              *computequeue.Timestamp                          `json:"expiryStartedAt,omitempty"`
 	ProtectedObject              computequeue.JobCapsuleProtectedObjectDescriptor `json:"protectedObject"`
 	ReleaseReceipt               json.RawMessage                                  `json:"releaseReceipt,omitempty"`
 	ReleaseRequestedAt           *computequeue.Timestamp                          `json:"releaseRequestedAt,omitempty"`
@@ -613,6 +615,13 @@ func workerResultHTTPStatus(record ResultRecord) HTTPWorkerResultStatus {
 	}
 	if len(record.ReleaseReceiptBytes) != 0 {
 		result.ReleaseReceipt = bytes.Clone(record.ReleaseReceiptBytes)
+	}
+	if record.ExpiryStartedAt > 0 {
+		value := record.ExpiryStartedAt
+		result.ExpiryStartedAt = &value
+	}
+	if len(record.ExpiryReceiptBytes) != 0 {
+		result.ExpiryReceipt = bytes.Clone(record.ExpiryReceiptBytes)
 	}
 	return result
 }

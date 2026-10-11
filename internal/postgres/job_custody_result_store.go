@@ -139,7 +139,7 @@ func (store *JobCustodyStore) ReserveResult(
 			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0)
 			 FROM job_custody_results),
 			(SELECT COALESCE(sum(protected_byte_count),0) FROM job_custody_admissions) +
-			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state<>'released'),0)
+			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state NOT IN ('released','expired')),0)
 			 FROM job_custody_results)`,
 	).Scan(&count, &stagingBytes, &totalBytes); err != nil {
 		return jobcustody.ResultRecord{}, false, err
@@ -455,6 +455,59 @@ func (store *JobCustodyStore) ListPendingResultReleases(
 	return results, nil
 }
 
+func (store *JobCustodyStore) ListResultExpiryCandidates(
+	ctx context.Context,
+	now computequeue.Timestamp,
+	limit int,
+) ([]jobcustody.ResultRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || now.Validate() != nil || limit <= 0 ||
+		limit > jobcustody.MaximumResultExpiryBatchSize {
+		return nil, jobcustody.ErrInvalid
+	}
+	rows, err := store.pool.Query(ctx, `
+		SELECT result_capsule_id FROM job_custody_results
+		WHERE (state IN ('retained','delivered') AND retention_until_milliseconds <= $1)
+		   OR state='expiryPending'
+		ORDER BY retention_until_milliseconds,result_capsule_id
+		LIMIT $2`, int64(now), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	resultIDs := make([]computequeue.JobCapsuleID, 0, limit)
+	for rows.Next() {
+		var resultID uuid.UUID
+		if err := rows.Scan(&resultID); err != nil {
+			return nil, err
+		}
+		resultIDs = append(resultIDs, computequeue.JobCapsuleID(resultID.String()))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	results := make([]jobcustody.ResultRecord, 0, len(resultIDs))
+	for _, resultID := range resultIDs {
+		record, err := loadJobCustodyResult(ctx, store.pool, resultID, false)
+		if errors.Is(err, jobcustody.ErrMissing) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if record.State == jobcustody.ResultExpired ||
+			record.State == jobcustody.ResultReleasePending || record.State == jobcustody.ResultReleased {
+			continue
+		}
+		if record.State != jobcustody.ResultExpiryPending &&
+			(record.State != jobcustody.ResultRetained && record.State != jobcustody.ResultDelivered ||
+				record.Header.RetentionUntil > now) {
+			return nil, jobcustody.ErrConflict
+		}
+		results = append(results, record)
+	}
+	return results, nil
+}
+
 func (store *JobCustodyStore) AcknowledgeResultDelivery(
 	ctx context.Context,
 	resultCapsuleID computequeue.JobCapsuleID,
@@ -647,6 +700,125 @@ func (store *JobCustodyStore) FinalizeResultRelease(
 	return updated, nil
 }
 
+func (store *JobCustodyStore) RequestResultExpiry(
+	ctx context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	startedAt computequeue.Timestamp,
+) (jobcustody.ResultRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || resultCapsuleID.Validate() != nil ||
+		startedAt.Validate() != nil {
+		return jobcustody.ResultRecord{}, jobcustody.ErrInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	record, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, true)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if record.State == jobcustody.ResultExpiryPending || record.State == jobcustody.ResultExpired {
+		if err := tx.Commit(ctx); err != nil {
+			return jobcustody.ResultRecord{}, err
+		}
+		return record, nil
+	}
+	if (record.State != jobcustody.ResultRetained && record.State != jobcustody.ResultDelivered) ||
+		startedAt < record.Header.RetentionUntil ||
+		startedAt < computequeue.Timestamp(record.UpdatedAtMillis) {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	resultUUID := uuid.MustParse(string(resultCapsuleID))
+	tag, err := tx.Exec(ctx, `
+		UPDATE job_custody_results SET
+			state='expiryPending',expiry_started_at_milliseconds=$2,
+			updated_at_milliseconds=$2,stored_at=now()
+		WHERE result_capsule_id=$1 AND state IN ('retained','delivered')`,
+		resultUUID, int64(startedAt),
+	)
+	if err != nil {
+		return jobcustody.ResultRecord{}, mapJobCustodyWriteError(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	if err := advanceJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	updated, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, false)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	return updated, nil
+}
+
+func (store *JobCustodyStore) FinalizeResultExpiry(
+	ctx context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	receiptBytes []byte,
+	expiredAt int64,
+) (jobcustody.ResultRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || resultCapsuleID.Validate() != nil ||
+		len(receiptBytes) == 0 ||
+		len(receiptBytes) > serviceauthority.MaximumJobCustodyResultExpiryReceiptRecordByteCount {
+		return jobcustody.ResultRecord{}, jobcustody.ErrInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	record, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, true)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if record.State == jobcustody.ResultExpired {
+		if err := tx.Commit(ctx); err != nil {
+			return jobcustody.ResultRecord{}, err
+		}
+		return record, nil
+	}
+	if record.State != jobcustody.ResultExpiryPending || expiredAt < record.UpdatedAtMillis ||
+		expiredAt < int64(record.Header.RetentionUntil) {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	resultUUID := uuid.MustParse(string(resultCapsuleID))
+	tag, err := tx.Exec(ctx, `
+		UPDATE job_custody_results SET
+			state='expired',object_path=NULL,expiry_receipt_record=$2,
+			updated_at_milliseconds=$3,stored_at=now()
+		WHERE result_capsule_id=$1 AND state='expiryPending'`,
+		resultUUID, receiptBytes, expiredAt,
+	)
+	if err != nil {
+		return jobcustody.ResultRecord{}, mapJobCustodyWriteError(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	if err := advanceJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	updated, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, false)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	return updated, nil
+}
+
 func loadJobCustodyResult(
 	ctx context.Context,
 	querier jobCustodyQuerier,
@@ -669,6 +841,7 @@ func loadJobCustodyResult(
 			delivery_acknowledged_at_milliseconds,delivery_permit_digest,
 			source_delivery_receipt_digest,release_requested_at_milliseconds,
 			release_permit_digest,source_release_receipt_digest,release_receipt_record,
+			expiry_started_at_milliseconds,expiry_receipt_record,
 			updated_at_milliseconds
 		FROM job_custody_results WHERE result_capsule_id=$1`
 	if forUpdate {
@@ -679,8 +852,8 @@ func loadJobCustodyResult(
 	var protectedSHA, state string
 	var retentionUntil, chunkBytes, chunkCount, byteCount, acceptedAt, committedBytes, updatedAt int64
 	var objectPath, deliveryPermit, sourceDelivery, releasePermit, sourceRelease *string
-	var deliveryAt, releaseAt *int64
-	var receiptBytes, releaseReceiptBytes []byte
+	var deliveryAt, releaseAt, expiryStartedAt *int64
+	var receiptBytes, releaseReceiptBytes, expiryReceiptBytes []byte
 	err = querier.QueryRow(ctx, query, resultUUID).Scan(
 		&storedResult, &claimID, &inputCapsuleID, &assignmentID, &idempotency,
 		&resultSet, &executionReceipt, &routeAuthorityID, &routeWorkerID, &routeKey,
@@ -688,7 +861,7 @@ func loadJobCustodyResult(
 		&protectedSHA, &chunkBytes, &chunkCount, &byteCount, &acceptedAt, &committedBytes,
 		&state, &objectPath, &receiptBytes, &deliveryAt, &deliveryPermit,
 		&sourceDelivery, &releaseAt, &releasePermit, &sourceRelease,
-		&releaseReceiptBytes, &updatedAt,
+		&releaseReceiptBytes, &expiryStartedAt, &expiryReceiptBytes, &updatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return jobcustody.ResultRecord{}, jobcustody.ErrMissing
@@ -722,6 +895,7 @@ func loadJobCustodyResult(
 		AcceptedAt:                   computequeue.Timestamp(acceptedAt), CommittedBytes: committedBytes,
 		State: jobcustody.ResultState(state), CustodyReceiptBytes: bytes.Clone(receiptBytes),
 		ReleaseReceiptBytes: bytes.Clone(releaseReceiptBytes),
+		ExpiryReceiptBytes:  bytes.Clone(expiryReceiptBytes),
 		UpdatedAtMillis:     updatedAt,
 	}
 	if objectPath != nil {
@@ -744,6 +918,9 @@ func loadJobCustodyResult(
 	}
 	if sourceRelease != nil {
 		record.SourceReleaseReceiptDigest = computequeue.Digest(*sourceRelease)
+	}
+	if expiryStartedAt != nil {
+		record.ExpiryStartedAt = computequeue.Timestamp(*expiryStartedAt)
 	}
 	if storedResult.String() != string(resultCapsuleID) || record.ValidateStored() != nil {
 		return jobcustody.ResultRecord{}, jobcustody.ErrInvalid

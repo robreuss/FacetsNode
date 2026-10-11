@@ -360,6 +360,107 @@ func TestResultDeliveryCoordinatorListsAndReadsOnlyOriginalSourceResults(t *test
 	}
 }
 
+func TestResultDeliveryCoordinatorExpiresUndeliveredResultAndResumesAfterUnlink(t *testing.T) {
+	inputContent, _ := temporaryContentStore(t)
+	resultContent, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
+	fixture := newStagingFixture(t, []byte("opaque-expiry-input"), 64)
+	clock := fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)}
+	signer := testJobCustodyReceiptSigner(t)
+	inputCoordinator := &Coordinator{
+		Ledger: ledger, Content: inputContent, Capacity: &memoryCapacityAuthority{},
+		Verifier: fixture.verifier, ReceiptSigner: signer, Clock: clock,
+	}
+	inputHandle, err := inputCoordinator.AdmitAuthorized(
+		t.Context(), fixture.envelopeBytes, fixture.authorization(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inputCoordinator.AppendChunk(
+		t.Context(), inputHandle, 0, fixture.protectedBytes, digestBytes(fixture.protectedBytes),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inputCoordinator.Finalize(t.Context(), inputHandle); err != nil {
+		t.Fatal(err)
+	}
+	claimCoordinator := &WorkerClaimCoordinator{Ledger: ledger, Content: inputContent, Clock: clock}
+	claim, err := claimCoordinator.Claim(
+		t.Context(), verifiedWorkerClaimAuthorization(t, fixture, 1_800_000_060_000),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedResult := []byte("opaque-result-that-will-expire")
+	resultCoordinator := &ResultCoordinator{
+		Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
+		ReceiptSigner: signer, Clock: clock,
+	}
+	handle, err := resultCoordinator.AcceptAuthorized(t.Context(), verifiedWorkerResultAuthorization(
+		t, fixture, claim.Record(), protectedResult, 64, 1_800_000_050_000,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resultCoordinator.AppendChunk(
+		t.Context(), handle, 0, protectedResult, digestBytes(protectedResult),
+	); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := resultCoordinator.Finalize(t.Context(), handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery := &ResultDeliveryCoordinator{
+		Ledger: ledger, Content: resultContent, ReceiptSigner: signer,
+		Clock: fixedJobCustodyClock{time.UnixMilli(int64(retained.Header.RetentionUntil) - 1)},
+	}
+	if completed, err := delivery.ReconcileExpiredResults(t.Context(), 16); err != nil || completed != 0 {
+		t.Fatalf("early expiry completed=%d err=%v", completed, err)
+	}
+	delivery.Clock = fixedJobCustodyClock{time.UnixMilli(int64(retained.Header.RetentionUntil))}
+	ledger.mu.Lock()
+	ledger.failResultExpiryFinalizeOnce = true
+	ledger.mu.Unlock()
+	if completed, err := delivery.ReconcileExpiredResults(t.Context(), 16); !errors.Is(err, ErrUnavailable) || completed != 0 {
+		t.Fatalf("injected expiry completed=%d err=%v", completed, err)
+	}
+	pending, err := ledger.LoadResult(t.Context(), retained.Header.ResultCapsuleID)
+	if err != nil || pending.State != ResultExpiryPending ||
+		pending.ExpiryStartedAt != retained.Header.RetentionUntil {
+		t.Fatalf("pending expiry=%+v err=%v", pending, err)
+	}
+	if _, err := resultContent.OpenObject(
+		retained.Header.ResultCapsuleID, retained.Header.ProtectedObject,
+	); !errors.Is(err, ErrMissing) {
+		t.Fatalf("expiry intent did not unlink result before injected crash: %v", err)
+	}
+	if completed, err := delivery.ReconcileExpiredResults(t.Context(), 16); err != nil || completed != 1 {
+		t.Fatalf("expiry resume completed=%d err=%v", completed, err)
+	}
+	expired, err := ledger.LoadResult(t.Context(), retained.Header.ResultCapsuleID)
+	if err != nil || expired.State != ResultExpired || expired.ObjectPath != "" ||
+		len(expired.ExpiryReceiptBytes) == 0 || expired.DeliveryAcknowledgedAt != 0 {
+		t.Fatalf("expired=%+v err=%v", expired, err)
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyResultExpiryReceipt(expired.ExpiryReceiptBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil || payload.RetentionUntilMilliseconds != int64(retained.Header.RetentionUntil) ||
+		payload.SourceDeliveryReceiptDigest != "" {
+		t.Fatalf("expiry receipt=%+v err=%v", payload, err)
+	}
+	if completed, err := delivery.ReconcileExpiredResults(t.Context(), 16); err != nil || completed != 0 {
+		t.Fatalf("replayed expiry completed=%d err=%v", completed, err)
+	}
+	if _, err := delivery.ReconcileExpiredResults(t.Context(), 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unbounded expiry reconciliation error=%v", err)
+	}
+}
+
 func verifiedWorkerClaimAuthorization(
 	t *testing.T,
 	fixture stagingFixture,
@@ -584,6 +685,36 @@ func (ledger *memoryLedger) ListPendingResultReleases(
 	return results, nil
 }
 
+func (ledger *memoryLedger) ListResultExpiryCandidates(
+	_ context.Context,
+	now computequeue.Timestamp,
+	limit int,
+) ([]ResultRecord, error) {
+	if limit <= 0 || limit > MaximumResultExpiryBatchSize {
+		return nil, ErrInvalid
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	results := make([]ResultRecord, 0, limit)
+	for _, record := range ledger.results {
+		if record.State == ResultExpiryPending ||
+			((record.State == ResultRetained || record.State == ResultDelivered) &&
+				record.Header.RetentionUntil <= now) {
+			results = append(results, cloneResultRecord(record))
+		}
+	}
+	slices.SortFunc(results, func(left, right ResultRecord) int {
+		if left.Header.RetentionUntil != right.Header.RetentionUntil {
+			return cmp.Compare(left.Header.RetentionUntil, right.Header.RetentionUntil)
+		}
+		return cmp.Compare(left.Header.ResultCapsuleID, right.Header.ResultCapsuleID)
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
 func (ledger *memoryLedger) RequestResultRelease(
 	_ context.Context,
 	resultCapsuleID computequeue.JobCapsuleID,
@@ -643,6 +774,62 @@ func (ledger *memoryLedger) FinalizeResultRelease(
 	record.ObjectPath = ""
 	record.ReleaseReceiptBytes = bytes.Clone(receiptBytes)
 	record.UpdatedAtMillis = releasedAt
+	ledger.results[resultCapsuleID] = record
+	return cloneResultRecord(record), nil
+}
+
+func (ledger *memoryLedger) RequestResultExpiry(
+	_ context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	startedAt computequeue.Timestamp,
+) (ResultRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	record, present := ledger.results[resultCapsuleID]
+	if !present {
+		return ResultRecord{}, ErrMissing
+	}
+	if record.State == ResultExpiryPending || record.State == ResultExpired {
+		return cloneResultRecord(record), nil
+	}
+	if (record.State != ResultRetained && record.State != ResultDelivered) ||
+		startedAt < record.Header.RetentionUntil || startedAt < computequeue.Timestamp(record.UpdatedAtMillis) {
+		return ResultRecord{}, ErrConflict
+	}
+	record.State = ResultExpiryPending
+	record.ExpiryStartedAt = startedAt
+	record.UpdatedAtMillis = int64(startedAt)
+	ledger.results[resultCapsuleID] = record
+	return cloneResultRecord(record), nil
+}
+
+func (ledger *memoryLedger) FinalizeResultExpiry(
+	_ context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	receiptBytes []byte,
+	expiredAt int64,
+) (ResultRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	record, present := ledger.results[resultCapsuleID]
+	if !present {
+		return ResultRecord{}, ErrMissing
+	}
+	if record.State == ResultExpired {
+		return cloneResultRecord(record), nil
+	}
+	if record.State != ResultExpiryPending || len(receiptBytes) == 0 ||
+		expiredAt < record.UpdatedAtMillis || expiredAt < int64(record.Header.RetentionUntil) {
+		return ResultRecord{}, ErrConflict
+	}
+	if ledger.failResultExpiryFinalizeOnce {
+		ledger.failResultExpiryFinalizeOnce = false
+		return ResultRecord{}, ErrUnavailable
+	}
+	record.State = ResultExpired
+	record.ObjectPath = ""
+	record.ExpiryReceiptBytes = bytes.Clone(receiptBytes)
+	record.UpdatedAtMillis = expiredAt
 	ledger.results[resultCapsuleID] = record
 	return cloneResultRecord(record), nil
 }

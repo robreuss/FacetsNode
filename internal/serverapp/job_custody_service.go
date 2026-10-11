@@ -53,6 +53,11 @@ func runJobCustodyService(
 	); err != nil {
 		return fmt.Errorf("Job custody pending result release reconciliation failed: %w", err)
 	}
+	if _, err := runtimeState.Delivery.ReconcileExpiredResults(
+		startupContext, jobcustody.MaximumResultExpiryBatchSize,
+	); err != nil {
+		return fmt.Errorf("Job custody expired result reconciliation failed: %w", err)
+	}
 	readiness := func(ctx context.Context) error {
 		readinessContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
@@ -75,7 +80,7 @@ func runJobCustodyService(
 	maintenanceDone := make(chan struct{})
 	go func() {
 		defer close(maintenanceDone)
-		jobCustodyReleaseMaintenanceLoop(
+		jobCustodyResultMaintenanceLoop(
 			maintenanceContext, runtimeState.Delivery, configuration.CleanupPeriod, logger,
 		)
 	}()
@@ -108,7 +113,7 @@ func runJobCustodyService(
 	return nil
 }
 
-func jobCustodyReleaseMaintenanceLoop(
+func jobCustodyResultMaintenanceLoop(
 	ctx context.Context,
 	delivery *jobcustody.ResultDeliveryCoordinator,
 	period time.Duration,
@@ -126,10 +131,33 @@ func jobCustodyReleaseMaintenanceLoop(
 		case <-ticker.C:
 			reconcileContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 			err := reconcileAllPendingJobCustodyReleases(reconcileContext, delivery)
+			if err == nil {
+				err = reconcileAllExpiredJobCustodyResults(reconcileContext, delivery)
+			}
 			cancel()
 			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Warn("Job custody pending result release reconciliation failed", "error", err)
+				logger.Warn("Job custody result maintenance failed", "error", err)
 			}
+		}
+	}
+}
+
+func reconcileAllExpiredJobCustodyResults(
+	ctx context.Context,
+	delivery *jobcustody.ResultDeliveryCoordinator,
+) error {
+	if ctx == nil || delivery == nil {
+		return jobcustody.ErrInvalid
+	}
+	for {
+		completed, err := delivery.ReconcileExpiredResults(
+			ctx, jobcustody.MaximumResultExpiryBatchSize,
+		)
+		if err != nil {
+			return err
+		}
+		if completed < jobcustody.MaximumResultExpiryBatchSize {
+			return nil
 		}
 	}
 }

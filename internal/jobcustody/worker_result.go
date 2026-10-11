@@ -20,6 +20,7 @@ import (
 type ResultState string
 
 const MaximumPendingResultReleaseBatchSize = 256
+const MaximumResultExpiryBatchSize = 256
 
 const (
 	ResultStaging        ResultState = "staging"
@@ -27,6 +28,8 @@ const (
 	ResultDelivered      ResultState = "delivered"
 	ResultReleasePending ResultState = "releasePending"
 	ResultReleased       ResultState = "released"
+	ResultExpiryPending  ResultState = "expiryPending"
+	ResultExpired        ResultState = "expired"
 )
 
 // ResultRecord is the complete clear metadata retained beside one opaque
@@ -52,6 +55,8 @@ type ResultRecord struct {
 	ReleasePermitDigest          computequeue.Digest
 	SourceReleaseReceiptDigest   computequeue.Digest
 	ReleaseReceiptBytes          []byte
+	ExpiryStartedAt              computequeue.Timestamp
+	ExpiryReceiptBytes           []byte
 	UpdatedAtMillis              int64
 }
 
@@ -78,7 +83,15 @@ func (record ResultRecord) ValidateStored() error {
 	hasRelease := record.ReleaseRequestedAt.Validate() == nil &&
 		record.ReleasePermitDigest.Validate() == nil &&
 		record.SourceReleaseReceiptDigest.Validate() == nil
-	if (!noDelivery && !hasDelivery) || (!noRelease && !hasRelease) {
+	noExpiry := record.ExpiryStartedAt == 0 && len(record.ExpiryReceiptBytes) == 0
+	hasPendingExpiry := record.ExpiryStartedAt.Validate() == nil &&
+		record.ExpiryStartedAt >= record.Header.RetentionUntil &&
+		int64(record.ExpiryStartedAt) <= record.UpdatedAtMillis && len(record.ExpiryReceiptBytes) == 0
+	hasFinishedExpiry := record.ExpiryStartedAt.Validate() == nil &&
+		record.ExpiryStartedAt >= record.Header.RetentionUntil &&
+		int64(record.ExpiryStartedAt) <= record.UpdatedAtMillis && len(record.ExpiryReceiptBytes) != 0
+	if (!noDelivery && !hasDelivery) || (!noRelease && !hasRelease) ||
+		(!noExpiry && !hasPendingExpiry && !hasFinishedExpiry) {
 		return ErrInvalid
 	}
 	if hasDelivery && (record.DeliveryAcknowledgedAt < record.AcceptedAt ||
@@ -92,28 +105,28 @@ func (record ResultRecord) ValidateStored() error {
 	switch record.State {
 	case ResultStaging:
 		if record.ObjectPath != "" || len(record.CustodyReceiptBytes) != 0 || !noDelivery || !noRelease ||
-			len(record.ReleaseReceiptBytes) != 0 {
+			len(record.ReleaseReceiptBytes) != 0 || !noExpiry {
 			return ErrInvalid
 		}
 	case ResultRetained:
 		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
 			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
 			validateResultCustodyReceiptRecord(record, nil) != nil || !noDelivery || !noRelease ||
-			len(record.ReleaseReceiptBytes) != 0 {
+			len(record.ReleaseReceiptBytes) != 0 || !noExpiry {
 			return ErrInvalid
 		}
 	case ResultDelivered:
 		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
 			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
 			validateResultCustodyReceiptRecord(record, nil) != nil || !hasDelivery || hasRelease ||
-			len(record.ReleaseReceiptBytes) != 0 {
+			len(record.ReleaseReceiptBytes) != 0 || !noExpiry {
 			return ErrInvalid
 		}
 	case ResultReleasePending:
 		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
 			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
 			validateResultCustodyReceiptRecord(record, nil) != nil || !hasDelivery || !hasRelease ||
-			len(record.ReleaseReceiptBytes) != 0 {
+			len(record.ReleaseReceiptBytes) != 0 || !noExpiry {
 			return ErrInvalid
 		}
 	case ResultReleased:
@@ -121,7 +134,23 @@ func (record ResultRecord) ValidateStored() error {
 			record.ObjectPath != "" || len(record.CustodyReceiptBytes) == 0 ||
 			validateResultCustodyReceiptRecord(record, nil) != nil || !hasDelivery || !hasRelease ||
 			len(record.ReleaseReceiptBytes) == 0 ||
-			validateResultReleaseReceiptRecord(record, nil) != nil {
+			validateResultReleaseReceiptRecord(record, nil) != nil || !noExpiry {
+			return ErrInvalid
+		}
+	case ResultExpiryPending:
+		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
+			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
+			validateResultCustodyReceiptRecord(record, nil) != nil ||
+			(!noDelivery && !hasDelivery) || !noRelease || len(record.ReleaseReceiptBytes) != 0 ||
+			!hasPendingExpiry {
+			return ErrInvalid
+		}
+	case ResultExpired:
+		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
+			record.ObjectPath != "" || len(record.CustodyReceiptBytes) == 0 ||
+			validateResultCustodyReceiptRecord(record, nil) != nil ||
+			(!noDelivery && !hasDelivery) || !noRelease || len(record.ReleaseReceiptBytes) != 0 ||
+			!hasFinishedExpiry || validateResultExpiryReceiptRecord(record, nil) != nil {
 			return ErrInvalid
 		}
 	default:
@@ -155,6 +184,7 @@ type ResultLedger interface {
 type ResultLifecycleLedger interface {
 	ResultLedger
 	ListPendingResultReleases(context.Context, int) ([]ResultRecord, error)
+	ListResultExpiryCandidates(context.Context, computequeue.Timestamp, int) ([]ResultRecord, error)
 	AcknowledgeResultDelivery(
 		context.Context, computequeue.JobCapsuleID, computequeue.Digest,
 		computequeue.Digest, computequeue.Timestamp,
@@ -164,6 +194,12 @@ type ResultLifecycleLedger interface {
 		computequeue.Digest, computequeue.Timestamp,
 	) (ResultRecord, error)
 	FinalizeResultRelease(
+		context.Context, computequeue.JobCapsuleID, []byte, int64,
+	) (ResultRecord, error)
+	RequestResultExpiry(
+		context.Context, computequeue.JobCapsuleID, computequeue.Timestamp,
+	) (ResultRecord, error)
+	FinalizeResultExpiry(
 		context.Context, computequeue.JobCapsuleID, []byte, int64,
 	) (ResultRecord, error)
 }
@@ -399,6 +435,89 @@ func (coordinator *ResultDeliveryCoordinator) ReconcilePendingReleases(
 	return completed, nil
 }
 
+// ReconcileExpiredResults performs only the cleanup already authorized by an
+// elapsed, signed retention bound. Persisting expiryPending before unlinking
+// makes the operation restart-safe and keeps it distinct from source release.
+func (coordinator *ResultDeliveryCoordinator) ReconcileExpiredResults(
+	ctx context.Context,
+	limit int,
+) (int, error) {
+	if coordinator.validate() != nil || ctx == nil || limit <= 0 ||
+		limit > MaximumResultExpiryBatchSize {
+		return 0, ErrInvalid
+	}
+	now := computequeue.Timestamp(coordinator.Clock.Now().UnixMilli())
+	records, err := coordinator.Ledger.ListResultExpiryCandidates(ctx, now, limit)
+	if err != nil {
+		return 0, err
+	}
+	completed := 0
+	for _, record := range records {
+		if record.State == ResultRetained || record.State == ResultDelivered {
+			record, err = coordinator.Ledger.RequestResultExpiry(
+				ctx, record.Header.ResultCapsuleID, now,
+			)
+			if err != nil {
+				if errors.Is(err, ErrConflict) {
+					current, loadErr := coordinator.Ledger.LoadResult(
+						ctx, record.Header.ResultCapsuleID,
+					)
+					if loadErr == nil &&
+						(current.State == ResultReleasePending || current.State == ResultReleased) {
+						completed++
+						continue
+					}
+				}
+				return completed, err
+			}
+		}
+		if _, err := coordinator.finishPendingResultExpiry(ctx, record); err != nil {
+			return completed, err
+		}
+		completed++
+	}
+	return completed, nil
+}
+
+func (coordinator *ResultDeliveryCoordinator) finishPendingResultExpiry(
+	ctx context.Context,
+	record ResultRecord,
+) (ResultRecord, error) {
+	if ctx == nil || record.ValidateStored() != nil || record.State != ResultExpiryPending {
+		return ResultRecord{}, ErrInvalid
+	}
+	if err := coordinator.Content.DeleteObject(
+		record.Header.ResultCapsuleID, record.Header.ProtectedObject,
+	); err != nil {
+		return ResultRecord{}, err
+	}
+	expiredAt := coordinator.Clock.Now().UnixMilli()
+	if expiredAt < int64(record.Header.RetentionUntil) {
+		expiredAt = int64(record.Header.RetentionUntil)
+	}
+	if expiredAt < record.UpdatedAtMillis {
+		expiredAt = record.UpdatedAtMillis
+	}
+	receiptBytes, err := coordinator.signResultExpiryReceipt(record, expiredAt)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	criticalContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	expired, err := coordinator.Ledger.FinalizeResultExpiry(
+		criticalContext, record.Header.ResultCapsuleID, receiptBytes, expiredAt,
+	)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	if expired.ValidateStored() != nil || expired.State != ResultExpired ||
+		!sameResult(expired, record) ||
+		validateResultExpiryReceiptRecord(expired, coordinator.ReceiptSigner) != nil {
+		return ResultRecord{}, ErrInvalid
+	}
+	return expired, nil
+}
+
 func (coordinator *ResultDeliveryCoordinator) finishPendingResultRelease(
 	ctx context.Context,
 	record ResultRecord,
@@ -497,6 +616,9 @@ type ResultReceiptSigner interface {
 	SignJobCustodyResultReleaseReceipt(
 		serviceauthority.JobCustodyResultReleaseReceiptPayload,
 	) (serviceauthority.JobCustodyResultReleaseReceipt, error)
+	SignJobCustodyResultExpiryReceipt(
+		serviceauthority.JobCustodyResultExpiryReceiptPayload,
+	) (serviceauthority.JobCustodyResultExpiryReceipt, error)
 }
 
 type ResultCoordinator struct {
@@ -920,6 +1042,47 @@ func (coordinator *ResultDeliveryCoordinator) signResultReleaseReceipt(
 	return encoded, nil
 }
 
+func (coordinator *ResultDeliveryCoordinator) signResultExpiryReceipt(
+	record ResultRecord,
+	expiredAt int64,
+) ([]byte, error) {
+	if record.ValidateStored() != nil || record.State != ResultExpiryPending ||
+		expiredAt < int64(record.Header.RetentionUntil) || expiredAt < record.UpdatedAtMillis {
+		return nil, ErrInvalid
+	}
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	inputCapsuleID, inputErr := uuid.Parse(string(record.Header.InputCapsuleID))
+	resultCapsuleID, resultErr := uuid.Parse(string(record.Header.ResultCapsuleID))
+	custodyDigest, custodyErr := resultCustodyReceiptReferenceDigest(record)
+	if assignmentErr != nil || inputErr != nil || resultErr != nil || custodyErr != nil {
+		return nil, ErrInvalid
+	}
+	receipt, err := coordinator.ReceiptSigner.SignJobCustodyResultExpiryReceipt(
+		serviceauthority.JobCustodyResultExpiryReceiptPayload{
+			AssignmentID:                 assignmentID,
+			CustodyReceiptDigest:         string(custodyDigest),
+			DeliveryAcknowledgedAtMillis: int64(record.DeliveryAcknowledgedAt),
+			DeploymentID:                 coordinator.ReceiptSigner.DeploymentID(),
+			ExpiredAtMilliseconds:        expiredAt,
+			InputCapsuleID:               inputCapsuleID,
+			Kind:                         serviceauthority.JobCustodyResultExpiryReceiptKind,
+			ResultCapsuleID:              resultCapsuleID,
+			ResultSetDigest:              string(record.Header.ResultSetDigest),
+			RetentionUntilMilliseconds:   int64(record.Header.RetentionUntil),
+			SourceDeliveryReceiptDigest:  string(record.SourceDeliveryReceiptDigest),
+			Version:                      serviceauthority.JobCustodyResultExpiryReceiptVersion,
+		},
+	)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	return encoded, nil
+}
+
 func resultCustodyReceiptReferenceDigest(record ResultRecord) (computequeue.Digest, error) {
 	if len(record.CustodyReceiptBytes) == 0 {
 		return "", ErrInvalid
@@ -978,6 +1141,45 @@ func validateResultReleaseReceiptRecord(record ResultRecord, signer ResultReceip
 	return nil
 }
 
+func validateResultExpiryReceiptRecord(record ResultRecord, signer ResultReceiptSigner) error {
+	if record.State != ResultExpired || len(record.ExpiryReceiptBytes) == 0 {
+		return ErrInvalid
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyResultExpiryReceipt(record.ExpiryReceiptBytes)
+	if err != nil {
+		return ErrInvalid
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil {
+		return ErrInvalid
+	}
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	inputCapsuleID, inputErr := uuid.Parse(string(record.Header.InputCapsuleID))
+	resultCapsuleID, resultErr := uuid.Parse(string(record.Header.ResultCapsuleID))
+	custodyDigest, custodyErr := resultCustodyReceiptReferenceDigest(record)
+	if assignmentErr != nil || inputErr != nil || resultErr != nil || custodyErr != nil ||
+		payload.AssignmentID != assignmentID ||
+		payload.CustodyReceiptDigest != string(custodyDigest) ||
+		payload.DeliveryAcknowledgedAtMillis != int64(record.DeliveryAcknowledgedAt) ||
+		payload.ExpiredAtMilliseconds != record.UpdatedAtMillis ||
+		payload.InputCapsuleID != inputCapsuleID ||
+		payload.ResultCapsuleID != resultCapsuleID ||
+		payload.ResultSetDigest != string(record.Header.ResultSetDigest) ||
+		payload.RetentionUntilMilliseconds != int64(record.Header.RetentionUntil) ||
+		payload.SourceDeliveryReceiptDigest != string(record.SourceDeliveryReceiptDigest) {
+		return ErrInvalid
+	}
+	if signer != nil {
+		if payload.DeploymentID != signer.DeploymentID() ||
+			receipt.Signature.SignerID != signer.DeploymentID() ||
+			receipt.Signature.PublicSigningKeyX963 != signer.PublicSigningKeyX963() ||
+			receipt.Signature.SigningKeyFingerprint != signer.SigningKeyFingerprint() {
+			return ErrInvalid
+		}
+	}
+	return nil
+}
+
 func validateResultCustodyReceiptRecord(record ResultRecord, signer ResultReceiptSigner) error {
 	receipt, err := serviceauthority.DecodeJobCustodyResultReceipt(record.CustodyReceiptBytes)
 	if err != nil {
@@ -1013,10 +1215,15 @@ func validateResultCustodyReceiptRecord(record ResultRecord, signer ResultReceip
 	if record.State == ResultRetained && committedAt != record.UpdatedAtMillis {
 		return ErrInvalid
 	}
-	if record.State != ResultRetained &&
-		(committedAt > int64(record.DeliveryAcknowledgedAt) ||
-			record.DeliveryAcknowledgedAt > computequeue.Timestamp(record.UpdatedAtMillis)) {
-		return ErrInvalid
+	if record.State != ResultRetained {
+		if record.DeliveryAcknowledgedAt != 0 {
+			if committedAt > int64(record.DeliveryAcknowledgedAt) ||
+				record.DeliveryAcknowledgedAt > computequeue.Timestamp(record.UpdatedAtMillis) {
+				return ErrInvalid
+			}
+		} else if record.State != ResultExpiryPending && record.State != ResultExpired {
+			return ErrInvalid
+		}
 	}
 	if signer != nil {
 		if payload.DeploymentID != signer.DeploymentID() ||
@@ -1032,5 +1239,6 @@ func validateResultCustodyReceiptRecord(record ResultRecord, signer ResultReceip
 func cloneResultRecord(record ResultRecord) ResultRecord {
 	record.CustodyReceiptBytes = bytes.Clone(record.CustodyReceiptBytes)
 	record.ReleaseReceiptBytes = bytes.Clone(record.ReleaseReceiptBytes)
+	record.ExpiryReceiptBytes = bytes.Clone(record.ExpiryReceiptBytes)
 	return record
 }

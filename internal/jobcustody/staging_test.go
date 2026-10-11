@@ -487,6 +487,7 @@ type memoryLedger struct {
 	resultChunks                  map[computequeue.JobCapsuleID]map[int64]AppendRequest
 	failAppendCommitOnce          bool
 	failResultReleaseFinalizeOnce bool
+	failResultExpiryFinalizeOnce  bool
 }
 
 func newMemoryLedger() *memoryLedger {
