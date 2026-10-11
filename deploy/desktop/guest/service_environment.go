@@ -12,6 +12,8 @@ import (
 // projects or paths. Each existing deployment retains its own named volumes.
 const deviceProject = "fbd-device-sync"
 const sharedProject = "fbd-shared-spaces"
+const jobCustodyProject = "fbd-job-custody"
+const storageCapacityProject = "fbd-storage-capacity"
 
 func serviceEnvironment(root, kit string, identity applianceIdentity, images map[string]string, candidate bool) (map[string]string, map[string]string, error) {
 	common := map[string]string{"FBD_RECIPE_DIRECTORY": filepath.Join(kit, "recipes"), "FBD_CANDIDATE_MAINTENANCE": strconv.FormatBool(candidate)}
@@ -58,6 +60,44 @@ func serviceEnvironment(root, kit string, identity applianceIdentity, images map
 		}
 	}
 	return device, shared, nil
+}
+
+// dormantRecipeEnvironment supplies disposable values only for rendering and
+// auditing the packaged recipes. It does not create service authority, pool
+// identity, admission trust, or an activation-ready runtime configuration.
+func dormantRecipeEnvironment(root, kit string, images map[string]string) (map[string]string, map[string]string, error) {
+	for _, name := range []string{"postgres", "caddy", "job-custody", "storage-capacity-authority"} {
+		image := images[name]
+		if !strings.HasPrefix(image, "sha256:") || !validHex(strings.TrimPrefix(image, "sha256:"), 32) {
+			return nil, nil, errors.New("unverified dormant recipe image")
+		}
+	}
+	configuration := filepath.Join(root, "configuration")
+	common := map[string]string{
+		"FACETS_BOX_DATA_ROOT":                  root,
+		"FACETS_STORAGE_CAPACITY_POOL_ID":       "00000000-0000-4000-8000-000000000001",
+		"FACETS_STORAGE_CAPACITY_TLS_DIRECTORY": filepath.Join(configuration, "storage-capacity", "tls"),
+		"FBD_CADDY_IMAGE":                       images["caddy"],
+		"FBD_POSTGRES_IMAGE":                    images["postgres"],
+		"FBD_RECIPE_DIRECTORY":                  filepath.Join(kit, "recipes"),
+	}
+	job, storage := map[string]string{}, map[string]string{}
+	for key, value := range common {
+		job[key], storage[key] = value, value
+	}
+	job["FBD_JOB_CUSTODY_IMAGE"] = images["job-custody"]
+	job["FACETS_JOB_CUSTODY_POSTGRES_PASSWORD"] = "build-validation-only"
+	job["FACETS_JOB_CUSTODY_PUBLIC_URL"] = "https://validation.invalid/facetsbox/job-custody"
+	job["FACETS_JOB_CUSTODY_DEPLOYMENT_ID"] = "00000000-0000-4000-8000-000000000002"
+	job["FACETS_JOB_CUSTODY_AUTHORITY_KEY_DIRECTORY"] = filepath.Join(configuration, "job-custody", "keys")
+	job["FACETS_JOB_CUSTODY_AUTHORITY_POLICY_DIRECTORY"] = filepath.Join(configuration, "job-custody", "policy")
+	job["FACETS_JOB_CUSTODY_AUTHORITY_STATE_DIRECTORY"] = filepath.Join(configuration, "job-custody", "state")
+	job["FACETS_JOB_CUSTODY_ADMISSION_DIRECTORY"] = filepath.Join(configuration, "job-custody", "admission")
+
+	storage["FBD_STORAGE_CAPACITY_AUTHORITY_IMAGE"] = images["storage-capacity-authority"]
+	storage["FACETS_STORAGE_CAPACITY_POSTGRES_PASSWORD"] = "build-validation-only"
+	storage["FACETS_STORAGE_CAPACITY_AUTHORITY_CONFIG_DIRECTORY"] = filepath.Join(configuration, "storage-capacity")
+	return job, storage, nil
 }
 
 func encodeEnvironment(values map[string]string) ([]byte, error) {

@@ -388,8 +388,9 @@ func verifyPortableServiceKit() (portableServiceSummary, error) {
 func verifyPortableDormancy(ctx context.Context) error {
 	for _, path := range []string{
 		dataRoot + "/configuration", dataRoot + "/service-activation.json",
+		dataRoot + "/job-custody", dataRoot + "/capacity-pool",
 		dataRoot + "/fbd-device-sync-onion-identity.json", dataRoot + "/fbd-shared-spaces-onion-identity.json",
-		"/opt/fbd/device-sync.env", "/opt/fbd/shared-spaces.env",
+		"/opt/fbd/device-sync.env", "/opt/fbd/shared-spaces.env", "/opt/fbd/job-custody.env", "/opt/fbd/storage-capacity.env",
 	} {
 		if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
 			return errors.New("durable service authority exists before activation")
@@ -417,7 +418,7 @@ func verifyPortableDormancy(ctx context.Context) error {
 }
 
 func portableRuntimeFixture(name string) bool {
-	for _, prefix := range []string{deviceProject, sharedProject, "fbd-validation-", "fbd-build-onion-"} {
+	for _, prefix := range []string{deviceProject, sharedProject, jobCustodyProject, storageCapacityProject, "fbd-validation-", "fbd-build-onion-"} {
 		if strings.HasSuffix(prefix, "-") && strings.HasPrefix(name, prefix) {
 			return true
 		}

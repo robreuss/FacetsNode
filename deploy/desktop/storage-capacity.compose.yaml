@@ -1,0 +1,21 @@
+# Portable appliance overlay. Shipping and rendering this recipe does not
+# initialize a physical pool or start the authority.
+services:
+  postgres:
+    image: ${FBD_POSTGRES_IMAGE:?verified local image required}
+    pull_policy: never
+    restart: "no"
+  storage-capacity-authority:
+    image: ${FBD_STORAGE_CAPACITY_AUTHORITY_IMAGE:?verified local image required}
+    build: !reset null
+    pull_policy: never
+    restart: "no"
+  initialize:
+    image: ${FBD_STORAGE_CAPACITY_AUTHORITY_IMAGE:?verified local image required}
+    build: !reset null
+    pull_policy: never
+    restart: "no"
+  storage-capacity:
+    image: ${FBD_CADDY_IMAGE:?verified local image required}
+    pull_policy: never
+    restart: "no"

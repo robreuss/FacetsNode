@@ -324,14 +324,20 @@ func composeCommandAt(ctx context.Context, project, kit, environmentDirectory st
 }
 
 func composeCommandNamed(ctx context.Context, kindProject, project, kit, environmentDirectory string, args ...string) ([]byte, error) {
-	kind := "device-sync"
-	if kindProject == sharedProject {
+	kind, suffixes := "device-sync", []string{".compose.yaml", ".onion.yaml", ".desktop.yaml"}
+	switch kindProject {
+	case deviceProject:
+	case sharedProject:
 		kind = "shared-spaces"
-	} else if kindProject != deviceProject {
+	case jobCustodyProject:
+		kind, suffixes = "job-custody", []string{".compose.yaml", ".desktop.yaml"}
+	case storageCapacityProject:
+		kind, suffixes = "storage-capacity", []string{".compose.yaml", ".desktop.yaml"}
+	default:
 		return nil, errors.New("unknown deployment")
 	}
 	base := []string{"compose", "--project-name", project, "--env-file", filepath.Join(environmentDirectory, kind+".env")}
-	for _, suffix := range []string{".compose.yaml", ".onion.yaml", ".desktop.yaml"} {
+	for _, suffix := range suffixes {
 		base = append(base, "-f", filepath.Join(kit, "recipes", kind+suffix))
 	}
 	return privateOutput(ctx, "/usr/bin/docker", append(base, args...)...)
@@ -348,6 +354,15 @@ func validateRecipesAt(ctx context.Context, kit, environmentDirectory string, im
 			return fmt.Errorf("render %s: %w", project, err)
 		}
 		if err = validateComposeBoundary(b, project, images); err != nil {
+			return err
+		}
+	}
+	for _, project := range []string{jobCustodyProject, storageCapacityProject} {
+		b, err := composeCommandAt(ctx, project, kit, environmentDirectory, "config", "--format", "json")
+		if err != nil {
+			return fmt.Errorf("render dormant %s: %w", project, err)
+		}
+		if err = validateDormantComposeBoundary(b, project, project, images, environmentDirectory, kit); err != nil {
 			return err
 		}
 	}
@@ -378,6 +393,25 @@ func validateRecipesAt(ctx context.Context, kit, environmentDirectory string, im
 			}
 		}
 	}
+	b, err := privateOutput(ctx, "/usr/bin/docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges=true", "--entrypoint", "/usr/bin/caddy", "--mount", "type=bind,src="+filepath.Join(kit, "recipes")+",dst=/etc/fbd,readonly", caddy, "adapt", "--config", "/etc/fbd/StorageCapacity.Caddyfile", "--adapter", "caddyfile")
+	if err != nil {
+		return fmt.Errorf("validate Storage Capacity ingress recipe: %w", err)
+	}
+	var capacityConfig struct {
+		Apps struct {
+			HTTP struct {
+				Servers map[string]struct{ Listen []string }
+			}
+		}
+	}
+	if json.Unmarshal(b, &capacityConfig) != nil || len(capacityConfig.Apps.HTTP.Servers) != 1 {
+		return errors.New("invalid Storage Capacity ingress configuration")
+	}
+	for _, server := range capacityConfig.Apps.HTTP.Servers {
+		if len(server.Listen) != 1 || server.Listen[0] != ":8443" {
+			return errors.New("unexpected Storage Capacity listener")
+		}
+	}
 	return nil
 }
 
@@ -401,6 +435,19 @@ func validateBuiltServiceKit(ctx context.Context, work string, release serviceRe
 		return e
 	}
 	for name, env := range map[string]map[string]string{"device-sync": d, "shared-spaces": g} {
+		b, e := encodeEnvironment(env)
+		if e != nil {
+			return e
+		}
+		if e = os.WriteFile(filepath.Join(root, name+".env"), b, 0600); e != nil {
+			return e
+		}
+	}
+	j, s, e := dormantRecipeEnvironment(root, filepath.Join(work, "kit"), images)
+	if e != nil {
+		return e
+	}
+	for name, env := range map[string]map[string]string{"job-custody": j, "storage-capacity": s} {
 		b, e := encodeEnvironment(env)
 		if e != nil {
 			return e

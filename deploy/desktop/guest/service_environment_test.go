@@ -49,3 +49,24 @@ func TestEnvironmentRejectsInterpolationAndNewline(t *testing.T) {
 		}
 	}
 }
+
+func TestDormantRecipeEnvironmentDoesNotCreateActivationAuthority(t *testing.T) {
+	images := dormantFixtureImages()
+	job, storage, err := dormantRecipeEnvironment("/retained", "/kit", images)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job["FBD_JOB_CUSTODY_IMAGE"] != images["job-custody"] || storage["FBD_STORAGE_CAPACITY_AUTHORITY_IMAGE"] != images["storage-capacity-authority"] {
+		t.Fatal("dormant recipe did not bind exact verified images")
+	}
+	for _, environment := range []map[string]string{job, storage} {
+		for key := range environment {
+			if strings.Contains(key, "SIGNING_KEY") || strings.Contains(key, "ADMISSION_KEYS") || strings.Contains(key, "PEER_REGISTRY") {
+				t.Fatalf("render-only environment created authority material: %s", key)
+			}
+		}
+	}
+	if _, err = encodeEnvironment(job); err != nil {
+		t.Fatal(err)
+	}
+}

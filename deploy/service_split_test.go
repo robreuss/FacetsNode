@@ -220,8 +220,21 @@ func TestPortableServiceKitIncludesDormantComputeQueueServices(t *testing.T) {
 		`cp "$build_root/source/deploy/job-custody/compose.yaml" "$kit/recipes/job-custody.compose.yaml"`,
 		`cp "$build_root/source/deploy/storage-capacity/compose.yaml" "$kit/recipes/storage-capacity.compose.yaml"`,
 		`cp "$build_root/source/deploy/storage-capacity/Capacity.Caddyfile" "$kit/recipes/StorageCapacity.Caddyfile"`,
+		`cp "$recipe_root/job-custody.compose.yaml" "$kit/recipes/job-custody.desktop.yaml"`,
+		`cp "$recipe_root/storage-capacity.compose.yaml" "$kit/recipes/storage-capacity.desktop.yaml"`,
 		`jobCustodyRuntime:"not-run"`,
 		`storageCapacityRuntime:"not-run"`,
+	})
+
+	jobOverlay := readDeploymentFile(t, "desktop/job-custody.compose.yaml")
+	storageOverlay := readDeploymentFile(t, "desktop/storage-capacity.compose.yaml")
+	assertContainsAll(t, "portable Job Custody overlay", jobOverlay, []string{
+		"FBD_POSTGRES_IMAGE", "FBD_JOB_CUSTODY_IMAGE", "build: !reset null",
+		"pull_policy: never", `restart: "no"`,
+	})
+	assertContainsAll(t, "portable Storage Capacity overlay", storageOverlay, []string{
+		"FBD_POSTGRES_IMAGE", "FBD_STORAGE_CAPACITY_AUTHORITY_IMAGE", "FBD_CADDY_IMAGE",
+		"build: !reset null", "pull_policy: never", `restart: "no"`,
 	})
 }
 

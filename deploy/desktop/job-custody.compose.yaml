@@ -1,0 +1,12 @@
+# Portable appliance overlay. Shipping and rendering this recipe does not
+# create Job Custody authority or start the service.
+services:
+  job-custody-postgres:
+    image: ${FBD_POSTGRES_IMAGE:?verified local image required}
+    pull_policy: never
+    restart: "no"
+  job-custody:
+    image: ${FBD_JOB_CUSTODY_IMAGE:?verified local image required}
+    build: !reset null
+    pull_policy: never
+    restart: "no"

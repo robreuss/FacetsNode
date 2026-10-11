@@ -27,7 +27,7 @@ func TestPortableAcceptanceRequiresDormantRuntime(t *testing.T) {
 }
 
 func TestPortableRuntimeFixtureNames(t *testing.T) {
-	for _, name := range []string{"fbd-device-sync_server_1", "fbd-shared-spaces-postgres", "fbd-validation-device-test_postgres", "fbd-build-onion-test"} {
+	for _, name := range []string{"fbd-device-sync_server_1", "fbd-shared-spaces-postgres", "fbd-job-custody_job-custody_1", "fbd-storage-capacity-postgres", "fbd-validation-device-test_postgres", "fbd-build-onion-test"} {
 		if !portableRuntimeFixture(name) {
 			t.Fatalf("fixture %q was not detected", name)
 		}

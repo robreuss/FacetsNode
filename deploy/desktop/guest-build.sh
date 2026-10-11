@@ -44,6 +44,8 @@ cp "$build_root/source/deploy/onion/device-sync.compose.yaml" "$kit/recipes/devi
 cp "$build_root/source/deploy/onion/shared-spaces.compose.yaml" "$kit/recipes/shared-spaces.onion.yaml"
 cp "$recipe_root/device-sync.compose.yaml" "$kit/recipes/device-sync.desktop.yaml"
 cp "$recipe_root/shared-spaces.compose.yaml" "$kit/recipes/shared-spaces.desktop.yaml"
+cp "$recipe_root/job-custody.compose.yaml" "$kit/recipes/job-custody.desktop.yaml"
+cp "$recipe_root/storage-capacity.compose.yaml" "$kit/recipes/storage-capacity.desktop.yaml"
 cp "$recipe_root"/*.Caddyfile "$kit/recipes/"
 # The builder is infrastructure, with a finite CPU/memory envelope. No ordinary
 # Facets container is created here and no workload receives the Docker socket.
