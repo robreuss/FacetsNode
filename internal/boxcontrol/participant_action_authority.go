@@ -15,17 +15,18 @@ const participantActionProofDomain = "Facets Box participant action proof v1\x00
 type BoxParticipantAction string
 
 const (
-	ParticipantActionAdvertiseWorker          BoxParticipantAction = "worker.advertise"
-	ParticipantActionUpdateWorkerAvailability BoxParticipantAction = "worker.availability.update"
-	ParticipantActionWithdrawWorker           BoxParticipantAction = "worker.withdraw"
-	ParticipantActionRequestWorkerAccess      BoxParticipantAction = "worker.access.request"
-	ParticipantActionGrantWorkerAccess        BoxParticipantAction = "worker.access.grant"
-	ParticipantActionRevokeWorkerAccess       BoxParticipantAction = "worker.access.revoke"
-	ParticipantActionEnqueueWorkerOperation   BoxParticipantAction = "worker.operation.enqueue"
-	ParticipantActionClaimWorkerOperation     BoxParticipantAction = "worker.operation.claim"
-	ParticipantActionRespondWorkerOperation   BoxParticipantAction = "worker.operation.respond"
-	ParticipantActionCancelWorkerOperation    BoxParticipantAction = "worker.operation.cancel"
-	ParticipantActionIssueJobCustodyPermit    BoxParticipantAction = "job-custody.permit.issue"
+	ParticipantActionAdvertiseWorker                  BoxParticipantAction = "worker.advertise"
+	ParticipantActionUpdateWorkerAvailability         BoxParticipantAction = "worker.availability.update"
+	ParticipantActionWithdrawWorker                   BoxParticipantAction = "worker.withdraw"
+	ParticipantActionRequestWorkerAccess              BoxParticipantAction = "worker.access.request"
+	ParticipantActionGrantWorkerAccess                BoxParticipantAction = "worker.access.grant"
+	ParticipantActionRevokeWorkerAccess               BoxParticipantAction = "worker.access.revoke"
+	ParticipantActionEnqueueWorkerOperation           BoxParticipantAction = "worker.operation.enqueue"
+	ParticipantActionClaimWorkerOperation             BoxParticipantAction = "worker.operation.claim"
+	ParticipantActionRespondWorkerOperation           BoxParticipantAction = "worker.operation.respond"
+	ParticipantActionCancelWorkerOperation            BoxParticipantAction = "worker.operation.cancel"
+	ParticipantActionIssueJobCustodyPermit            BoxParticipantAction = "job-custody.permit.issue"
+	ParticipantActionIssueJobCustodyWorkerClaimPermit BoxParticipantAction = "job-custody.worker-claim-permit.issue"
 )
 
 func (action BoxParticipantAction) valid() bool {
@@ -40,7 +41,8 @@ func (action BoxParticipantAction) valid() bool {
 		ParticipantActionClaimWorkerOperation,
 		ParticipantActionRespondWorkerOperation,
 		ParticipantActionCancelWorkerOperation,
-		ParticipantActionIssueJobCustodyPermit:
+		ParticipantActionIssueJobCustodyPermit,
+		ParticipantActionIssueJobCustodyWorkerClaimPermit:
 		return true
 	default:
 		return false

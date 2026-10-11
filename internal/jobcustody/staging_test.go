@@ -301,6 +301,10 @@ func testAdmissionAuthorization(
 			string(header.CapsuleID),
 			string(header.IdempotencyKey),
 		),
+		authorityID: uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+		workerCapabilitiesDigest: computequeue.SHA256Digest(
+			"job-custody-staging-tests", "worker-capabilities",
+		),
 	}
 }
 
@@ -474,6 +478,7 @@ type memoryLedger struct {
 	records              map[computequeue.JobCapsuleID]AdmissionRecord
 	idempotency          map[computequeue.Digest]computequeue.JobCapsuleID
 	chunks               map[computequeue.JobCapsuleID]map[int64]AppendRequest
+	claims               map[uuid.UUID]WorkerClaimRecord
 	failAppendCommitOnce bool
 }
 
@@ -482,7 +487,105 @@ func newMemoryLedger() *memoryLedger {
 		records:     make(map[computequeue.JobCapsuleID]AdmissionRecord),
 		idempotency: make(map[computequeue.Digest]computequeue.JobCapsuleID),
 		chunks:      make(map[computequeue.JobCapsuleID]map[int64]AppendRequest),
+		claims:      make(map[uuid.UUID]WorkerClaimRecord),
 	}
+}
+
+func (ledger *memoryLedger) ClaimNext(
+	_ context.Context,
+	authorization WorkerClaimAuthorization,
+) (WorkerClaimRecord, AdmissionRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	payload := authorization.Payload()
+	if existing, present := ledger.claims[payload.ClaimID]; present {
+		admission := ledger.records[existing.CapsuleID]
+		if !sameMemoryWorkerClaimAuthorization(existing, admission, authorization) {
+			return WorkerClaimRecord{}, AdmissionRecord{}, ErrConflict
+		}
+		return existing, cloneAdmission(admission), nil
+	}
+	for capsuleID, admission := range ledger.records {
+		if admission.State != AdmissionRetained || admission.RouteAuthorityID != payload.AuthorityID ||
+			admission.Header.RouteRecipientWorkerID != payload.RouteRecipientWorkerID ||
+			admission.Header.RouteRecipientKeyFingerprint != payload.RouteRecipientKeyFingerprint ||
+			admission.WorkerCapabilitiesDigest != payload.WorkerCapabilitiesDigest ||
+			payload.ExpiresAt > admission.Header.RetentionUntil {
+			continue
+		}
+		active := false
+		for _, claim := range ledger.claims {
+			if claim.CapsuleID == capsuleID && claim.State == WorkerClaimClaimed {
+				active = true
+				break
+			}
+		}
+		if active {
+			continue
+		}
+		record := WorkerClaimRecord{
+			ClaimID: payload.ClaimID, CapsuleID: capsuleID,
+			RouteAuthorityID:             payload.AuthorityID,
+			RouteRecipientWorkerID:       payload.RouteRecipientWorkerID,
+			RouteRecipientKeyFingerprint: payload.RouteRecipientKeyFingerprint,
+			WorkerCapabilitiesDigest:     payload.WorkerCapabilitiesDigest,
+			WorkerOwnerAuthorityDigest:   payload.WorkerOwnerAuthorityDigest,
+			ClaimPermitDigest:            authorization.PermitDigest(),
+			ClaimedAt:                    payload.IssuedAt, LeaseExpiresAt: payload.ExpiresAt,
+			State: WorkerClaimClaimed, UpdatedAtMillis: int64(payload.IssuedAt),
+		}
+		ledger.claims[payload.ClaimID] = record
+		return record, cloneAdmission(admission), nil
+	}
+	return WorkerClaimRecord{}, AdmissionRecord{}, ErrNoWork
+}
+
+func (ledger *memoryLedger) RenewClaim(
+	_ context.Context,
+	authorization WorkerClaimAuthorization,
+) (WorkerClaimRecord, AdmissionRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	payload := authorization.Payload()
+	record, present := ledger.claims[payload.ClaimID]
+	if !present {
+		return WorkerClaimRecord{}, AdmissionRecord{}, ErrMissing
+	}
+	admission := ledger.records[record.CapsuleID]
+	if sameMemoryWorkerClaimAuthorization(record, admission, authorization) {
+		return record, cloneAdmission(admission), nil
+	}
+	if record.State != WorkerClaimClaimed || record.RouteAuthorityID != payload.AuthorityID ||
+		record.RouteRecipientWorkerID != payload.RouteRecipientWorkerID ||
+		record.RouteRecipientKeyFingerprint != payload.RouteRecipientKeyFingerprint ||
+		record.WorkerCapabilitiesDigest != payload.WorkerCapabilitiesDigest ||
+		record.WorkerOwnerAuthorityDigest != payload.WorkerOwnerAuthorityDigest ||
+		payload.ExpiresAt <= record.LeaseExpiresAt || payload.ExpiresAt > admission.Header.RetentionUntil {
+		return WorkerClaimRecord{}, AdmissionRecord{}, ErrConflict
+	}
+	record.ClaimPermitDigest = authorization.PermitDigest()
+	record.LeaseExpiresAt = payload.ExpiresAt
+	record.UpdatedAtMillis++
+	ledger.claims[payload.ClaimID] = record
+	return record, cloneAdmission(admission), nil
+}
+
+func sameMemoryWorkerClaimAuthorization(
+	record WorkerClaimRecord,
+	admission AdmissionRecord,
+	authorization WorkerClaimAuthorization,
+) bool {
+	payload := authorization.Payload()
+	return record.CapsuleID == admission.Header.CapsuleID &&
+		record.RouteAuthorityID == admission.RouteAuthorityID &&
+		record.WorkerCapabilitiesDigest == admission.WorkerCapabilitiesDigest &&
+		record.ClaimID == payload.ClaimID && record.RouteAuthorityID == payload.AuthorityID &&
+		record.RouteRecipientWorkerID == payload.RouteRecipientWorkerID &&
+		record.RouteRecipientKeyFingerprint == payload.RouteRecipientKeyFingerprint &&
+		record.WorkerCapabilitiesDigest == payload.WorkerCapabilitiesDigest &&
+		record.WorkerOwnerAuthorityDigest == payload.WorkerOwnerAuthorityDigest &&
+		record.ClaimPermitDigest == authorization.PermitDigest() &&
+		record.LeaseExpiresAt == payload.ExpiresAt
 }
 
 func (ledger *memoryLedger) ReserveAdmission(

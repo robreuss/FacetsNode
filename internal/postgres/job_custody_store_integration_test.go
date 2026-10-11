@@ -2,6 +2,8 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -38,7 +40,7 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 	}
 	defer pool.Close()
 	if _, err := pool.Exec(ctx, `
-		DROP TABLE IF EXISTS job_custody_chunks,job_custody_admissions,
+		DROP TABLE IF EXISTS job_custody_worker_claims,job_custody_chunks,job_custody_admissions,
 			job_custody_ledger CASCADE;
 		DROP TABLE IF EXISTS facets_job_custody_schema_migrations;
 	`); err != nil {
@@ -130,6 +132,37 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 	if err := retryFinalization.Abort(ctx); err != nil {
 		t.Fatal(err)
 	}
+	claimID := uuid.MustParse("55555555-5555-4555-8555-555555555555")
+	_, workerPermitKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimAuthorization := postgresWorkerClaimAuthorization(
+		t, record, claimID, 1_800_000_050_000, workerPermitKey,
+	)
+	claim, claimedAdmission, err := reopened.ClaimNext(ctx, claimAuthorization)
+	if err != nil || claim.ClaimID != claimID ||
+		claimedAdmission.Header.CapsuleID != record.Header.CapsuleID {
+		t.Fatalf("claim=%+v admission=%+v err=%v", claim, claimedAdmission, err)
+	}
+	if replay, _, err := reopened.ClaimNext(ctx, claimAuthorization); err != nil || replay != claim {
+		t.Fatalf("claim replay=%+v err=%v", replay, err)
+	}
+	renewalAuthorization := postgresWorkerClaimAuthorization(
+		t, record, claimID, 1_800_000_070_000, workerPermitKey,
+	)
+	renewed, _, err := reopened.RenewClaim(ctx, renewalAuthorization)
+	if err != nil || renewed.LeaseExpiresAt != 1_800_000_070_000 ||
+		renewed.ClaimPermitDigest == claim.ClaimPermitDigest {
+		t.Fatalf("renewed=%+v err=%v", renewed, err)
+	}
+	secondAuthorization := postgresWorkerClaimAuthorization(
+		t, record, uuid.MustParse("66666666-6666-4666-8666-666666666666"),
+		1_800_000_050_000, workerPermitKey,
+	)
+	if _, _, err := reopened.ClaimNext(ctx, secondAuthorization); !errors.Is(err, jobcustody.ErrNoWork) {
+		t.Fatalf("active claim allowed duplicate assignment: %v", err)
+	}
 
 	quotaRecord := postgresJobCustodyAdmission(
 		t, []byte("this-admission-exceeds-the-total-byte-quota"), 8,
@@ -145,6 +178,60 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 	if _, err := reopened.LoadAdmission(ctx, record.Header.CapsuleID); !errors.Is(err, jobcustody.ErrInvalid) {
 		t.Fatalf("incomplete durable chunk ledger error=%v", err)
 	}
+}
+
+func postgresWorkerClaimAuthorization(
+	t *testing.T,
+	record jobcustody.AdmissionRecord,
+	claimID uuid.UUID,
+	expiresAt computequeue.Timestamp,
+	privateKey ed25519.PrivateKey,
+) jobcustody.WorkerClaimAuthorization {
+	t.Helper()
+	if privateKey == nil {
+		_, generated, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		privateKey = generated
+	}
+	authorityID := record.RouteAuthorityID
+	payload := jobcustody.WorkerClaimPermitPayload{
+		AuthorityID: authorityID, ClaimID: claimID,
+		ExpiresAt: expiresAt, IssuedAt: 1_800_000_000_009,
+		PermitID:                     uuid.New(),
+		RouteRecipientKeyFingerprint: record.Header.RouteRecipientKeyFingerprint,
+		RouteRecipientWorkerID:       record.Header.RouteRecipientWorkerID,
+		Version:                      jobcustody.WorkerClaimPermitVersion,
+		WorkerCapabilitiesDigest:     record.WorkerCapabilitiesDigest,
+		WorkerOwnerAuthorityDigest: computequeue.SHA256Digest(
+			"postgres-job-custody-worker-owner", string(record.Header.RouteRecipientWorkerID),
+		),
+	}
+	signer, err := jobcustody.NewWorkerClaimPermitSigner(authorityID, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit, err := signer.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	key, err := jobcustody.NewAdmissionPermitVerificationKey(authorityID, publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := jobcustody.NewAdmissionPermitVerifier(
+		[]jobcustody.AdmissionPermitVerificationKey{key},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := verifier.VerifyWorkerClaim(permit, 1_800_000_000_010)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authorization
 }
 
 type fixedPostgresJobCustodyClock struct{ value time.Time }
@@ -197,6 +284,10 @@ func postgresJobCustodyAdmission(
 		EnvelopeBytes: envelopeBytes, Header: header, ExpectedSigner: signer,
 		AdmissionPermitDigest: computequeue.SHA256Digest(
 			"postgres-job-custody-permit", string(capsuleID),
+		),
+		RouteAuthorityID: uuid.MustParse("8c000000-0000-0000-0000-000000000001"),
+		WorkerCapabilitiesDigest: computequeue.SHA256Digest(
+			"postgres-job-custody-worker-capabilities", string(capsuleID),
 		),
 		AcceptedAt: 1_800_000_000_010, State: jobcustody.AdmissionStaging,
 		UpdatedAtMillis: 1_800_000_000_010,

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -14,15 +15,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/robreuss/FacetsNode/internal/carriage"
 	"github.com/robreuss/FacetsNode/internal/computequeue"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
 const (
-	JobCustodyChunkSectionKind    byte = 65
-	MaximumJobCustodyControlBytes      = 160 * 1024
-	JobCustodyCarriageContentType      = "application/vnd.facets.carriage"
+	JobCustodyChunkSectionKind       byte = 65
+	JobCustodyWorkerChunkSectionKind byte = 66
+	MaximumJobCustodyControlBytes         = 160 * 1024
+	JobCustodyCarriageContentType         = "application/vnd.facets.carriage"
 )
 
 type HTTPAdmissionRequest struct {
@@ -32,6 +36,35 @@ type HTTPAdmissionRequest struct {
 
 type HTTPAuthorizationRequest struct {
 	Permit SignedAdmissionPermit `json:"permit"`
+}
+
+type HTTPWorkerClaimRequest struct {
+	Permit SignedWorkerClaimPermit `json:"permit"`
+}
+
+type HTTPWorkerClaimStatus struct {
+	AssignmentID    computequeue.AssignmentID                        `json:"assignmentID"`
+	CapsuleID       computequeue.JobCapsuleID                        `json:"capsuleID"`
+	ClaimID         uuid.UUID                                        `json:"claimID"`
+	LeaseExpiresAt  computequeue.Timestamp                           `json:"leaseExpiresAt"`
+	ProtectedObject computequeue.JobCapsuleProtectedObjectDescriptor `json:"protectedObject"`
+	State           WorkerClaimState                                 `json:"state"`
+}
+
+type HTTPWorkerChunkHeader struct {
+	CapsuleID   computequeue.JobCapsuleID `json:"capsuleID"`
+	ChunkIndex  int64                     `json:"chunkIndex"`
+	ChunkSHA256 computequeue.Digest       `json:"chunkSHA256"`
+	ClaimID     uuid.UUID                 `json:"claimID"`
+	Version     int                       `json:"version"`
+}
+
+func (value HTTPWorkerChunkHeader) Validate() error {
+	if value.Version != 1 || value.CapsuleID.Validate() != nil || value.ClaimID == uuid.Nil ||
+		value.ChunkIndex < 0 || value.ChunkSHA256.Validate() != nil {
+		return ErrInvalid
+	}
+	return nil
 }
 
 // HTTPChunkHeader is canonical JSON inside a Carriage frame. The signed Box
@@ -61,12 +94,13 @@ type HTTPAdmissionStatus struct {
 }
 
 type HTTPHandler struct {
-	coordinator *Coordinator
-	permits     *AdmissionPermitVerifier
-	now         func() time.Time
-	readiness   func(context.Context) error
-	management  jobCustodyTrafficControl
-	storage     jobCustodyTrafficControl
+	coordinator  *Coordinator
+	workerClaims *WorkerClaimCoordinator
+	permits      *AdmissionPermitVerifier
+	now          func() time.Time
+	readiness    func(context.Context) error
+	management   jobCustodyTrafficControl
+	storage      jobCustodyTrafficControl
 }
 
 type jobCustodyTrafficControl struct {
@@ -76,21 +110,24 @@ type jobCustodyTrafficControl struct {
 
 func NewHTTPHandler(
 	coordinator *Coordinator,
+	workerClaims *WorkerClaimCoordinator,
 	permits *AdmissionPermitVerifier,
 	limits traffic.Limits,
 	readiness func(context.Context) error,
 ) (*HTTPHandler, error) {
-	if coordinator == nil || coordinator.validate() != nil || permits == nil ||
+	if coordinator == nil || coordinator.validate() != nil || workerClaims == nil ||
+		workerClaims.validate() != nil || permits == nil ||
 		traffic.ValidateLimits(limits) != nil || readiness == nil {
 		return nil, ErrInvalid
 	}
 	return &HTTPHandler{
-		coordinator: coordinator,
-		permits:     permits,
-		now:         time.Now,
-		readiness:   readiness,
-		management:  newJobCustodyTrafficControl(limits[traffic.SurfaceManagement]),
-		storage:     newJobCustodyTrafficControl(limits[traffic.SurfaceStorage]),
+		coordinator:  coordinator,
+		workerClaims: workerClaims,
+		permits:      permits,
+		now:          time.Now,
+		readiness:    readiness,
+		management:   newJobCustodyTrafficControl(limits[traffic.SurfaceManagement]),
+		storage:      newJobCustodyTrafficControl(limits[traffic.SurfaceStorage]),
 	}, nil
 }
 
@@ -102,6 +139,9 @@ func (handler *HTTPHandler) Handler() http.Handler {
 	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/status", handler.limited(handler.management, http.HandlerFunc(handler.handleStatus)))
 	mux.Handle("PUT /v1/job-custody/admissions/{capsuleID}/chunks/{chunkIndex}", handler.limited(handler.storage, http.HandlerFunc(handler.handleChunk)))
 	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/finalize", handler.limited(handler.management, http.HandlerFunc(handler.handleFinalize)))
+	mux.Handle("POST /v1/job-custody/workers/{workerID}/claims", handler.limited(handler.management, http.HandlerFunc(handler.handleWorkerClaim)))
+	mux.Handle("POST /v1/job-custody/claims/{claimID}/renew", handler.limited(handler.management, http.HandlerFunc(handler.handleWorkerClaimRenew)))
+	mux.Handle("POST /v1/job-custody/claims/{claimID}/chunks/{chunkIndex}", handler.limited(handler.storage, http.HandlerFunc(handler.handleWorkerClaimChunk)))
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -259,6 +299,118 @@ func (handler *HTTPHandler) handleFinalize(writer http.ResponseWriter, request *
 		return
 	}
 	writeJobCustodyJSON(writer, http.StatusOK, admissionHTTPStatus(record))
+}
+
+func (handler *HTTPHandler) handleWorkerClaim(writer http.ResponseWriter, request *http.Request) {
+	authorization, ok := handler.authorizedWorkerClaim(writer, request)
+	if !ok {
+		return
+	}
+	workerID := computequeue.WorkerID(request.PathValue("workerID"))
+	if workerID.Validate() != nil || authorization.Payload().RouteRecipientWorkerID != workerID {
+		writeJobCustodyError(writer, http.StatusBadRequest, "invalid_worker_claim")
+		return
+	}
+	handle, err := handler.workerClaims.Claim(request.Context(), authorization)
+	if errors.Is(err, ErrNoWork) {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	writeJobCustodyJSON(writer, http.StatusOK, workerClaimHTTPStatus(handle))
+}
+
+func (handler *HTTPHandler) handleWorkerClaimRenew(writer http.ResponseWriter, request *http.Request) {
+	authorization, ok := handler.authorizedWorkerClaim(writer, request)
+	if !ok {
+		return
+	}
+	claimID, err := uuid.Parse(request.PathValue("claimID"))
+	if err != nil || claimID == uuid.Nil || authorization.Payload().ClaimID != claimID {
+		writeJobCustodyError(writer, http.StatusBadRequest, "invalid_worker_claim")
+		return
+	}
+	handle, err := handler.workerClaims.Renew(request.Context(), authorization)
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	writeJobCustodyJSON(writer, http.StatusOK, workerClaimHTTPStatus(handle))
+}
+
+func (handler *HTTPHandler) handleWorkerClaimChunk(writer http.ResponseWriter, request *http.Request) {
+	authorization, ok := handler.authorizedWorkerClaim(writer, request)
+	if !ok {
+		return
+	}
+	claimID, claimErr := uuid.Parse(request.PathValue("claimID"))
+	chunkIndex, indexErr := strconv.ParseInt(request.PathValue("chunkIndex"), 10, 64)
+	if claimErr != nil || claimID == uuid.Nil || authorization.Payload().ClaimID != claimID ||
+		indexErr != nil || chunkIndex < 0 {
+		writeJobCustodyError(writer, http.StatusBadRequest, "invalid_worker_chunk")
+		return
+	}
+	handle, err := handler.workerClaims.Claim(request.Context(), authorization)
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	chunk, err := handler.workerClaims.ReadChunk(handle, chunkIndex)
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	digest := sha256.Sum256(chunk)
+	headerBytes, err := computequeue.EncodeCanonical(HTTPWorkerChunkHeader{
+		CapsuleID: handle.Admission().Header.CapsuleID, ChunkIndex: chunkIndex,
+		ChunkSHA256: computequeue.Digest(fmt.Sprintf("%x", digest[:])),
+		ClaimID:     claimID, Version: 1,
+	})
+	if err != nil {
+		writeJobCustodyError(writer, http.StatusInternalServerError, "custody_unavailable")
+		return
+	}
+	wire, err := (carriage.Frame{
+		SectionKind: JobCustodyWorkerChunkSectionKind, Header: headerBytes, Payload: chunk,
+	}).Encode()
+	if err != nil {
+		writeJobCustodyError(writer, http.StatusInternalServerError, "custody_unavailable")
+		return
+	}
+	writer.Header().Set("Content-Type", JobCustodyCarriageContentType)
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(wire)
+}
+
+func (handler *HTTPHandler) authorizedWorkerClaim(
+	writer http.ResponseWriter,
+	request *http.Request,
+) (WorkerClaimAuthorization, bool) {
+	var input HTTPWorkerClaimRequest
+	if decodeJobCustodyJSON(request, &input, MaximumJobCustodyControlBytes) != nil {
+		writeJobCustodyError(writer, http.StatusBadRequest, "invalid_worker_authorization")
+		return WorkerClaimAuthorization{}, false
+	}
+	authorization, err := handler.permits.VerifyWorkerClaim(
+		input.Permit, computequeue.Timestamp(handler.now().UnixMilli()),
+	)
+	if err != nil {
+		writeJobCustodyError(writer, http.StatusUnauthorized, "unauthorized")
+		return WorkerClaimAuthorization{}, false
+	}
+	return authorization, true
+}
+
+func workerClaimHTTPStatus(handle WorkerClaimHandle) HTTPWorkerClaimStatus {
+	record, admission := handle.Record(), handle.Admission()
+	return HTTPWorkerClaimStatus{
+		AssignmentID: admission.Header.AssignmentID, CapsuleID: admission.Header.CapsuleID,
+		ClaimID: record.ClaimID, LeaseExpiresAt: record.LeaseExpiresAt,
+		ProtectedObject: admission.Header.ProtectedObject, State: record.State,
+	}
 }
 
 func (handler *HTTPHandler) authorizedStoredAdmission(

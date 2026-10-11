@@ -200,9 +200,11 @@ func NewAdmissionPermitVerifier(
 // persistence contract. Its private fields prevent a decoded request from
 // becoming trusted route state without first crossing Verify.
 type AdmissionAuthorization struct {
-	header         computequeue.JobCustodyAdmissionHeader
-	expectedSigner computequeue.ReceiptSignerBinding
-	permitDigest   computequeue.Digest
+	header                   computequeue.JobCustodyAdmissionHeader
+	expectedSigner           computequeue.ReceiptSignerBinding
+	permitDigest             computequeue.Digest
+	authorityID              uuid.UUID
+	workerCapabilitiesDigest computequeue.Digest
 }
 
 func (value AdmissionAuthorization) Header() computequeue.JobCustodyAdmissionHeader {
@@ -215,6 +217,14 @@ func (value AdmissionAuthorization) ExpectedSigner() computequeue.ReceiptSignerB
 
 func (value AdmissionAuthorization) PermitDigest() computequeue.Digest {
 	return value.permitDigest
+}
+
+func (value AdmissionAuthorization) AuthorityID() uuid.UUID {
+	return value.authorityID
+}
+
+func (value AdmissionAuthorization) WorkerCapabilitiesDigest() computequeue.Digest {
+	return value.workerCapabilitiesDigest
 }
 
 func (value AdmissionAuthorization) MarshalJSON() ([]byte, error) {
@@ -268,9 +278,11 @@ func (verifier *AdmissionPermitVerifier) Verify(
 		return AdmissionAuthorization{}, ErrAdmissionPermitAuthentication
 	}
 	return AdmissionAuthorization{
-		header:         envelope.Header,
-		expectedSigner: payload.AdmissionSigner,
-		permitDigest:   permitDigest,
+		header:                   envelope.Header,
+		expectedSigner:           payload.AdmissionSigner,
+		permitDigest:             permitDigest,
+		authorityID:              payload.AuthorityID,
+		workerCapabilitiesDigest: payload.WorkerCapabilitiesDigest,
 	}, nil
 }
 

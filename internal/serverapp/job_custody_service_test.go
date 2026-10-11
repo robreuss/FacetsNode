@@ -59,6 +59,7 @@ func TestJobCustodyDatabaseTableAllowlistRejectsEveryForeignService(t *testing.T
 		"job_custody_ledger",
 		"job_custody_admissions",
 		"job_custody_chunks",
+		"job_custody_worker_claims",
 	}
 	for name, tables := range map[string][]string{
 		"empty":            nil,
@@ -109,7 +110,7 @@ func TestJobCustodyRuntimeAssemblyReopensExactIsolatedState(t *testing.T) {
 	defer pool.Close()
 	reset := func() {
 		if _, err := pool.Exec(ctx, `
-			DROP TABLE IF EXISTS job_custody_chunks,job_custody_admissions,
+			DROP TABLE IF EXISTS job_custody_worker_claims,job_custody_chunks,job_custody_admissions,
 				job_custody_ledger CASCADE;
 			DROP TABLE IF EXISTS facets_job_custody_schema_migrations;
 		`); err != nil {
@@ -123,7 +124,7 @@ func TestJobCustodyRuntimeAssemblyReopensExactIsolatedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.Coordinator == nil || runtime.AdmissionPermits == nil ||
+	if runtime.Coordinator == nil || runtime.WorkerClaims == nil || runtime.AdmissionPermits == nil ||
 		runtime.content == nil || runtime.bindings == nil {
 		t.Fatal("Job custody runtime omitted a required authority or custody component")
 	}

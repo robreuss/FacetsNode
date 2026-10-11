@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/robreuss/FacetsNode/internal/carriage"
 	"github.com/robreuss/FacetsNode/internal/computequeue"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
@@ -19,13 +21,15 @@ import (
 func TestJobCustodyHTTPAdmissionCarriageAndReceiptReplay(t *testing.T) {
 	fixture := newAdmissionPermitFixture(t)
 	content, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
 	coordinator := &Coordinator{
-		Ledger: newMemoryLedger(), Content: content, Capacity: &memoryCapacityAuthority{},
+		Ledger: ledger, Content: content, Capacity: &memoryCapacityAuthority{},
 		Verifier: fixture.admission.verifier, ReceiptSigner: testJobCustodyReceiptSigner(t),
 		Clock: fixedJobCustodyClock{time.UnixMilli(int64(fixture.issuedAt + 1))},
 	}
 	handler, err := NewHTTPHandler(
-		coordinator, fixture.verifier, traffic.DefaultLimits(),
+		coordinator, &WorkerClaimCoordinator{Ledger: ledger, Content: content, Clock: coordinator.Clock},
+		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
 	)
 	if err != nil {
@@ -133,16 +137,150 @@ func TestJobCustodyHTTPAdmissionCarriageAndReceiptReplay(t *testing.T) {
 	}
 }
 
+func TestJobCustodyHTTPWorkerClaimsExactRetainedCapsuleAndReadsProtectedChunks(t *testing.T) {
+	fixture := newAdmissionPermitFixture(t)
+	content, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
+	clock := fixedJobCustodyClock{time.UnixMilli(int64(fixture.issuedAt + 1))}
+	coordinator := &Coordinator{
+		Ledger: ledger, Content: content, Capacity: &memoryCapacityAuthority{},
+		Verifier: fixture.admission.verifier, ReceiptSigner: testJobCustodyReceiptSigner(t),
+		Clock: clock,
+	}
+	admissionAuthorization, err := fixture.verifier.Verify(
+		fixture.permit, fixture.admission.envelopeBytes, fixture.issuedAt+1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionHandle, err := coordinator.AdmitAuthorized(
+		t.Context(), fixture.admission.envelopeBytes, admissionAuthorization,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := int64(0); index < fixture.admission.header.ProtectedObject.ChunkCount; index++ {
+		offset := index * fixture.admission.header.ProtectedObject.ChunkByteCount
+		end := min(offset+fixture.admission.header.ProtectedObject.ChunkByteCount,
+			int64(len(fixture.admission.protectedBytes)))
+		chunk := fixture.admission.protectedBytes[offset:end]
+		if _, err := coordinator.AppendChunk(t.Context(), admissionHandle, index, chunk, digestBytes(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := coordinator.Finalize(t.Context(), admissionHandle); err != nil {
+		t.Fatal(err)
+	}
+	workerClaims := &WorkerClaimCoordinator{Ledger: ledger, Content: content, Clock: clock}
+	handler, err := NewHTTPHandler(
+		coordinator, workerClaims, fixture.verifier, traffic.DefaultLimits(),
+		func(context.Context) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.now = func() time.Time { return time.UnixMilli(int64(fixture.issuedAt + 1)) }
+	server := handler.Handler()
+	claimID := uuid.MustParse("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+	claimPayload := WorkerClaimPermitPayload{
+		AuthorityID: fixture.authorityID, ClaimID: claimID,
+		ExpiresAt: fixture.issuedAt + 50_000, IssuedAt: fixture.issuedAt,
+		PermitID:                     uuid.MustParse("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+		RouteRecipientKeyFingerprint: fixture.admission.header.RouteRecipientKeyFingerprint,
+		RouteRecipientWorkerID:       fixture.admission.header.RouteRecipientWorkerID,
+		Version:                      WorkerClaimPermitVersion,
+		WorkerCapabilitiesDigest:     fixture.payload.WorkerCapabilitiesDigest,
+		WorkerOwnerAuthorityDigest:   computequeue.SHA256Digest("worker-claim-http", "owner"),
+	}
+	claimSigner, err := NewWorkerClaimPermitSigner(fixture.authorityID, fixture.privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimPermit, err := claimSigner.Sign(claimPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimPath := fmt.Sprintf(
+		"/v1/job-custody/workers/%s/claims", fixture.admission.header.RouteRecipientWorkerID,
+	)
+	claimed := serveJobCustodyJSON(
+		t, server, http.MethodPost, claimPath, HTTPWorkerClaimRequest{Permit: claimPermit},
+	)
+	if claimed.Code != http.StatusOK {
+		t.Fatalf("claim status=%d body=%s", claimed.Code, claimed.Body.String())
+	}
+	var status HTTPWorkerClaimStatus
+	decodeJobCustodyTestJSON(t, claimed.Body.Bytes(), &status)
+	if status.ClaimID != claimID || status.CapsuleID != fixture.admission.header.CapsuleID ||
+		status.AssignmentID != fixture.admission.header.AssignmentID ||
+		status.ProtectedObject != fixture.admission.header.ProtectedObject ||
+		status.State != WorkerClaimClaimed {
+		t.Fatalf("claim=%+v", status)
+	}
+	var received []byte
+	for index := int64(0); index < status.ProtectedObject.ChunkCount; index++ {
+		path := fmt.Sprintf("/v1/job-custody/claims/%s/chunks/%d", claimID, index)
+		response := serveJobCustodyJSON(
+			t, server, http.MethodPost, path, HTTPWorkerClaimRequest{Permit: claimPermit},
+		)
+		if response.Code != http.StatusOK || response.Header().Get("Content-Type") != JobCustodyCarriageContentType {
+			t.Fatalf("chunk %d status=%d body=%s", index, response.Code, response.Body.String())
+		}
+		frame, err := carriage.DecodeFrame(response.Body.Bytes())
+		if err != nil || frame.SectionKind != JobCustodyWorkerChunkSectionKind {
+			t.Fatalf("chunk %d frame=%+v err=%v", index, frame, err)
+		}
+		header, err := computequeue.DecodeCanonical[HTTPWorkerChunkHeader](frame.Header)
+		if err != nil || header.ClaimID != claimID || header.ChunkIndex != index ||
+			header.ChunkSHA256 != digestBytes(frame.Payload) {
+			t.Fatalf("chunk %d header=%+v err=%v", index, header, err)
+		}
+		received = append(received, frame.Payload...)
+	}
+	if !bytes.Equal(received, fixture.admission.protectedBytes) {
+		t.Fatal("Worker did not receive exact protected capsule bytes")
+	}
+	renewedPayload := claimPayload
+	renewedPayload.PermitID = uuid.MustParse("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+	renewedPayload.ExpiresAt = fixture.issuedAt + 70_000
+	renewedPermit, err := claimSigner.Sign(renewedPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewed := serveJobCustodyJSON(
+		t, server, http.MethodPost,
+		fmt.Sprintf("/v1/job-custody/claims/%s/renew", claimID),
+		HTTPWorkerClaimRequest{Permit: renewedPermit},
+	)
+	if renewed.Code != http.StatusOK {
+		t.Fatalf("renew status=%d body=%s", renewed.Code, renewed.Body.String())
+	}
+	decodeJobCustodyTestJSON(t, renewed.Body.Bytes(), &status)
+	if status.LeaseExpiresAt != renewedPayload.ExpiresAt {
+		t.Fatalf("renewed claim=%+v", status)
+	}
+	chunkAfterRenewal := serveJobCustodyJSON(
+		t, server, http.MethodPost,
+		fmt.Sprintf("/v1/job-custody/claims/%s/chunks/0", claimID),
+		HTTPWorkerClaimRequest{Permit: renewedPermit},
+	)
+	if chunkAfterRenewal.Code != http.StatusOK {
+		t.Fatalf("renewed chunk status=%d body=%s", chunkAfterRenewal.Code, chunkAfterRenewal.Body.String())
+	}
+}
+
 func TestJobCustodyHTTPRejectsPermitAndCarriageSubstitution(t *testing.T) {
 	fixture := newAdmissionPermitFixture(t)
 	content, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
 	coordinator := &Coordinator{
-		Ledger: newMemoryLedger(), Content: content, Capacity: &memoryCapacityAuthority{},
+		Ledger: ledger, Content: content, Capacity: &memoryCapacityAuthority{},
 		Verifier: fixture.admission.verifier, ReceiptSigner: testJobCustodyReceiptSigner(t),
 		Clock: fixedJobCustodyClock{time.UnixMilli(int64(fixture.issuedAt + 1))},
 	}
 	handler, err := NewHTTPHandler(
-		coordinator, fixture.verifier, traffic.DefaultLimits(),
+		coordinator, &WorkerClaimCoordinator{Ledger: ledger, Content: content, Clock: coordinator.Clock},
+		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
 	)
 	if err != nil {

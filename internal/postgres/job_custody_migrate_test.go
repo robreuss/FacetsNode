@@ -6,14 +6,23 @@ import (
 )
 
 func TestJobCustodyMigrationIsIsolatedAndContentBlind(t *testing.T) {
-	body, err := jobCustodyMigrationFiles.ReadFile("job_custody_migrations/001_job_custody.sql")
-	if err != nil {
-		t.Fatal(err)
+	var body []byte
+	for _, name := range []string{
+		"job_custody_migrations/001_job_custody.sql",
+		"job_custody_migrations/002_job_custody_receipts.sql",
+		"job_custody_migrations/003_job_custody_worker_route.sql",
+	} {
+		part, err := jobCustodyMigrationFiles.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = append(body, part...)
 	}
 	text := string(body)
 	for _, required := range []string{
 		"job_custody_ledger", "job_custody_admissions", "job_custody_chunks",
-		"envelope_record", "expected_signer_id", "protected_byte_count",
+		"job_custody_worker_claims", "envelope_record", "expected_signer_id",
+		"protected_byte_count", "route_authority_id", "worker_capabilities_digest",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Job Custody migration is missing %q", required)

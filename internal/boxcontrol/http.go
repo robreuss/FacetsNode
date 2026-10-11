@@ -105,6 +105,7 @@ func (service *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/shared-workers/{workerID}/access-grants", service.handleGrantSharedWorkerAccess)
 	mux.HandleFunc("POST /v1/shared-worker-access-grants/{grantID}/revoke", service.handleRevokeSharedWorkerAccess)
 	mux.HandleFunc("POST /v1/job-custody/admission-permits", service.handleIssueJobCustodyAdmissionPermit)
+	mux.HandleFunc("POST /v1/job-custody/worker-claim-permits", service.handleIssueJobCustodyWorkerClaimPermit)
 	mux.HandleFunc("POST /v1/shared-workers/{workerID}/operations", service.handleEnqueueSharedWorkerOperation)
 	mux.HandleFunc("POST /v1/shared-workers/{workerID}/operation-claims", service.handleClaimSharedWorkerOperation)
 	mux.HandleFunc("POST /v1/shared-worker-operations/{operationID}/response", service.handleCompleteSharedWorkerOperation)
@@ -1152,7 +1153,9 @@ func sharedWorkerOperationRequest(request *http.Request) bool {
 }
 
 func jobCustodyPermitRequest(request *http.Request) bool {
-	return request.Method == http.MethodPost && request.URL.Path == "/v1/job-custody/admission-permits"
+	return request.Method == http.MethodPost &&
+		(request.URL.Path == "/v1/job-custody/admission-permits" ||
+			request.URL.Path == "/v1/job-custody/worker-claim-permits")
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {

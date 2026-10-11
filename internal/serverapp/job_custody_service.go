@@ -54,6 +54,7 @@ func runJobCustodyService(
 	}
 	handler, err := jobcustody.NewHTTPHandler(
 		runtimeState.Coordinator,
+		runtimeState.WorkerClaims,
 		runtimeState.AdmissionPermits,
 		configuration.TrafficLimits,
 		readiness,
@@ -136,6 +137,7 @@ func finishJobCustodyHTTPServer(
 // and route grant rather than accepting requester-echoed trust fields.
 type jobCustodyRuntime struct {
 	Coordinator      *jobcustody.Coordinator
+	WorkerClaims     *jobcustody.WorkerClaimCoordinator
 	AdmissionPermits *jobcustody.AdmissionPermitVerifier
 	content          *jobcustody.ContentStore
 	bindings         *serviceauthority.BindingRegistry
@@ -239,6 +241,9 @@ func prepareJobCustodyRuntime(
 		ReceiptSigner: signer,
 		Clock:         clock,
 	}
+	runtime.WorkerClaims = &jobcustody.WorkerClaimCoordinator{
+		Ledger: ledger, Content: content, Clock: clock,
+	}
 	return runtime, nil
 }
 
@@ -291,6 +296,7 @@ var jobCustodyDatabaseTables = map[string]struct{}{
 	"job_custody_ledger":                   {},
 	"job_custody_admissions":               {},
 	"job_custody_chunks":                   {},
+	"job_custody_worker_claims":            {},
 }
 
 func requireDedicatedJobCustodyDatabase(ctx context.Context, pool *pgxpool.Pool) error {

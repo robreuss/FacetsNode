@@ -122,14 +122,20 @@ func (store *JobCustodyStore) ReserveAdmission(
 			capsule_id,idempotency_key,envelope_record,
 			expected_signer_id,expected_signing_key_id,
 			expected_signing_key_revision,expected_signature_profile_id,
-			admission_permit_digest,
+			admission_permit_digest,route_authority_id,
+			route_recipient_worker_id,route_recipient_key_fingerprint,
+			worker_capabilities_digest,retention_until_milliseconds,
 			accepted_at_milliseconds,protected_byte_count,committed_bytes,
 			state,object_path,updated_at_milliseconds
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,'staging',NULL,$9)`,
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,0,'staging',NULL,$14)`,
 		capsuleID, string(candidate.Header.IdempotencyKey), candidate.EnvelopeBytes,
 		string(candidate.ExpectedSigner.SignerID), string(candidate.ExpectedSigner.SigningKeyID),
 		int64(candidate.ExpectedSigner.SigningKeyRevision), candidate.ExpectedSigner.SignatureProfileID,
-		string(candidate.AdmissionPermitDigest), int64(candidate.AcceptedAt), byteCount,
+		string(candidate.AdmissionPermitDigest), candidate.RouteAuthorityID,
+		uuid.MustParse(string(candidate.Header.RouteRecipientWorkerID)),
+		string(candidate.Header.RouteRecipientKeyFingerprint),
+		string(candidate.WorkerCapabilitiesDigest), int64(candidate.Header.RetentionUntil),
+		int64(candidate.AcceptedAt), byteCount,
 	)
 	if err != nil {
 		return jobcustody.AdmissionRecord{}, false, mapJobCustodyWriteError(err)
@@ -374,7 +380,9 @@ func loadJobCustodyAdmission(
 		SELECT capsule_id,idempotency_key,envelope_record,
 			expected_signer_id,expected_signing_key_id,
 			expected_signing_key_revision,expected_signature_profile_id,
-			admission_permit_digest,
+			admission_permit_digest,route_authority_id,
+			route_recipient_worker_id,route_recipient_key_fingerprint,
+			worker_capabilities_digest,retention_until_milliseconds,
 			accepted_at_milliseconds,protected_byte_count,committed_bytes,
 			state,object_path,custody_receipt_record,updated_at_milliseconds
 		FROM job_custody_admissions WHERE capsule_id=$1`
@@ -382,14 +390,16 @@ func loadJobCustodyAdmission(
 		query += " FOR UPDATE"
 	}
 	var storedCapsule uuid.UUID
-	var idempotencyKey, signerID, signingKeyID, signatureProfileID, permitDigest, state string
+	var idempotencyKey, signerID, signingKeyID, signatureProfileID, permitDigest, capabilitiesDigest, routeKeyFingerprint, state string
 	var envelopeBytes, receiptBytes []byte
-	var signingKeyRevision, acceptedAt, protectedByteCount, committedBytes, updatedAt int64
+	var routeAuthorityID, routeWorkerID uuid.UUID
+	var signingKeyRevision, acceptedAt, protectedByteCount, committedBytes, retentionUntil, updatedAt int64
 	var objectPath *string
 	err = querier.QueryRow(ctx, query, capsuleUUID).Scan(
 		&storedCapsule, &idempotencyKey, &envelopeBytes,
 		&signerID, &signingKeyID, &signingKeyRevision, &signatureProfileID,
-		&permitDigest,
+		&permitDigest, &routeAuthorityID, &routeWorkerID, &routeKeyFingerprint,
+		&capabilitiesDigest, &retentionUntil,
 		&acceptedAt, &protectedByteCount, &committedBytes,
 		&state, &objectPath, &receiptBytes, &updatedAt,
 	)
@@ -403,6 +413,9 @@ func loadJobCustodyAdmission(
 	if err != nil || signingKeyRevision <= 0 || storedCapsule.String() != string(capsuleID) ||
 		string(envelope.Header.CapsuleID) != storedCapsule.String() ||
 		string(envelope.Header.IdempotencyKey) != idempotencyKey ||
+		string(envelope.Header.RouteRecipientWorkerID) != routeWorkerID.String() ||
+		string(envelope.Header.RouteRecipientKeyFingerprint) != routeKeyFingerprint ||
+		int64(envelope.Header.RetentionUntil) != retentionUntil ||
 		envelope.Header.ProtectedObject.ByteCount != protectedByteCount {
 		return jobcustody.AdmissionRecord{}, jobcustody.ErrInvalid
 	}
@@ -412,12 +425,14 @@ func loadJobCustodyAdmission(
 			SignerID: computequeue.SignerID(signerID), SigningKeyID: computequeue.SigningKeyID(signingKeyID),
 			SigningKeyRevision: uint64(signingKeyRevision), SignatureProfileID: signatureProfileID,
 		},
-		AdmissionPermitDigest: computequeue.Digest(permitDigest),
-		AcceptedAt:            computequeue.Timestamp(acceptedAt),
-		CommittedBytes:        committedBytes,
-		State:                 jobcustody.AdmissionState(state),
-		CustodyReceiptBytes:   bytes.Clone(receiptBytes),
-		UpdatedAtMillis:       updatedAt,
+		AdmissionPermitDigest:    computequeue.Digest(permitDigest),
+		RouteAuthorityID:         routeAuthorityID,
+		WorkerCapabilitiesDigest: computequeue.Digest(capabilitiesDigest),
+		AcceptedAt:               computequeue.Timestamp(acceptedAt),
+		CommittedBytes:           committedBytes,
+		State:                    jobcustody.AdmissionState(state),
+		CustodyReceiptBytes:      bytes.Clone(receiptBytes),
+		UpdatedAtMillis:          updatedAt,
 	}
 	if objectPath != nil {
 		record.ObjectPath = *objectPath
@@ -507,6 +522,8 @@ func advanceJobCustodyLedger(ctx context.Context, tx pgx.Tx) error {
 func sameStoredAdmission(left, right jobcustody.AdmissionRecord) bool {
 	return bytes.Equal(left.EnvelopeBytes, right.EnvelopeBytes) &&
 		left.Header == right.Header && left.ExpectedSigner == right.ExpectedSigner &&
+		left.RouteAuthorityID == right.RouteAuthorityID &&
+		left.WorkerCapabilitiesDigest == right.WorkerCapabilitiesDigest &&
 		left.AcceptedAt == right.AcceptedAt
 }
 

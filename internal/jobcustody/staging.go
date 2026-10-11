@@ -27,22 +27,25 @@ const (
 // protected bytes. It intentionally has no Space, object, prompt, model,
 // operation, result, credential, label, or caller-selected path field.
 type AdmissionRecord struct {
-	EnvelopeBytes         []byte
-	Header                computequeue.JobCustodyAdmissionHeader
-	ExpectedSigner        computequeue.ReceiptSignerBinding
-	AdmissionPermitDigest computequeue.Digest
-	AcceptedAt            computequeue.Timestamp
-	CommittedBytes        int64
-	State                 AdmissionState
-	ObjectPath            string
-	CustodyReceiptBytes   []byte
-	UpdatedAtMillis       int64
+	EnvelopeBytes            []byte
+	Header                   computequeue.JobCustodyAdmissionHeader
+	ExpectedSigner           computequeue.ReceiptSignerBinding
+	AdmissionPermitDigest    computequeue.Digest
+	RouteAuthorityID         uuid.UUID
+	WorkerCapabilitiesDigest computequeue.Digest
+	AcceptedAt               computequeue.Timestamp
+	CommittedBytes           int64
+	State                    AdmissionState
+	ObjectPath               string
+	CustodyReceiptBytes      []byte
+	UpdatedAtMillis          int64
 }
 
 func (record AdmissionRecord) ValidateStored() error {
 	if len(record.EnvelopeBytes) == 0 || record.Header.Validate() != nil ||
 		record.ExpectedSigner.Validate() != nil || record.AcceptedAt.Validate() != nil ||
 		record.AdmissionPermitDigest.Validate() != nil ||
+		record.RouteAuthorityID == uuid.Nil || record.WorkerCapabilitiesDigest.Validate() != nil ||
 		record.AcceptedAt < record.Header.NotBeforeAt || record.AcceptedAt >= record.Header.ExpiresAt ||
 		record.CommittedBytes < 0 || record.CommittedBytes > record.Header.ProtectedObject.ByteCount ||
 		record.UpdatedAtMillis < int64(record.AcceptedAt) {
@@ -73,7 +76,9 @@ func (record AdmissionRecord) ValidateStored() error {
 
 func sameAdmissionIdentity(left, right AdmissionRecord) bool {
 	return bytes.Equal(left.EnvelopeBytes, right.EnvelopeBytes) &&
-		left.Header == right.Header && left.ExpectedSigner == right.ExpectedSigner
+		left.Header == right.Header && left.ExpectedSigner == right.ExpectedSigner &&
+		left.RouteAuthorityID == right.RouteAuthorityID &&
+		left.WorkerCapabilitiesDigest == right.WorkerCapabilitiesDigest
 }
 
 func sameAdmission(left, right AdmissionRecord) bool {
@@ -204,7 +209,8 @@ func (coordinator *Coordinator) AdmitAuthorized(
 		return AdmissionHandle{}, ErrInvalid
 	}
 	if expectedHeader.Validate() != nil || expectedSigner.Validate() != nil ||
-		authorization.permitDigest.Validate() != nil {
+		authorization.permitDigest.Validate() != nil || authorization.authorityID == uuid.Nil ||
+		authorization.workerCapabilitiesDigest.Validate() != nil {
 		return AdmissionHandle{}, ErrInvalid
 	}
 	envelope, err := computequeue.DecodeJobCustodyAdmissionCanonical(envelopeBytes)
@@ -241,13 +247,15 @@ func (coordinator *Coordinator) AdmitAuthorized(
 		return AdmissionHandle{}, err
 	}
 	candidate := AdmissionRecord{
-		EnvelopeBytes:         bytes.Clone(envelopeBytes),
-		Header:                verified.Header(),
-		ExpectedSigner:        verified.ExpectedSigner(),
-		AdmissionPermitDigest: authorization.permitDigest,
-		AcceptedAt:            acceptedAt,
-		State:                 AdmissionStaging,
-		UpdatedAtMillis:       int64(acceptedAt),
+		EnvelopeBytes:            bytes.Clone(envelopeBytes),
+		Header:                   verified.Header(),
+		ExpectedSigner:           verified.ExpectedSigner(),
+		AdmissionPermitDigest:    authorization.permitDigest,
+		RouteAuthorityID:         authorization.authorityID,
+		WorkerCapabilitiesDigest: authorization.workerCapabilitiesDigest,
+		AcceptedAt:               acceptedAt,
+		State:                    AdmissionStaging,
+		UpdatedAtMillis:          int64(acceptedAt),
 	}
 	if err := candidate.ValidateStored(); err != nil {
 		return AdmissionHandle{}, err
