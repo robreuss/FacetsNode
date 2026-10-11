@@ -114,3 +114,32 @@ The immediate implementation scope includes checkpoint 3's dormant service-kit
 installation and restart proof. Service activation and durable identity creation
 remain a separate attended checkpoint after the active Facets work supplies
 stable integration contracts.
+
+## Compute Queue packaging checkpoint, October 10, 2026
+
+The portable service release now includes architecture-bound Job Custody and
+Storage Capacity Authority images and their exact Compose recipes. They remain
+explicitly dormant: portable acceptance records `jobCustodyRuntime: not-run`
+and `storageCapacityRuntime: not-run`, excludes them from the active appliance
+health surface, and rejects any pre-existing authority files, retained service
+directories, containers, or volumes that would make that claim ambiguous.
+
+The build gate renders both dormant projects with disposable non-authority
+values and rejects mutable images, source builds, host ports, autonomous
+restart, unexpected networks, unowned volumes, unapproved bind mounts, and
+container-runtime authority. The release continues to import only verified OCI
+manifest digests. This is stronger package evidence, not service activation or
+installed-runtime proof.
+
+Source, full Go test/vet, focused race-test, shell-syntax, and Linux AMD64/ARM64
+cross-build evidence passed at FacetsNode commit `48a6ab9`. A checksum-bound
+AMD64 installer bundle was reproduced from that pushed commit. No Facets
+service was installed or started on a host.
+
+The primary development and installed-runtime acceptance target is the new
+Linux VM. FBD remains a periodically synchronized ARM64 release adapter. The
+Raspberry Pi 5 is an additional ARM64 performance/prototyping environment and
+does not substitute for primary-VM or FBD release acceptance. The next gate is
+to transfer the exact bundle to the explicitly identified new VM, install it in
+dormant mode, reboot, and verify the same withheld-activation record and image
+identities. No host should be inferred from older VM evidence.
