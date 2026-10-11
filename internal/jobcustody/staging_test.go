@@ -479,15 +479,21 @@ type memoryLedger struct {
 	idempotency          map[computequeue.Digest]computequeue.JobCapsuleID
 	chunks               map[computequeue.JobCapsuleID]map[int64]AppendRequest
 	claims               map[uuid.UUID]WorkerClaimRecord
+	results              map[computequeue.JobCapsuleID]ResultRecord
+	resultIdempotency    map[computequeue.Digest]computequeue.JobCapsuleID
+	resultChunks         map[computequeue.JobCapsuleID]map[int64]AppendRequest
 	failAppendCommitOnce bool
 }
 
 func newMemoryLedger() *memoryLedger {
 	return &memoryLedger{
-		records:     make(map[computequeue.JobCapsuleID]AdmissionRecord),
-		idempotency: make(map[computequeue.Digest]computequeue.JobCapsuleID),
-		chunks:      make(map[computequeue.JobCapsuleID]map[int64]AppendRequest),
-		claims:      make(map[uuid.UUID]WorkerClaimRecord),
+		records:           make(map[computequeue.JobCapsuleID]AdmissionRecord),
+		idempotency:       make(map[computequeue.Digest]computequeue.JobCapsuleID),
+		chunks:            make(map[computequeue.JobCapsuleID]map[int64]AppendRequest),
+		claims:            make(map[uuid.UUID]WorkerClaimRecord),
+		results:           make(map[computequeue.JobCapsuleID]ResultRecord),
+		resultIdempotency: make(map[computequeue.Digest]computequeue.JobCapsuleID),
+		resultChunks:      make(map[computequeue.JobCapsuleID]map[int64]AppendRequest),
 	}
 }
 
@@ -567,6 +573,23 @@ func (ledger *memoryLedger) RenewClaim(
 	record.LeaseExpiresAt = payload.ExpiresAt
 	record.UpdatedAtMillis++
 	ledger.claims[payload.ClaimID] = record
+	return record, cloneAdmission(admission), nil
+}
+
+func (ledger *memoryLedger) LoadWorkerClaim(
+	_ context.Context,
+	claimID uuid.UUID,
+) (WorkerClaimRecord, AdmissionRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	record, present := ledger.claims[claimID]
+	if !present {
+		return WorkerClaimRecord{}, AdmissionRecord{}, ErrMissing
+	}
+	admission, present := ledger.records[record.CapsuleID]
+	if !present {
+		return WorkerClaimRecord{}, AdmissionRecord{}, ErrMissing
+	}
 	return record, cloneAdmission(admission), nil
 }
 

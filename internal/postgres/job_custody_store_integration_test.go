@@ -163,6 +163,99 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 	if _, _, err := reopened.ClaimNext(ctx, secondAuthorization); !errors.Is(err, jobcustody.ErrNoWork) {
 		t.Fatalf("active claim allowed duplicate assignment: %v", err)
 	}
+	resultContents := []byte("result-data")
+	resultDescriptor, err := computequeue.NewJobCapsuleProtectedObjectDescriptor(
+		int64(len(resultContents)), postgresJobCustodyDigest(resultContents), 5,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultHeader, err := jobcustody.NewWorkerResultHeader(
+		record.Header.AssignmentID,
+		claimID,
+		record.Header.CapsuleID,
+		"77777777-7777-4777-8777-777777777777",
+		resultDescriptor,
+		computequeue.SHA256Digest("postgres-job-custody-result", "result-set"),
+		computequeue.SHA256Digest("postgres-job-custody-result", "execution-receipt"),
+		record.Header.RetentionUntil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultRecord := jobcustody.ResultRecord{
+		Header: resultHeader, RouteAuthorityID: renewed.RouteAuthorityID,
+		RouteRecipientWorkerID:       renewed.RouteRecipientWorkerID,
+		RouteRecipientKeyFingerprint: renewed.RouteRecipientKeyFingerprint,
+		WorkerCapabilitiesDigest:     renewed.WorkerCapabilitiesDigest,
+		WorkerOwnerAuthorityDigest:   renewed.WorkerOwnerAuthorityDigest,
+		ClaimPermitDigest:            renewed.ClaimPermitDigest,
+		ResultPermitDigest: computequeue.SHA256Digest(
+			"postgres-job-custody-result", "result-permit",
+		),
+		AcceptedAt: 1_800_000_000_010, State: jobcustody.ResultStaging,
+		UpdatedAtMillis: 1_800_000_000_010,
+	}
+	reservedResult, created, err := reopened.ReserveResult(ctx, resultRecord)
+	if err != nil || !created || reservedResult.ValidateStored() != nil {
+		t.Fatalf("reserve result created=%v record=%+v err=%v", created, reservedResult, err)
+	}
+	if retry, created, err := reopened.ReserveResult(ctx, resultRecord); err != nil || created ||
+		retry.AcceptedAt != resultRecord.AcceptedAt {
+		t.Fatalf("exact result reserve retry created=%v record=%+v err=%v", created, retry, err)
+	}
+	for index := int64(0); index < resultDescriptor.ChunkCount; index++ {
+		offset := index * resultDescriptor.ChunkByteCount
+		end := min(offset+resultDescriptor.ChunkByteCount, int64(len(resultContents)))
+		chunk := resultContents[offset:end]
+		request := jobcustody.AppendRequest{
+			CapsuleID: resultHeader.ResultCapsuleID, ChunkIndex: index, Offset: offset,
+			ByteCount: int64(len(chunk)), ChunkSHA256: postgresJobCustodyDigest(chunk),
+		}
+		lease, err := reopened.BeginResultAppend(ctx, request)
+		if err != nil || lease.ExistingNextOffset() != nil {
+			t.Fatalf("begin result chunk %d err=%v", index, err)
+		}
+		if err := lease.Commit(ctx, end); err != nil {
+			t.Fatalf("commit result chunk %d: %v", index, err)
+		}
+		if index == 0 {
+			replay, err := reopened.BeginResultAppend(ctx, request)
+			if err != nil {
+				t.Fatalf("begin result chunk replay: %v", err)
+			}
+			existingNext := replay.ExistingNextOffset()
+			if existingNext == nil || *existingNext != end {
+				t.Fatalf("result chunk replay next=%v", existingNext)
+			}
+			if err := replay.Abort(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	resultFinalization, err := reopened.BeginResultFinalization(ctx, resultHeader.ResultCapsuleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultCommittedAt := int64(1_800_000_000_010)
+	resultReceiptBytes := postgresJobCustodyResultReceipt(t, resultRecord, resultCommittedAt)
+	retainedResult, err := resultFinalization.Commit(
+		ctx, "objects/"+string(resultHeader.ResultCapsuleID),
+		resultReceiptBytes, resultCommittedAt,
+	)
+	if err != nil || retainedResult.State != jobcustody.ResultRetained {
+		t.Fatalf("retained result=%+v err=%v", retainedResult, err)
+	}
+	resultReopened, err := postgresstore.NewJobCustodyStore(pool, limits, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedResult, err := resultReopened.LoadResult(ctx, resultHeader.ResultCapsuleID)
+	if err != nil || loadedResult.ValidateStored() != nil ||
+		loadedResult.State != jobcustody.ResultRetained ||
+		loadedResult.ObjectPath != retainedResult.ObjectPath {
+		t.Fatalf("reopened result=%+v err=%v", loadedResult, err)
+	}
 
 	quotaRecord := postgresJobCustodyAdmission(
 		t, []byte("this-admission-exceeds-the-total-byte-quota"), 8,
@@ -332,6 +425,48 @@ func postgresJobCustodyReceipt(
 		RetentionUntilMilliseconds:      int64(record.Header.RetentionUntil),
 		Version:                         serviceauthority.JobCustodyReceiptVersion,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func postgresJobCustodyResultReceipt(
+	t *testing.T,
+	record jobcustody.ResultRecord,
+	committedAt int64,
+) []byte {
+	t.Helper()
+	seed := make([]byte, 32)
+	seed[31] = 7
+	deploymentID := uuid.MustParse("8b000000-0000-0000-0000-000000000001")
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := signer.SignJobCustodyResultReceipt(
+		serviceauthority.JobCustodyResultReceiptPayload{
+			AssignmentID: uuid.MustParse(string(record.Header.AssignmentID)),
+			ClaimID:      record.Header.ClaimID, ClaimPermitDigest: string(record.ClaimPermitDigest),
+			CommittedAtMilliseconds: committedAt, DeploymentID: deploymentID,
+			InputCapsuleID:                  uuid.MustParse(string(record.Header.InputCapsuleID)),
+			Kind:                            serviceauthority.JobCustodyResultReceiptKind,
+			ProtectedObjectByteCount:        record.Header.ProtectedObject.ByteCount,
+			ProtectedObjectDescriptorDigest: string(record.Header.ProtectedObject.Digest()),
+			ProtectedObjectSHA256:           string(record.Header.ProtectedObject.SHA256),
+			ResultCapsuleID:                 uuid.MustParse(string(record.Header.ResultCapsuleID)),
+			ResultIdempotencyKey:            string(record.Header.IdempotencyKey),
+			ResultPermitDigest:              string(record.ResultPermitDigest),
+			ResultSetDigest:                 string(record.Header.ResultSetDigest),
+			RetentionUntilMilliseconds:      int64(record.Header.RetentionUntil),
+			Version:                         serviceauthority.JobCustodyResultReceiptVersion,
+			WorkerExecutionReceiptDigest:    string(record.Header.WorkerExecutionReceiptDigest),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

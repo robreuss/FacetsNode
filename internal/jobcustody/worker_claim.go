@@ -58,6 +58,7 @@ func (record WorkerClaimRecord) ValidateStored() error {
 type WorkerClaimLedger interface {
 	ClaimNext(context.Context, WorkerClaimAuthorization) (WorkerClaimRecord, AdmissionRecord, error)
 	RenewClaim(context.Context, WorkerClaimAuthorization) (WorkerClaimRecord, AdmissionRecord, error)
+	LoadWorkerClaim(context.Context, uuid.UUID) (WorkerClaimRecord, AdmissionRecord, error)
 }
 
 type WorkerClaimCoordinator struct {

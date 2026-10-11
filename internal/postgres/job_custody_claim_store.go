@@ -11,6 +11,16 @@ import (
 	"github.com/robreuss/FacetsNode/internal/jobcustody"
 )
 
+func (store *JobCustodyStore) LoadWorkerClaim(
+	ctx context.Context,
+	claimID uuid.UUID,
+) (jobcustody.WorkerClaimRecord, jobcustody.AdmissionRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || claimID == uuid.Nil {
+		return jobcustody.WorkerClaimRecord{}, jobcustody.AdmissionRecord{}, jobcustody.ErrInvalid
+	}
+	return loadJobCustodyWorkerClaim(ctx, store.pool, claimID, false)
+}
+
 func (store *JobCustodyStore) ClaimNext(
 	ctx context.Context,
 	authorization jobcustody.WorkerClaimAuthorization,

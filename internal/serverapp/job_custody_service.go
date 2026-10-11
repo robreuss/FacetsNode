@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -55,6 +56,7 @@ func runJobCustodyService(
 	handler, err := jobcustody.NewHTTPHandler(
 		runtimeState.Coordinator,
 		runtimeState.WorkerClaims,
+		runtimeState.Results,
 		runtimeState.AdmissionPermits,
 		configuration.TrafficLimits,
 		readiness,
@@ -138,8 +140,10 @@ func finishJobCustodyHTTPServer(
 type jobCustodyRuntime struct {
 	Coordinator      *jobcustody.Coordinator
 	WorkerClaims     *jobcustody.WorkerClaimCoordinator
+	Results          *jobcustody.ResultCoordinator
 	AdmissionPermits *jobcustody.AdmissionPermitVerifier
 	content          *jobcustody.ContentStore
+	resultContent    *jobcustody.ContentStore
 	bindings         *serviceauthority.BindingRegistry
 }
 
@@ -150,6 +154,9 @@ func (runtime *jobCustodyRuntime) Close() error {
 	var failures []error
 	if runtime.content != nil {
 		failures = append(failures, runtime.content.Close())
+	}
+	if runtime.resultContent != nil {
+		failures = append(failures, runtime.resultContent.Close())
 	}
 	if runtime.bindings != nil {
 		failures = append(failures, runtime.bindings.Close())
@@ -223,6 +230,13 @@ func prepareJobCustodyRuntime(
 		return nil, fmt.Errorf("Job custody protected object store rejected: %w", err)
 	}
 	runtime.content = content
+	resultContent, err := jobcustody.OpenContentStore(
+		filepath.Join(configuration.JobCustodyRoot, "results"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("Job custody protected result store rejected: %w", err)
+	}
+	runtime.resultContent = resultContent
 	clock := jobCustodyWallClock{}
 	ledger, err := postgres.NewJobCustodyStore(
 		pool,
@@ -243,6 +257,13 @@ func prepareJobCustodyRuntime(
 	}
 	runtime.WorkerClaims = &jobcustody.WorkerClaimCoordinator{
 		Ledger: ledger, Content: content, Clock: clock,
+	}
+	runtime.Results = &jobcustody.ResultCoordinator{
+		Ledger: ledger, Content: resultContent,
+		Capacity: jobCustodyCapacityAuthority{
+			client: capacityClient, lifetime: configuration.StorageCapacityReservationTTL,
+		},
+		ReceiptSigner: signer, Clock: clock,
 	}
 	return runtime, nil
 }
@@ -297,6 +318,8 @@ var jobCustodyDatabaseTables = map[string]struct{}{
 	"job_custody_admissions":               {},
 	"job_custody_chunks":                   {},
 	"job_custody_worker_claims":            {},
+	"job_custody_results":                  {},
+	"job_custody_result_chunks":            {},
 }
 
 func requireDedicatedJobCustodyDatabase(ctx context.Context, pool *pgxpool.Pool) error {

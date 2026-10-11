@@ -104,10 +104,14 @@ func (store *JobCustodyStore) ReserveAdmission(
 	}
 	var count, stagingBytes, totalBytes int64
 	if err := tx.QueryRow(ctx, `
-		SELECT count(*),
-			COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0),
-			COALESCE(sum(protected_byte_count),0)
-		FROM job_custody_admissions`,
+		SELECT
+			(SELECT count(*) FROM job_custody_admissions),
+			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0)
+			 FROM job_custody_admissions) +
+			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0)
+			 FROM job_custody_results),
+			(SELECT COALESCE(sum(protected_byte_count),0) FROM job_custody_admissions) +
+			(SELECT COALESCE(sum(protected_byte_count),0) FROM job_custody_results)`,
 	).Scan(&count, &stagingBytes, &totalBytes); err != nil {
 		return jobcustody.AdmissionRecord{}, false, err
 	}

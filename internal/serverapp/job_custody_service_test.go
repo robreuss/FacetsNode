@@ -124,8 +124,9 @@ func TestJobCustodyRuntimeAssemblyReopensExactIsolatedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.Coordinator == nil || runtime.WorkerClaims == nil || runtime.AdmissionPermits == nil ||
-		runtime.content == nil || runtime.bindings == nil {
+	if runtime.Coordinator == nil || runtime.WorkerClaims == nil || runtime.Results == nil ||
+		runtime.AdmissionPermits == nil || runtime.content == nil || runtime.resultContent == nil ||
+		runtime.bindings == nil {
 		t.Fatal("Job custody runtime omitted a required authority or custody component")
 	}
 	if _, err := prepareJobCustodyRuntime(ctx, pool, configuration); err == nil {
