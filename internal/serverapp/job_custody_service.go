@@ -57,6 +57,7 @@ func runJobCustodyService(
 		runtimeState.Coordinator,
 		runtimeState.WorkerClaims,
 		runtimeState.Results,
+		runtimeState.Delivery,
 		runtimeState.AdmissionPermits,
 		configuration.TrafficLimits,
 		readiness,
@@ -141,6 +142,7 @@ type jobCustodyRuntime struct {
 	Coordinator      *jobcustody.Coordinator
 	WorkerClaims     *jobcustody.WorkerClaimCoordinator
 	Results          *jobcustody.ResultCoordinator
+	Delivery         *jobcustody.ResultDeliveryCoordinator
 	AdmissionPermits *jobcustody.AdmissionPermitVerifier
 	content          *jobcustody.ContentStore
 	resultContent    *jobcustody.ContentStore
@@ -264,6 +266,9 @@ func prepareJobCustodyRuntime(
 			client: capacityClient, lifetime: configuration.StorageCapacityReservationTTL,
 		},
 		ReceiptSigner: signer, Clock: clock,
+	}
+	runtime.Delivery = &jobcustody.ResultDeliveryCoordinator{
+		Ledger: ledger, Content: resultContent, Clock: clock,
 	}
 	return runtime, nil
 }

@@ -2,7 +2,10 @@ package jobcustody
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -143,6 +146,116 @@ func TestResultCoordinatorRejectsChangedResultAndExpiredClaim(t *testing.T) {
 	}
 }
 
+func TestResultDeliveryCoordinatorListsAndReadsOnlyOriginalSourceResults(t *testing.T) {
+	inputContent, _ := temporaryContentStore(t)
+	resultContent, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
+	fixture := newStagingFixture(t, []byte("opaque-input-capsule"), 64)
+	clock := fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)}
+	signer := testJobCustodyReceiptSigner(t)
+	inputCoordinator := &Coordinator{
+		Ledger: ledger, Content: inputContent, Capacity: &memoryCapacityAuthority{},
+		Verifier: fixture.verifier, ReceiptSigner: signer, Clock: clock,
+	}
+	inputHandle, err := inputCoordinator.AdmitAuthorized(
+		t.Context(), fixture.envelopeBytes, fixture.authorization(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inputCoordinator.AppendChunk(
+		t.Context(), inputHandle, 0, fixture.protectedBytes, digestBytes(fixture.protectedBytes),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inputCoordinator.Finalize(t.Context(), inputHandle); err != nil {
+		t.Fatal(err)
+	}
+	claimAuthorization := verifiedWorkerClaimAuthorization(t, fixture, 1_800_000_060_000)
+	claimCoordinator := &WorkerClaimCoordinator{Ledger: ledger, Content: inputContent, Clock: clock}
+	claim, err := claimCoordinator.Claim(t.Context(), claimAuthorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedResult := []byte("opaque-result-for-original-source")
+	resultAuthorization := verifiedWorkerResultAuthorization(
+		t, fixture, claim.Record(), protectedResult, 8, 1_800_000_050_000,
+	)
+	resultCoordinator := &ResultCoordinator{
+		Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
+		ReceiptSigner: signer, Clock: clock,
+	}
+	resultHandle, err := resultCoordinator.AcceptAuthorized(t.Context(), resultAuthorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := int64(0); index < resultHandle.record.Header.ProtectedObject.ChunkCount; index++ {
+		offset := index * resultHandle.record.Header.ProtectedObject.ChunkByteCount
+		end := min(offset+resultHandle.record.Header.ProtectedObject.ChunkByteCount, int64(len(protectedResult)))
+		chunk := protectedResult[offset:end]
+		if _, err := resultCoordinator.AppendChunk(
+			t.Context(), resultHandle, index, chunk, digestBytes(chunk),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retained, err := resultCoordinator.Finalize(t.Context(), resultHandle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrievalAuthorization := ResultRetrievalAuthorization{
+		payload: ResultRetrievalPermitPayload{
+			AdmissionPermitDigest:    inputHandle.record.AdmissionPermitDigest,
+			AuthorityID:              inputHandle.record.RouteAuthorityID,
+			ExpiresAt:                1_800_000_050_000,
+			InputCapsuleID:           inputHandle.record.Header.CapsuleID,
+			IssuedAt:                 1_800_000_000_000,
+			PermitID:                 uuid.New(),
+			RequesterAuthorityDigest: inputHandle.record.RequesterAuthorityDigest,
+			Version:                  ResultRetrievalPermitVersion,
+		},
+		permitDigest: computequeue.SHA256Digest("result-delivery-test", "retrieval-permit"),
+	}
+	delivery := &ResultDeliveryCoordinator{Ledger: ledger, Content: resultContent, Clock: clock}
+	listed, err := delivery.ListAuthorized(t.Context(), retrievalAuthorization)
+	if err != nil || len(listed) != 1 || listed[0].Header != retained.Header {
+		t.Fatalf("listed=%+v err=%v", listed, err)
+	}
+	deliveryHandle, err := delivery.OpenAuthorized(
+		t.Context(), retrievalAuthorization, retained.Header.ResultCapsuleID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received []byte
+	for index := int64(0); index < retained.Header.ProtectedObject.ChunkCount; index++ {
+		chunk, err := delivery.ReadChunk(deliveryHandle, index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		received = append(received, chunk...)
+	}
+	if !bytes.Equal(received, protectedResult) {
+		t.Fatal("source did not receive exact protected result bytes")
+	}
+	wrongSource := retrievalAuthorization
+	wrongSource.payload.RequesterAuthorityDigest = computequeue.SHA256Digest(
+		"result-delivery-test", "wrong-source",
+	)
+	if _, err := delivery.ListAuthorized(t.Context(), wrongSource); err == nil {
+		t.Fatal("different source authority retrieved the result")
+	}
+	if _, err := delivery.OpenAuthorized(
+		t.Context(), retrievalAuthorization, computequeue.JobCapsuleID(uuid.NewString()),
+	); !errors.Is(err, ErrMissing) {
+		t.Fatalf("unknown result error=%v", err)
+	}
+	delivery.Clock = fixedJobCustodyClock{time.UnixMilli(int64(retrievalAuthorization.payload.ExpiresAt))}
+	if _, err := delivery.ReadChunk(deliveryHandle, 0); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expired retrieval handle error=%v", err)
+	}
+}
+
 func verifiedWorkerClaimAuthorization(
 	t *testing.T,
 	fixture stagingFixture,
@@ -219,6 +332,31 @@ func (ledger *memoryLedger) LoadResult(
 		return ResultRecord{}, ErrMissing
 	}
 	return cloneResultRecord(record), nil
+}
+
+func (ledger *memoryLedger) ListResultsForInput(
+	_ context.Context,
+	inputCapsuleID computequeue.JobCapsuleID,
+) ([]ResultRecord, AdmissionRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	admission, present := ledger.records[inputCapsuleID]
+	if !present {
+		return nil, AdmissionRecord{}, ErrMissing
+	}
+	results := make([]ResultRecord, 0)
+	for _, record := range ledger.results {
+		if record.Header.InputCapsuleID == inputCapsuleID {
+			results = append(results, cloneResultRecord(record))
+		}
+	}
+	slices.SortFunc(results, func(left, right ResultRecord) int {
+		if left.AcceptedAt != right.AcceptedAt {
+			return cmp.Compare(left.AcceptedAt, right.AcceptedAt)
+		}
+		return cmp.Compare(left.Header.ResultCapsuleID, right.Header.ResultCapsuleID)
+	})
+	return results, cloneWorkerClaimAdmission(admission), nil
 }
 
 func (ledger *memoryLedger) ReserveResult(

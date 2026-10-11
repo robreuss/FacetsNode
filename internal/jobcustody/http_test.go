@@ -34,6 +34,7 @@ func TestJobCustodyHTTPAdmissionCarriageAndReceiptReplay(t *testing.T) {
 			Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
 			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
 		},
+		&ResultDeliveryCoordinator{Ledger: ledger, Content: resultContent, Clock: coordinator.Clock},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
 	)
@@ -184,6 +185,7 @@ func TestJobCustodyHTTPWorkerClaimsExactRetainedCapsuleAndReadsProtectedChunks(t
 			Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
 			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
 		},
+		&ResultDeliveryCoordinator{Ledger: ledger, Content: resultContent, Clock: coordinator.Clock},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
 	)
@@ -396,6 +398,94 @@ func TestJobCustodyHTTPWorkerClaimsExactRetainedCapsuleAndReadsProtectedChunks(t
 	if !bytes.Equal(replayedResult.CustodyReceipt, resultStatus.CustodyReceipt) {
 		t.Fatal("result finalize replay changed the persisted custody receipt")
 	}
+	retrievalPayload := ResultRetrievalPermitPayload{
+		AdmissionPermitDigest: admissionAuthorization.PermitDigest(),
+		AuthorityID:           fixture.authorityID, ExpiresAt: fixture.issuedAt + 60_000,
+		InputCapsuleID:           fixture.admission.header.CapsuleID,
+		IssuedAt:                 fixture.issuedAt,
+		PermitID:                 uuid.MustParse("34343434-3434-4434-8434-343434343434"),
+		RequesterAuthorityDigest: fixture.payload.RequesterAuthorityDigest,
+		Version:                  ResultRetrievalPermitVersion,
+	}
+	retrievalSigner, err := NewResultRetrievalPermitSigner(fixture.authorityID, fixture.privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrievalPermit, err := retrievalSigner.Sign(retrievalPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrievalAuthorization, err := fixture.verifier.VerifyResultRetrieval(
+		retrievalPermit, fixture.issuedAt+1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultStatusPath := fmt.Sprintf(
+		"/v1/job-custody/admissions/%s/results/status",
+		fixture.admission.header.CapsuleID,
+	)
+	listed := serveJobCustodyJSON(
+		t, server, http.MethodPost, resultStatusPath,
+		HTTPResultRetrievalRequest{Permit: retrievalPermit},
+	)
+	if listed.Code != http.StatusOK {
+		t.Fatalf("result list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var listStatus HTTPResultListStatus
+	decodeJobCustodyTestJSON(t, listed.Body.Bytes(), &listStatus)
+	if len(listStatus.Results) != 1 ||
+		listStatus.Results[0].ResultCapsuleID != resultHeader.ResultCapsuleID ||
+		!bytes.Equal(listStatus.Results[0].CustodyReceipt, resultStatus.CustodyReceipt) {
+		t.Fatalf("result list=%+v", listStatus)
+	}
+	var deliveredResult []byte
+	for index := int64(0); index < resultDescriptor.ChunkCount; index++ {
+		path := fmt.Sprintf(
+			"/v1/job-custody/admissions/%s/results/%s/chunks/%d",
+			fixture.admission.header.CapsuleID, resultHeader.ResultCapsuleID, index,
+		)
+		response := serveJobCustodyJSON(
+			t, server, http.MethodPost, path,
+			HTTPResultRetrievalRequest{Permit: retrievalPermit},
+		)
+		if response.Code != http.StatusOK ||
+			response.Header().Get("Content-Type") != JobCustodyCarriageContentType {
+			t.Fatalf("delivery chunk %d status=%d body=%s", index, response.Code, response.Body.String())
+		}
+		frame, err := carriage.DecodeFrame(response.Body.Bytes())
+		if err != nil || frame.SectionKind != JobCustodyResultDeliveryChunkSectionKind {
+			t.Fatalf("delivery chunk %d frame=%+v err=%v", index, frame, err)
+		}
+		header, err := computequeue.DecodeCanonical[HTTPResultDeliveryChunkHeader](frame.Header)
+		if err != nil || header.Validate() != nil || header.ChunkIndex != index ||
+			header.InputCapsuleID != fixture.admission.header.CapsuleID ||
+			header.ResultCapsuleID != resultHeader.ResultCapsuleID ||
+			header.RetrievalPermitDigest != retrievalAuthorization.PermitDigest() ||
+			header.ChunkSHA256 != digestBytes(frame.Payload) {
+			t.Fatalf("delivery chunk %d header=%+v err=%v", index, header, err)
+		}
+		deliveredResult = append(deliveredResult, frame.Payload...)
+	}
+	if !bytes.Equal(deliveredResult, protectedResult) {
+		t.Fatal("source did not receive exact protected result bytes over HTTP")
+	}
+	wrongSourcePayload := retrievalPayload
+	wrongSourcePayload.PermitID = uuid.MustParse("56565656-5656-4656-8656-565656565656")
+	wrongSourcePayload.RequesterAuthorityDigest = computequeue.SHA256Digest(
+		"job-custody-http-tests", "wrong-source-authority",
+	)
+	wrongSourcePermit, err := retrievalSigner.Sign(wrongSourcePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongSource := serveJobCustodyJSON(
+		t, server, http.MethodPost, resultStatusPath,
+		HTTPResultRetrievalRequest{Permit: wrongSourcePermit},
+	)
+	if wrongSource.Code != http.StatusConflict {
+		t.Fatalf("wrong source status=%d body=%s", wrongSource.Code, wrongSource.Body.String())
+	}
 }
 
 func TestJobCustodyHTTPRejectsPermitAndCarriageSubstitution(t *testing.T) {
@@ -414,6 +504,7 @@ func TestJobCustodyHTTPRejectsPermitAndCarriageSubstitution(t *testing.T) {
 			Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
 			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
 		},
+		&ResultDeliveryCoordinator{Ledger: ledger, Content: resultContent, Clock: coordinator.Clock},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
 	)

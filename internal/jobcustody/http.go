@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	JobCustodyChunkSectionKind       byte = 65
-	JobCustodyWorkerChunkSectionKind byte = 66
-	JobCustodyResultChunkSectionKind byte = 67
-	MaximumJobCustodyControlBytes         = 160 * 1024
-	JobCustodyCarriageContentType         = "application/vnd.facets.carriage"
+	JobCustodyChunkSectionKind               byte = 65
+	JobCustodyWorkerChunkSectionKind         byte = 66
+	JobCustodyResultChunkSectionKind         byte = 67
+	JobCustodyResultDeliveryChunkSectionKind byte = 68
+	MaximumJobCustodyControlBytes                 = 160 * 1024
+	JobCustodyCarriageContentType                 = "application/vnd.facets.carriage"
 )
 
 type HTTPAdmissionRequest struct {
@@ -47,13 +48,25 @@ type HTTPWorkerResultRequest struct {
 	Permit SignedWorkerResultPermit `json:"permit"`
 }
 
+type HTTPResultRetrievalRequest struct {
+	Permit SignedResultRetrievalPermit `json:"permit"`
+}
+
+type HTTPResultListStatus struct {
+	Results []HTTPWorkerResultStatus `json:"results"`
+}
+
 type HTTPWorkerResultStatus struct {
-	CommittedBytes  int64                                            `json:"committedBytes"`
-	CustodyReceipt  json.RawMessage                                  `json:"custodyReceipt,omitempty"`
-	ProtectedObject computequeue.JobCapsuleProtectedObjectDescriptor `json:"protectedObject"`
-	ResultCapsuleID computequeue.JobCapsuleID                        `json:"resultCapsuleID"`
-	ResultSetDigest computequeue.Digest                              `json:"resultSetDigest"`
-	State           ResultState                                      `json:"state"`
+	AssignmentID                 computequeue.AssignmentID                        `json:"assignmentID"`
+	ClaimID                      uuid.UUID                                        `json:"claimID"`
+	CommittedBytes               int64                                            `json:"committedBytes"`
+	CustodyReceipt               json.RawMessage                                  `json:"custodyReceipt,omitempty"`
+	ProtectedObject              computequeue.JobCapsuleProtectedObjectDescriptor `json:"protectedObject"`
+	ResultCapsuleID              computequeue.JobCapsuleID                        `json:"resultCapsuleID"`
+	ResultSetDigest              computequeue.Digest                              `json:"resultSetDigest"`
+	RetentionUntil               computequeue.Timestamp                           `json:"retentionUntil"`
+	State                        ResultState                                      `json:"state"`
+	WorkerExecutionReceiptDigest computequeue.Digest                              `json:"workerExecutionReceiptDigest"`
 }
 
 type HTTPWorkerClaimStatus struct {
@@ -78,6 +91,24 @@ type HTTPWorkerResultChunkHeader struct {
 	ChunkSHA256 computequeue.Digest      `json:"chunkSHA256"`
 	Permit      SignedWorkerResultPermit `json:"permit"`
 	Version     int                      `json:"version"`
+}
+
+type HTTPResultDeliveryChunkHeader struct {
+	ChunkIndex            int64                     `json:"chunkIndex"`
+	ChunkSHA256           computequeue.Digest       `json:"chunkSHA256"`
+	InputCapsuleID        computequeue.JobCapsuleID `json:"inputCapsuleID"`
+	ResultCapsuleID       computequeue.JobCapsuleID `json:"resultCapsuleID"`
+	RetrievalPermitDigest computequeue.Digest       `json:"retrievalPermitDigest"`
+	Version               int                       `json:"version"`
+}
+
+func (value HTTPResultDeliveryChunkHeader) Validate() error {
+	if value.Version != ResultRetrievalPermitVersion || value.ChunkIndex < 0 ||
+		value.ChunkSHA256.Validate() != nil || value.InputCapsuleID.Validate() != nil ||
+		value.ResultCapsuleID.Validate() != nil || value.RetrievalPermitDigest.Validate() != nil {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func (value HTTPWorkerResultChunkHeader) Validate() error {
@@ -127,6 +158,7 @@ type HTTPHandler struct {
 	coordinator  *Coordinator
 	workerClaims *WorkerClaimCoordinator
 	results      *ResultCoordinator
+	delivery     *ResultDeliveryCoordinator
 	permits      *AdmissionPermitVerifier
 	now          func() time.Time
 	readiness    func(context.Context) error
@@ -143,12 +175,14 @@ func NewHTTPHandler(
 	coordinator *Coordinator,
 	workerClaims *WorkerClaimCoordinator,
 	results *ResultCoordinator,
+	delivery *ResultDeliveryCoordinator,
 	permits *AdmissionPermitVerifier,
 	limits traffic.Limits,
 	readiness func(context.Context) error,
 ) (*HTTPHandler, error) {
 	if coordinator == nil || coordinator.validate() != nil || workerClaims == nil ||
 		workerClaims.validate() != nil || results == nil || results.validate() != nil || permits == nil ||
+		delivery == nil || delivery.validate() != nil ||
 		traffic.ValidateLimits(limits) != nil || readiness == nil {
 		return nil, ErrInvalid
 	}
@@ -156,6 +190,7 @@ func NewHTTPHandler(
 		coordinator:  coordinator,
 		workerClaims: workerClaims,
 		results:      results,
+		delivery:     delivery,
 		permits:      permits,
 		now:          time.Now,
 		readiness:    readiness,
@@ -178,6 +213,8 @@ func (handler *HTTPHandler) Handler() http.Handler {
 	mux.Handle("POST /v1/job-custody/claims/{claimID}/results", handler.limited(handler.management, http.HandlerFunc(handler.handleWorkerResult)))
 	mux.Handle("PUT /v1/job-custody/claims/{claimID}/results/{resultCapsuleID}/chunks/{chunkIndex}", handler.limited(handler.storage, http.HandlerFunc(handler.handleWorkerResultChunk)))
 	mux.Handle("POST /v1/job-custody/claims/{claimID}/results/{resultCapsuleID}/finalize", handler.limited(handler.management, http.HandlerFunc(handler.handleWorkerResultFinalize)))
+	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/results/status", handler.limited(handler.management, http.HandlerFunc(handler.handleResultList)))
+	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/results/{resultCapsuleID}/chunks/{chunkIndex}", handler.limited(handler.storage, http.HandlerFunc(handler.handleResultDeliveryChunk)))
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -547,14 +584,120 @@ func workerResultPathMatches(request *http.Request, authorization WorkerResultAu
 
 func workerResultHTTPStatus(record ResultRecord) HTTPWorkerResultStatus {
 	result := HTTPWorkerResultStatus{
+		AssignmentID: record.Header.AssignmentID, ClaimID: record.Header.ClaimID,
 		CommittedBytes: record.CommittedBytes, ProtectedObject: record.Header.ProtectedObject,
 		ResultCapsuleID: record.Header.ResultCapsuleID,
-		ResultSetDigest: record.Header.ResultSetDigest, State: record.State,
+		ResultSetDigest: record.Header.ResultSetDigest,
+		RetentionUntil:  record.Header.RetentionUntil, State: record.State,
+		WorkerExecutionReceiptDigest: record.Header.WorkerExecutionReceiptDigest,
 	}
 	if len(record.CustodyReceiptBytes) != 0 {
 		result.CustodyReceipt = bytes.Clone(record.CustodyReceiptBytes)
 	}
 	return result
+}
+
+func (handler *HTTPHandler) handleResultList(writer http.ResponseWriter, request *http.Request) {
+	authorization, ok := handler.authorizedResultRetrieval(writer, request)
+	if !ok || !resultRetrievalInputPathMatches(request, authorization) {
+		if ok {
+			writeJobCustodyError(writer, http.StatusBadRequest, "invalid_result_retrieval")
+		}
+		return
+	}
+	records, err := handler.delivery.ListAuthorized(request.Context(), authorization)
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	status := HTTPResultListStatus{Results: make([]HTTPWorkerResultStatus, len(records))}
+	for index, record := range records {
+		status.Results[index] = workerResultHTTPStatus(record)
+	}
+	writeJobCustodyJSON(writer, http.StatusOK, status)
+}
+
+func (handler *HTTPHandler) handleResultDeliveryChunk(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	resultCapsuleID := computequeue.JobCapsuleID(request.PathValue("resultCapsuleID"))
+	chunkIndex, indexErr := strconv.ParseInt(request.PathValue("chunkIndex"), 10, 64)
+	if resultCapsuleID.Validate() != nil || indexErr != nil || chunkIndex < 0 {
+		writeJobCustodyError(writer, http.StatusBadRequest, "invalid_result_retrieval_chunk")
+		return
+	}
+	authorization, ok := handler.authorizedResultRetrieval(writer, request)
+	if !ok || !resultRetrievalInputPathMatches(request, authorization) {
+		if ok {
+			writeJobCustodyError(writer, http.StatusBadRequest, "invalid_result_retrieval_chunk")
+		}
+		return
+	}
+	handle, err := handler.delivery.OpenAuthorized(
+		request.Context(), authorization, resultCapsuleID,
+	)
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	chunk, err := handler.delivery.ReadChunk(handle, chunkIndex)
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	digest := sha256.Sum256(chunk)
+	headerBytes, err := computequeue.EncodeCanonical(HTTPResultDeliveryChunkHeader{
+		ChunkIndex:            chunkIndex,
+		ChunkSHA256:           computequeue.Digest(fmt.Sprintf("%x", digest[:])),
+		InputCapsuleID:        authorization.Payload().InputCapsuleID,
+		ResultCapsuleID:       resultCapsuleID,
+		RetrievalPermitDigest: authorization.PermitDigest(),
+		Version:               ResultRetrievalPermitVersion,
+	})
+	if err != nil {
+		writeJobCustodyError(writer, http.StatusInternalServerError, "custody_unavailable")
+		return
+	}
+	wire, err := (carriage.Frame{
+		SectionKind: JobCustodyResultDeliveryChunkSectionKind,
+		Header:      headerBytes, Payload: chunk,
+	}).Encode()
+	if err != nil {
+		writeJobCustodyError(writer, http.StatusInternalServerError, "custody_unavailable")
+		return
+	}
+	writer.Header().Set("Content-Type", JobCustodyCarriageContentType)
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(wire)
+}
+
+func (handler *HTTPHandler) authorizedResultRetrieval(
+	writer http.ResponseWriter,
+	request *http.Request,
+) (ResultRetrievalAuthorization, bool) {
+	var input HTTPResultRetrievalRequest
+	if decodeJobCustodyJSON(request, &input, MaximumJobCustodyControlBytes) != nil {
+		writeJobCustodyError(writer, http.StatusBadRequest, "invalid_result_retrieval_authorization")
+		return ResultRetrievalAuthorization{}, false
+	}
+	authorization, err := handler.permits.VerifyResultRetrieval(
+		input.Permit, computequeue.Timestamp(handler.now().UnixMilli()),
+	)
+	if err != nil {
+		writeJobCustodyError(writer, http.StatusUnauthorized, "unauthorized")
+		return ResultRetrievalAuthorization{}, false
+	}
+	return authorization, true
+}
+
+func resultRetrievalInputPathMatches(
+	request *http.Request,
+	authorization ResultRetrievalAuthorization,
+) bool {
+	inputCapsuleID := computequeue.JobCapsuleID(request.PathValue("capsuleID"))
+	return inputCapsuleID.Validate() == nil &&
+		inputCapsuleID == authorization.Payload().InputCapsuleID
 }
 
 func (handler *HTTPHandler) authorizedWorkerClaim(

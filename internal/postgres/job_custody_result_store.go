@@ -23,6 +23,57 @@ func (store *JobCustodyStore) LoadResult(
 	return loadJobCustodyResult(ctx, store.pool, resultCapsuleID, false)
 }
 
+func (store *JobCustodyStore) ListResultsForInput(
+	ctx context.Context,
+	inputCapsuleID computequeue.JobCapsuleID,
+) ([]jobcustody.ResultRecord, jobcustody.AdmissionRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || inputCapsuleID.Validate() != nil {
+		return nil, jobcustody.AdmissionRecord{}, jobcustody.ErrInvalid
+	}
+	admission, err := loadJobCustodyAdmission(ctx, store.pool, inputCapsuleID, false)
+	if err != nil {
+		return nil, jobcustody.AdmissionRecord{}, err
+	}
+	inputUUID, err := uuid.Parse(string(inputCapsuleID))
+	if err != nil {
+		return nil, jobcustody.AdmissionRecord{}, jobcustody.ErrInvalid
+	}
+	rows, err := store.pool.Query(ctx, `
+		SELECT result_capsule_id FROM job_custody_results
+		WHERE input_capsule_id=$1 ORDER BY accepted_at_milliseconds,result_capsule_id`,
+		inputUUID,
+	)
+	if err != nil {
+		return nil, jobcustody.AdmissionRecord{}, err
+	}
+	var identifiers []computequeue.JobCapsuleID
+	for rows.Next() {
+		var identifier uuid.UUID
+		if err := rows.Scan(&identifier); err != nil {
+			rows.Close()
+			return nil, jobcustody.AdmissionRecord{}, err
+		}
+		identifiers = append(identifiers, computequeue.JobCapsuleID(identifier.String()))
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, jobcustody.AdmissionRecord{}, err
+	}
+	rows.Close()
+	results := make([]jobcustody.ResultRecord, 0, len(identifiers))
+	for _, identifier := range identifiers {
+		record, err := loadJobCustodyResult(ctx, store.pool, identifier, false)
+		if err != nil {
+			return nil, jobcustody.AdmissionRecord{}, err
+		}
+		if record.Header.InputCapsuleID != inputCapsuleID {
+			return nil, jobcustody.AdmissionRecord{}, jobcustody.ErrInvalid
+		}
+		results = append(results, record)
+	}
+	return results, admission, nil
+}
+
 func (store *JobCustodyStore) ReserveResult(
 	ctx context.Context,
 	candidate jobcustody.ResultRecord,

@@ -256,6 +256,14 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 		loadedResult.ObjectPath != retainedResult.ObjectPath {
 		t.Fatalf("reopened result=%+v err=%v", loadedResult, err)
 	}
+	listedResults, listedAdmission, err := resultReopened.ListResultsForInput(
+		ctx, record.Header.CapsuleID,
+	)
+	if err != nil || len(listedResults) != 1 ||
+		listedResults[0].Header.ResultCapsuleID != resultHeader.ResultCapsuleID ||
+		listedAdmission.Header.CapsuleID != record.Header.CapsuleID {
+		t.Fatalf("listed results=%+v admission=%+v err=%v", listedResults, listedAdmission, err)
+	}
 
 	quotaRecord := postgresJobCustodyAdmission(
 		t, []byte("this-admission-exceeds-the-total-byte-quota"), 8,
@@ -379,6 +387,9 @@ func postgresJobCustodyAdmission(
 			"postgres-job-custody-permit", string(capsuleID),
 		),
 		RouteAuthorityID: uuid.MustParse("8c000000-0000-0000-0000-000000000001"),
+		RequesterAuthorityDigest: computequeue.SHA256Digest(
+			"postgres-job-custody-requester-authority", string(capsuleID),
+		),
 		WorkerCapabilitiesDigest: computequeue.SHA256Digest(
 			"postgres-job-custody-worker-capabilities", string(capsuleID),
 		),

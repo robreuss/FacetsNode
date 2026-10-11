@@ -94,15 +94,10 @@ func makeJobCustodyRouteAuthority(
 	if capabilitiesDigest.Validate() != nil || !grant.validAt(grant.GrantedAtMilliseconds) {
 		return BoxJobCustodyRouteAuthority{}, ErrJobCustodyRouteAuthority
 	}
-	requesterDigest := computequeue.SHA256Digest(
-		"facets.box.job-custody.requester-authority.v1",
-		enrollment.Anchor.BoxID.String(),
-		enrollment.Anchor.ParticipantID.String(),
-		enrollment.Anchor.BoxScopedPrincipalID.String(),
-		enrollment.Device.DeviceID.String(),
-		enrollment.Device.GrantID.String(),
-		fmt.Sprint(enrollment.Device.DeviceGeneration),
-	)
+	requesterDigest, err := makeJobCustodyRequesterAuthorityDigest(enrollment)
+	if err != nil {
+		return BoxJobCustodyRouteAuthority{}, err
+	}
 	// The human confirmation-code digest is deliberately excluded: exporting a
 	// commitment derived from a six-digit secret would create an offline oracle.
 	// These fields are the durable authorization and route semantics.
@@ -120,6 +115,30 @@ func makeJobCustodyRouteAuthority(
 		workerAccessGrantDigest:  grantDigest,
 		workerCapabilitiesDigest: capabilitiesDigest,
 	}, nil
+}
+
+func makeJobCustodyRequesterAuthorityDigest(
+	enrollment BoxParticipantEnrollment,
+) (computequeue.Digest, error) {
+	if enrollment.Anchor.BoxID == uuid.Nil || enrollment.Anchor.ParticipantID == uuid.Nil ||
+		enrollment.Anchor.BoxScopedPrincipalID == uuid.Nil || enrollment.Device.DeviceID == uuid.Nil ||
+		enrollment.Device.GrantID == uuid.Nil || enrollment.Device.DeviceGeneration == 0 ||
+		enrollment.Device.ParticipantID != enrollment.Anchor.ParticipantID {
+		return "", ErrJobCustodyRouteAuthority
+	}
+	digest := computequeue.SHA256Digest(
+		"facets.box.job-custody.requester-authority.v1",
+		enrollment.Anchor.BoxID.String(),
+		enrollment.Anchor.ParticipantID.String(),
+		enrollment.Anchor.BoxScopedPrincipalID.String(),
+		enrollment.Device.DeviceID.String(),
+		enrollment.Device.GrantID.String(),
+		fmt.Sprint(enrollment.Device.DeviceGeneration),
+	)
+	if digest.Validate() != nil {
+		return "", ErrJobCustodyRouteAuthority
+	}
+	return digest, nil
 }
 
 func (store *MemoryStore) AuthorizeJobCustodyAdmission(

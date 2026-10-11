@@ -1,5 +1,7 @@
 ALTER TABLE job_custody_admissions
     ADD COLUMN route_authority_id uuid NOT NULL,
+    ADD COLUMN requester_authority_digest text NOT NULL
+        CHECK (requester_authority_digest ~ '^[0-9a-f]{64}$'),
     ADD COLUMN route_recipient_worker_id uuid NOT NULL,
     ADD COLUMN route_recipient_key_fingerprint text NOT NULL
         CHECK (route_recipient_key_fingerprint ~ '^[0-9a-f]{64}$'),

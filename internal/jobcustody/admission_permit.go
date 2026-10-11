@@ -204,6 +204,7 @@ type AdmissionAuthorization struct {
 	expectedSigner           computequeue.ReceiptSignerBinding
 	permitDigest             computequeue.Digest
 	authorityID              uuid.UUID
+	requesterAuthorityDigest computequeue.Digest
 	workerCapabilitiesDigest computequeue.Digest
 }
 
@@ -221,6 +222,10 @@ func (value AdmissionAuthorization) PermitDigest() computequeue.Digest {
 
 func (value AdmissionAuthorization) AuthorityID() uuid.UUID {
 	return value.authorityID
+}
+
+func (value AdmissionAuthorization) RequesterAuthorityDigest() computequeue.Digest {
+	return value.requesterAuthorityDigest
 }
 
 func (value AdmissionAuthorization) WorkerCapabilitiesDigest() computequeue.Digest {
@@ -282,6 +287,7 @@ func (verifier *AdmissionPermitVerifier) Verify(
 		expectedSigner:           payload.AdmissionSigner,
 		permitDigest:             permitDigest,
 		authorityID:              payload.AuthorityID,
+		requesterAuthorityDigest: payload.RequesterAuthorityDigest,
 		workerCapabilitiesDigest: payload.WorkerCapabilitiesDigest,
 	}, nil
 }

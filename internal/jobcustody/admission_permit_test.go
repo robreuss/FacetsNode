@@ -76,6 +76,7 @@ func TestAdmissionPermitDerivesSignerAndRouteFromBoxAuthority(t *testing.T) {
 		authorization.ExpectedSigner() != fixture.admission.signer ||
 		authorization.PermitDigest().Validate() != nil ||
 		authorization.AuthorityID() != fixture.authorityID ||
+		authorization.RequesterAuthorityDigest() != fixture.payload.RequesterAuthorityDigest ||
 		authorization.WorkerCapabilitiesDigest() != fixture.payload.WorkerCapabilitiesDigest {
 		t.Fatalf("unexpected authorization: %#v", authorization)
 	}

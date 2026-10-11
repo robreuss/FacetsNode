@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"time"
 
@@ -88,9 +89,131 @@ func sameResult(left, right ResultRecord) bool {
 type ResultLedger interface {
 	LoadWorkerClaim(context.Context, uuid.UUID) (WorkerClaimRecord, AdmissionRecord, error)
 	LoadResult(context.Context, computequeue.JobCapsuleID) (ResultRecord, error)
+	ListResultsForInput(context.Context, computequeue.JobCapsuleID) ([]ResultRecord, AdmissionRecord, error)
 	ReserveResult(context.Context, ResultRecord) (ResultRecord, bool, error)
 	BeginResultAppend(context.Context, AppendRequest) (ResultAppendLease, error)
 	BeginResultFinalization(context.Context, computequeue.JobCapsuleID) (ResultFinalizationLease, error)
+}
+
+type ResultDeliveryCoordinator struct {
+	Ledger  ResultLedger
+	Content *ContentStore
+	Clock   Clock
+}
+
+func (coordinator *ResultDeliveryCoordinator) validate() error {
+	if coordinator == nil || coordinator.Ledger == nil || coordinator.Content == nil ||
+		coordinator.Clock == nil {
+		return ErrInvalid
+	}
+	return nil
+}
+
+type ResultDeliveryHandle struct {
+	authorization ResultRetrievalAuthorization
+	record        ResultRecord
+}
+
+func (handle ResultDeliveryHandle) Record() ResultRecord {
+	return cloneResultRecord(handle.record)
+}
+
+func (coordinator *ResultDeliveryCoordinator) ListAuthorized(
+	ctx context.Context,
+	authorization ResultRetrievalAuthorization,
+) ([]ResultRecord, error) {
+	if coordinator.validate() != nil || ctx == nil || authorization.payload.Validate() != nil ||
+		authorization.permitDigest.Validate() != nil {
+		return nil, ErrInvalid
+	}
+	payload := authorization.payload
+	now := computequeue.Timestamp(coordinator.Clock.Now().UnixMilli())
+	if now < payload.IssuedAt || now >= payload.ExpiresAt {
+		return nil, ErrConflict
+	}
+	results, admission, err := coordinator.Ledger.ListResultsForInput(ctx, payload.InputCapsuleID)
+	if err != nil {
+		return nil, err
+	}
+	if validateResultRetrievalBinding(admission, authorization, now) != nil {
+		return nil, ErrConflict
+	}
+	cloned := make([]ResultRecord, 0, len(results))
+	for _, result := range results {
+		if result.ValidateStored() != nil || result.Header.InputCapsuleID != payload.InputCapsuleID ||
+			result.RouteAuthorityID != payload.AuthorityID {
+			return nil, ErrInvalid
+		}
+		if now >= result.Header.RetentionUntil {
+			continue
+		}
+		cloned = append(cloned, cloneResultRecord(result))
+	}
+	return cloned, nil
+}
+
+func (coordinator *ResultDeliveryCoordinator) OpenAuthorized(
+	ctx context.Context,
+	authorization ResultRetrievalAuthorization,
+	resultCapsuleID computequeue.JobCapsuleID,
+) (ResultDeliveryHandle, error) {
+	if resultCapsuleID.Validate() != nil {
+		return ResultDeliveryHandle{}, ErrInvalid
+	}
+	results, err := coordinator.ListAuthorized(ctx, authorization)
+	if err != nil {
+		return ResultDeliveryHandle{}, err
+	}
+	for _, result := range results {
+		if result.Header.ResultCapsuleID != resultCapsuleID {
+			continue
+		}
+		if result.State != ResultRetained {
+			return ResultDeliveryHandle{}, ErrConflict
+		}
+		file, err := coordinator.Content.OpenObject(resultCapsuleID, result.Header.ProtectedObject)
+		if err != nil {
+			return ResultDeliveryHandle{}, err
+		}
+		if err := file.Close(); err != nil {
+			return ResultDeliveryHandle{}, ErrUnavailable
+		}
+		return ResultDeliveryHandle{authorization: authorization, record: result}, nil
+	}
+	return ResultDeliveryHandle{}, ErrMissing
+}
+
+func (coordinator *ResultDeliveryCoordinator) ReadChunk(
+	handle ResultDeliveryHandle,
+	chunkIndex int64,
+) ([]byte, error) {
+	if coordinator.validate() != nil || handle.authorization.payload.Validate() != nil ||
+		handle.record.ValidateStored() != nil || handle.record.State != ResultRetained ||
+		handle.record.Header.InputCapsuleID != handle.authorization.payload.InputCapsuleID ||
+		chunkIndex < 0 || chunkIndex >= handle.record.Header.ProtectedObject.ChunkCount {
+		return nil, ErrInvalid
+	}
+	now := computequeue.Timestamp(coordinator.Clock.Now().UnixMilli())
+	if now < handle.authorization.payload.IssuedAt || now >= handle.authorization.payload.ExpiresAt ||
+		now >= handle.record.Header.RetentionUntil {
+		return nil, ErrConflict
+	}
+	descriptor := handle.record.Header.ProtectedObject
+	offset := chunkIndex * descriptor.ChunkByteCount
+	byteCount := min(descriptor.ChunkByteCount, descriptor.ByteCount-offset)
+	file, err := coordinator.Content.OpenObject(handle.record.Header.ResultCapsuleID, descriptor)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil, ErrUnavailable
+	}
+	result := make([]byte, int(byteCount))
+	if _, err := io.ReadFull(file, result); err != nil {
+		return nil, ErrUnavailable
+	}
+	return result, nil
 }
 
 type ResultAppendLease interface {
@@ -406,6 +529,25 @@ func validateWorkerResultBinding(
 		claim.RouteRecipientKeyFingerprint != payload.RouteRecipientKeyFingerprint ||
 		claim.WorkerCapabilitiesDigest != payload.WorkerCapabilitiesDigest ||
 		claim.WorkerOwnerAuthorityDigest != payload.WorkerOwnerAuthorityDigest {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validateResultRetrievalBinding(
+	admission AdmissionRecord,
+	authorization ResultRetrievalAuthorization,
+	now computequeue.Timestamp,
+) error {
+	payload := authorization.payload
+	if admission.ValidateStored() != nil || admission.State != AdmissionRetained ||
+		payload.Validate() != nil || authorization.permitDigest.Validate() != nil ||
+		now < payload.IssuedAt || now >= payload.ExpiresAt ||
+		now >= admission.Header.RetentionUntil ||
+		admission.Header.CapsuleID != payload.InputCapsuleID ||
+		admission.RouteAuthorityID != payload.AuthorityID ||
+		admission.RequesterAuthorityDigest != payload.RequesterAuthorityDigest ||
+		admission.AdmissionPermitDigest != payload.AdmissionPermitDigest {
 		return ErrInvalid
 	}
 	return nil

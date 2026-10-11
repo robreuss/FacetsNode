@@ -302,6 +302,9 @@ func testAdmissionAuthorization(
 			string(header.IdempotencyKey),
 		),
 		authorityID: uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+		requesterAuthorityDigest: computequeue.SHA256Digest(
+			"job-custody-staging-tests", "requester-authority",
+		),
 		workerCapabilitiesDigest: computequeue.SHA256Digest(
 			"job-custody-staging-tests", "worker-capabilities",
 		),

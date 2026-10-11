@@ -32,6 +32,7 @@ type AdmissionRecord struct {
 	ExpectedSigner           computequeue.ReceiptSignerBinding
 	AdmissionPermitDigest    computequeue.Digest
 	RouteAuthorityID         uuid.UUID
+	RequesterAuthorityDigest computequeue.Digest
 	WorkerCapabilitiesDigest computequeue.Digest
 	AcceptedAt               computequeue.Timestamp
 	CommittedBytes           int64
@@ -45,7 +46,8 @@ func (record AdmissionRecord) ValidateStored() error {
 	if len(record.EnvelopeBytes) == 0 || record.Header.Validate() != nil ||
 		record.ExpectedSigner.Validate() != nil || record.AcceptedAt.Validate() != nil ||
 		record.AdmissionPermitDigest.Validate() != nil ||
-		record.RouteAuthorityID == uuid.Nil || record.WorkerCapabilitiesDigest.Validate() != nil ||
+		record.RouteAuthorityID == uuid.Nil || record.RequesterAuthorityDigest.Validate() != nil ||
+		record.WorkerCapabilitiesDigest.Validate() != nil ||
 		record.AcceptedAt < record.Header.NotBeforeAt || record.AcceptedAt >= record.Header.ExpiresAt ||
 		record.CommittedBytes < 0 || record.CommittedBytes > record.Header.ProtectedObject.ByteCount ||
 		record.UpdatedAtMillis < int64(record.AcceptedAt) {
@@ -78,6 +80,7 @@ func sameAdmissionIdentity(left, right AdmissionRecord) bool {
 	return bytes.Equal(left.EnvelopeBytes, right.EnvelopeBytes) &&
 		left.Header == right.Header && left.ExpectedSigner == right.ExpectedSigner &&
 		left.RouteAuthorityID == right.RouteAuthorityID &&
+		left.RequesterAuthorityDigest == right.RequesterAuthorityDigest &&
 		left.WorkerCapabilitiesDigest == right.WorkerCapabilitiesDigest
 }
 
@@ -252,6 +255,7 @@ func (coordinator *Coordinator) AdmitAuthorized(
 		ExpectedSigner:           verified.ExpectedSigner(),
 		AdmissionPermitDigest:    authorization.permitDigest,
 		RouteAuthorityID:         authorization.authorityID,
+		RequesterAuthorityDigest: authorization.requesterAuthorityDigest,
 		WorkerCapabilitiesDigest: authorization.workerCapabilitiesDigest,
 		AcceptedAt:               acceptedAt,
 		State:                    AdmissionStaging,
