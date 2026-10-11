@@ -406,6 +406,55 @@ func (lease *jobCustodyResultFinalizationLease) Abort(ctx context.Context) error
 	return err
 }
 
+func (store *JobCustodyStore) ListPendingResultReleases(
+	ctx context.Context,
+	limit int,
+) ([]jobcustody.ResultRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || limit <= 0 ||
+		limit > jobcustody.MaximumPendingResultReleaseBatchSize {
+		return nil, jobcustody.ErrInvalid
+	}
+	rows, err := store.pool.Query(ctx, `
+		SELECT result_capsule_id FROM job_custody_results
+		WHERE state='releasePending'
+		ORDER BY release_requested_at_milliseconds,result_capsule_id
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	resultIDs := make([]computequeue.JobCapsuleID, 0, limit)
+	for rows.Next() {
+		var resultID uuid.UUID
+		if err := rows.Scan(&resultID); err != nil {
+			return nil, err
+		}
+		resultIDs = append(resultIDs, computequeue.JobCapsuleID(resultID.String()))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	results := make([]jobcustody.ResultRecord, 0, len(resultIDs))
+	for _, resultID := range resultIDs {
+		record, err := loadJobCustodyResult(ctx, store.pool, resultID, false)
+		if errors.Is(err, jobcustody.ErrMissing) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		// A concurrent exact retry may finish after the candidate query.
+		if record.State == jobcustody.ResultReleased {
+			continue
+		}
+		if record.State != jobcustody.ResultReleasePending {
+			return nil, jobcustody.ErrConflict
+		}
+		results = append(results, record)
+	}
+	return results, nil
+}
+
 func (store *JobCustodyStore) AcknowledgeResultDelivery(
 	ctx context.Context,
 	resultCapsuleID computequeue.JobCapsuleID,
@@ -561,6 +610,12 @@ func (store *JobCustodyStore) FinalizeResultRelease(
 	record, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, true)
 	if err != nil {
 		return jobcustody.ResultRecord{}, err
+	}
+	if record.State == jobcustody.ResultReleased {
+		if err := tx.Commit(ctx); err != nil {
+			return jobcustody.ResultRecord{}, err
+		}
+		return record, nil
 	}
 	if record.State != jobcustody.ResultReleasePending || releasedAt < record.UpdatedAtMillis {
 		return jobcustody.ResultRecord{}, jobcustody.ErrConflict

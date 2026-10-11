@@ -37,6 +37,7 @@ func TestJobCustodyConfigurationAndStoreLimitsRemainServiceLocal(t *testing.T) {
 		StorageCapacityReservationTTL: 5 * time.Minute,
 		TransferPeriod:                time.Minute,
 		ShutdownPeriod:                5 * time.Second,
+		CleanupPeriod:                 time.Minute,
 		JobCustodyMaximumAdmissions:   11, JobCustodyMaximumStagingBytes: 12,
 		JobCustodyMaximumCustodyBytes: 13,
 	}
@@ -228,6 +229,7 @@ func writeJobCustodyRuntimeConfiguration(t *testing.T, databaseURL string) confi
 		StorageCapacityReservationTTL:      5 * time.Minute,
 		TransferPeriod:                     time.Minute,
 		ShutdownPeriod:                     5 * time.Second,
+		CleanupPeriod:                      time.Minute,
 		JobCustodyMaximumAdmissions:        10, JobCustodyMaximumStagingBytes: 1 << 20,
 		JobCustodyMaximumCustodyBytes: 2 << 20,
 	}

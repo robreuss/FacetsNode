@@ -48,6 +48,11 @@ func runJobCustodyService(
 			_ = runtimeState.Close()
 		}
 	}()
+	if _, err := runtimeState.Delivery.ReconcilePendingReleases(
+		startupContext, jobcustody.MaximumPendingResultReleaseBatchSize,
+	); err != nil {
+		return fmt.Errorf("Job custody pending result release reconciliation failed: %w", err)
+	}
 	readiness := func(ctx context.Context) error {
 		readinessContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
@@ -66,6 +71,14 @@ func runJobCustodyService(
 		return fmt.Errorf("Job custody HTTP authority rejected: %w", err)
 	}
 	server := newJobCustodyHTTPServer(configuration, handler.Handler())
+	maintenanceContext, stopMaintenance := context.WithCancel(rootContext)
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		jobCustodyReleaseMaintenanceLoop(
+			maintenanceContext, runtimeState.Delivery, configuration.CleanupPeriod, logger,
+		)
+	}()
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info(
@@ -80,6 +93,8 @@ func runJobCustodyService(
 	retainCustody, err := finishJobCustodyHTTPServer(
 		rootContext, server, serverErrors, configuration.ShutdownPeriod,
 	)
+	stopMaintenance()
+	<-maintenanceDone
 	if retainCustody {
 		// A forced-close handler may still own the database or private content
 		// root. Keep process-scoped custody until Main exits rather than admit a
@@ -91,6 +106,52 @@ func runJobCustodyService(
 	}
 	logger.Info("Job custody shutdown complete")
 	return nil
+}
+
+func jobCustodyReleaseMaintenanceLoop(
+	ctx context.Context,
+	delivery *jobcustody.ResultDeliveryCoordinator,
+	period time.Duration,
+	logger *slog.Logger,
+) {
+	if ctx == nil || delivery == nil || period <= 0 || logger == nil {
+		return
+	}
+	ticker := time.NewTicker(period)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reconcileContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+			err := reconcileAllPendingJobCustodyReleases(reconcileContext, delivery)
+			cancel()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Warn("Job custody pending result release reconciliation failed", "error", err)
+			}
+		}
+	}
+}
+
+func reconcileAllPendingJobCustodyReleases(
+	ctx context.Context,
+	delivery *jobcustody.ResultDeliveryCoordinator,
+) error {
+	if ctx == nil || delivery == nil {
+		return jobcustody.ErrInvalid
+	}
+	for {
+		completed, err := delivery.ReconcilePendingReleases(
+			ctx, jobcustody.MaximumPendingResultReleaseBatchSize,
+		)
+		if err != nil {
+			return err
+		}
+		if completed < jobcustody.MaximumPendingResultReleaseBatchSize {
+			return nil
+		}
+	}
 }
 
 func newJobCustodyHTTPServer(
@@ -311,7 +372,7 @@ func validateJobCustodyConfiguration(configuration config.Config) error {
 		configuration.JobCustodyMaximumCustodyBytes <= 0 ||
 		configuration.JobCustodyMaximumStagingBytes > configuration.JobCustodyMaximumCustodyBytes ||
 		configuration.BlobRoot != "" || configuration.TransferPeriod <= 0 ||
-		configuration.ShutdownPeriod <= 0 {
+		configuration.ShutdownPeriod <= 0 || configuration.CleanupPeriod <= 0 {
 		return serviceauthority.ErrInvalid
 	}
 	return nil

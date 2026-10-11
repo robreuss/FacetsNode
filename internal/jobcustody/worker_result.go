@@ -19,6 +19,8 @@ import (
 
 type ResultState string
 
+const MaximumPendingResultReleaseBatchSize = 256
+
 const (
 	ResultStaging        ResultState = "staging"
 	ResultRetained       ResultState = "retained"
@@ -152,6 +154,7 @@ type ResultLedger interface {
 
 type ResultLifecycleLedger interface {
 	ResultLedger
+	ListPendingResultReleases(context.Context, int) ([]ResultRecord, error)
 	AcknowledgeResultDelivery(
 		context.Context, computequeue.JobCapsuleID, computequeue.Digest,
 		computequeue.Digest, computequeue.Timestamp,
@@ -366,6 +369,42 @@ func (coordinator *ResultDeliveryCoordinator) ReleaseResult(
 	}
 	if record.State != ResultReleasePending {
 		return ResultRecord{}, ErrConflict
+	}
+	return coordinator.finishPendingResultRelease(ctx, record)
+}
+
+// ReconcilePendingReleases resumes already-authorized cleanup after process
+// termination or an ambiguous response. It creates no new release authority:
+// every candidate must already contain the exact persisted source permit and
+// source receipt commitment accepted by RequestResultRelease.
+func (coordinator *ResultDeliveryCoordinator) ReconcilePendingReleases(
+	ctx context.Context,
+	limit int,
+) (int, error) {
+	if coordinator.validate() != nil || ctx == nil || limit <= 0 ||
+		limit > MaximumPendingResultReleaseBatchSize {
+		return 0, ErrInvalid
+	}
+	records, err := coordinator.Ledger.ListPendingResultReleases(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	completed := 0
+	for _, record := range records {
+		if _, err := coordinator.finishPendingResultRelease(ctx, record); err != nil {
+			return completed, err
+		}
+		completed++
+	}
+	return completed, nil
+}
+
+func (coordinator *ResultDeliveryCoordinator) finishPendingResultRelease(
+	ctx context.Context,
+	record ResultRecord,
+) (ResultRecord, error) {
+	if ctx == nil || record.ValidateStored() != nil || record.State != ResultReleasePending {
+		return ResultRecord{}, ErrInvalid
 	}
 	if err := coordinator.Content.DeleteObject(
 		record.Header.ResultCapsuleID, record.Header.ProtectedObject,

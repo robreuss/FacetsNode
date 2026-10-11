@@ -326,10 +326,19 @@ func TestResultDeliveryCoordinatorListsAndReadsOnlyOriginalSourceResults(t *test
 	); !errors.Is(err, ErrMissing) {
 		t.Fatalf("release intent did not unlink result before injected crash: %v", err)
 	}
-	released, err := delivery.ReleaseResult(t.Context(), release)
+	if completed, err := delivery.ReconcilePendingReleases(t.Context(), 16); err != nil || completed != 1 {
+		t.Fatalf("pending release reconciliation completed=%d err=%v", completed, err)
+	}
+	released, err := ledger.LoadResult(t.Context(), retained.Header.ResultCapsuleID)
 	if err != nil || released.State != ResultReleased || released.ObjectPath != "" ||
 		len(released.ReleaseReceiptBytes) == 0 {
 		t.Fatalf("released=%+v err=%v", released, err)
+	}
+	if completed, err := delivery.ReconcilePendingReleases(t.Context(), 16); err != nil || completed != 0 {
+		t.Fatalf("empty release reconciliation completed=%d err=%v", completed, err)
+	}
+	if _, err := delivery.ReconcilePendingReleases(t.Context(), 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unbounded release reconciliation error=%v", err)
 	}
 	if _, err := serviceauthority.DecodeJobCustodyResultReleaseReceipt(
 		released.ReleaseReceiptBytes,
@@ -548,6 +557,33 @@ func (ledger *memoryLedger) AcknowledgeResultDelivery(
 	return cloneResultRecord(record), nil
 }
 
+func (ledger *memoryLedger) ListPendingResultReleases(
+	_ context.Context,
+	limit int,
+) ([]ResultRecord, error) {
+	if limit <= 0 || limit > MaximumPendingResultReleaseBatchSize {
+		return nil, ErrInvalid
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	results := make([]ResultRecord, 0, limit)
+	for _, record := range ledger.results {
+		if record.State == ResultReleasePending {
+			results = append(results, cloneResultRecord(record))
+		}
+	}
+	slices.SortFunc(results, func(left, right ResultRecord) int {
+		if left.ReleaseRequestedAt != right.ReleaseRequestedAt {
+			return cmp.Compare(left.ReleaseRequestedAt, right.ReleaseRequestedAt)
+		}
+		return cmp.Compare(left.Header.ResultCapsuleID, right.Header.ResultCapsuleID)
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
 func (ledger *memoryLedger) RequestResultRelease(
 	_ context.Context,
 	resultCapsuleID computequeue.JobCapsuleID,
@@ -591,6 +627,9 @@ func (ledger *memoryLedger) FinalizeResultRelease(
 	record, present := ledger.results[resultCapsuleID]
 	if !present {
 		return ResultRecord{}, ErrMissing
+	}
+	if record.State == ResultReleased {
+		return cloneResultRecord(record), nil
 	}
 	if record.State != ResultReleasePending || len(receiptBytes) == 0 ||
 		releasedAt < record.UpdatedAtMillis {

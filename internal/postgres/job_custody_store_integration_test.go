@@ -299,6 +299,11 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 		pendingResult.State != jobcustody.ResultReleasePending {
 		t.Fatalf("pending result release=%+v err=%v", pendingResult, err)
 	}
+	pendingReleases, err := resultReopened.ListPendingResultReleases(ctx, 16)
+	if err != nil || len(pendingReleases) != 1 ||
+		pendingReleases[0].Header.ResultCapsuleID != resultHeader.ResultCapsuleID {
+		t.Fatalf("pending result releases=%+v err=%v", pendingReleases, err)
+	}
 	releaseReceiptBytes := postgresJobCustodyResultReleaseReceipt(
 		t, pendingResult, 1_800_000_000_030,
 	)
@@ -308,6 +313,11 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 	if err != nil || releasedResult.ValidateStored() != nil ||
 		releasedResult.State != jobcustody.ResultReleased || releasedResult.ObjectPath != "" {
 		t.Fatalf("released result=%+v err=%v", releasedResult, err)
+	}
+	if replay, err := resultReopened.FinalizeResultRelease(
+		ctx, resultHeader.ResultCapsuleID, []byte("ignored-after-exact-release"), 1_800_000_000_031,
+	); err != nil || !bytes.Equal(replay.ReleaseReceiptBytes, releaseReceiptBytes) {
+		t.Fatalf("released result finalization replay=%+v err=%v", replay, err)
 	}
 	afterReleaseRestart, err := postgresstore.NewJobCustodyStore(pool, limits, clock)
 	if err != nil {
