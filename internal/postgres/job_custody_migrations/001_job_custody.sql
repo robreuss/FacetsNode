@@ -17,14 +17,14 @@ CREATE TABLE job_custody_admissions (
     accepted_at_milliseconds bigint NOT NULL CHECK (accepted_at_milliseconds >= 0),
     protected_byte_count bigint NOT NULL CHECK (protected_byte_count > 0),
     committed_bytes bigint NOT NULL DEFAULT 0 CHECK (committed_bytes >= 0),
-    state text NOT NULL CHECK (state IN ('staging','retained')),
+    state text NOT NULL CHECK (state IN ('staging','stagingExpiryPending','retained','expiryPending','expired')),
     object_path text,
     updated_at_milliseconds bigint NOT NULL CHECK (updated_at_milliseconds >= accepted_at_milliseconds),
     stored_at timestamptz NOT NULL DEFAULT now(),
     CHECK (committed_bytes <= protected_byte_count),
     CHECK (
-        (state = 'staging' AND object_path IS NULL) OR
-        (state = 'retained' AND committed_bytes = protected_byte_count AND
+        (state IN ('staging','stagingExpiryPending','expired') AND object_path IS NULL) OR
+        (state IN ('retained','expiryPending') AND committed_bytes = protected_byte_count AND
          object_path = 'objects/' || capsule_id::text)
     )
 );

@@ -114,6 +114,158 @@ func TestCoordinatorStagesExactAdmissionThroughSharedCapacity(t *testing.T) {
 	}
 }
 
+func TestAdmissionExpiryCoordinatorExpiresRetainedInputAndEndedClaimAfterUnlink(t *testing.T) {
+	content, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
+	fixture := newStagingFixture(t, []byte("opaque-retained-input-for-expiry"), 64)
+	clock := fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)}
+	signer := testJobCustodyReceiptSigner(t)
+	coordinator := &Coordinator{
+		Ledger: ledger, Content: content, Capacity: &memoryCapacityAuthority{},
+		Verifier: fixture.verifier, ReceiptSigner: signer, Clock: clock,
+	}
+	handle, err := coordinator.AdmitAuthorized(
+		t.Context(), fixture.envelopeBytes, fixture.authorization(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.AppendChunk(
+		t.Context(), handle, 0, fixture.protectedBytes, digestBytes(fixture.protectedBytes),
+	); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := coordinator.Finalize(t.Context(), handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimCoordinator := &WorkerClaimCoordinator{Ledger: ledger, Content: content, Clock: clock}
+	claim, err := claimCoordinator.Claim(
+		t.Context(), verifiedWorkerClaimAuthorization(t, fixture, retained.Header.RetentionUntil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimCoordinator.Clock = fixedJobCustodyClock{
+		time.UnixMilli(int64(retained.Header.RetentionUntil)),
+	}
+	if _, err := claimCoordinator.ReadChunk(claim, 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expired in-memory claim handle remained readable: %v", err)
+	}
+	expiry := &AdmissionExpiryCoordinator{
+		Ledger: ledger, Content: content, ReceiptSigner: signer,
+		Clock: fixedJobCustodyClock{time.UnixMilli(int64(retained.Header.RetentionUntil))},
+	}
+	ledger.mu.Lock()
+	ledger.failAdmissionExpiryFinalizeOnce = true
+	ledger.mu.Unlock()
+	if completed, err := expiry.ReconcileExpiredAdmissions(t.Context(), 16); !errors.Is(err, ErrUnavailable) || completed != 0 {
+		t.Fatalf("injected input expiry completed=%d err=%v", completed, err)
+	}
+	pending, err := ledger.LoadAdmission(t.Context(), retained.Header.CapsuleID)
+	if err != nil || pending.State != AdmissionExpiryPending ||
+		pending.ExpiryStartedAt != retained.Header.RetentionUntil {
+		t.Fatalf("pending input expiry=%+v err=%v", pending, err)
+	}
+	endedClaim, _, err := ledger.LoadWorkerClaim(t.Context(), claim.Record().ClaimID)
+	if err != nil || endedClaim.State != WorkerClaimExpired {
+		t.Fatalf("ended claim=%+v err=%v", endedClaim, err)
+	}
+	if _, err := content.OpenObject(retained.Header.CapsuleID, retained.Header.ProtectedObject); !errors.Is(err, ErrMissing) {
+		t.Fatalf("input expiry intent did not unlink retained input: %v", err)
+	}
+	if completed, err := expiry.ReconcileExpiredAdmissions(t.Context(), 16); err != nil || completed != 1 {
+		t.Fatalf("input expiry resume completed=%d err=%v", completed, err)
+	}
+	expired, err := ledger.LoadAdmission(t.Context(), retained.Header.CapsuleID)
+	if err != nil || expired.State != AdmissionExpired || expired.ObjectPath != "" ||
+		len(expired.CustodyReceiptBytes) == 0 || len(expired.ExpiryReceiptBytes) == 0 {
+		t.Fatalf("expired input=%+v err=%v", expired, err)
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyExpiryReceipt(expired.ExpiryReceiptBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil || payload.CapsuleID.String() != string(retained.Header.CapsuleID) ||
+		payload.RetentionUntilMilliseconds != int64(retained.Header.RetentionUntil) {
+		t.Fatalf("input expiry receipt=%+v err=%v", payload, err)
+	}
+}
+
+func TestAdmissionExpiryCoordinatorExpiresPartialStagingAndResumesAfterUnlink(t *testing.T) {
+	content, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
+	fixture := newStagingFixture(t, []byte("opaque-partial-input-that-never-finishes"), 8)
+	clock := fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)}
+	signer := testJobCustodyReceiptSigner(t)
+	coordinator := &Coordinator{
+		Ledger: ledger, Content: content, Capacity: &memoryCapacityAuthority{},
+		Verifier: fixture.verifier, ReceiptSigner: signer, Clock: clock,
+	}
+	handle, err := coordinator.AdmitAuthorized(
+		t.Context(), fixture.envelopeBytes, fixture.authorization(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstChunk := fixture.protectedBytes[:8]
+	if _, err := coordinator.AppendChunk(
+		t.Context(), handle, 0, firstChunk, digestBytes(firstChunk),
+	); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := ledger.LoadAdmission(t.Context(), fixture.header.CapsuleID)
+	if err != nil || staged.CommittedBytes != int64(len(firstChunk)) {
+		t.Fatalf("partial input=%+v err=%v", staged, err)
+	}
+	expiry := &AdmissionExpiryCoordinator{
+		Ledger: ledger, Content: content, ReceiptSigner: signer,
+		Clock: fixedJobCustodyClock{time.UnixMilli(int64(staged.Header.RetentionUntil))},
+	}
+	ledger.mu.Lock()
+	ledger.failAdmissionExpiryFinalizeOnce = true
+	ledger.mu.Unlock()
+	if completed, err := expiry.ReconcileExpiredAdmissions(t.Context(), 16); !errors.Is(err, ErrUnavailable) || completed != 0 {
+		t.Fatalf("injected staging expiry completed=%d err=%v", completed, err)
+	}
+	pending, err := ledger.LoadAdmission(t.Context(), staged.Header.CapsuleID)
+	if err != nil || pending.State != AdmissionStagingExpiryPending ||
+		pending.CommittedBytes != int64(len(firstChunk)) {
+		t.Fatalf("pending staging expiry=%+v err=%v", pending, err)
+	}
+	name, err := capsuleName(staged.Header.CapsuleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := openRegular(content.staging, name, 1, 0o600, 0o400)
+	if partial != nil {
+		_ = partial.Close()
+	}
+	if !errors.Is(err, ErrMissing) {
+		t.Fatalf("input staging expiry did not unlink partial bytes: %v", err)
+	}
+	if completed, err := expiry.ReconcileExpiredAdmissions(t.Context(), 16); err != nil || completed != 1 {
+		t.Fatalf("input staging expiry resume completed=%d err=%v", completed, err)
+	}
+	expired, err := ledger.LoadAdmission(t.Context(), staged.Header.CapsuleID)
+	if err != nil || expired.State != AdmissionExpired || len(expired.CustodyReceiptBytes) != 0 ||
+		len(expired.ExpiryReceiptBytes) == 0 {
+		t.Fatalf("expired staging input=%+v err=%v", expired, err)
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyStagingExpiryReceipt(
+		expired.ExpiryReceiptBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil || payload.CommittedBytes != int64(len(firstChunk)) ||
+		payload.ProtectedObjectByteCount != int64(len(fixture.protectedBytes)) {
+		t.Fatalf("input staging expiry receipt=%+v err=%v", payload, err)
+	}
+}
+
 func TestCoordinatorReleasesCapacityBeforeLedgerCommitAndReconcilesRetry(t *testing.T) {
 	content, _ := temporaryContentStore(t)
 	ledger := newMemoryLedger()
@@ -477,17 +629,18 @@ func (lease *memoryCapacityLease) Release(context.Context) error {
 }
 
 type memoryLedger struct {
-	mu                            sync.Mutex
-	records                       map[computequeue.JobCapsuleID]AdmissionRecord
-	idempotency                   map[computequeue.Digest]computequeue.JobCapsuleID
-	chunks                        map[computequeue.JobCapsuleID]map[int64]AppendRequest
-	claims                        map[uuid.UUID]WorkerClaimRecord
-	results                       map[computequeue.JobCapsuleID]ResultRecord
-	resultIdempotency             map[computequeue.Digest]computequeue.JobCapsuleID
-	resultChunks                  map[computequeue.JobCapsuleID]map[int64]AppendRequest
-	failAppendCommitOnce          bool
-	failResultReleaseFinalizeOnce bool
-	failResultExpiryFinalizeOnce  bool
+	mu                              sync.Mutex
+	records                         map[computequeue.JobCapsuleID]AdmissionRecord
+	idempotency                     map[computequeue.Digest]computequeue.JobCapsuleID
+	chunks                          map[computequeue.JobCapsuleID]map[int64]AppendRequest
+	claims                          map[uuid.UUID]WorkerClaimRecord
+	results                         map[computequeue.JobCapsuleID]ResultRecord
+	resultIdempotency               map[computequeue.Digest]computequeue.JobCapsuleID
+	resultChunks                    map[computequeue.JobCapsuleID]map[int64]AppendRequest
+	failAppendCommitOnce            bool
+	failAdmissionExpiryFinalizeOnce bool
+	failResultReleaseFinalizeOnce   bool
+	failResultExpiryFinalizeOnce    bool
 }
 
 func newMemoryLedger() *memoryLedger {
@@ -650,6 +803,104 @@ func (ledger *memoryLedger) LoadAdmission(
 	return cloneAdmission(record), nil
 }
 
+func (ledger *memoryLedger) ListAdmissionExpiryCandidates(
+	_ context.Context,
+	now computequeue.Timestamp,
+	limit int,
+) ([]AdmissionRecord, error) {
+	if limit <= 0 || limit > MaximumAdmissionExpiryBatchSize {
+		return nil, ErrInvalid
+	}
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	records := make([]AdmissionRecord, 0, limit)
+	for _, record := range ledger.records {
+		if record.State == AdmissionStagingExpiryPending || record.State == AdmissionExpiryPending ||
+			((record.State == AdmissionStaging || record.State == AdmissionRetained) &&
+				record.Header.RetentionUntil <= now) {
+			records = append(records, cloneAdmission(record))
+			if len(records) == limit {
+				break
+			}
+		}
+	}
+	return records, nil
+}
+
+func (ledger *memoryLedger) RequestAdmissionExpiry(
+	_ context.Context,
+	capsuleID computequeue.JobCapsuleID,
+	startedAt computequeue.Timestamp,
+) (AdmissionRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	record, exists := ledger.records[capsuleID]
+	if !exists {
+		return AdmissionRecord{}, ErrMissing
+	}
+	if record.State == AdmissionStagingExpiryPending || record.State == AdmissionExpiryPending ||
+		record.State == AdmissionExpired {
+		return cloneAdmission(record), nil
+	}
+	if (record.State != AdmissionStaging && record.State != AdmissionRetained) ||
+		startedAt < record.Header.RetentionUntil ||
+		startedAt < computequeue.Timestamp(record.UpdatedAtMillis) {
+		return AdmissionRecord{}, ErrConflict
+	}
+	for claimID, claim := range ledger.claims {
+		if claim.CapsuleID != capsuleID || claim.State != WorkerClaimClaimed {
+			continue
+		}
+		if claim.LeaseExpiresAt > startedAt {
+			return AdmissionRecord{}, ErrConflict
+		}
+		claim.State = WorkerClaimExpired
+		claim.UpdatedAtMillis = int64(startedAt)
+		ledger.claims[claimID] = claim
+	}
+	if record.State == AdmissionStaging {
+		record.State = AdmissionStagingExpiryPending
+	} else {
+		record.State = AdmissionExpiryPending
+	}
+	record.ExpiryStartedAt = startedAt
+	record.UpdatedAtMillis = int64(startedAt)
+	ledger.records[capsuleID] = record
+	return cloneAdmission(record), nil
+}
+
+func (ledger *memoryLedger) FinalizeAdmissionExpiry(
+	_ context.Context,
+	capsuleID computequeue.JobCapsuleID,
+	receiptBytes []byte,
+	expiredAt int64,
+) (AdmissionRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	record, exists := ledger.records[capsuleID]
+	if !exists {
+		return AdmissionRecord{}, ErrMissing
+	}
+	if record.State == AdmissionExpired {
+		return cloneAdmission(record), nil
+	}
+	if (record.State != AdmissionStagingExpiryPending && record.State != AdmissionExpiryPending) ||
+		len(receiptBytes) == 0 || expiredAt < record.UpdatedAtMillis ||
+		expiredAt < int64(record.Header.RetentionUntil) {
+		return AdmissionRecord{}, ErrConflict
+	}
+	if ledger.failAdmissionExpiryFinalizeOnce {
+		ledger.failAdmissionExpiryFinalizeOnce = false
+		return AdmissionRecord{}, ErrUnavailable
+	}
+	record.State = AdmissionExpired
+	record.ObjectPath = ""
+	record.ExpiryReceiptBytes = bytes.Clone(receiptBytes)
+	record.UpdatedAtMillis = expiredAt
+	ledger.records[capsuleID] = record
+	return cloneAdmission(record), nil
+}
+
 func (ledger *memoryLedger) BeginAppend(
 	_ context.Context,
 	request AppendRequest,
@@ -770,5 +1021,6 @@ func (lease *memoryFinalizationLease) Abort(context.Context) error {
 func cloneAdmission(record AdmissionRecord) AdmissionRecord {
 	record.EnvelopeBytes = bytes.Clone(record.EnvelopeBytes)
 	record.CustodyReceiptBytes = bytes.Clone(record.CustodyReceiptBytes)
+	record.ExpiryReceiptBytes = bytes.Clone(record.ExpiryReceiptBytes)
 	return record
 }

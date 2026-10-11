@@ -158,10 +158,12 @@ func (value HTTPChunkHeader) Validate() error {
 }
 
 type HTTPAdmissionStatus struct {
-	CommittedBytes     int64           `json:"committedBytes"`
-	CustodyReceipt     json.RawMessage `json:"custodyReceipt,omitempty"`
-	ProtectedByteCount int64           `json:"protectedByteCount"`
-	State              AdmissionState  `json:"state"`
+	CommittedBytes     int64                   `json:"committedBytes"`
+	CustodyReceipt     json.RawMessage         `json:"custodyReceipt,omitempty"`
+	ExpiryReceipt      json.RawMessage         `json:"expiryReceipt,omitempty"`
+	ExpiryStartedAt    *computequeue.Timestamp `json:"expiryStartedAt,omitempty"`
+	ProtectedByteCount int64                   `json:"protectedByteCount"`
+	State              AdmissionState          `json:"state"`
 }
 
 type HTTPHandler struct {
@@ -891,6 +893,13 @@ func admissionHTTPStatus(record AdmissionRecord) HTTPAdmissionStatus {
 	}
 	if len(record.CustodyReceiptBytes) != 0 {
 		result.CustodyReceipt = bytes.Clone(record.CustodyReceiptBytes)
+	}
+	if record.ExpiryStartedAt > 0 {
+		value := record.ExpiryStartedAt
+		result.ExpiryStartedAt = &value
+	}
+	if len(record.ExpiryReceiptBytes) != 0 {
+		result.ExpiryReceipt = bytes.Clone(record.ExpiryReceiptBytes)
 	}
 	return result
 }

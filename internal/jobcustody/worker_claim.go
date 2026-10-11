@@ -143,8 +143,13 @@ func (coordinator *WorkerClaimCoordinator) ReadChunk(
 	handle WorkerClaimHandle,
 	chunkIndex int64,
 ) ([]byte, error) {
-	if coordinator.validate() != nil || handle.record.ValidateStored() != nil ||
+	if coordinator.validate() != nil {
+		return nil, ErrInvalid
+	}
+	now := computequeue.Timestamp(coordinator.Clock.Now().UnixMilli())
+	if handle.record.ValidateStored() != nil ||
 		handle.admission.ValidateStored() != nil || handle.record.State != WorkerClaimClaimed ||
+		now < handle.record.ClaimedAt || now >= handle.record.LeaseExpiresAt ||
 		chunkIndex < 0 || chunkIndex >= handle.admission.Header.ProtectedObject.ChunkCount {
 		return nil, ErrInvalid
 	}
@@ -194,5 +199,6 @@ func validateWorkerClaimBinding(
 func cloneWorkerClaimAdmission(record AdmissionRecord) AdmissionRecord {
 	record.EnvelopeBytes = append([]byte(nil), record.EnvelopeBytes...)
 	record.CustodyReceiptBytes = append([]byte(nil), record.CustodyReceiptBytes...)
+	record.ExpiryReceiptBytes = append([]byte(nil), record.ExpiryReceiptBytes...)
 	return record
 }

@@ -105,13 +105,15 @@ func (store *JobCustodyStore) ReserveAdmission(
 	var count, stagingBytes, totalBytes int64
 	if err := tx.QueryRow(ctx, `
 		SELECT
-			(SELECT count(*) FROM job_custody_admissions),
-			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0)
+			(SELECT count(*) FILTER (WHERE state<>'expired') FROM job_custody_admissions),
+			(SELECT COALESCE(sum(protected_byte_count)
+			 FILTER (WHERE state IN ('staging','stagingExpiryPending')),0)
 			 FROM job_custody_admissions) +
 			(SELECT COALESCE(sum(protected_byte_count)
 			 FILTER (WHERE state IN ('staging','stagingExpiryPending')),0)
 			 FROM job_custody_results),
-			(SELECT COALESCE(sum(protected_byte_count),0) FROM job_custody_admissions) +
+			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state<>'expired'),0)
+			 FROM job_custody_admissions) +
 			(SELECT COALESCE(sum(protected_byte_count)
 			 FILTER (WHERE state NOT IN ('released','expired')),0) FROM job_custody_results)`,
 	).Scan(&count, &stagingBytes, &totalBytes); err != nil {
@@ -393,24 +395,26 @@ func loadJobCustodyAdmission(
 			route_recipient_worker_id,route_recipient_key_fingerprint,
 			worker_capabilities_digest,retention_until_milliseconds,
 			accepted_at_milliseconds,protected_byte_count,committed_bytes,
-			state,object_path,custody_receipt_record,updated_at_milliseconds
+			state,object_path,custody_receipt_record,
+			expiry_started_at_milliseconds,expiry_receipt_record,updated_at_milliseconds
 		FROM job_custody_admissions WHERE capsule_id=$1`
 	if forUpdate {
 		query += " FOR UPDATE"
 	}
 	var storedCapsule uuid.UUID
 	var idempotencyKey, signerID, signingKeyID, signatureProfileID, permitDigest, requesterDigest, capabilitiesDigest, routeKeyFingerprint, state string
-	var envelopeBytes, receiptBytes []byte
+	var envelopeBytes, receiptBytes, expiryReceiptBytes []byte
 	var routeAuthorityID, routeWorkerID uuid.UUID
 	var signingKeyRevision, acceptedAt, protectedByteCount, committedBytes, retentionUntil, updatedAt int64
 	var objectPath *string
+	var expiryStartedAt *int64
 	err = querier.QueryRow(ctx, query, capsuleUUID).Scan(
 		&storedCapsule, &idempotencyKey, &envelopeBytes,
 		&signerID, &signingKeyID, &signingKeyRevision, &signatureProfileID,
 		&permitDigest, &routeAuthorityID, &requesterDigest, &routeWorkerID, &routeKeyFingerprint,
 		&capabilitiesDigest, &retentionUntil,
 		&acceptedAt, &protectedByteCount, &committedBytes,
-		&state, &objectPath, &receiptBytes, &updatedAt,
+		&state, &objectPath, &receiptBytes, &expiryStartedAt, &expiryReceiptBytes, &updatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return jobcustody.AdmissionRecord{}, jobcustody.ErrMissing
@@ -442,10 +446,14 @@ func loadJobCustodyAdmission(
 		CommittedBytes:           committedBytes,
 		State:                    jobcustody.AdmissionState(state),
 		CustodyReceiptBytes:      bytes.Clone(receiptBytes),
+		ExpiryReceiptBytes:       bytes.Clone(expiryReceiptBytes),
 		UpdatedAtMillis:          updatedAt,
 	}
 	if objectPath != nil {
 		record.ObjectPath = *objectPath
+	}
+	if expiryStartedAt != nil {
+		record.ExpiryStartedAt = computequeue.Timestamp(*expiryStartedAt)
 	}
 	if record.ValidateStored() != nil {
 		return jobcustody.AdmissionRecord{}, jobcustody.ErrInvalid
@@ -541,6 +549,7 @@ func sameStoredAdmission(left, right jobcustody.AdmissionRecord) bool {
 func cloneJobCustodyAdmission(record jobcustody.AdmissionRecord) jobcustody.AdmissionRecord {
 	record.EnvelopeBytes = bytes.Clone(record.EnvelopeBytes)
 	record.CustodyReceiptBytes = bytes.Clone(record.CustodyReceiptBytes)
+	record.ExpiryReceiptBytes = bytes.Clone(record.ExpiryReceiptBytes)
 	return record
 }
 

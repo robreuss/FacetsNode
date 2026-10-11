@@ -135,12 +135,14 @@ func (store *JobCustodyStore) ReserveResult(
 		SELECT
 			(SELECT count(*) FILTER (WHERE state NOT IN ('released','expired'))
 			 FROM job_custody_results),
-			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0)
+			(SELECT COALESCE(sum(protected_byte_count)
+			 FILTER (WHERE state IN ('staging','stagingExpiryPending')),0)
 			 FROM job_custody_admissions) +
 			(SELECT COALESCE(sum(protected_byte_count)
 			 FILTER (WHERE state IN ('staging','stagingExpiryPending')),0)
 			 FROM job_custody_results),
-			(SELECT COALESCE(sum(protected_byte_count),0) FROM job_custody_admissions) +
+			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state<>'expired'),0)
+			 FROM job_custody_admissions) +
 			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state NOT IN ('released','expired')),0)
 			 FROM job_custody_results)`,
 	).Scan(&count, &stagingBytes, &totalBytes); err != nil {

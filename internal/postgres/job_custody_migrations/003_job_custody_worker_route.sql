@@ -10,6 +10,11 @@ ALTER TABLE job_custody_admissions
     ADD COLUMN retention_until_milliseconds bigint NOT NULL
         CHECK (retention_until_milliseconds > 0);
 
+ALTER TABLE job_custody_admissions
+    ADD CHECK (expiry_started_at_milliseconds IS NULL OR
+        (expiry_started_at_milliseconds >= retention_until_milliseconds AND
+         expiry_started_at_milliseconds <= updated_at_milliseconds));
+
 CREATE INDEX job_custody_worker_route_idx
     ON job_custody_admissions(
         route_authority_id, route_recipient_worker_id,

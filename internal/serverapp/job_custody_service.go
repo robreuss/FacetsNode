@@ -126,6 +126,11 @@ func runJobCustodyService(
 	); err != nil {
 		return fmt.Errorf("Job custody expired result reconciliation failed: %w", err)
 	}
+	if _, err := runtimeState.InputExpiry.ReconcileExpiredAdmissions(
+		startupContext, jobcustody.MaximumAdmissionExpiryBatchSize,
+	); err != nil {
+		return fmt.Errorf("Job custody expired input reconciliation failed: %w", err)
+	}
 	readinessProbe := jobCustodyReadiness{
 		database: pool, inputContent: runtimeState.content,
 		resultContent: runtimeState.resultContent,
@@ -161,8 +166,9 @@ func runJobCustodyService(
 	maintenanceDone := make(chan struct{})
 	go func() {
 		defer close(maintenanceDone)
-		jobCustodyResultMaintenanceLoop(
-			maintenanceContext, runtimeState.Delivery, configuration.CleanupPeriod, logger,
+		jobCustodyMaintenanceLoop(
+			maintenanceContext, runtimeState.Delivery, runtimeState.InputExpiry,
+			configuration.CleanupPeriod, logger,
 		)
 	}()
 	serverErrors := make(chan error, 1)
@@ -194,13 +200,14 @@ func runJobCustodyService(
 	return nil
 }
 
-func jobCustodyResultMaintenanceLoop(
+func jobCustodyMaintenanceLoop(
 	ctx context.Context,
 	delivery *jobcustody.ResultDeliveryCoordinator,
+	inputExpiry *jobcustody.AdmissionExpiryCoordinator,
 	period time.Duration,
 	logger *slog.Logger,
 ) {
-	if ctx == nil || delivery == nil || period <= 0 || logger == nil {
+	if ctx == nil || delivery == nil || inputExpiry == nil || period <= 0 || logger == nil {
 		return
 	}
 	ticker := time.NewTicker(period)
@@ -215,10 +222,33 @@ func jobCustodyResultMaintenanceLoop(
 			if err == nil {
 				err = reconcileAllExpiredJobCustodyResults(reconcileContext, delivery)
 			}
+			if err == nil {
+				err = reconcileAllExpiredJobCustodyAdmissions(reconcileContext, inputExpiry)
+			}
 			cancel()
 			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Warn("Job custody result maintenance failed", "error", err)
+				logger.Warn("Job custody maintenance failed", "error", err)
 			}
+		}
+	}
+}
+
+func reconcileAllExpiredJobCustodyAdmissions(
+	ctx context.Context,
+	coordinator *jobcustody.AdmissionExpiryCoordinator,
+) error {
+	if ctx == nil || coordinator == nil {
+		return jobcustody.ErrInvalid
+	}
+	for {
+		completed, err := coordinator.ReconcileExpiredAdmissions(
+			ctx, jobcustody.MaximumAdmissionExpiryBatchSize,
+		)
+		if err != nil {
+			return err
+		}
+		if completed < jobcustody.MaximumAdmissionExpiryBatchSize {
+			return nil
 		}
 	}
 }
@@ -313,6 +343,7 @@ type jobCustodyRuntime struct {
 	WorkerClaims      *jobcustody.WorkerClaimCoordinator
 	Results           *jobcustody.ResultCoordinator
 	Delivery          *jobcustody.ResultDeliveryCoordinator
+	InputExpiry       *jobcustody.AdmissionExpiryCoordinator
 	AdmissionPermits  *jobcustody.AdmissionPermitVerifier
 	capacityReadiness jobCustodyCapacityReadiness
 	content           *jobcustody.ContentStore
@@ -441,6 +472,9 @@ func prepareJobCustodyRuntime(
 	}
 	runtime.Delivery = &jobcustody.ResultDeliveryCoordinator{
 		Ledger: ledger, Content: resultContent, ReceiptSigner: signer, Clock: clock,
+	}
+	runtime.InputExpiry = &jobcustody.AdmissionExpiryCoordinator{
+		Ledger: ledger, Content: content, ReceiptSigner: signer, Clock: clock,
 	}
 	return runtime, nil
 }

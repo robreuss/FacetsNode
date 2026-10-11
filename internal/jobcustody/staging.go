@@ -18,9 +18,14 @@ import (
 
 type AdmissionState string
 
+const MaximumAdmissionExpiryBatchSize = 256
+
 const (
-	AdmissionStaging  AdmissionState = "staging"
-	AdmissionRetained AdmissionState = "retained"
+	AdmissionStaging              AdmissionState = "staging"
+	AdmissionStagingExpiryPending AdmissionState = "stagingExpiryPending"
+	AdmissionRetained             AdmissionState = "retained"
+	AdmissionExpiryPending        AdmissionState = "expiryPending"
+	AdmissionExpired              AdmissionState = "expired"
 )
 
 // AdmissionRecord is the complete durable metadata permitted beside opaque
@@ -39,6 +44,8 @@ type AdmissionRecord struct {
 	State                    AdmissionState
 	ObjectPath               string
 	CustodyReceiptBytes      []byte
+	ExpiryStartedAt          computequeue.Timestamp
+	ExpiryReceiptBytes       []byte
 	UpdatedAtMillis          int64
 }
 
@@ -59,15 +66,41 @@ func (record AdmissionRecord) ValidateStored() error {
 		return ErrInvalid
 	}
 	expectedPath := filepath.Join("objects", string(record.Header.CapsuleID))
+	noExpiry := record.ExpiryStartedAt == 0 && len(record.ExpiryReceiptBytes) == 0
+	hasPendingExpiry := record.ExpiryStartedAt >= record.Header.RetentionUntil &&
+		record.UpdatedAtMillis == int64(record.ExpiryStartedAt) && len(record.ExpiryReceiptBytes) == 0
+	hasFinishedExpiry := record.ExpiryStartedAt >= record.Header.RetentionUntil &&
+		record.UpdatedAtMillis >= int64(record.ExpiryStartedAt) && len(record.ExpiryReceiptBytes) > 0
 	switch record.State {
 	case AdmissionStaging:
-		if record.ObjectPath != "" || len(record.CustodyReceiptBytes) != 0 {
+		if record.ObjectPath != "" || len(record.CustodyReceiptBytes) != 0 || !noExpiry {
+			return ErrInvalid
+		}
+	case AdmissionStagingExpiryPending:
+		if record.ObjectPath != "" || len(record.CustodyReceiptBytes) != 0 || !hasPendingExpiry {
 			return ErrInvalid
 		}
 	case AdmissionRetained:
 		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
 			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
-			validateCustodyReceiptRecord(record, nil) != nil {
+			validateCustodyReceiptRecord(record, nil) != nil || !noExpiry {
+			return ErrInvalid
+		}
+	case AdmissionExpiryPending:
+		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
+			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
+			validateCustodyReceiptRecord(record, nil) != nil || !hasPendingExpiry {
+			return ErrInvalid
+		}
+	case AdmissionExpired:
+		if len(record.CustodyReceiptBytes) == 0 {
+			if record.ObjectPath != "" || !hasFinishedExpiry ||
+				validateAdmissionStagingExpiryReceiptRecord(record, nil) != nil {
+				return ErrInvalid
+			}
+		} else if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
+			record.ObjectPath != "" || validateCustodyReceiptRecord(record, nil) != nil ||
+			!hasFinishedExpiry || validateAdmissionExpiryReceiptRecord(record, nil) != nil {
 			return ErrInvalid
 		}
 	default:
@@ -101,6 +134,18 @@ type Ledger interface {
 	ReserveAdmission(context.Context, AdmissionRecord) (AdmissionRecord, bool, error)
 	BeginAppend(context.Context, AppendRequest) (AppendLease, error)
 	BeginFinalization(context.Context, computequeue.JobCapsuleID) (FinalizationLease, error)
+}
+
+type AdmissionLifecycleLedger interface {
+	ListAdmissionExpiryCandidates(
+		context.Context, computequeue.Timestamp, int,
+	) ([]AdmissionRecord, error)
+	RequestAdmissionExpiry(
+		context.Context, computequeue.JobCapsuleID, computequeue.Timestamp,
+	) (AdmissionRecord, error)
+	FinalizeAdmissionExpiry(
+		context.Context, computequeue.JobCapsuleID, []byte, int64,
+	) (AdmissionRecord, error)
 }
 
 type AppendRequest struct {
@@ -162,6 +207,34 @@ type ReceiptSigner interface {
 	) (serviceauthority.JobCustodyReceipt, error)
 }
 
+type AdmissionExpiryReceiptSigner interface {
+	DeploymentID() uuid.UUID
+	PublicSigningKeyX963() string
+	SigningKeyFingerprint() string
+	SignJobCustodyExpiryReceipt(
+		serviceauthority.JobCustodyExpiryReceiptPayload,
+	) (serviceauthority.JobCustodyExpiryReceipt, error)
+	SignJobCustodyStagingExpiryReceipt(
+		serviceauthority.JobCustodyStagingExpiryReceiptPayload,
+	) (serviceauthority.JobCustodyStagingExpiryReceipt, error)
+}
+
+type AdmissionExpiryCoordinator struct {
+	Ledger        AdmissionLifecycleLedger
+	Content       *ContentStore
+	ReceiptSigner AdmissionExpiryReceiptSigner
+	Clock         Clock
+}
+
+func (coordinator *AdmissionExpiryCoordinator) validate() error {
+	if coordinator == nil || coordinator.Ledger == nil || coordinator.Content == nil ||
+		coordinator.ReceiptSigner == nil || coordinator.ReceiptSigner.DeploymentID() == uuid.Nil ||
+		coordinator.Clock == nil {
+		return ErrInvalid
+	}
+	return nil
+}
+
 type Coordinator struct {
 	Ledger        Ledger
 	Content       *ContentStore
@@ -195,6 +268,8 @@ func (handle AdmissionHandle) Header() computequeue.JobCustodyAdmissionHeader {
 func (handle AdmissionHandle) Record() AdmissionRecord {
 	result := handle.record
 	result.EnvelopeBytes = bytes.Clone(handle.record.EnvelopeBytes)
+	result.CustodyReceiptBytes = bytes.Clone(handle.record.CustodyReceiptBytes)
+	result.ExpiryReceiptBytes = bytes.Clone(handle.record.ExpiryReceiptBytes)
 	return result
 }
 
@@ -543,7 +618,10 @@ func validateCustodyReceiptRecord(record AdmissionRecord, signer ReceiptSigner) 
 		payload.ProtectedObjectDescriptorDigest != string(record.Header.ProtectedObject.Digest()) ||
 		payload.ProtectedObjectSHA256 != string(record.Header.ProtectedObject.SHA256) ||
 		payload.RetentionUntilMilliseconds != int64(record.Header.RetentionUntil) ||
-		payload.CommittedAtMilliseconds != record.UpdatedAtMillis {
+		payload.CommittedAtMilliseconds < int64(record.AcceptedAt) ||
+		payload.CommittedAtMilliseconds > int64(record.Header.RetentionUntil) ||
+		payload.CommittedAtMilliseconds > record.UpdatedAtMillis ||
+		(record.State == AdmissionRetained && payload.CommittedAtMilliseconds != record.UpdatedAtMillis) {
 		return ErrInvalid
 	}
 	if signer != nil {
@@ -553,6 +631,263 @@ func validateCustodyReceiptRecord(record AdmissionRecord, signer ReceiptSigner) 
 			receipt.Signature.SigningKeyFingerprint != signer.SigningKeyFingerprint() {
 			return ErrInvalid
 		}
+	}
+	return nil
+}
+
+func (coordinator *AdmissionExpiryCoordinator) ReconcileExpiredAdmissions(
+	ctx context.Context,
+	limit int,
+) (int, error) {
+	if coordinator.validate() != nil || ctx == nil || limit <= 0 ||
+		limit > MaximumAdmissionExpiryBatchSize {
+		return 0, ErrInvalid
+	}
+	now := computequeue.Timestamp(coordinator.Clock.Now().UnixMilli())
+	records, err := coordinator.Ledger.ListAdmissionExpiryCandidates(ctx, now, limit)
+	if err != nil {
+		return 0, err
+	}
+	completed := 0
+	for _, record := range records {
+		if record.State == AdmissionStaging || record.State == AdmissionRetained {
+			record, err = coordinator.Ledger.RequestAdmissionExpiry(
+				ctx, record.Header.CapsuleID, now,
+			)
+			if err != nil {
+				return completed, err
+			}
+		}
+		if _, err := coordinator.finishPendingAdmissionExpiry(ctx, record); err != nil {
+			return completed, err
+		}
+		completed++
+	}
+	return completed, nil
+}
+
+func (coordinator *AdmissionExpiryCoordinator) finishPendingAdmissionExpiry(
+	ctx context.Context,
+	record AdmissionRecord,
+) (AdmissionRecord, error) {
+	if ctx == nil || record.ValidateStored() != nil ||
+		(record.State != AdmissionStagingExpiryPending && record.State != AdmissionExpiryPending) {
+		return AdmissionRecord{}, ErrInvalid
+	}
+	if record.State == AdmissionStagingExpiryPending {
+		if err := coordinator.Content.DeleteStaging(
+			record.Header.CapsuleID, record.Header.ProtectedObject, record.CommittedBytes,
+		); err != nil {
+			return AdmissionRecord{}, err
+		}
+	} else if err := coordinator.Content.DeleteObject(
+		record.Header.CapsuleID, record.Header.ProtectedObject,
+	); err != nil {
+		return AdmissionRecord{}, err
+	}
+	expiredAt := coordinator.Clock.Now().UnixMilli()
+	if expiredAt < int64(record.Header.RetentionUntil) {
+		expiredAt = int64(record.Header.RetentionUntil)
+	}
+	if expiredAt < record.UpdatedAtMillis {
+		expiredAt = record.UpdatedAtMillis
+	}
+	var receiptBytes []byte
+	var err error
+	if record.State == AdmissionStagingExpiryPending {
+		receiptBytes, err = coordinator.signAdmissionStagingExpiryReceipt(record, expiredAt)
+	} else {
+		receiptBytes, err = coordinator.signAdmissionExpiryReceipt(record, expiredAt)
+	}
+	if err != nil {
+		return AdmissionRecord{}, err
+	}
+	criticalContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	expired, err := coordinator.Ledger.FinalizeAdmissionExpiry(
+		criticalContext, record.Header.CapsuleID, receiptBytes, expiredAt,
+	)
+	if err != nil {
+		return AdmissionRecord{}, err
+	}
+	receiptErr := validateAdmissionExpiryReceiptRecord(expired, coordinator.ReceiptSigner)
+	if record.State == AdmissionStagingExpiryPending {
+		receiptErr = validateAdmissionStagingExpiryReceiptRecord(expired, coordinator.ReceiptSigner)
+	}
+	if expired.ValidateStored() != nil || expired.State != AdmissionExpired ||
+		!sameAdmission(expired, record) || receiptErr != nil {
+		return AdmissionRecord{}, ErrInvalid
+	}
+	return expired, nil
+}
+
+func (coordinator *AdmissionExpiryCoordinator) signAdmissionExpiryReceipt(
+	record AdmissionRecord,
+	expiredAt int64,
+) ([]byte, error) {
+	if record.ValidateStored() != nil || record.State != AdmissionExpiryPending ||
+		expiredAt < int64(record.Header.RetentionUntil) || expiredAt < record.UpdatedAtMillis {
+		return nil, ErrInvalid
+	}
+	capsuleID, capsuleErr := uuid.Parse(string(record.Header.CapsuleID))
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	envelopeDigest, envelopeErr := AdmissionEnvelopeDigest(record.EnvelopeBytes)
+	custodyDigest, custodyErr := admissionCustodyReceiptReferenceDigest(record)
+	if capsuleErr != nil || assignmentErr != nil || envelopeErr != nil || custodyErr != nil {
+		return nil, ErrInvalid
+	}
+	receipt, err := coordinator.ReceiptSigner.SignJobCustodyExpiryReceipt(
+		serviceauthority.JobCustodyExpiryReceiptPayload{
+			AdmissionEnvelopeDigest:    string(envelopeDigest),
+			AdmissionPermitDigest:      string(record.AdmissionPermitDigest),
+			AssignmentID:               assignmentID,
+			CapsuleID:                  capsuleID,
+			CustodyReceiptDigest:       string(custodyDigest),
+			DeploymentID:               coordinator.ReceiptSigner.DeploymentID(),
+			ExpiredAtMilliseconds:      expiredAt,
+			Kind:                       serviceauthority.JobCustodyExpiryReceiptKind,
+			RetentionUntilMilliseconds: int64(record.Header.RetentionUntil),
+			Version:                    serviceauthority.JobCustodyExpiryReceiptVersion,
+		},
+	)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	return encoded, nil
+}
+
+func (coordinator *AdmissionExpiryCoordinator) signAdmissionStagingExpiryReceipt(
+	record AdmissionRecord,
+	expiredAt int64,
+) ([]byte, error) {
+	if record.ValidateStored() != nil || record.State != AdmissionStagingExpiryPending ||
+		expiredAt < int64(record.Header.RetentionUntil) || expiredAt < record.UpdatedAtMillis {
+		return nil, ErrInvalid
+	}
+	capsuleID, capsuleErr := uuid.Parse(string(record.Header.CapsuleID))
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	envelopeDigest, envelopeErr := AdmissionEnvelopeDigest(record.EnvelopeBytes)
+	if capsuleErr != nil || assignmentErr != nil || envelopeErr != nil {
+		return nil, ErrInvalid
+	}
+	receipt, err := coordinator.ReceiptSigner.SignJobCustodyStagingExpiryReceipt(
+		serviceauthority.JobCustodyStagingExpiryReceiptPayload{
+			AdmissionEnvelopeDigest:    string(envelopeDigest),
+			AdmissionPermitDigest:      string(record.AdmissionPermitDigest),
+			AssignmentID:               assignmentID,
+			CapsuleID:                  capsuleID,
+			CommittedBytes:             record.CommittedBytes,
+			DeploymentID:               coordinator.ReceiptSigner.DeploymentID(),
+			ExpiredAtMilliseconds:      expiredAt,
+			Kind:                       serviceauthority.JobCustodyStagingExpiryReceiptKind,
+			ProtectedObjectByteCount:   record.Header.ProtectedObject.ByteCount,
+			ProtectedObjectSHA256:      string(record.Header.ProtectedObject.SHA256),
+			RetentionUntilMilliseconds: int64(record.Header.RetentionUntil),
+			Version:                    serviceauthority.JobCustodyStagingExpiryReceiptVersion,
+		},
+	)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	return encoded, nil
+}
+
+func admissionCustodyReceiptReferenceDigest(record AdmissionRecord) (computequeue.Digest, error) {
+	if len(record.CustodyReceiptBytes) == 0 {
+		return "", ErrInvalid
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyReceipt(record.CustodyReceiptBytes)
+	if err != nil {
+		return "", ErrInvalid
+	}
+	digest, err := receipt.ReferenceDigest()
+	if err != nil {
+		return "", ErrInvalid
+	}
+	return computequeue.Digest(digest), nil
+}
+
+func validateAdmissionExpiryReceiptRecord(
+	record AdmissionRecord,
+	signer AdmissionExpiryReceiptSigner,
+) error {
+	if record.State != AdmissionExpired || len(record.CustodyReceiptBytes) == 0 ||
+		len(record.ExpiryReceiptBytes) == 0 {
+		return ErrInvalid
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyExpiryReceipt(record.ExpiryReceiptBytes)
+	if err != nil {
+		return ErrInvalid
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil {
+		return ErrInvalid
+	}
+	capsuleID, capsuleErr := uuid.Parse(string(record.Header.CapsuleID))
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	envelopeDigest, envelopeErr := AdmissionEnvelopeDigest(record.EnvelopeBytes)
+	custodyDigest, custodyErr := admissionCustodyReceiptReferenceDigest(record)
+	if capsuleErr != nil || assignmentErr != nil || envelopeErr != nil || custodyErr != nil ||
+		payload.AdmissionEnvelopeDigest != string(envelopeDigest) ||
+		payload.AdmissionPermitDigest != string(record.AdmissionPermitDigest) ||
+		payload.AssignmentID != assignmentID || payload.CapsuleID != capsuleID ||
+		payload.CustodyReceiptDigest != string(custodyDigest) ||
+		payload.ExpiredAtMilliseconds != record.UpdatedAtMillis ||
+		payload.RetentionUntilMilliseconds != int64(record.Header.RetentionUntil) {
+		return ErrInvalid
+	}
+	if signer != nil && (payload.DeploymentID != signer.DeploymentID() ||
+		receipt.Signature.SignerID != signer.DeploymentID() ||
+		receipt.Signature.PublicSigningKeyX963 != signer.PublicSigningKeyX963() ||
+		receipt.Signature.SigningKeyFingerprint != signer.SigningKeyFingerprint()) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validateAdmissionStagingExpiryReceiptRecord(
+	record AdmissionRecord,
+	signer AdmissionExpiryReceiptSigner,
+) error {
+	if record.State != AdmissionExpired || len(record.CustodyReceiptBytes) != 0 ||
+		len(record.ExpiryReceiptBytes) == 0 {
+		return ErrInvalid
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyStagingExpiryReceipt(record.ExpiryReceiptBytes)
+	if err != nil {
+		return ErrInvalid
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil {
+		return ErrInvalid
+	}
+	capsuleID, capsuleErr := uuid.Parse(string(record.Header.CapsuleID))
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	envelopeDigest, envelopeErr := AdmissionEnvelopeDigest(record.EnvelopeBytes)
+	if capsuleErr != nil || assignmentErr != nil || envelopeErr != nil ||
+		payload.AdmissionEnvelopeDigest != string(envelopeDigest) ||
+		payload.AdmissionPermitDigest != string(record.AdmissionPermitDigest) ||
+		payload.AssignmentID != assignmentID || payload.CapsuleID != capsuleID ||
+		payload.CommittedBytes != record.CommittedBytes ||
+		payload.ExpiredAtMilliseconds != record.UpdatedAtMillis ||
+		payload.ProtectedObjectByteCount != record.Header.ProtectedObject.ByteCount ||
+		payload.ProtectedObjectSHA256 != string(record.Header.ProtectedObject.SHA256) ||
+		payload.RetentionUntilMilliseconds != int64(record.Header.RetentionUntil) {
+		return ErrInvalid
+	}
+	if signer != nil && (payload.DeploymentID != signer.DeploymentID() ||
+		receipt.Signature.SignerID != signer.DeploymentID() ||
+		receipt.Signature.PublicSigningKeyX963 != signer.PublicSigningKeyX963() ||
+		receipt.Signature.SigningKeyFingerprint != signer.SigningKeyFingerprint()) {
+		return ErrInvalid
 	}
 	return nil
 }

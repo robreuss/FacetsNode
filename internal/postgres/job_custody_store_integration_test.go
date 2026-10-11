@@ -337,6 +337,36 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 	if _, _, err := reopened.ReserveAdmission(ctx, quotaRecord); !errors.Is(err, jobcustody.ErrUnavailable) {
 		t.Fatalf("over-quota admission error=%v", err)
 	}
+	pendingInputExpiry, err := reopened.RequestAdmissionExpiry(
+		ctx, record.Header.CapsuleID, record.Header.RetentionUntil,
+	)
+	if err != nil || pendingInputExpiry.ValidateStored() != nil ||
+		pendingInputExpiry.State != jobcustody.AdmissionExpiryPending {
+		t.Fatalf("pending input expiry=%+v err=%v", pendingInputExpiry, err)
+	}
+	inputExpiryCandidates, err := reopened.ListAdmissionExpiryCandidates(
+		ctx, record.Header.RetentionUntil, 16,
+	)
+	if err != nil || len(inputExpiryCandidates) != 1 ||
+		inputExpiryCandidates[0].Header.CapsuleID != record.Header.CapsuleID {
+		t.Fatalf("input expiry candidates=%+v err=%v", inputExpiryCandidates, err)
+	}
+	inputExpiryReceipt := postgresJobCustodyExpiryReceipt(
+		t, pendingInputExpiry, int64(record.Header.RetentionUntil),
+	)
+	expiredInput, err := reopened.FinalizeAdmissionExpiry(
+		ctx, record.Header.CapsuleID, inputExpiryReceipt, int64(record.Header.RetentionUntil),
+	)
+	if err != nil || expiredInput.ValidateStored() != nil ||
+		expiredInput.State != jobcustody.AdmissionExpired || expiredInput.ObjectPath != "" {
+		t.Fatalf("expired input=%+v err=%v", expiredInput, err)
+	}
+	if replay, err := reopened.FinalizeAdmissionExpiry(
+		ctx, record.Header.CapsuleID, []byte("ignored-after-exact-expiry"),
+		int64(record.Header.RetentionUntil)+1,
+	); err != nil || !bytes.Equal(replay.ExpiryReceiptBytes, inputExpiryReceipt) {
+		t.Fatalf("expired input finalization replay=%+v err=%v", replay, err)
+	}
 	if _, err := pool.Exec(ctx, `DELETE FROM job_custody_chunks WHERE capsule_id=$1 AND chunk_index=0`,
 		uuid.MustParse(string(record.Header.CapsuleID))); err != nil {
 		t.Fatal(err)
@@ -344,6 +374,55 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 	if _, err := reopened.LoadAdmission(ctx, record.Header.CapsuleID); !errors.Is(err, jobcustody.ErrInvalid) {
 		t.Fatalf("incomplete durable chunk ledger error=%v", err)
 	}
+}
+
+func postgresJobCustodyExpiryReceipt(
+	t *testing.T,
+	record jobcustody.AdmissionRecord,
+	expiredAt int64,
+) []byte {
+	t.Helper()
+	seed := make([]byte, 32)
+	seed[31] = 7
+	deploymentID := uuid.MustParse("8b000000-0000-0000-0000-000000000001")
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custodyReceipt, err := serviceauthority.DecodeJobCustodyReceipt(record.CustodyReceiptBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custodyReceiptDigest, err := custodyReceipt.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelopeDigest, err := jobcustody.AdmissionEnvelopeDigest(record.EnvelopeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := signer.SignJobCustodyExpiryReceipt(
+		serviceauthority.JobCustodyExpiryReceiptPayload{
+			AdmissionEnvelopeDigest:    string(envelopeDigest),
+			AdmissionPermitDigest:      string(record.AdmissionPermitDigest),
+			AssignmentID:               uuid.MustParse(string(record.Header.AssignmentID)),
+			CapsuleID:                  uuid.MustParse(string(record.Header.CapsuleID)),
+			CustodyReceiptDigest:       custodyReceiptDigest,
+			DeploymentID:               deploymentID,
+			ExpiredAtMilliseconds:      expiredAt,
+			Kind:                       serviceauthority.JobCustodyExpiryReceiptKind,
+			RetentionUntilMilliseconds: int64(record.Header.RetentionUntil),
+			Version:                    serviceauthority.JobCustodyExpiryReceiptVersion,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func postgresWorkerClaimAuthorization(
