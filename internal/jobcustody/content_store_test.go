@@ -251,6 +251,19 @@ func TestContentStoreRejectsUnsafeRootsSymlinksAndReplacement(t *testing.T) {
 	}
 }
 
+func TestContentStoreReadinessTracksExclusiveCustodyLifetime(t *testing.T) {
+	store, _ := temporaryContentStore(t)
+	if err := store.Readiness(); err != nil {
+		t.Fatalf("open store not ready: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Readiness(); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed store readiness=%v", err)
+	}
+}
+
 func TestContentStoreSerializesConcurrentCapsuleWrites(t *testing.T) {
 	store, _ := temporaryContentStore(t)
 	var group sync.WaitGroup

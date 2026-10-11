@@ -22,8 +22,102 @@ import (
 	"github.com/robreuss/FacetsNode/internal/config"
 	"github.com/robreuss/FacetsNode/internal/jobcustody"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storageauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/testpostgres"
 )
+
+type jobCustodyReadinessDatabaseFixture struct{ err error }
+
+func (fixture jobCustodyReadinessDatabaseFixture) Ping(context.Context) error { return fixture.err }
+
+type jobCustodyReadinessCapacityFixture struct {
+	snapshot storagecapacity.CoarseReadinessSnapshot
+	err      error
+	request  storageauthority.PrivateReadinessRequest
+}
+
+func (fixture *jobCustodyReadinessCapacityFixture) Readiness(
+	_ context.Context,
+	request storageauthority.PrivateReadinessRequest,
+) (storagecapacity.CoarseReadinessSnapshot, error) {
+	fixture.request = request
+	return fixture.snapshot, fixture.err
+}
+
+func TestJobCustodyReadinessRequiresEveryContentBlindDependency(t *testing.T) {
+	inputParent := t.TempDir()
+	resultParent := t.TempDir()
+	if err := os.Chmod(inputParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(resultParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inputContent, err := jobcustody.OpenContentStore(filepath.Join(inputParent, "inputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inputContent.Close()
+	resultContent, err := jobcustody.OpenContentStore(filepath.Join(resultParent, "results"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resultContent.Close()
+	ready := storagecapacity.CoarseReadinessSnapshot{
+		ProtocolVersion: storagecapacity.AuthorityProtocolVersion,
+		Revision:        1, State: storagecapacity.ReadinessReady,
+		ObservedAtMilliseconds: 1,
+	}
+	capacity := &jobCustodyReadinessCapacityFixture{snapshot: ready}
+	operationID := uuid.MustParse("8d000000-0000-0000-0000-000000000001")
+	readinessProbe := jobCustodyReadiness{
+		database:     jobCustodyReadinessDatabaseFixture{},
+		inputContent: inputContent, resultContent: resultContent,
+	}
+	if err := readinessProbe.Check(context.Background()); err != nil {
+		t.Fatalf("ready dependencies rejected: %v", err)
+	}
+	admissionProbe := jobCustodyAdmissionReadiness{
+		capacity: capacity, newOperation: func() uuid.UUID { return operationID },
+	}
+	if snapshot, err := admissionProbe.Snapshot(context.Background()); err != nil || snapshot != ready {
+		t.Fatalf("ready admission snapshot=%+v error=%v", snapshot, err)
+	}
+	if capacity.request.ProtocolVersion != storagecapacity.AuthorityProtocolVersion ||
+		capacity.request.OperationID != operationID {
+		t.Fatalf("capacity readiness request=%+v", capacity.request)
+	}
+
+	readinessProbe.database = jobCustodyReadinessDatabaseFixture{err: errors.New("database unavailable")}
+	if err := readinessProbe.Check(context.Background()); !errors.Is(err, jobcustody.ErrUnavailable) {
+		t.Fatalf("database failure mapped to %v", err)
+	}
+	readinessProbe.database = jobCustodyReadinessDatabaseFixture{}
+
+	capacity.err = errors.New("capacity unavailable")
+	if _, err := admissionProbe.Snapshot(context.Background()); !errors.Is(err, jobcustody.ErrUnavailable) {
+		t.Fatalf("capacity failure mapped to %v", err)
+	}
+	capacity.err = nil
+	capacity.snapshot = storagecapacity.CoarseReadinessSnapshot{
+		ProtocolVersion: storagecapacity.AuthorityProtocolVersion,
+		Revision:        2, State: storagecapacity.ReadinessStoragePressure,
+		ObservedAtMilliseconds: 2,
+		RetryAfterMilliseconds: storagecapacity.DefaultReadinessRetryAfterMilliseconds,
+	}
+	if snapshot, err := admissionProbe.Snapshot(context.Background()); err != nil || snapshot != capacity.snapshot {
+		t.Fatalf("storage pressure snapshot=%+v error=%v", snapshot, err)
+	}
+	capacity.snapshot = ready
+
+	if err := resultContent.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := readinessProbe.Check(context.Background()); !errors.Is(err, jobcustody.ErrUnavailable) {
+		t.Fatalf("lost result custody mapped to %v", err)
+	}
+}
 
 func TestJobCustodyConfigurationAndStoreLimitsRemainServiceLocal(t *testing.T) {
 	configuration := config.Config{
@@ -128,7 +222,7 @@ func TestJobCustodyRuntimeAssemblyReopensExactIsolatedState(t *testing.T) {
 	if runtime.Coordinator == nil || runtime.WorkerClaims == nil || runtime.Results == nil ||
 		runtime.Delivery == nil ||
 		runtime.AdmissionPermits == nil || runtime.content == nil || runtime.resultContent == nil ||
-		runtime.bindings == nil {
+		runtime.capacityReadiness == nil || runtime.bindings == nil {
 		t.Fatal("Job custody runtime omitted a required authority or custody component")
 	}
 	if _, err := prepareJobCustodyRuntime(ctx, pool, configuration); err == nil {

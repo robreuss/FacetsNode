@@ -34,6 +34,18 @@ type ContentStore struct {
 	closed                                           bool
 }
 
+// Readiness verifies that this process still owns the exact private custody
+// directories and exclusive process lock opened at startup. It deliberately
+// reports no paths, object identities, counts, or byte usage.
+func (store *ContentStore) Readiness() error {
+	if store == nil {
+		return ErrUnavailable
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.validate()
+}
+
 func OpenContentStore(path string) (_ *ContentStore, result error) {
 	abs, err := filepath.Abs(path)
 	if err != nil || filepath.Base(abs) == "." || filepath.Dir(abs) == abs {

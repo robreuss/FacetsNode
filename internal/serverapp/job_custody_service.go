@@ -26,6 +26,74 @@ type jobCustodyWallClock struct{}
 
 func (jobCustodyWallClock) Now() time.Time { return time.Now() }
 
+type jobCustodyDatabaseReadiness interface {
+	Ping(context.Context) error
+}
+
+type jobCustodyCapacityReadiness interface {
+	Readiness(
+		context.Context,
+		storageauthority.PrivateReadinessRequest,
+	) (storagecapacity.CoarseReadinessSnapshot, error)
+}
+
+// jobCustodyReadiness composes the dependencies required to continue serving
+// already accepted custody. Capacity pressure must not make reads, delivery,
+// acknowledgement, release, or cleanup unavailable.
+type jobCustodyReadiness struct {
+	database      jobCustodyDatabaseReadiness
+	inputContent  *jobcustody.ContentStore
+	resultContent *jobcustody.ContentStore
+}
+
+func (probe jobCustodyReadiness) Check(ctx context.Context) error {
+	if ctx == nil || probe.database == nil || probe.inputContent == nil ||
+		probe.resultContent == nil {
+		return jobcustody.ErrUnavailable
+	}
+	if err := probe.database.Ping(ctx); err != nil {
+		return jobcustody.ErrUnavailable
+	}
+	if err := probe.inputContent.Readiness(); err != nil {
+		return jobcustody.ErrUnavailable
+	}
+	if err := probe.resultContent.Readiness(); err != nil {
+		return jobcustody.ErrUnavailable
+	}
+	return nil
+}
+
+// jobCustodyAdmissionReadiness returns only the shared authority's coarse,
+// content-blind admission state. It is advisory: only atomic reservation can
+// grant capacity to a new admission.
+type jobCustodyAdmissionReadiness struct {
+	capacity     jobCustodyCapacityReadiness
+	newOperation func() uuid.UUID
+}
+
+func (probe jobCustodyAdmissionReadiness) Snapshot(
+	ctx context.Context,
+) (storagecapacity.CoarseReadinessSnapshot, error) {
+	if ctx == nil || probe.capacity == nil || probe.newOperation == nil {
+		return storagecapacity.CoarseReadinessSnapshot{}, jobcustody.ErrUnavailable
+	}
+	operationID := probe.newOperation()
+	if operationID == uuid.Nil {
+		return storagecapacity.CoarseReadinessSnapshot{}, jobcustody.ErrUnavailable
+	}
+	readiness, err := probe.capacity.Readiness(
+		ctx,
+		storageauthority.PrivateReadinessRequest{
+			ProtocolVersion: storagecapacity.AuthorityProtocolVersion,
+			OperationID:     operationID,
+		},
+	)
+	if err != nil || readiness.Validate() != nil {
+		return storagecapacity.CoarseReadinessSnapshot{}, jobcustody.ErrUnavailable
+	}
+	return readiness, nil
+}
+
 func runJobCustodyService(
 	rootContext context.Context,
 	pool *pgxpool.Pool,
@@ -58,10 +126,22 @@ func runJobCustodyService(
 	); err != nil {
 		return fmt.Errorf("Job custody expired result reconciliation failed: %w", err)
 	}
+	readinessProbe := jobCustodyReadiness{
+		database: pool, inputContent: runtimeState.content,
+		resultContent: runtimeState.resultContent,
+	}
 	readiness := func(ctx context.Context) error {
 		readinessContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		return pool.Ping(readinessContext)
+		return readinessProbe.Check(readinessContext)
+	}
+	admissionReadinessProbe := jobCustodyAdmissionReadiness{
+		capacity: runtimeState.capacityReadiness, newOperation: uuid.New,
+	}
+	admissionReadiness := func(ctx context.Context) (storagecapacity.CoarseReadinessSnapshot, error) {
+		readinessContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		return admissionReadinessProbe.Snapshot(readinessContext)
 	}
 	handler, err := jobcustody.NewHTTPHandler(
 		runtimeState.Coordinator,
@@ -71,6 +151,7 @@ func runJobCustodyService(
 		runtimeState.AdmissionPermits,
 		configuration.TrafficLimits,
 		readiness,
+		admissionReadiness,
 	)
 	if err != nil {
 		return fmt.Errorf("Job custody HTTP authority rejected: %w", err)
@@ -228,14 +309,15 @@ func finishJobCustodyHTTPServer(
 // admission handler: transport authentication must supply the expected signer
 // and route grant rather than accepting requester-echoed trust fields.
 type jobCustodyRuntime struct {
-	Coordinator      *jobcustody.Coordinator
-	WorkerClaims     *jobcustody.WorkerClaimCoordinator
-	Results          *jobcustody.ResultCoordinator
-	Delivery         *jobcustody.ResultDeliveryCoordinator
-	AdmissionPermits *jobcustody.AdmissionPermitVerifier
-	content          *jobcustody.ContentStore
-	resultContent    *jobcustody.ContentStore
-	bindings         *serviceauthority.BindingRegistry
+	Coordinator       *jobcustody.Coordinator
+	WorkerClaims      *jobcustody.WorkerClaimCoordinator
+	Results           *jobcustody.ResultCoordinator
+	Delivery          *jobcustody.ResultDeliveryCoordinator
+	AdmissionPermits  *jobcustody.AdmissionPermitVerifier
+	capacityReadiness jobCustodyCapacityReadiness
+	content           *jobcustody.ContentStore
+	resultContent     *jobcustody.ContentStore
+	bindings          *serviceauthority.BindingRegistry
 }
 
 func (runtime *jobCustodyRuntime) Close() error {
@@ -316,6 +398,7 @@ func prepareJobCustodyRuntime(
 	if err != nil {
 		return nil, fmt.Errorf("Job custody storage capacity authority rejected: %w", err)
 	}
+	runtime.capacityReadiness = capacityClient
 	content, err := jobcustody.OpenContentStore(configuration.JobCustodyRoot)
 	if err != nil {
 		return nil, fmt.Errorf("Job custody protected object store rejected: %w", err)

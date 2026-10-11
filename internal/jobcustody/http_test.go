@@ -15,8 +15,17 @@ import (
 	"github.com/robreuss/FacetsNode/internal/carriage"
 	"github.com/robreuss/FacetsNode/internal/computequeue"
 	"github.com/robreuss/FacetsNode/internal/serviceauthority"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
+
+func readyJobCustodyAdmissionSnapshot() storagecapacity.CoarseReadinessSnapshot {
+	return storagecapacity.CoarseReadinessSnapshot{
+		ProtocolVersion: storagecapacity.AuthorityProtocolVersion,
+		Revision:        1, State: storagecapacity.ReadinessReady,
+		ObservedAtMilliseconds: 1,
+	}
+}
 
 func TestJobCustodyHTTPAdmissionCarriageAndReceiptReplay(t *testing.T) {
 	fixture := newAdmissionPermitFixture(t)
@@ -28,6 +37,8 @@ func TestJobCustodyHTTPAdmissionCarriageAndReceiptReplay(t *testing.T) {
 		Verifier: fixture.admission.verifier, ReceiptSigner: testJobCustodyReceiptSigner(t),
 		Clock: fixedJobCustodyClock{time.UnixMilli(int64(fixture.issuedAt + 1))},
 	}
+	admissionReadiness := readyJobCustodyAdmissionSnapshot()
+	var admissionReadinessError error
 	handler, err := NewHTTPHandler(
 		coordinator, &WorkerClaimCoordinator{Ledger: ledger, Content: content, Clock: coordinator.Clock},
 		&ResultCoordinator{
@@ -40,12 +51,54 @@ func TestJobCustodyHTTPAdmissionCarriageAndReceiptReplay(t *testing.T) {
 		},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
+		func(context.Context) (storagecapacity.CoarseReadinessSnapshot, error) {
+			return admissionReadiness, admissionReadinessError
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	handler.now = func() time.Time { return time.UnixMilli(int64(fixture.issuedAt + 1)) }
 	server := handler.Handler()
+	operationalRequest := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	operationalResponse := httptest.NewRecorder()
+	server.ServeHTTP(operationalResponse, operationalRequest)
+	if operationalResponse.Code != http.StatusOK || operationalResponse.Body.String() != "{\"status\":\"ready\"}\n" {
+		t.Fatalf("operational readiness status=%d body=%s", operationalResponse.Code, operationalResponse.Body.String())
+	}
+	readinessRequest := httptest.NewRequest(http.MethodGet, "/v1/readiness", nil)
+	readinessResponse := httptest.NewRecorder()
+	server.ServeHTTP(readinessResponse, readinessRequest)
+	if readinessResponse.Code != http.StatusOK {
+		t.Fatalf("admission readiness status=%d body=%s", readinessResponse.Code, readinessResponse.Body.String())
+	}
+	var readiness storagecapacity.CoarseReadinessSnapshot
+	decodeJobCustodyTestJSON(t, readinessResponse.Body.Bytes(), &readiness)
+	if readiness != admissionReadiness {
+		t.Fatalf("admission readiness=%+v", readiness)
+	}
+	admissionReadiness = storagecapacity.CoarseReadinessSnapshot{
+		ProtocolVersion: storagecapacity.AuthorityProtocolVersion,
+		Revision:        2, State: storagecapacity.ReadinessStoragePressure,
+		ObservedAtMilliseconds: 2,
+		RetryAfterMilliseconds: storagecapacity.DefaultReadinessRetryAfterMilliseconds,
+	}
+	pressureRequest := httptest.NewRequest(http.MethodGet, "/v1/readiness", nil)
+	pressureResponse := httptest.NewRecorder()
+	server.ServeHTTP(pressureResponse, pressureRequest)
+	if pressureResponse.Code != http.StatusOK || pressureResponse.Header().Get("Retry-After") != "30" {
+		t.Fatalf("pressure readiness status=%d retry=%q body=%s", pressureResponse.Code, pressureResponse.Header().Get("Retry-After"), pressureResponse.Body.String())
+	}
+	admissionReadinessError = ErrUnavailable
+	unavailableRequest := httptest.NewRequest(http.MethodGet, "/v1/readiness", nil)
+	unavailableResponse := httptest.NewRecorder()
+	server.ServeHTTP(unavailableResponse, unavailableRequest)
+	if unavailableResponse.Code != http.StatusServiceUnavailable ||
+		unavailableResponse.Body.String() != "{\"code\":\"readiness_unavailable\"}\n" {
+		t.Fatalf("unavailable readiness status=%d body=%s", unavailableResponse.Code, unavailableResponse.Body.String())
+	}
+	admissionReadiness = readyJobCustodyAdmissionSnapshot()
+	admissionReadinessError = nil
 
 	admission := HTTPAdmissionRequest{
 		AdmissionEnvelope: fixture.admission.envelopeBytes,
@@ -194,6 +247,9 @@ func TestJobCustodyHTTPWorkerClaimsExactRetainedCapsuleAndReadsProtectedChunks(t
 		},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
+		func(context.Context) (storagecapacity.CoarseReadinessSnapshot, error) {
+			return readyJobCustodyAdmissionSnapshot(), nil
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -608,6 +664,9 @@ func TestJobCustodyHTTPRejectsPermitAndCarriageSubstitution(t *testing.T) {
 		},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
+		func(context.Context) (storagecapacity.CoarseReadinessSnapshot, error) {
+			return readyJobCustodyAdmissionSnapshot(), nil
+		},
 	)
 	if err != nil {
 		t.Fatal(err)

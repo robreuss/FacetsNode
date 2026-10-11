@@ -19,6 +19,7 @@ import (
 
 	"github.com/robreuss/FacetsNode/internal/carriage"
 	"github.com/robreuss/FacetsNode/internal/computequeue"
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 	"github.com/robreuss/FacetsNode/internal/traffic"
 )
 
@@ -164,15 +165,16 @@ type HTTPAdmissionStatus struct {
 }
 
 type HTTPHandler struct {
-	coordinator  *Coordinator
-	workerClaims *WorkerClaimCoordinator
-	results      *ResultCoordinator
-	delivery     *ResultDeliveryCoordinator
-	permits      *AdmissionPermitVerifier
-	now          func() time.Time
-	readiness    func(context.Context) error
-	management   jobCustodyTrafficControl
-	storage      jobCustodyTrafficControl
+	coordinator        *Coordinator
+	workerClaims       *WorkerClaimCoordinator
+	results            *ResultCoordinator
+	delivery           *ResultDeliveryCoordinator
+	permits            *AdmissionPermitVerifier
+	now                func() time.Time
+	readiness          func(context.Context) error
+	admissionReadiness func(context.Context) (storagecapacity.CoarseReadinessSnapshot, error)
+	management         jobCustodyTrafficControl
+	storage            jobCustodyTrafficControl
 }
 
 type jobCustodyTrafficControl struct {
@@ -188,23 +190,25 @@ func NewHTTPHandler(
 	permits *AdmissionPermitVerifier,
 	limits traffic.Limits,
 	readiness func(context.Context) error,
+	admissionReadiness func(context.Context) (storagecapacity.CoarseReadinessSnapshot, error),
 ) (*HTTPHandler, error) {
 	if coordinator == nil || coordinator.validate() != nil || workerClaims == nil ||
 		workerClaims.validate() != nil || results == nil || results.validate() != nil || permits == nil ||
 		delivery == nil || delivery.validate() != nil ||
-		traffic.ValidateLimits(limits) != nil || readiness == nil {
+		traffic.ValidateLimits(limits) != nil || readiness == nil || admissionReadiness == nil {
 		return nil, ErrInvalid
 	}
 	return &HTTPHandler{
-		coordinator:  coordinator,
-		workerClaims: workerClaims,
-		results:      results,
-		delivery:     delivery,
-		permits:      permits,
-		now:          time.Now,
-		readiness:    readiness,
-		management:   newJobCustodyTrafficControl(limits[traffic.SurfaceManagement]),
-		storage:      newJobCustodyTrafficControl(limits[traffic.SurfaceStorage]),
+		coordinator:        coordinator,
+		workerClaims:       workerClaims,
+		results:            results,
+		delivery:           delivery,
+		permits:            permits,
+		now:                time.Now,
+		readiness:          readiness,
+		admissionReadiness: admissionReadiness,
+		management:         newJobCustodyTrafficControl(limits[traffic.SurfaceManagement]),
+		storage:            newJobCustodyTrafficControl(limits[traffic.SurfaceStorage]),
 	}, nil
 }
 
@@ -212,6 +216,7 @@ func (handler *HTTPHandler) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /livez", handler.limited(handler.management, http.HandlerFunc(handler.handleLive)))
 	mux.Handle("GET /readyz", handler.limited(handler.management, http.HandlerFunc(handler.handleReady)))
+	mux.Handle("GET /v1/readiness", handler.limited(handler.management, http.HandlerFunc(handler.handleAdmissionReadiness)))
 	mux.Handle("POST /v1/job-custody/admissions", handler.limited(handler.management, http.HandlerFunc(handler.handleAdmission)))
 	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/status", handler.limited(handler.management, http.HandlerFunc(handler.handleStatus)))
 	mux.Handle("PUT /v1/job-custody/admissions/{capsuleID}/chunks/{chunkIndex}", handler.limited(handler.storage, http.HandlerFunc(handler.handleChunk)))
@@ -292,6 +297,19 @@ func (handler *HTTPHandler) handleReady(writer http.ResponseWriter, request *htt
 		return
 	}
 	writeJobCustodyJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+func (handler *HTTPHandler) handleAdmissionReadiness(writer http.ResponseWriter, request *http.Request) {
+	readiness, err := handler.admissionReadiness(request.Context())
+	if err != nil || readiness.Validate() != nil {
+		writeJobCustodyError(writer, http.StatusServiceUnavailable, "readiness_unavailable")
+		return
+	}
+	if readiness.RetryAfterMilliseconds > 0 {
+		retryAfterSeconds := max(int64(1), (readiness.RetryAfterMilliseconds+999)/1000)
+		writer.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds, 10))
+	}
+	writeJobCustodyJSON(writer, http.StatusOK, readiness)
 }
 
 func (handler *HTTPHandler) handleAdmission(writer http.ResponseWriter, request *http.Request) {
