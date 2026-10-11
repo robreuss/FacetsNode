@@ -10,6 +10,8 @@ import (
 func TestServiceApplicationsHaveIndependentOperationalNamespaces(t *testing.T) {
 	deviceSync := readDeploymentFile(t, "../compose.yaml")
 	sharedSpaces := readDeploymentFile(t, "shared-spaces/compose.yaml")
+	jobCustody := readDeploymentFile(t, "job-custody/compose.yaml")
+	storageCapacity := readDeploymentFile(t, "storage-capacity/compose.yaml")
 
 	assertContainsAll(t, "Device Sync Compose", deviceSync, []string{
 		"name: facets-device-sync",
@@ -37,12 +39,51 @@ func TestServiceApplicationsHaveIndependentOperationalNamespaces(t *testing.T) {
 		"facets-shared-spaces-blobs:",
 		`["CMD", "/facets-shared-spaces-server"`,
 	})
+	assertContainsAll(t, "Job Custody Compose", jobCustody, []string{
+		"name: facets-job-custody",
+		"target: job-custody",
+		"FACETS_JOB_CUSTODY_DATABASE_URL:",
+		"FACETS_JOB_CUSTODY_DEPLOYMENT_ID:",
+		"FACETS_JOB_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL: https://storage-capacity:8443",
+		"facets-job-custody-postgres:",
+		"/job-custody/content:/var/lib/facets-job-custody/custody",
+		`["CMD", "/facets-job-custody-server"`,
+		"external: true",
+		"name: facets-box-service-control",
+		"name: facets-box-storage-capacity-client",
+	})
+	assertContainsAll(t, "Storage Capacity Compose", storageCapacity, []string{
+		"name: facets-storage-capacity",
+		"target: storage-capacity-authority",
+		"FACETS_STORAGE_CAPACITY_AUTHORITY_DATABASE_URL:",
+		"FACETS_STORAGE_CAPACITY_AUTHORITY_POOL_ID:",
+		"FACETS_STORAGE_CAPACITY_AUTHORITY_POOL_ROOT:",
+		"facets-storage-capacity-postgres:",
+		`["CMD", "/facets-storage-capacity-authority"`,
+		"name: facets-box-storage-capacity-client",
+	})
 
 	if strings.Contains(deviceSync, "FACETS_SHARED_SPACES_") {
 		t.Fatal("Device Sync Compose consumes Shared Spaces configuration")
 	}
 	if strings.Contains(sharedSpaces, "FACETS_DEVICE_SYNC_") {
 		t.Fatal("Shared Spaces Compose consumes Device Sync configuration")
+	}
+	for _, forbidden := range []string{
+		"FACETS_DEVICE_SYNC_DATABASE_URL", "FACETS_SHARED_SPACES_DATABASE_URL",
+		"FACETS_BOX_CONTROLLER_DATABASE_URL", "FACETS_STORAGE_CAPACITY_AUTHORITY_DATABASE_URL",
+	} {
+		if strings.Contains(jobCustody, forbidden) {
+			t.Fatalf("Job Custody Compose consumes unrelated authority %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{
+		"FACETS_JOB_CUSTODY_DATABASE_URL", "FACETS_DEVICE_SYNC_DATABASE_URL",
+		"FACETS_SHARED_SPACES_DATABASE_URL", "FACETS_BOX_CONTROLLER_DATABASE_URL",
+	} {
+		if strings.Contains(storageCapacity, forbidden) {
+			t.Fatalf("Storage Capacity Compose consumes unrelated authority %q", forbidden)
+		}
 	}
 }
 
@@ -161,11 +202,50 @@ func TestDockerfilePublishesAllServiceImages(t *testing.T) {
 		"COPY --from=build /out/facets-job-custody-server /facets-job-custody-server",
 		"COPY --chown=65532:65532 --from=build /out/job-custody /var/lib/facets-job-custody",
 		"ENTRYPOINT [\"/facets-job-custody-server\"]",
+		"FROM scratch AS storage-capacity-authority",
+		"COPY --from=build /out/facets-storage-capacity-authority /facets-storage-capacity-authority",
+		"ENTRYPOINT [\"/facets-storage-capacity-authority\"]",
 		"FROM scratch AS box-controller",
 		"ENTRYPOINT [\"/facets-box-controller\"]",
 		"FROM scratch AS box-discovery",
 		"ENTRYPOINT [\"/facets-box-discovery\"]",
 	})
+}
+
+func TestJobCustodyCapacityTLSAndPublicIngressStayNarrow(t *testing.T) {
+	compose := readDeploymentFile(t, "job-custody/compose.yaml")
+	capacityCompose := readDeploymentFile(t, "storage-capacity/compose.yaml")
+	capacityCaddy := readDeploymentFile(t, "storage-capacity/Capacity.Caddyfile")
+	boxCaddy := readDeploymentFile(t, "Caddyfile")
+
+	assertContainsAll(t, "Job Custody capacity TLS", capacityCaddy, []string{
+		"tls /etc/facets-capacity-tls/server.crt /etc/facets-capacity-tls/server.key",
+		"reverse_proxy storage-capacity-authority:8080",
+		"admin off",
+		"auto_https off",
+	})
+	assertContainsAll(t, "Box Job Custody ingress", boxCaddy, []string{
+		"@jobCustodyApplication path /facetsbox/job-custody/v1/job-custody/*",
+		"uri strip_prefix /facetsbox/job-custody",
+		"reverse_proxy job-custody:8080",
+	})
+	capacityStart := strings.Index(capacityCompose, "  storage-capacity:\n")
+	if capacityStart < 0 {
+		t.Fatal("Job Custody capacity TLS block is not bounded")
+	}
+	capacityBlock := capacityCompose[capacityStart:]
+	if strings.Contains(capacityBlock, "ports:") || strings.Contains(capacityBlock, "service-control") {
+		t.Fatal("Storage Capacity Authority TLS endpoint escaped the private capacity plane")
+	}
+	if strings.Contains(compose, "storage-capacity-authority:") ||
+		strings.Contains(compose, "storage-capacity-postgres:") {
+		t.Fatal("Job Custody Compose owns shared physical-capacity lifecycle")
+	}
+	if strings.Contains(boxCaddy, "/facetsbox/job-custody/readyz") ||
+		strings.Contains(boxCaddy, "/facetsbox/job-custody/livez") ||
+		strings.Contains(boxCaddy, "/facetsbox/job-custody/v1/readiness") {
+		t.Fatal("Job Custody operational readiness was exposed through public ingress")
+	}
 }
 
 func TestBoxControllerHasIndependentDatabaseAndNoServiceSigningAuthority(t *testing.T) {

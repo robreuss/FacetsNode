@@ -26,6 +26,8 @@ RUN for value in "$FACETS_SERVER_SOURCE_REVISION" "$FACETS_SERVER_SOURCE_TREE"; 
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
         -o /out/facets-job-custody-server ./cmd/facets-job-custody-server && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+        -o /out/facets-storage-capacity-authority ./cmd/facets-storage-capacity-authority && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
         -o /out/facets-box-controller ./cmd/facets-box-controller && \
 	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
 		-o /out/facets-box-discovery ./cmd/facets-box-discovery && \
@@ -99,6 +101,18 @@ COPY --chown=65532:65532 --from=build /out/job-custody /var/lib/facets-job-custo
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/facets-job-custody-server"]
+
+FROM scratch AS storage-capacity-authority
+ARG FACETS_SERVER_SOURCE_REVISION
+ARG FACETS_SERVER_SOURCE_TREE
+LABEL org.opencontainers.image.title="Facets Storage Capacity Authority" \
+      org.opencontainers.image.revision="$FACETS_SERVER_SOURCE_REVISION" \
+      org.opencontainers.image.source-tree="$FACETS_SERVER_SOURCE_TREE"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/facets-storage-capacity-authority /facets-storage-capacity-authority
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/facets-storage-capacity-authority"]
 
 FROM scratch AS box-controller
 ARG FACETS_SERVER_SOURCE_REVISION

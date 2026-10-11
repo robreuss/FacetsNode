@@ -1,0 +1,87 @@
+name: facets-job-custody
+
+services:
+  job-custody-postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: facets_job_custody
+      POSTGRES_USER: facets_job_custody
+      POSTGRES_PASSWORD: ${FACETS_JOB_CUSTODY_POSTGRES_PASSWORD:?Set FACETS_JOB_CUSTODY_POSTGRES_PASSWORD in deploy/job-custody/.env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U facets_job_custody -d facets_job_custody"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+    volumes:
+      - facets-job-custody-postgres:/var/lib/postgresql/data
+    networks:
+      - job-custody-database
+
+  job-custody:
+    build:
+      context: ../..
+      target: job-custody
+      args:
+        FACETS_SERVER_SOURCE_REVISION: ${FACETS_SERVER_SOURCE_REVISION:-unknown}
+        FACETS_SERVER_SOURCE_TREE: ${FACETS_SERVER_SOURCE_TREE:-unknown}
+    environment:
+      FACETS_JOB_CUSTODY_DATABASE_URL: postgres://facets_job_custody:${FACETS_JOB_CUSTODY_POSTGRES_PASSWORD:?Set FACETS_JOB_CUSTODY_POSTGRES_PASSWORD in deploy/job-custody/.env}@job-custody-postgres:5432/facets_job_custody?sslmode=disable
+      FACETS_JOB_CUSTODY_LISTEN_ADDR: :8080
+      FACETS_JOB_CUSTODY_PUBLIC_URL: ${FACETS_JOB_CUSTODY_PUBLIC_URL:?Set the public Job Custody URL in deploy/job-custody/.env}
+      FACETS_JOB_CUSTODY_DEPLOYMENT_ID: ${FACETS_JOB_CUSTODY_DEPLOYMENT_ID:?Set the nonzero Job Custody deployment UUID in deploy/job-custody/.env}
+      FACETS_JOB_CUSTODY_DEPLOYMENT_SIGNING_KEY_FILE: /run/secrets/facets-job-custody/deployment-signing-key
+      FACETS_JOB_CUSTODY_DEPLOYMENT_ROUTE_POLICY_FILE: /etc/facets-job-custody/service-authority/deployment-routes.json
+      FACETS_JOB_CUSTODY_SERVICE_AUTHORITY_BINDINGS_FILE: /var/lib/facets-job-custody/service-authority/bindings.json
+      FACETS_JOB_CUSTODY_ADMISSION_KEYS_FILE: /etc/facets-job-custody/admission/admission-keys.json
+      FACETS_JOB_CUSTODY_ADMISSION_AUTHORITIES_FILE: /etc/facets-job-custody/admission/admission-authorities.json
+      FACETS_JOB_CUSTODY_CUSTODY_ROOT: /var/lib/facets-job-custody/custody
+      FACETS_JOB_CUSTODY_STORAGE_CAPACITY_AUTHORITY_URL: https://storage-capacity:8443
+      FACETS_JOB_CUSTODY_STORAGE_CAPACITY_POOL_ID: ${FACETS_STORAGE_CAPACITY_POOL_ID:?Set the nonzero physical-pool UUID in deploy/job-custody/.env}
+      FACETS_JOB_CUSTODY_STORAGE_CAPACITY_RESERVATION_TTL: ${FACETS_JOB_CUSTODY_STORAGE_CAPACITY_RESERVATION_TTL:-5m}
+      FACETS_JOB_CUSTODY_MAXIMUM_ADMISSIONS: ${FACETS_JOB_CUSTODY_MAXIMUM_ADMISSIONS:-100000}
+      FACETS_JOB_CUSTODY_MAXIMUM_STAGING_BYTES: ${FACETS_JOB_CUSTODY_MAXIMUM_STAGING_BYTES:-2199023255552}
+      FACETS_JOB_CUSTODY_MAXIMUM_CUSTODY_BYTES: ${FACETS_JOB_CUSTODY_MAXIMUM_CUSTODY_BYTES:-21990232555520}
+      FACETS_JOB_CUSTODY_CLEANUP_PERIOD: ${FACETS_JOB_CUSTODY_CLEANUP_PERIOD:-1m}
+      FACETS_JOB_CUSTODY_HTTP_TRANSFER_PERIOD: ${FACETS_JOB_CUSTODY_HTTP_TRANSFER_PERIOD:-10m}
+      SSL_CERT_FILE: /etc/facets-job-custody/capacity-tls/server.crt
+    depends_on:
+      job-custody-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/facets-job-custody-server", "healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - ${FACETS_BOX_DATA_ROOT:?Set the retained Facets Box data root}/job-custody/content:/var/lib/facets-job-custody/custody
+      - ${FACETS_JOB_CUSTODY_AUTHORITY_KEY_DIRECTORY:?Set the protected Job Custody deployment-key directory}:/run/secrets/facets-job-custody:ro
+      - ${FACETS_JOB_CUSTODY_AUTHORITY_POLICY_DIRECTORY:?Set the protected Job Custody route-policy directory}:/etc/facets-job-custody/service-authority:ro
+      - ${FACETS_JOB_CUSTODY_AUTHORITY_STATE_DIRECTORY:?Set the writable Job Custody authority-state directory}:/var/lib/facets-job-custody/service-authority
+      - ${FACETS_JOB_CUSTODY_ADMISSION_DIRECTORY:?Set the protected Job Custody admission-trust directory}:/etc/facets-job-custody/admission:ro
+      - ${FACETS_STORAGE_CAPACITY_TLS_DIRECTORY:?Set the private capacity TLS directory}/server.crt:/etc/facets-job-custody/capacity-tls/server.crt:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - job-custody-database
+      - storage-capacity-client
+      - service-control
+
+networks:
+  job-custody-database:
+    internal: true
+  storage-capacity-client:
+    external: true
+    name: facets-box-storage-capacity-client
+  service-control:
+    external: true
+    name: facets-box-service-control
+
+volumes:
+  facets-job-custody-postgres:

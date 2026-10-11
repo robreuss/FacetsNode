@@ -12,6 +12,11 @@
 			uri strip_prefix /facetsbox/device-sync
 			reverse_proxy server:8080
 		}
+		@jobCustodyApplication path /facetsbox/job-custody/v1/job-custody/*
+		handle @jobCustodyApplication {
+			uri strip_prefix /facetsbox/job-custody
+			reverse_proxy job-custody:8080
+		}
 		handle /facetsbox {
 			redir * /facetsbox/ 308
 		}

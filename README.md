@@ -9,7 +9,8 @@ deployed Facets services:
 | Facets Shared Spaces Server | `facets-shared-spaces-server` / `shared-spaces` | `deploy/shared-spaces/compose.yaml` | `FACETS_SHARED_SPACES_` |
 | Facets Compute Pool Service | `facets-compute-pool-server` / `compute-pool` | Not packaged yet | `FACETS_COMPUTE_POOL_` |
 | Facets Backup Custody Service | `facets-backup-custody-server` / `backup-custody` | Not packaged yet | `FACETS_BACKUP_CUSTODY_` |
-| Facets Job Custody Service | `facets-job-custody-server` / `job-custody` | Not packaged yet | `FACETS_JOB_CUSTODY_` |
+| Facets Job Custody Service | `facets-job-custody-server` / `job-custody` | `deploy/job-custody/compose.yaml` | `FACETS_JOB_CUSTODY_` |
+| Facets Storage Capacity Authority | `facets-storage-capacity-authority` / `storage-capacity-authority` | `deploy/storage-capacity/compose.yaml` | `FACETS_STORAGE_CAPACITY_AUTHORITY_` |
 
 The services share opaque envelope routing, PostgreSQL persistence, encrypted
 blob custody, cursors, receipts, checkpoints, wake hints, quotas, audit facts,

@@ -1,0 +1,113 @@
+name: facets-storage-capacity
+
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: facets_storage_capacity
+      POSTGRES_USER: facets_storage_capacity
+      POSTGRES_PASSWORD: ${FACETS_STORAGE_CAPACITY_POSTGRES_PASSWORD:?Set FACETS_STORAGE_CAPACITY_POSTGRES_PASSWORD in deploy/storage-capacity/.env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U facets_storage_capacity -d facets_storage_capacity"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+    volumes:
+      - facets-storage-capacity-postgres:/var/lib/postgresql/data
+    networks:
+      - database
+
+  storage-capacity-authority:
+    build:
+      context: ../..
+      target: storage-capacity-authority
+      args:
+        FACETS_SERVER_SOURCE_REVISION: ${FACETS_SERVER_SOURCE_REVISION:-unknown}
+        FACETS_SERVER_SOURCE_TREE: ${FACETS_SERVER_SOURCE_TREE:-unknown}
+    environment: &storage-capacity-environment
+      FACETS_STORAGE_CAPACITY_AUTHORITY_DATABASE_URL: postgres://facets_storage_capacity:${FACETS_STORAGE_CAPACITY_POSTGRES_PASSWORD:?Set FACETS_STORAGE_CAPACITY_POSTGRES_PASSWORD in deploy/storage-capacity/.env}@postgres:5432/facets_storage_capacity?sslmode=disable
+      FACETS_STORAGE_CAPACITY_AUTHORITY_LISTEN_ADDR: :8080
+      FACETS_STORAGE_CAPACITY_AUTHORITY_POOL_ID: ${FACETS_STORAGE_CAPACITY_POOL_ID:?Set the nonzero physical-pool UUID in deploy/storage-capacity/.env}
+      FACETS_STORAGE_CAPACITY_AUTHORITY_POOL_ROOT: /srv/facets-capacity-pool
+      FACETS_STORAGE_CAPACITY_AUTHORITY_PEER_REGISTRY_FILE: /etc/facets-storage-capacity-authority/peers.json
+      FACETS_STORAGE_CAPACITY_AUTHORITY_READINESS_PERIOD: ${FACETS_STORAGE_CAPACITY_READINESS_PERIOD:-30s}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/facets-storage-capacity-authority", "healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    volumes: &storage-capacity-volumes
+      - ${FACETS_BOX_DATA_ROOT:?Set the retained Facets Box data root}/capacity-pool:/srv/facets-capacity-pool
+      - ${FACETS_STORAGE_CAPACITY_AUTHORITY_CONFIG_DIRECTORY:?Set the protected capacity-authority configuration directory}/peers.json:/etc/facets-storage-capacity-authority/peers.json:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - database
+      - backend
+
+  initialize:
+    profiles: [initialize]
+    build:
+      context: ../..
+      target: storage-capacity-authority
+      args:
+        FACETS_SERVER_SOURCE_REVISION: ${FACETS_SERVER_SOURCE_REVISION:-unknown}
+        FACETS_SERVER_SOURCE_TREE: ${FACETS_SERVER_SOURCE_TREE:-unknown}
+    command: ["initialize"]
+    environment: *storage-capacity-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    volumes: *storage-capacity-volumes
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - database
+
+  storage-capacity:
+    image: caddy:2.10.2-alpine
+    depends_on:
+      storage-capacity-authority:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /config:size=8m,mode=0755
+      - /data:size=8m,mode=0755
+    volumes:
+      - ./Capacity.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${FACETS_STORAGE_CAPACITY_TLS_DIRECTORY:?Set the private capacity TLS directory}:/etc/facets-capacity-tls:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - backend
+      - client
+
+networks:
+  database:
+    internal: true
+  backend:
+    internal: true
+  client:
+    name: facets-box-storage-capacity-client
+    internal: true
+
+volumes:
+  facets-storage-capacity-postgres:

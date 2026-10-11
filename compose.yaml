@@ -224,6 +224,7 @@ networks:
   controller-private:
     internal: true
   service-control:
+    name: facets-box-service-control
     internal: true
   ingress-control:
     internal: true

@@ -1,0 +1,9 @@
+:8443 {
+	tls /etc/facets-capacity-tls/server.crt /etc/facets-capacity-tls/server.key
+	reverse_proxy storage-capacity-authority:8080
+}
+
+{
+	admin off
+	auto_https off
+}
