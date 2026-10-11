@@ -152,6 +152,63 @@ func TestContentStoreDeletesOnlyExactFinalizedObjectAndConvergesAfterUnlink(t *t
 	}
 }
 
+func TestContentStoreDeletesPartialAndInterruptedStagingExactly(t *testing.T) {
+	store, root := temporaryContentStore(t)
+	partialID := computequeue.JobCapsuleID("2a2a2a2a-2a2a-4a2a-8a2a-2a2a2a2a2a2a")
+	contents := []byte("opaque-partial-staging-object")
+	descriptor := protectedDescriptor(t, contents, 7)
+	if err := store.Prepare(partialID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileAndAppend(partialID, descriptor, 0, contents[:7]); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteStaging(partialID, descriptor, 6); err == nil {
+		t.Fatal("deleted partial staging under a substituted committed offset")
+	}
+	if err := store.DeleteStaging(partialID, descriptor, 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteStaging(partialID, descriptor, 7); err != nil {
+		t.Fatalf("partial staging deletion did not converge: %v", err)
+	}
+	if err := store.Prepare(partialID); err != nil {
+		t.Fatalf("partial staging namespace remained occupied: %v", err)
+	}
+
+	interruptedID := computequeue.JobCapsuleID("2b2b2b2b-2b2b-4b2b-8b2b-2b2b2b2b2b2b")
+	if err := store.Prepare(interruptedID); err != nil {
+		t.Fatal(err)
+	}
+	for offset := int64(0); offset < int64(len(contents)); {
+		end := min(offset+descriptor.ChunkByteCount, int64(len(contents)))
+		next, err := store.ReconcileAndAppend(interruptedID, descriptor, offset, contents[offset:end])
+		if err != nil {
+			t.Fatal(err)
+		}
+		offset = next
+	}
+	stage := filepath.Join(root, "staging", string(interruptedID))
+	object := filepath.Join(root, "objects", string(interruptedID))
+	if err := os.Chmod(stage, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(stage, object); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteStaging(interruptedID, descriptor, int64(len(contents))); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{stage, object} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("interrupted publication alias remains at %s: %v", path, err)
+		}
+	}
+	if err := store.DeleteStaging(interruptedID, descriptor, int64(len(contents))); err != nil {
+		t.Fatalf("interrupted staging deletion did not converge: %v", err)
+	}
+}
+
 func TestContentStoreRecoversPublicationAliasAndRejectsForeignAlias(t *testing.T) {
 	store, root := temporaryContentStore(t)
 	capsuleID := computequeue.JobCapsuleID("33333333-3333-4333-8333-333333333333")

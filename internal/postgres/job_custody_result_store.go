@@ -133,10 +133,12 @@ func (store *JobCustodyStore) ReserveResult(
 	var count, stagingBytes, totalBytes int64
 	if err := tx.QueryRow(ctx, `
 		SELECT
-			(SELECT count(*) FROM job_custody_results),
+			(SELECT count(*) FILTER (WHERE state NOT IN ('released','expired'))
+			 FROM job_custody_results),
 			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0)
 			 FROM job_custody_admissions) +
-			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0)
+			(SELECT COALESCE(sum(protected_byte_count)
+			 FILTER (WHERE state IN ('staging','stagingExpiryPending')),0)
 			 FROM job_custody_results),
 			(SELECT COALESCE(sum(protected_byte_count),0) FROM job_custody_admissions) +
 			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state NOT IN ('released','expired')),0)
@@ -466,8 +468,8 @@ func (store *JobCustodyStore) ListResultExpiryCandidates(
 	}
 	rows, err := store.pool.Query(ctx, `
 		SELECT result_capsule_id FROM job_custody_results
-		WHERE (state IN ('retained','delivered') AND retention_until_milliseconds <= $1)
-		   OR state='expiryPending'
+		WHERE (state IN ('staging','retained','delivered') AND retention_until_milliseconds <= $1)
+		   OR state IN ('stagingExpiryPending','expiryPending')
 		ORDER BY retention_until_milliseconds,result_capsule_id
 		LIMIT $2`, int64(now), limit)
 	if err != nil {
@@ -498,8 +500,10 @@ func (store *JobCustodyStore) ListResultExpiryCandidates(
 			record.State == jobcustody.ResultReleasePending || record.State == jobcustody.ResultReleased {
 			continue
 		}
-		if record.State != jobcustody.ResultExpiryPending &&
-			(record.State != jobcustody.ResultRetained && record.State != jobcustody.ResultDelivered ||
+		if record.State != jobcustody.ResultStagingExpiryPending &&
+			record.State != jobcustody.ResultExpiryPending &&
+			(record.State != jobcustody.ResultStaging && record.State != jobcustody.ResultRetained &&
+				record.State != jobcustody.ResultDelivered ||
 				record.Header.RetentionUntil > now) {
 			return nil, jobcustody.ErrConflict
 		}
@@ -721,24 +725,30 @@ func (store *JobCustodyStore) RequestResultExpiry(
 	if err != nil {
 		return jobcustody.ResultRecord{}, err
 	}
-	if record.State == jobcustody.ResultExpiryPending || record.State == jobcustody.ResultExpired {
+	if record.State == jobcustody.ResultStagingExpiryPending ||
+		record.State == jobcustody.ResultExpiryPending || record.State == jobcustody.ResultExpired {
 		if err := tx.Commit(ctx); err != nil {
 			return jobcustody.ResultRecord{}, err
 		}
 		return record, nil
 	}
-	if (record.State != jobcustody.ResultRetained && record.State != jobcustody.ResultDelivered) ||
+	if (record.State != jobcustody.ResultStaging && record.State != jobcustody.ResultRetained &&
+		record.State != jobcustody.ResultDelivered) ||
 		startedAt < record.Header.RetentionUntil ||
 		startedAt < computequeue.Timestamp(record.UpdatedAtMillis) {
 		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
 	}
 	resultUUID := uuid.MustParse(string(resultCapsuleID))
+	nextState := "expiryPending"
+	if record.State == jobcustody.ResultStaging {
+		nextState = "stagingExpiryPending"
+	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE job_custody_results SET
-			state='expiryPending',expiry_started_at_milliseconds=$2,
+			state=$3,expiry_started_at_milliseconds=$2,
 			updated_at_milliseconds=$2,stored_at=now()
-		WHERE result_capsule_id=$1 AND state IN ('retained','delivered')`,
-		resultUUID, int64(startedAt),
+		WHERE result_capsule_id=$1 AND state IN ('staging','retained','delivered')`,
+		resultUUID, int64(startedAt), nextState,
 	)
 	if err != nil {
 		return jobcustody.ResultRecord{}, mapJobCustodyWriteError(err)
@@ -788,7 +798,8 @@ func (store *JobCustodyStore) FinalizeResultExpiry(
 		}
 		return record, nil
 	}
-	if record.State != jobcustody.ResultExpiryPending || expiredAt < record.UpdatedAtMillis ||
+	if (record.State != jobcustody.ResultStagingExpiryPending &&
+		record.State != jobcustody.ResultExpiryPending) || expiredAt < record.UpdatedAtMillis ||
 		expiredAt < int64(record.Header.RetentionUntil) {
 		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
 	}
@@ -797,7 +808,7 @@ func (store *JobCustodyStore) FinalizeResultExpiry(
 		UPDATE job_custody_results SET
 			state='expired',object_path=NULL,expiry_receipt_record=$2,
 			updated_at_milliseconds=$3,stored_at=now()
-		WHERE result_capsule_id=$1 AND state='expiryPending'`,
+		WHERE result_capsule_id=$1 AND state IN ('stagingExpiryPending','expiryPending')`,
 		resultUUID, receiptBytes, expiredAt,
 	)
 	if err != nil {

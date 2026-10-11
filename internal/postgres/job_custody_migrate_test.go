@@ -26,7 +26,7 @@ func TestJobCustodyMigrationIsIsolatedAndContentBlind(t *testing.T) {
 		"envelope_record", "expected_signer_id",
 		"protected_byte_count", "route_authority_id", "requester_authority_digest",
 		"worker_capabilities_digest", "expiry_started_at_milliseconds",
-		"expiry_receipt_record", "expiryPending", "expired",
+		"expiry_receipt_record", "stagingExpiryPending", "expiryPending", "expired",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Job Custody migration is missing %q", required)

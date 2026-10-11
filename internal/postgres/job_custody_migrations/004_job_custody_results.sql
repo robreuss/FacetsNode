@@ -52,13 +52,19 @@ CREATE TABLE job_custody_results (
     CHECK (protected_byte_count <= 1099511627776),
     CHECK (protected_chunk_count = ((protected_byte_count - 1) / protected_chunk_byte_count) + 1),
     CHECK (committed_bytes <= protected_byte_count),
-    CHECK (state IN ('staging','retained','delivered','releasePending','released','expiryPending','expired')),
+    CHECK (state IN ('staging','stagingExpiryPending','retained','delivered','releasePending','released','expiryPending','expired')),
     CHECK (
         (state = 'staging' AND object_path IS NULL AND custody_receipt_record IS NULL AND
          delivery_acknowledged_at_milliseconds IS NULL AND delivery_permit_digest IS NULL AND
          source_delivery_receipt_digest IS NULL AND release_requested_at_milliseconds IS NULL AND
          release_permit_digest IS NULL AND source_release_receipt_digest IS NULL AND
          release_receipt_record IS NULL AND expiry_started_at_milliseconds IS NULL AND
+         expiry_receipt_record IS NULL) OR
+        (state = 'stagingExpiryPending' AND object_path IS NULL AND custody_receipt_record IS NULL AND
+         delivery_acknowledged_at_milliseconds IS NULL AND delivery_permit_digest IS NULL AND
+         source_delivery_receipt_digest IS NULL AND release_requested_at_milliseconds IS NULL AND
+         release_permit_digest IS NULL AND source_release_receipt_digest IS NULL AND
+         release_receipt_record IS NULL AND expiry_started_at_milliseconds IS NOT NULL AND
          expiry_receipt_record IS NULL) OR
         (state = 'retained' AND committed_bytes = protected_byte_count AND
          object_path = 'objects/' || result_capsule_id::text AND custody_receipt_record IS NOT NULL AND
@@ -96,15 +102,17 @@ CREATE TABLE job_custody_results (
            source_delivery_receipt_digest IS NULL) OR
           (delivery_acknowledged_at_milliseconds IS NOT NULL AND delivery_permit_digest IS NOT NULL AND
            source_delivery_receipt_digest IS NOT NULL))) OR
-        (state = 'expired' AND committed_bytes = protected_byte_count AND object_path IS NULL AND
-         custody_receipt_record IS NOT NULL AND release_requested_at_milliseconds IS NULL AND
+        (state = 'expired' AND object_path IS NULL AND release_requested_at_milliseconds IS NULL AND
          release_permit_digest IS NULL AND source_release_receipt_digest IS NULL AND
          release_receipt_record IS NULL AND expiry_started_at_milliseconds IS NOT NULL AND
          expiry_receipt_record IS NOT NULL AND
-         ((delivery_acknowledged_at_milliseconds IS NULL AND delivery_permit_digest IS NULL AND
-           source_delivery_receipt_digest IS NULL) OR
-          (delivery_acknowledged_at_milliseconds IS NOT NULL AND delivery_permit_digest IS NOT NULL AND
-           source_delivery_receipt_digest IS NOT NULL)))
+         ((custody_receipt_record IS NULL AND delivery_acknowledged_at_milliseconds IS NULL AND
+           delivery_permit_digest IS NULL AND source_delivery_receipt_digest IS NULL) OR
+          (committed_bytes = protected_byte_count AND custody_receipt_record IS NOT NULL AND
+           ((delivery_acknowledged_at_milliseconds IS NULL AND delivery_permit_digest IS NULL AND
+             source_delivery_receipt_digest IS NULL) OR
+            (delivery_acknowledged_at_milliseconds IS NOT NULL AND delivery_permit_digest IS NOT NULL AND
+             source_delivery_receipt_digest IS NOT NULL)))))
     ),
     CHECK (delivery_acknowledged_at_milliseconds IS NULL OR
         delivery_acknowledged_at_milliseconds BETWEEN accepted_at_milliseconds AND retention_until_milliseconds),

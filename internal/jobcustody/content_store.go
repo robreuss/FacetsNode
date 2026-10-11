@@ -365,6 +365,109 @@ func (store *ContentStore) DeleteObject(
 	return nil
 }
 
+// DeleteStaging relinquishes an incomplete protected object after its signed
+// retention bound has elapsed. It also converges the narrow crash window where
+// filesystem publication completed before the staging database transition.
+// The operation proves namespace removal, not secure-media erasure.
+func (store *ContentStore) DeleteStaging(
+	capsuleID computequeue.JobCapsuleID,
+	descriptor computequeue.JobCapsuleProtectedObjectDescriptor,
+	committedBytes int64,
+) error {
+	if store == nil {
+		return ErrInvalid
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	name, err := capsuleName(capsuleID)
+	if err != nil || descriptor.Validate() != nil || committedBytes < 0 ||
+		committedBytes > descriptor.ByteCount || store.validate() != nil {
+		return ErrInvalid
+	}
+
+	object, objectErr := openRegular(store.objects, name, 2, 0o400)
+	if objectErr != nil && !errors.Is(objectErr, ErrMissing) {
+		return objectErr
+	}
+	staged, stagedErr := openRegular(store.staging, name, 2, 0o600, 0o400)
+	if stagedErr != nil && !errors.Is(stagedErr, ErrMissing) {
+		if object != nil {
+			_ = object.Close()
+		}
+		return stagedErr
+	}
+	if object == nil && staged == nil {
+		return nil
+	}
+	closeBoth := func() {
+		if object != nil {
+			_ = object.Close()
+		}
+		if staged != nil {
+			_ = staged.Close()
+		}
+	}
+	if object != nil {
+		objectInfo, objectStatErr := object.Stat()
+		if committedBytes != descriptor.ByteCount || objectStatErr != nil ||
+			verifyComplete(object, descriptor) != nil {
+			closeBoth()
+			return ErrInvalid
+		}
+		if staged != nil {
+			stagedInfo, stagedStatErr := staged.Stat()
+			if stagedStatErr != nil || stagedInfo.Mode().Perm() != 0o400 ||
+				!os.SameFile(objectInfo, stagedInfo) || linkCount(objectInfo) != 2 {
+				closeBoth()
+				return ErrConflict
+			}
+		}
+	}
+	if staged != nil {
+		stagedInfo, statErr := staged.Stat()
+		if statErr != nil || stagedInfo.Size() != committedBytes {
+			closeBoth()
+			return ErrInvalid
+		}
+		switch stagedInfo.Mode().Perm() {
+		case 0o600:
+			if object != nil || linkCount(stagedInfo) != 1 {
+				closeBoth()
+				return ErrConflict
+			}
+		case 0o400:
+			if committedBytes != descriptor.ByteCount || verifyComplete(staged, descriptor) != nil {
+				closeBoth()
+				return ErrInvalid
+			}
+		default:
+			closeBoth()
+			return ErrInvalid
+		}
+	}
+	closeBoth()
+	if object != nil {
+		if err := store.objects.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return ErrUnavailable
+		}
+		if store.objectsDir.Sync() != nil {
+			return ErrUnavailable
+		}
+	}
+	if staged != nil {
+		if err := store.staging.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return ErrUnavailable
+		}
+		if store.stagingDir.Sync() != nil {
+			return ErrUnavailable
+		}
+	}
+	if store.validate() != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
 func (store *ContentStore) finish(
 	name string,
 	descriptor computequeue.JobCapsuleProtectedObjectDescriptor,

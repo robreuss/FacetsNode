@@ -461,6 +461,108 @@ func TestResultDeliveryCoordinatorExpiresUndeliveredResultAndResumesAfterUnlink(
 	}
 }
 
+func TestResultDeliveryCoordinatorExpiresPartialStagingAndResumesAfterUnlink(t *testing.T) {
+	inputContent, _ := temporaryContentStore(t)
+	resultContent, _ := temporaryContentStore(t)
+	ledger := newMemoryLedger()
+	fixture := newStagingFixture(t, []byte("opaque-partial-expiry-input"), 64)
+	clock := fixedJobCustodyClock{time.UnixMilli(1_800_000_000_010)}
+	signer := testJobCustodyReceiptSigner(t)
+	inputCoordinator := &Coordinator{
+		Ledger: ledger, Content: inputContent, Capacity: &memoryCapacityAuthority{},
+		Verifier: fixture.verifier, ReceiptSigner: signer, Clock: clock,
+	}
+	inputHandle, err := inputCoordinator.AdmitAuthorized(
+		t.Context(), fixture.envelopeBytes, fixture.authorization(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inputCoordinator.AppendChunk(
+		t.Context(), inputHandle, 0, fixture.protectedBytes, digestBytes(fixture.protectedBytes),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inputCoordinator.Finalize(t.Context(), inputHandle); err != nil {
+		t.Fatal(err)
+	}
+	claimCoordinator := &WorkerClaimCoordinator{Ledger: ledger, Content: inputContent, Clock: clock}
+	claim, err := claimCoordinator.Claim(
+		t.Context(), verifiedWorkerClaimAuthorization(t, fixture, 1_800_000_060_000),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedResult := []byte("opaque-partial-result-that-never-finishes")
+	resultCoordinator := &ResultCoordinator{
+		Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
+		ReceiptSigner: signer, Clock: clock,
+	}
+	handle, err := resultCoordinator.AcceptAuthorized(t.Context(), verifiedWorkerResultAuthorization(
+		t, fixture, claim.Record(), protectedResult, 8, 1_800_000_050_000,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstChunk := protectedResult[:8]
+	if next, err := resultCoordinator.AppendChunk(
+		t.Context(), handle, 0, firstChunk, digestBytes(firstChunk),
+	); err != nil || next != int64(len(firstChunk)) {
+		t.Fatalf("partial append next=%d err=%v", next, err)
+	}
+	staged, err := ledger.LoadResult(t.Context(), handle.Record().Header.ResultCapsuleID)
+	if err != nil || staged.State != ResultStaging || staged.CommittedBytes != int64(len(firstChunk)) {
+		t.Fatalf("staged=%+v err=%v", staged, err)
+	}
+	delivery := &ResultDeliveryCoordinator{
+		Ledger: ledger, Content: resultContent, ReceiptSigner: signer,
+		Clock: fixedJobCustodyClock{time.UnixMilli(int64(staged.Header.RetentionUntil))},
+	}
+	ledger.mu.Lock()
+	ledger.failResultExpiryFinalizeOnce = true
+	ledger.mu.Unlock()
+	if completed, err := delivery.ReconcileExpiredResults(t.Context(), 16); !errors.Is(err, ErrUnavailable) || completed != 0 {
+		t.Fatalf("injected staging expiry completed=%d err=%v", completed, err)
+	}
+	pending, err := ledger.LoadResult(t.Context(), staged.Header.ResultCapsuleID)
+	if err != nil || pending.State != ResultStagingExpiryPending ||
+		pending.CommittedBytes != staged.CommittedBytes ||
+		pending.ExpiryStartedAt != staged.Header.RetentionUntil {
+		t.Fatalf("pending staging expiry=%+v err=%v", pending, err)
+	}
+	name, err := capsuleName(staged.Header.ResultCapsuleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := openRegular(resultContent.staging, name, 1, 0o600, 0o400)
+	if partial != nil {
+		_ = partial.Close()
+	}
+	if !errors.Is(err, ErrMissing) {
+		t.Fatalf("staging expiry intent did not unlink partial result before injected crash: %v", err)
+	}
+	if completed, err := delivery.ReconcileExpiredResults(t.Context(), 16); err != nil || completed != 1 {
+		t.Fatalf("staging expiry resume completed=%d err=%v", completed, err)
+	}
+	expired, err := ledger.LoadResult(t.Context(), staged.Header.ResultCapsuleID)
+	if err != nil || expired.State != ResultExpired || expired.ObjectPath != "" ||
+		len(expired.CustodyReceiptBytes) != 0 || len(expired.ExpiryReceiptBytes) == 0 {
+		t.Fatalf("expired staging=%+v err=%v", expired, err)
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyResultStagingExpiryReceipt(
+		expired.ExpiryReceiptBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil || payload.CommittedBytes != int64(len(firstChunk)) ||
+		payload.ProtectedObjectByteCount != int64(len(protectedResult)) ||
+		payload.RetentionUntilMilliseconds != int64(staged.Header.RetentionUntil) {
+		t.Fatalf("staging expiry receipt=%+v err=%v", payload, err)
+	}
+}
+
 func verifiedWorkerClaimAuthorization(
 	t *testing.T,
 	fixture stagingFixture,
@@ -697,8 +799,8 @@ func (ledger *memoryLedger) ListResultExpiryCandidates(
 	defer ledger.mu.Unlock()
 	results := make([]ResultRecord, 0, limit)
 	for _, record := range ledger.results {
-		if record.State == ResultExpiryPending ||
-			((record.State == ResultRetained || record.State == ResultDelivered) &&
+		if record.State == ResultStagingExpiryPending || record.State == ResultExpiryPending ||
+			((record.State == ResultStaging || record.State == ResultRetained || record.State == ResultDelivered) &&
 				record.Header.RetentionUntil <= now) {
 			results = append(results, cloneResultRecord(record))
 		}
@@ -789,14 +891,19 @@ func (ledger *memoryLedger) RequestResultExpiry(
 	if !present {
 		return ResultRecord{}, ErrMissing
 	}
-	if record.State == ResultExpiryPending || record.State == ResultExpired {
+	if record.State == ResultStagingExpiryPending || record.State == ResultExpiryPending ||
+		record.State == ResultExpired {
 		return cloneResultRecord(record), nil
 	}
-	if (record.State != ResultRetained && record.State != ResultDelivered) ||
+	if (record.State != ResultStaging && record.State != ResultRetained && record.State != ResultDelivered) ||
 		startedAt < record.Header.RetentionUntil || startedAt < computequeue.Timestamp(record.UpdatedAtMillis) {
 		return ResultRecord{}, ErrConflict
 	}
-	record.State = ResultExpiryPending
+	if record.State == ResultStaging {
+		record.State = ResultStagingExpiryPending
+	} else {
+		record.State = ResultExpiryPending
+	}
 	record.ExpiryStartedAt = startedAt
 	record.UpdatedAtMillis = int64(startedAt)
 	ledger.results[resultCapsuleID] = record
@@ -818,7 +925,8 @@ func (ledger *memoryLedger) FinalizeResultExpiry(
 	if record.State == ResultExpired {
 		return cloneResultRecord(record), nil
 	}
-	if record.State != ResultExpiryPending || len(receiptBytes) == 0 ||
+	if (record.State != ResultStagingExpiryPending && record.State != ResultExpiryPending) ||
+		len(receiptBytes) == 0 ||
 		expiredAt < record.UpdatedAtMillis || expiredAt < int64(record.Header.RetentionUntil) {
 		return ResultRecord{}, ErrConflict
 	}
