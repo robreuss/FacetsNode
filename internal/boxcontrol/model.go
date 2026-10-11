@@ -18,6 +18,8 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 const (
@@ -104,9 +106,11 @@ const (
 )
 
 type AuthenticatedService struct {
-	Kind     string              `json:"kind"`
-	Endpoint string              `json:"endpoint,omitempty"`
-	Status   ServiceAvailability `json:"status"`
+	Kind                     string                                   `json:"kind"`
+	Endpoint                 string                                   `json:"endpoint,omitempty"`
+	Status                   ServiceAvailability                      `json:"status"`
+	AdmissionReadinessStatus ServiceAvailability                      `json:"admissionReadinessStatus,omitempty"`
+	AdmissionReadiness       *storagecapacity.CoarseReadinessSnapshot `json:"admissionReadiness,omitempty"`
 }
 
 type AuthenticatedProfile struct {

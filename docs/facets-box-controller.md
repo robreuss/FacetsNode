@@ -18,6 +18,16 @@ Box manifest contains only the Box identity, claimed state, display name, and
 service kinds/endpoints. A scoped member grant is required for the authenticated
 service-status and Sync Group profile.
 
+An installed Job Custody service may be registered with the paired
+`FACETS_BOX_JOB_CUSTODY_PRIVATE_URL` and `FACETS_BOX_JOB_CUSTODY_URL`
+variables. The private channel reads only operational health and the coarse,
+revisioned admission state. The authenticated profile does not expose storage
+paths, byte counts, Jobs, Spaces, objects, prompts, or results. Storage pressure
+does not make the custody service unavailable: it remains able to deliver,
+acknowledge, release, and clean up already accepted work while reporting that
+new admission should wait. Atomic admission remains authoritative after every
+readiness poll.
+
 ## First initialization
 
 1. Configure an independent random value for

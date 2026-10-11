@@ -23,6 +23,8 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/chacha20poly1305"
+
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 type testDeviceSyncController struct {
@@ -30,6 +32,20 @@ type testDeviceSyncController struct {
 	bootstrap   json.RawMessage
 	healthError error
 	issueCount  int
+}
+
+type testJobCustodyMonitor struct {
+	healthError    error
+	readiness      storagecapacity.CoarseReadinessSnapshot
+	readinessError error
+}
+
+func (monitor *testJobCustodyMonitor) Healthy(context.Context) error { return monitor.healthError }
+
+func (monitor *testJobCustodyMonitor) AdmissionReadiness(
+	context.Context,
+) (storagecapacity.CoarseReadinessSnapshot, error) {
+	return monitor.readiness, monitor.readinessError
 }
 
 type failingConnectionCompletionStore struct {
@@ -55,6 +71,56 @@ func (controller *testDeviceSyncController) IssueAccountBootstrap(context.Contex
 
 func (controller *testDeviceSyncController) Healthy(context.Context) error {
 	return controller.healthError
+}
+
+func TestAuthenticatedProfileProjectsJobCustodyHealthAndCoarseAdmissionReadiness(t *testing.T) {
+	service := makeTestService(
+		t, initializedMemoryStore(t, "PROFILE-CODE"), &testDeviceSyncController{},
+		time.Unix(1_800_000_000, 0).UTC(),
+	)
+	monitor := &testJobCustodyMonitor{readiness: storagecapacity.CoarseReadinessSnapshot{
+		ProtocolVersion: storagecapacity.AuthorityProtocolVersion,
+		Revision:        4, State: storagecapacity.ReadinessStoragePressure,
+		ObservedAtMilliseconds: 1_800_000_000_000,
+		RetryAfterMilliseconds: storagecapacity.DefaultReadinessRetryAfterMilliseconds,
+	}}
+	service.services = append(service.services, ServiceDescriptor{
+		Kind: "job-custody", Endpoint: "https://box.example/facetsbox/job-custody",
+	})
+	service.serviceHealth["job-custody"] = monitor
+	profile, err := service.profile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobCustody := profile.Services[4]
+	if jobCustody.Kind != "job-custody" || jobCustody.Status != ServiceAvailable ||
+		jobCustody.AdmissionReadinessStatus != ServiceAvailable ||
+		jobCustody.AdmissionReadiness == nil || *jobCustody.AdmissionReadiness != monitor.readiness {
+		t.Fatalf("Job Custody profile=%+v", jobCustody)
+	}
+
+	monitor.readinessError = errors.New("capacity authority unavailable")
+	profile, err = service.profile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobCustody = profile.Services[4]
+	if jobCustody.Status != ServiceAvailable ||
+		jobCustody.AdmissionReadinessStatus != ServiceUnavailable ||
+		jobCustody.AdmissionReadiness != nil {
+		t.Fatalf("degraded admission profile=%+v", jobCustody)
+	}
+
+	monitor.healthError = errors.New("Job Custody unavailable")
+	profile, err = service.profile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobCustody = profile.Services[4]
+	if jobCustody.Status != ServiceUnavailable || jobCustody.AdmissionReadinessStatus != "" ||
+		jobCustody.AdmissionReadiness != nil {
+		t.Fatalf("unavailable Job Custody profile=%+v", jobCustody)
+	}
 }
 
 func TestClaimConnectsExactInstallationAndOwnerInvitationConnectsSecond(t *testing.T) {
@@ -190,7 +256,7 @@ func TestClaimConnectsExactInstallationAndOwnerInvitationConnectsSecond(t *testi
 	if payload.BoxID != state.BoxID || payload.GrantToken == "" || payload.Profile.DisplayName != "Rob's Home Box" {
 		t.Fatalf("unexpected handoff: %+v", payload)
 	}
-	if len(payload.Profile.Services) != 6 || payload.Profile.Services[2].Kind != "device-sync" || payload.Profile.Services[2].Status != ServiceAvailable {
+	if len(payload.Profile.Services) != 7 || payload.Profile.Services[2].Kind != "device-sync" || payload.Profile.Services[2].Status != ServiceAvailable {
 		t.Fatalf("authenticated service catalog is incomplete: %+v", payload.Profile.Services)
 	}
 	_, _, replayBody := testConnectionRequest(t, now, "Replay device")
@@ -521,7 +587,7 @@ func makeTestService(t *testing.T, store Store, deviceSync DeviceSyncController,
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(store, deviceSync, privateKey, "https://box.example/facetsbox", "Test Facets Box", []ServiceDescriptor{{Kind: "device-sync", Endpoint: "https://box.example/facetsbox/device-sync"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	service, err := NewService(store, deviceSync, privateKey, "https://box.example/facetsbox", "Test Facets Box", []ServiceDescriptor{{Kind: "device-sync", Endpoint: "https://box.example/facetsbox/device-sync"}}, map[string]ServiceHealthMonitor{"device-sync": deviceSync}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

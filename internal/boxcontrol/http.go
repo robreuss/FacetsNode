@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/robreuss/FacetsNode/internal/storagecapacity"
 )
 
 const (
@@ -36,11 +38,20 @@ type Service struct {
 	cookiePath    string
 	displayName   string
 	services      []ServiceDescriptor
+	serviceHealth map[string]ServiceHealthMonitor
 	logger        *slog.Logger
 	now           func() time.Time
 	random        io.Reader
 	startedAt     time.Time
 	approvalMu    sync.Mutex
+}
+
+type ServiceHealthMonitor interface {
+	Healthy(context.Context) error
+}
+
+type ServiceAdmissionReadinessMonitor interface {
+	AdmissionReadiness(context.Context) (storagecapacity.CoarseReadinessSnapshot, error)
 }
 
 func NewService(
@@ -50,6 +61,7 @@ func NewService(
 	publicBaseURL string,
 	displayName string,
 	services []ServiceDescriptor,
+	serviceHealth map[string]ServiceHealthMonitor,
 	logger *slog.Logger,
 ) (*Service, error) {
 	if store == nil || deviceSync == nil || len(privateKey) != ed25519.PrivateKeySize {
@@ -64,6 +76,17 @@ func NewService(
 	if err != nil {
 		return nil, err
 	}
+	if len(serviceHealth) != len(services) {
+		return nil, errors.New("Box service health catalog is incomplete")
+	}
+	configuredHealth := make(map[string]ServiceHealthMonitor, len(serviceHealth))
+	for _, descriptor := range services {
+		monitor, present := serviceHealth[descriptor.Kind]
+		if !present || monitor == nil {
+			return nil, errors.New("Box service health catalog is incomplete")
+		}
+		configuredHealth[descriptor.Kind] = monitor
+	}
 	displayName = normalizedDisplayName(displayName)
 	if displayName == "" || len(displayName) > 128 {
 		return nil, errors.New("Box display name is invalid")
@@ -74,7 +97,8 @@ func NewService(
 	return &Service{
 		store: store, deviceSync: deviceSync, privateKey: privateKey,
 		publicBaseURL: baseURL, cookiePath: parsed.Path, displayName: displayName,
-		services: services, logger: logger, now: time.Now, random: rand.Reader,
+		services: services, serviceHealth: configuredHealth,
+		logger: logger, now: time.Now, random: rand.Reader,
 		startedAt: time.Now(),
 	}, nil
 }
@@ -903,10 +927,7 @@ func (service *Service) profile(ctx context.Context) (AuthenticatedProfile, erro
 	for _, descriptor := range service.services {
 		configured[descriptor.Kind] = descriptor
 	}
-	healthContext, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	deviceSyncHealthy := service.deviceSync.Healthy(healthContext) == nil
-	serviceKinds := []string{"backup", "compute", "device-sync", "edge", "post", "shared-spaces"}
+	serviceKinds := []string{"backup", "compute", "device-sync", "edge", "job-custody", "post", "shared-spaces"}
 	statuses := make([]AuthenticatedService, 0, len(serviceKinds))
 	for _, kind := range serviceKinds {
 		descriptor, present := configured[kind]
@@ -914,11 +935,28 @@ func (service *Service) profile(ctx context.Context) (AuthenticatedProfile, erro
 			statuses = append(statuses, AuthenticatedService{Kind: kind, Status: ServiceNotConfigured})
 			continue
 		}
-		status := ServiceAvailable
-		if kind == "device-sync" && !deviceSyncHealthy {
-			status = ServiceUnavailable
+		status := AuthenticatedService{
+			Kind: kind, Endpoint: descriptor.Endpoint, Status: ServiceAvailable,
 		}
-		statuses = append(statuses, AuthenticatedService{Kind: kind, Endpoint: descriptor.Endpoint, Status: status})
+		healthContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+		monitor := service.serviceHealth[kind]
+		if monitor == nil || monitor.Healthy(healthContext) != nil {
+			status.Status = ServiceUnavailable
+			cancel()
+			statuses = append(statuses, status)
+			continue
+		}
+		if admissionMonitor, ok := monitor.(ServiceAdmissionReadinessMonitor); ok {
+			readiness, err := admissionMonitor.AdmissionReadiness(healthContext)
+			if err != nil || readiness.Validate() != nil {
+				status.AdmissionReadinessStatus = ServiceUnavailable
+			} else {
+				status.AdmissionReadinessStatus = ServiceAvailable
+				status.AdmissionReadiness = &readiness
+			}
+		}
+		cancel()
+		statuses = append(statuses, status)
 	}
 	return AuthenticatedProfile{
 		Version: SchemaVersion, BoxID: state.BoxID, DisplayName: displayName,

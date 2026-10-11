@@ -33,6 +33,8 @@ type configuration struct {
 	deviceSyncPrivateURL string
 	deviceSyncToken      string
 	deviceSyncPublicURL  string
+	jobCustodyPrivateURL string
+	jobCustodyPublicURL  string
 }
 
 func main() {
@@ -88,13 +90,26 @@ func main() {
 	if err != nil {
 		fatal("Device Sync controller channel rejected", err)
 	}
+	services := []boxcontrol.ServiceDescriptor{{Kind: "device-sync", Endpoint: config.deviceSyncPublicURL}}
+	serviceHealth := map[string]boxcontrol.ServiceHealthMonitor{"device-sync": deviceSync}
+	if config.jobCustodyPrivateURL != "" {
+		jobCustody, err := boxcontrol.NewJobCustodyHTTPClient(config.jobCustodyPrivateURL, nil)
+		if err != nil {
+			fatal("Job Custody controller channel rejected", err)
+		}
+		services = append(services, boxcontrol.ServiceDescriptor{
+			Kind: "job-custody", Endpoint: config.jobCustodyPublicURL,
+		})
+		serviceHealth["job-custody"] = jobCustody
+	}
 	service, err := boxcontrol.NewService(
 		store,
 		deviceSync,
 		privateKey,
 		config.publicURL,
 		config.displayName,
-		[]boxcontrol.ServiceDescriptor{{Kind: "device-sync", Endpoint: config.deviceSyncPublicURL}},
+		services,
+		serviceHealth,
 		slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "facets-box-controller"),
 	)
 	if err != nil {
@@ -135,9 +150,14 @@ func loadConfiguration() (configuration, error) {
 		deviceSyncPrivateURL: environment("FACETS_BOX_DEVICE_SYNC_PRIVATE_URL", "http://server:8080"),
 		deviceSyncToken:      os.Getenv("FACETS_DEVICE_SYNC_BOX_CONTROLLER_TOKEN"),
 		deviceSyncPublicURL:  os.Getenv("FACETS_BOX_DEVICE_SYNC_URL"),
+		jobCustodyPrivateURL: os.Getenv("FACETS_BOX_JOB_CUSTODY_PRIVATE_URL"),
+		jobCustodyPublicURL:  os.Getenv("FACETS_BOX_JOB_CUSTODY_URL"),
 	}
 	if config.databaseURL == "" || config.publicURL == "" || config.deviceSyncToken == "" || config.deviceSyncPublicURL == "" {
 		return configuration{}, errors.New("database, public URL, Device Sync URL, and controller token are required")
+	}
+	if (config.jobCustodyPrivateURL == "") != (config.jobCustodyPublicURL == "") {
+		return configuration{}, errors.New("private and public Job Custody URLs must be configured together")
 	}
 	return config, nil
 }
