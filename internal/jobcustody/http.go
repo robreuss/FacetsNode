@@ -52,6 +52,10 @@ type HTTPResultRetrievalRequest struct {
 	Permit SignedResultRetrievalPermit `json:"permit"`
 }
 
+type HTTPResultMutationRequest struct {
+	Permit SignedResultMutationPermit `json:"permit"`
+}
+
 type HTTPResultListStatus struct {
 	Results []HTTPWorkerResultStatus `json:"results"`
 }
@@ -61,7 +65,10 @@ type HTTPWorkerResultStatus struct {
 	ClaimID                      uuid.UUID                                        `json:"claimID"`
 	CommittedBytes               int64                                            `json:"committedBytes"`
 	CustodyReceipt               json.RawMessage                                  `json:"custodyReceipt,omitempty"`
+	DeliveryAcknowledgedAt       *computequeue.Timestamp                          `json:"deliveryAcknowledgedAt,omitempty"`
 	ProtectedObject              computequeue.JobCapsuleProtectedObjectDescriptor `json:"protectedObject"`
+	ReleaseReceipt               json.RawMessage                                  `json:"releaseReceipt,omitempty"`
+	ReleaseRequestedAt           *computequeue.Timestamp                          `json:"releaseRequestedAt,omitempty"`
 	ResultCapsuleID              computequeue.JobCapsuleID                        `json:"resultCapsuleID"`
 	ResultSetDigest              computequeue.Digest                              `json:"resultSetDigest"`
 	RetentionUntil               computequeue.Timestamp                           `json:"retentionUntil"`
@@ -215,6 +222,8 @@ func (handler *HTTPHandler) Handler() http.Handler {
 	mux.Handle("POST /v1/job-custody/claims/{claimID}/results/{resultCapsuleID}/finalize", handler.limited(handler.management, http.HandlerFunc(handler.handleWorkerResultFinalize)))
 	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/results/status", handler.limited(handler.management, http.HandlerFunc(handler.handleResultList)))
 	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/results/{resultCapsuleID}/chunks/{chunkIndex}", handler.limited(handler.storage, http.HandlerFunc(handler.handleResultDeliveryChunk)))
+	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/results/{resultCapsuleID}/acknowledgement", handler.limited(handler.management, http.HandlerFunc(handler.handleResultDeliveryAcknowledgement)))
+	mux.Handle("POST /v1/job-custody/admissions/{capsuleID}/results/{resultCapsuleID}/release", handler.limited(handler.management, http.HandlerFunc(handler.handleResultRelease)))
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -594,6 +603,17 @@ func workerResultHTTPStatus(record ResultRecord) HTTPWorkerResultStatus {
 	if len(record.CustodyReceiptBytes) != 0 {
 		result.CustodyReceipt = bytes.Clone(record.CustodyReceiptBytes)
 	}
+	if record.DeliveryAcknowledgedAt > 0 {
+		value := record.DeliveryAcknowledgedAt
+		result.DeliveryAcknowledgedAt = &value
+	}
+	if record.ReleaseRequestedAt > 0 {
+		value := record.ReleaseRequestedAt
+		result.ReleaseRequestedAt = &value
+	}
+	if len(record.ReleaseReceiptBytes) != 0 {
+		result.ReleaseReceipt = bytes.Clone(record.ReleaseReceiptBytes)
+	}
 	return result
 }
 
@@ -670,6 +690,69 @@ func (handler *HTTPHandler) handleResultDeliveryChunk(
 	writer.Header().Set("Content-Type", JobCustodyCarriageContentType)
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(wire)
+}
+
+func (handler *HTTPHandler) handleResultDeliveryAcknowledgement(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	authorization, ok := handler.authorizedResultMutation(
+		writer, request, ResultMutationAcknowledgeDelivery,
+	)
+	if !ok {
+		return
+	}
+	record, err := handler.delivery.AcknowledgeDelivery(request.Context(), authorization)
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	writeJobCustodyJSON(writer, http.StatusOK, workerResultHTTPStatus(record))
+}
+
+func (handler *HTTPHandler) handleResultRelease(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	authorization, ok := handler.authorizedResultMutation(
+		writer, request, ResultMutationReleaseCustody,
+	)
+	if !ok {
+		return
+	}
+	record, err := handler.delivery.ReleaseResult(request.Context(), authorization)
+	if err != nil {
+		writeJobCustodyOperationError(writer, err)
+		return
+	}
+	writeJobCustodyJSON(writer, http.StatusOK, workerResultHTTPStatus(record))
+}
+
+func (handler *HTTPHandler) authorizedResultMutation(
+	writer http.ResponseWriter,
+	request *http.Request,
+	expectedAction ResultMutationAction,
+) (ResultMutationAuthorization, bool) {
+	var input HTTPResultMutationRequest
+	if decodeJobCustodyJSON(request, &input, MaximumJobCustodyControlBytes) != nil {
+		writeJobCustodyError(writer, http.StatusBadRequest, "invalid_result_mutation_authorization")
+		return ResultMutationAuthorization{}, false
+	}
+	authorization, err := handler.permits.VerifyResultMutation(
+		input.Permit, computequeue.Timestamp(handler.now().UnixMilli()),
+	)
+	if err != nil {
+		writeJobCustodyError(writer, http.StatusUnauthorized, "unauthorized")
+		return ResultMutationAuthorization{}, false
+	}
+	payload := authorization.Payload()
+	if payload.Action != expectedAction ||
+		payload.InputCapsuleID != computequeue.JobCapsuleID(request.PathValue("capsuleID")) ||
+		payload.ResultCapsuleID != computequeue.JobCapsuleID(request.PathValue("resultCapsuleID")) {
+		writeJobCustodyError(writer, http.StatusBadRequest, "invalid_result_mutation")
+		return ResultMutationAuthorization{}, false
+	}
+	return authorization, true
 }
 
 func (handler *HTTPHandler) authorizedResultRetrieval(

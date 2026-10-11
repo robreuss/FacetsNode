@@ -477,15 +477,16 @@ func (lease *memoryCapacityLease) Release(context.Context) error {
 }
 
 type memoryLedger struct {
-	mu                   sync.Mutex
-	records              map[computequeue.JobCapsuleID]AdmissionRecord
-	idempotency          map[computequeue.Digest]computequeue.JobCapsuleID
-	chunks               map[computequeue.JobCapsuleID]map[int64]AppendRequest
-	claims               map[uuid.UUID]WorkerClaimRecord
-	results              map[computequeue.JobCapsuleID]ResultRecord
-	resultIdempotency    map[computequeue.Digest]computequeue.JobCapsuleID
-	resultChunks         map[computequeue.JobCapsuleID]map[int64]AppendRequest
-	failAppendCommitOnce bool
+	mu                            sync.Mutex
+	records                       map[computequeue.JobCapsuleID]AdmissionRecord
+	idempotency                   map[computequeue.Digest]computequeue.JobCapsuleID
+	chunks                        map[computequeue.JobCapsuleID]map[int64]AppendRequest
+	claims                        map[uuid.UUID]WorkerClaimRecord
+	results                       map[computequeue.JobCapsuleID]ResultRecord
+	resultIdempotency             map[computequeue.Digest]computequeue.JobCapsuleID
+	resultChunks                  map[computequeue.JobCapsuleID]map[int64]AppendRequest
+	failAppendCommitOnce          bool
+	failResultReleaseFinalizeOnce bool
 }
 
 func newMemoryLedger() *memoryLedger {

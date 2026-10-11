@@ -3,6 +3,7 @@ package jobcustody
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -108,6 +109,46 @@ func TestContentStoreVerifiesRangesAndRejectsTampering(t *testing.T) {
 	}
 	if _, err := store.OpenObject(capsuleID, descriptor); err == nil {
 		t.Fatal("accepted a tampered immutable object")
+	}
+}
+
+func TestContentStoreDeletesOnlyExactFinalizedObjectAndConvergesAfterUnlink(t *testing.T) {
+	store, _ := temporaryContentStore(t)
+	capsuleID := computequeue.JobCapsuleID("29292929-2929-4929-8929-292929292929")
+	contents := []byte("opaque-result-ready-for-custody-release")
+	descriptor := protectedDescriptor(t, contents, 11)
+	if err := store.Prepare(capsuleID); err != nil {
+		t.Fatal(err)
+	}
+	for offset := int64(0); offset < int64(len(contents)); {
+		end := min(offset+descriptor.ChunkByteCount, int64(len(contents)))
+		next, err := store.ReconcileAndAppend(capsuleID, descriptor, offset, contents[offset:end])
+		if err != nil {
+			t.Fatal(err)
+		}
+		offset = next
+	}
+	if _, err := store.Finalize(capsuleID, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	wrongDescriptor := descriptor
+	wrongDescriptor.SHA256 = computequeue.SHA256Digest("content-store-delete-test", "wrong")
+	if err := store.DeleteObject(capsuleID, wrongDescriptor); err == nil {
+		t.Fatal("deleted a finalized object under a substituted descriptor")
+	}
+	if file, err := store.OpenObject(capsuleID, descriptor); err != nil {
+		t.Fatalf("descriptor rejection removed the retained object: %v", err)
+	} else if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteObject(capsuleID, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OpenObject(capsuleID, descriptor); !errors.Is(err, ErrMissing) {
+		t.Fatalf("released object remained readable: %v", err)
+	}
+	if err := store.DeleteObject(capsuleID, descriptor); err != nil {
+		t.Fatalf("release replay did not converge after unlink: %v", err)
 	}
 }
 

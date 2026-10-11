@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -264,6 +265,60 @@ func TestPostgresJobCustodyLedgerRestartReplayAndQuotas(t *testing.T) {
 		listedAdmission.Header.CapsuleID != record.Header.CapsuleID {
 		t.Fatalf("listed results=%+v admission=%+v err=%v", listedResults, listedAdmission, err)
 	}
+	deliveryPermitDigest := computequeue.SHA256Digest(
+		"postgres-job-custody-result", "delivery-permit",
+	)
+	sourceDeliveryReceiptDigest := computequeue.SHA256Digest(
+		"postgres-job-custody-result", "source-delivery-receipt",
+	)
+	deliveredResult, err := resultReopened.AcknowledgeResultDelivery(
+		ctx, resultHeader.ResultCapsuleID, deliveryPermitDigest,
+		sourceDeliveryReceiptDigest, 1_800_000_000_020,
+	)
+	if err != nil || deliveredResult.ValidateStored() != nil ||
+		deliveredResult.State != jobcustody.ResultDelivered {
+		t.Fatalf("delivered result=%+v err=%v", deliveredResult, err)
+	}
+	if replay, err := resultReopened.AcknowledgeResultDelivery(
+		ctx, resultHeader.ResultCapsuleID, deliveryPermitDigest,
+		sourceDeliveryReceiptDigest, 1_800_000_000_021,
+	); err != nil || replay.UpdatedAtMillis != deliveredResult.UpdatedAtMillis {
+		t.Fatalf("delivery replay=%+v err=%v", replay, err)
+	}
+	releasePermitDigest := computequeue.SHA256Digest(
+		"postgres-job-custody-result", "release-permit",
+	)
+	sourceReleaseReceiptDigest := computequeue.SHA256Digest(
+		"postgres-job-custody-result", "source-release-receipt",
+	)
+	pendingResult, err := resultReopened.RequestResultRelease(
+		ctx, resultHeader.ResultCapsuleID, releasePermitDigest,
+		sourceReleaseReceiptDigest, 1_800_000_000_030,
+	)
+	if err != nil || pendingResult.ValidateStored() != nil ||
+		pendingResult.State != jobcustody.ResultReleasePending {
+		t.Fatalf("pending result release=%+v err=%v", pendingResult, err)
+	}
+	releaseReceiptBytes := postgresJobCustodyResultReleaseReceipt(
+		t, pendingResult, 1_800_000_000_030,
+	)
+	releasedResult, err := resultReopened.FinalizeResultRelease(
+		ctx, resultHeader.ResultCapsuleID, releaseReceiptBytes, 1_800_000_000_030,
+	)
+	if err != nil || releasedResult.ValidateStored() != nil ||
+		releasedResult.State != jobcustody.ResultReleased || releasedResult.ObjectPath != "" {
+		t.Fatalf("released result=%+v err=%v", releasedResult, err)
+	}
+	afterReleaseRestart, err := postgresstore.NewJobCustodyStore(pool, limits, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedReleasedResult, err := afterReleaseRestart.LoadResult(ctx, resultHeader.ResultCapsuleID)
+	if err != nil || loadedReleasedResult.ValidateStored() != nil ||
+		loadedReleasedResult.State != jobcustody.ResultReleased ||
+		!bytes.Equal(loadedReleasedResult.ReleaseReceiptBytes, releaseReceiptBytes) {
+		t.Fatalf("reopened released result=%+v err=%v", loadedReleasedResult, err)
+	}
 
 	quotaRecord := postgresJobCustodyAdmission(
 		t, []byte("this-admission-exceeds-the-total-byte-quota"), 8,
@@ -476,6 +531,53 @@ func postgresJobCustodyResultReceipt(
 			RetentionUntilMilliseconds:      int64(record.Header.RetentionUntil),
 			Version:                         serviceauthority.JobCustodyResultReceiptVersion,
 			WorkerExecutionReceiptDigest:    string(record.Header.WorkerExecutionReceiptDigest),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func postgresJobCustodyResultReleaseReceipt(
+	t *testing.T,
+	record jobcustody.ResultRecord,
+	releasedAt int64,
+) []byte {
+	t.Helper()
+	seed := make([]byte, 32)
+	seed[31] = 7
+	deploymentID := uuid.MustParse("8b000000-0000-0000-0000-000000000001")
+	signer, err := serviceauthority.NewDeploymentSigner(deploymentID, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custodyReceipt, err := serviceauthority.DecodeJobCustodyResultReceipt(record.CustodyReceiptBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custodyReceiptDigest, err := custodyReceipt.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := signer.SignJobCustodyResultReleaseReceipt(
+		serviceauthority.JobCustodyResultReleaseReceiptPayload{
+			AssignmentID:                 uuid.MustParse(string(record.Header.AssignmentID)),
+			CustodyReceiptDigest:         custodyReceiptDigest,
+			DeliveryAcknowledgedAtMillis: int64(record.DeliveryAcknowledgedAt),
+			DeploymentID:                 deploymentID,
+			InputCapsuleID:               uuid.MustParse(string(record.Header.InputCapsuleID)),
+			Kind:                         serviceauthority.JobCustodyResultReleaseReceiptKind,
+			ReleasedAtMilliseconds:       releasedAt,
+			ResultCapsuleID:              uuid.MustParse(string(record.Header.ResultCapsuleID)),
+			ResultSetDigest:              string(record.Header.ResultSetDigest),
+			SourceDeliveryReceiptDigest:  string(record.SourceDeliveryReceiptDigest),
+			SourceReleaseReceiptDigest:   string(record.SourceReleaseReceiptDigest),
+			Version:                      serviceauthority.JobCustodyResultReleaseReceiptVersion,
 		},
 	)
 	if err != nil {

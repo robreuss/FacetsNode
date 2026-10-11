@@ -139,7 +139,8 @@ func (store *JobCustodyStore) ReserveResult(
 			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state='staging'),0)
 			 FROM job_custody_results),
 			(SELECT COALESCE(sum(protected_byte_count),0) FROM job_custody_admissions) +
-			(SELECT COALESCE(sum(protected_byte_count),0) FROM job_custody_results)`,
+			(SELECT COALESCE(sum(protected_byte_count) FILTER (WHERE state<>'released'),0)
+			 FROM job_custody_results)`,
 	).Scan(&count, &stagingBytes, &totalBytes); err != nil {
 		return jobcustody.ResultRecord{}, false, err
 	}
@@ -405,6 +406,192 @@ func (lease *jobCustodyResultFinalizationLease) Abort(ctx context.Context) error
 	return err
 }
 
+func (store *JobCustodyStore) AcknowledgeResultDelivery(
+	ctx context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	permitDigest computequeue.Digest,
+	sourceReceiptDigest computequeue.Digest,
+	acknowledgedAt computequeue.Timestamp,
+) (jobcustody.ResultRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || resultCapsuleID.Validate() != nil ||
+		permitDigest.Validate() != nil || sourceReceiptDigest.Validate() != nil ||
+		acknowledgedAt.Validate() != nil {
+		return jobcustody.ResultRecord{}, jobcustody.ErrInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	record, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, true)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if record.State == jobcustody.ResultDelivered {
+		if record.DeliveryPermitDigest != permitDigest ||
+			record.SourceDeliveryReceiptDigest != sourceReceiptDigest {
+			return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return jobcustody.ResultRecord{}, err
+		}
+		return record, nil
+	}
+	if record.State != jobcustody.ResultRetained ||
+		acknowledgedAt < computequeue.Timestamp(record.UpdatedAtMillis) ||
+		acknowledgedAt > record.Header.RetentionUntil {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	resultUUID := uuid.MustParse(string(resultCapsuleID))
+	tag, err := tx.Exec(ctx, `
+		UPDATE job_custody_results SET
+			state='delivered',delivery_acknowledged_at_milliseconds=$2,
+			delivery_permit_digest=$3,source_delivery_receipt_digest=$4,
+			updated_at_milliseconds=$2,stored_at=now()
+		WHERE result_capsule_id=$1 AND state='retained'`,
+		resultUUID, int64(acknowledgedAt), string(permitDigest), string(sourceReceiptDigest),
+	)
+	if err != nil {
+		return jobcustody.ResultRecord{}, mapJobCustodyWriteError(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	if err := advanceJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	updated, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, false)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	return updated, nil
+}
+
+func (store *JobCustodyStore) RequestResultRelease(
+	ctx context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	permitDigest computequeue.Digest,
+	sourceReceiptDigest computequeue.Digest,
+	requestedAt computequeue.Timestamp,
+) (jobcustody.ResultRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || resultCapsuleID.Validate() != nil ||
+		permitDigest.Validate() != nil || sourceReceiptDigest.Validate() != nil ||
+		requestedAt.Validate() != nil {
+		return jobcustody.ResultRecord{}, jobcustody.ErrInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	record, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, true)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if record.State == jobcustody.ResultReleasePending || record.State == jobcustody.ResultReleased {
+		if record.ReleasePermitDigest != permitDigest ||
+			record.SourceReleaseReceiptDigest != sourceReceiptDigest {
+			return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return jobcustody.ResultRecord{}, err
+		}
+		return record, nil
+	}
+	if record.State != jobcustody.ResultDelivered ||
+		requestedAt < record.DeliveryAcknowledgedAt || requestedAt > record.Header.RetentionUntil {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	resultUUID := uuid.MustParse(string(resultCapsuleID))
+	tag, err := tx.Exec(ctx, `
+		UPDATE job_custody_results SET
+			state='releasePending',release_requested_at_milliseconds=$2,
+			release_permit_digest=$3,source_release_receipt_digest=$4,
+			updated_at_milliseconds=$2,stored_at=now()
+		WHERE result_capsule_id=$1 AND state='delivered'`,
+		resultUUID, int64(requestedAt), string(permitDigest), string(sourceReceiptDigest),
+	)
+	if err != nil {
+		return jobcustody.ResultRecord{}, mapJobCustodyWriteError(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	if err := advanceJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	updated, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, false)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	return updated, nil
+}
+
+func (store *JobCustodyStore) FinalizeResultRelease(
+	ctx context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	receiptBytes []byte,
+	releasedAt int64,
+) (jobcustody.ResultRecord, error) {
+	if store == nil || store.pool == nil || ctx == nil || resultCapsuleID.Validate() != nil ||
+		len(receiptBytes) == 0 ||
+		len(receiptBytes) > serviceauthority.MaximumJobCustodyResultReleaseReceiptRecordByteCount {
+		return jobcustody.ResultRecord{}, jobcustody.ErrInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	record, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, true)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if record.State != jobcustody.ResultReleasePending || releasedAt < record.UpdatedAtMillis {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	resultUUID := uuid.MustParse(string(resultCapsuleID))
+	tag, err := tx.Exec(ctx, `
+		UPDATE job_custody_results SET
+			state='released',object_path=NULL,release_receipt_record=$2,
+			updated_at_milliseconds=$3,stored_at=now()
+		WHERE result_capsule_id=$1 AND state='releasePending'`,
+		resultUUID, receiptBytes, releasedAt,
+	)
+	if err != nil {
+		return jobcustody.ResultRecord{}, mapJobCustodyWriteError(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return jobcustody.ResultRecord{}, jobcustody.ErrConflict
+	}
+	if err := advanceJobCustodyLedger(ctx, tx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	updated, err := loadJobCustodyResult(ctx, tx, resultCapsuleID, false)
+	if err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return jobcustody.ResultRecord{}, err
+	}
+	return updated, nil
+}
+
 func loadJobCustodyResult(
 	ctx context.Context,
 	querier jobCustodyQuerier,
@@ -423,7 +610,11 @@ func loadJobCustodyResult(
 			claim_permit_digest,result_permit_digest,retention_until_milliseconds,
 			protected_object_sha256,protected_chunk_byte_count,protected_chunk_count,
 			protected_byte_count,accepted_at_milliseconds,committed_bytes,state,
-			object_path,custody_receipt_record,updated_at_milliseconds
+			object_path,custody_receipt_record,
+			delivery_acknowledged_at_milliseconds,delivery_permit_digest,
+			source_delivery_receipt_digest,release_requested_at_milliseconds,
+			release_permit_digest,source_release_receipt_digest,release_receipt_record,
+			updated_at_milliseconds
 		FROM job_custody_results WHERE result_capsule_id=$1`
 	if forUpdate {
 		query += " FOR UPDATE"
@@ -432,14 +623,17 @@ func loadJobCustodyResult(
 	var idempotency, resultSet, executionReceipt, routeKey, capabilities, owner, claimPermit, resultPermit string
 	var protectedSHA, state string
 	var retentionUntil, chunkBytes, chunkCount, byteCount, acceptedAt, committedBytes, updatedAt int64
-	var objectPath *string
-	var receiptBytes []byte
+	var objectPath, deliveryPermit, sourceDelivery, releasePermit, sourceRelease *string
+	var deliveryAt, releaseAt *int64
+	var receiptBytes, releaseReceiptBytes []byte
 	err = querier.QueryRow(ctx, query, resultUUID).Scan(
 		&storedResult, &claimID, &inputCapsuleID, &assignmentID, &idempotency,
 		&resultSet, &executionReceipt, &routeAuthorityID, &routeWorkerID, &routeKey,
 		&capabilities, &owner, &claimPermit, &resultPermit, &retentionUntil,
 		&protectedSHA, &chunkBytes, &chunkCount, &byteCount, &acceptedAt, &committedBytes,
-		&state, &objectPath, &receiptBytes, &updatedAt,
+		&state, &objectPath, &receiptBytes, &deliveryAt, &deliveryPermit,
+		&sourceDelivery, &releaseAt, &releasePermit, &sourceRelease,
+		&releaseReceiptBytes, &updatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return jobcustody.ResultRecord{}, jobcustody.ErrMissing
@@ -472,10 +666,29 @@ func loadJobCustodyResult(
 		ResultPermitDigest:           computequeue.Digest(resultPermit),
 		AcceptedAt:                   computequeue.Timestamp(acceptedAt), CommittedBytes: committedBytes,
 		State: jobcustody.ResultState(state), CustodyReceiptBytes: bytes.Clone(receiptBytes),
-		UpdatedAtMillis: updatedAt,
+		ReleaseReceiptBytes: bytes.Clone(releaseReceiptBytes),
+		UpdatedAtMillis:     updatedAt,
 	}
 	if objectPath != nil {
 		record.ObjectPath = *objectPath
+	}
+	if deliveryAt != nil {
+		record.DeliveryAcknowledgedAt = computequeue.Timestamp(*deliveryAt)
+	}
+	if deliveryPermit != nil {
+		record.DeliveryPermitDigest = computequeue.Digest(*deliveryPermit)
+	}
+	if sourceDelivery != nil {
+		record.SourceDeliveryReceiptDigest = computequeue.Digest(*sourceDelivery)
+	}
+	if releaseAt != nil {
+		record.ReleaseRequestedAt = computequeue.Timestamp(*releaseAt)
+	}
+	if releasePermit != nil {
+		record.ReleasePermitDigest = computequeue.Digest(*releasePermit)
+	}
+	if sourceRelease != nil {
+		record.SourceReleaseReceiptDigest = computequeue.Digest(*sourceRelease)
 	}
 	if storedResult.String() != string(resultCapsuleID) || record.ValidateStored() != nil {
 		return jobcustody.ResultRecord{}, jobcustody.ErrInvalid
@@ -528,7 +741,7 @@ func validateJobCustodyResultChunks(
 		return err
 	}
 	if expectedOffset != record.CommittedBytes || expectedIndex > descriptor.ChunkCount ||
-		(record.State == jobcustody.ResultRetained && expectedIndex != descriptor.ChunkCount) {
+		(record.State != jobcustody.ResultStaging && expectedIndex != descriptor.ChunkCount) {
 		return jobcustody.ErrInvalid
 	}
 	return nil
@@ -545,6 +758,7 @@ func sameStoredResult(left, right jobcustody.ResultRecord) bool {
 
 func cloneJobCustodyResult(record jobcustody.ResultRecord) jobcustody.ResultRecord {
 	record.CustodyReceiptBytes = bytes.Clone(record.CustodyReceiptBytes)
+	record.ReleaseReceiptBytes = bytes.Clone(record.ReleaseReceiptBytes)
 	return record
 }
 

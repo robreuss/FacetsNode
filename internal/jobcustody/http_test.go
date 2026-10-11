@@ -34,7 +34,10 @@ func TestJobCustodyHTTPAdmissionCarriageAndReceiptReplay(t *testing.T) {
 			Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
 			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
 		},
-		&ResultDeliveryCoordinator{Ledger: ledger, Content: resultContent, Clock: coordinator.Clock},
+		&ResultDeliveryCoordinator{
+			Ledger: ledger, Content: resultContent,
+			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
+		},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
 	)
@@ -185,7 +188,10 @@ func TestJobCustodyHTTPWorkerClaimsExactRetainedCapsuleAndReadsProtectedChunks(t
 			Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
 			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
 		},
-		&ResultDeliveryCoordinator{Ledger: ledger, Content: resultContent, Clock: coordinator.Clock},
+		&ResultDeliveryCoordinator{
+			Ledger: ledger, Content: resultContent,
+			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
+		},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
 	)
@@ -470,6 +476,98 @@ func TestJobCustodyHTTPWorkerClaimsExactRetainedCapsuleAndReadsProtectedChunks(t
 	if !bytes.Equal(deliveredResult, protectedResult) {
 		t.Fatal("source did not receive exact protected result bytes over HTTP")
 	}
+	custodyReceiptDigest, err := resultReceipt.ReferenceDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationSigner, err := NewResultMutationPermitSigner(fixture.authorityID, fixture.privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutationPayload := ResultMutationPermitPayload{
+		Action:                        ResultMutationAcknowledgeDelivery,
+		AdmissionPermitDigest:         admissionAuthorization.PermitDigest(),
+		AuthorityID:                   fixture.authorityID,
+		ExpiresAt:                     fixture.issuedAt + 60_000,
+		InputCapsuleID:                fixture.admission.header.CapsuleID,
+		IssuedAt:                      fixture.issuedAt,
+		PermitID:                      uuid.MustParse("67676767-6767-4767-8767-676767676767"),
+		RequesterAuthorityDigest:      fixture.payload.RequesterAuthorityDigest,
+		ResultCapsuleID:               resultHeader.ResultCapsuleID,
+		ResultCustodyReceiptDigest:    computequeue.Digest(custodyReceiptDigest),
+		ResultSetDigest:               resultHeader.ResultSetDigest,
+		SourceTransitionReceiptDigest: computequeue.SHA256Digest("job-custody-http-tests", "source-delivery-receipt"),
+		Version:                       ResultMutationPermitVersion,
+	}
+	acknowledgementPermit, err := mutationSigner.Sign(mutationPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acknowledgementPath := fmt.Sprintf(
+		"/v1/job-custody/admissions/%s/results/%s/acknowledgement",
+		fixture.admission.header.CapsuleID, resultHeader.ResultCapsuleID,
+	)
+	acknowledged := serveJobCustodyJSON(
+		t, server, http.MethodPost, acknowledgementPath,
+		HTTPResultMutationRequest{Permit: acknowledgementPermit},
+	)
+	if acknowledged.Code != http.StatusOK {
+		t.Fatalf("result acknowledgement status=%d body=%s", acknowledged.Code, acknowledged.Body.String())
+	}
+	decodeJobCustodyTestJSON(t, acknowledged.Body.Bytes(), &resultStatus)
+	if resultStatus.State != ResultDelivered || resultStatus.DeliveryAcknowledgedAt == nil ||
+		len(resultStatus.ReleaseReceipt) != 0 {
+		t.Fatalf("acknowledged result=%+v", resultStatus)
+	}
+	mutationPayload.Action = ResultMutationReleaseCustody
+	mutationPayload.PermitID = uuid.MustParse("78787878-7878-4787-8787-787878787878")
+	mutationPayload.SourceTransitionReceiptDigest = computequeue.SHA256Digest(
+		"job-custody-http-tests", "source-release-receipt",
+	)
+	releasePermit, err := mutationSigner.Sign(mutationPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releasePath := fmt.Sprintf(
+		"/v1/job-custody/admissions/%s/results/%s/release",
+		fixture.admission.header.CapsuleID, resultHeader.ResultCapsuleID,
+	)
+	released := serveJobCustodyJSON(
+		t, server, http.MethodPost, releasePath, HTTPResultMutationRequest{Permit: releasePermit},
+	)
+	if released.Code != http.StatusOK {
+		t.Fatalf("result release status=%d body=%s", released.Code, released.Body.String())
+	}
+	decodeJobCustodyTestJSON(t, released.Body.Bytes(), &resultStatus)
+	if resultStatus.State != ResultReleased || resultStatus.ReleaseRequestedAt == nil ||
+		len(resultStatus.ReleaseReceipt) == 0 {
+		t.Fatalf("released result=%+v", resultStatus)
+	}
+	if _, err := serviceauthority.DecodeJobCustodyResultReleaseReceipt(resultStatus.ReleaseReceipt); err != nil {
+		t.Fatal(err)
+	}
+	replayedRelease := serveJobCustodyJSON(
+		t, server, http.MethodPost, releasePath, HTTPResultMutationRequest{Permit: releasePermit},
+	)
+	if replayedRelease.Code != http.StatusOK {
+		t.Fatalf("result release replay status=%d body=%s", replayedRelease.Code, replayedRelease.Body.String())
+	}
+	var replayedReleaseStatus HTTPWorkerResultStatus
+	decodeJobCustodyTestJSON(t, replayedRelease.Body.Bytes(), &replayedReleaseStatus)
+	if !bytes.Equal(replayedReleaseStatus.ReleaseReceipt, resultStatus.ReleaseReceipt) {
+		t.Fatal("result release replay changed the signed release receipt")
+	}
+	releasedChunkPath := fmt.Sprintf(
+		"/v1/job-custody/admissions/%s/results/%s/chunks/0",
+		fixture.admission.header.CapsuleID, resultHeader.ResultCapsuleID,
+	)
+	releasedChunk := serveJobCustodyJSON(
+		t, server, http.MethodPost, releasedChunkPath,
+		HTTPResultRetrievalRequest{Permit: retrievalPermit},
+	)
+	if releasedChunk.Code != http.StatusConflict {
+		t.Fatalf("released result remained downloadable: status=%d body=%s", releasedChunk.Code, releasedChunk.Body.String())
+	}
 	wrongSourcePayload := retrievalPayload
 	wrongSourcePayload.PermitID = uuid.MustParse("56565656-5656-4656-8656-565656565656")
 	wrongSourcePayload.RequesterAuthorityDigest = computequeue.SHA256Digest(
@@ -504,7 +602,10 @@ func TestJobCustodyHTTPRejectsPermitAndCarriageSubstitution(t *testing.T) {
 			Ledger: ledger, Content: resultContent, Capacity: &memoryCapacityAuthority{},
 			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
 		},
-		&ResultDeliveryCoordinator{Ledger: ledger, Content: resultContent, Clock: coordinator.Clock},
+		&ResultDeliveryCoordinator{
+			Ledger: ledger, Content: resultContent,
+			ReceiptSigner: coordinator.ReceiptSigner.(ResultReceiptSigner), Clock: coordinator.Clock,
+		},
 		fixture.verifier, traffic.DefaultLimits(),
 		func(context.Context) error { return nil },
 	)

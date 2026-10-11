@@ -20,8 +20,11 @@ import (
 type ResultState string
 
 const (
-	ResultStaging  ResultState = "staging"
-	ResultRetained ResultState = "retained"
+	ResultStaging        ResultState = "staging"
+	ResultRetained       ResultState = "retained"
+	ResultDelivered      ResultState = "delivered"
+	ResultReleasePending ResultState = "releasePending"
+	ResultReleased       ResultState = "released"
 )
 
 // ResultRecord is the complete clear metadata retained beside one opaque
@@ -40,6 +43,13 @@ type ResultRecord struct {
 	State                        ResultState
 	ObjectPath                   string
 	CustodyReceiptBytes          []byte
+	DeliveryAcknowledgedAt       computequeue.Timestamp
+	DeliveryPermitDigest         computequeue.Digest
+	SourceDeliveryReceiptDigest  computequeue.Digest
+	ReleaseRequestedAt           computequeue.Timestamp
+	ReleasePermitDigest          computequeue.Digest
+	SourceReleaseReceiptDigest   computequeue.Digest
+	ReleaseReceiptBytes          []byte
 	UpdatedAtMillis              int64
 }
 
@@ -56,15 +66,60 @@ func (record ResultRecord) ValidateStored() error {
 		return ErrInvalid
 	}
 	expectedPath := filepath.Join("objects", string(record.Header.ResultCapsuleID))
+	noDelivery := record.DeliveryAcknowledgedAt == 0 && record.DeliveryPermitDigest == "" &&
+		record.SourceDeliveryReceiptDigest == ""
+	hasDelivery := record.DeliveryAcknowledgedAt.Validate() == nil &&
+		record.DeliveryPermitDigest.Validate() == nil &&
+		record.SourceDeliveryReceiptDigest.Validate() == nil
+	noRelease := record.ReleaseRequestedAt == 0 && record.ReleasePermitDigest == "" &&
+		record.SourceReleaseReceiptDigest == ""
+	hasRelease := record.ReleaseRequestedAt.Validate() == nil &&
+		record.ReleasePermitDigest.Validate() == nil &&
+		record.SourceReleaseReceiptDigest.Validate() == nil
+	if (!noDelivery && !hasDelivery) || (!noRelease && !hasRelease) {
+		return ErrInvalid
+	}
+	if hasDelivery && (record.DeliveryAcknowledgedAt < record.AcceptedAt ||
+		record.DeliveryAcknowledgedAt > record.Header.RetentionUntil) {
+		return ErrInvalid
+	}
+	if hasRelease && (!hasDelivery || record.ReleaseRequestedAt < record.DeliveryAcknowledgedAt ||
+		record.ReleaseRequestedAt > record.Header.RetentionUntil) {
+		return ErrInvalid
+	}
 	switch record.State {
 	case ResultStaging:
-		if record.ObjectPath != "" || len(record.CustodyReceiptBytes) != 0 {
+		if record.ObjectPath != "" || len(record.CustodyReceiptBytes) != 0 || !noDelivery || !noRelease ||
+			len(record.ReleaseReceiptBytes) != 0 {
 			return ErrInvalid
 		}
 	case ResultRetained:
 		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
 			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
-			validateResultCustodyReceiptRecord(record, nil) != nil {
+			validateResultCustodyReceiptRecord(record, nil) != nil || !noDelivery || !noRelease ||
+			len(record.ReleaseReceiptBytes) != 0 {
+			return ErrInvalid
+		}
+	case ResultDelivered:
+		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
+			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
+			validateResultCustodyReceiptRecord(record, nil) != nil || !hasDelivery || hasRelease ||
+			len(record.ReleaseReceiptBytes) != 0 {
+			return ErrInvalid
+		}
+	case ResultReleasePending:
+		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
+			record.ObjectPath != expectedPath || len(record.CustodyReceiptBytes) == 0 ||
+			validateResultCustodyReceiptRecord(record, nil) != nil || !hasDelivery || !hasRelease ||
+			len(record.ReleaseReceiptBytes) != 0 {
+			return ErrInvalid
+		}
+	case ResultReleased:
+		if record.CommittedBytes != record.Header.ProtectedObject.ByteCount ||
+			record.ObjectPath != "" || len(record.CustodyReceiptBytes) == 0 ||
+			validateResultCustodyReceiptRecord(record, nil) != nil || !hasDelivery || !hasRelease ||
+			len(record.ReleaseReceiptBytes) == 0 ||
+			validateResultReleaseReceiptRecord(record, nil) != nil {
 			return ErrInvalid
 		}
 	default:
@@ -95,14 +150,31 @@ type ResultLedger interface {
 	BeginResultFinalization(context.Context, computequeue.JobCapsuleID) (ResultFinalizationLease, error)
 }
 
+type ResultLifecycleLedger interface {
+	ResultLedger
+	AcknowledgeResultDelivery(
+		context.Context, computequeue.JobCapsuleID, computequeue.Digest,
+		computequeue.Digest, computequeue.Timestamp,
+	) (ResultRecord, error)
+	RequestResultRelease(
+		context.Context, computequeue.JobCapsuleID, computequeue.Digest,
+		computequeue.Digest, computequeue.Timestamp,
+	) (ResultRecord, error)
+	FinalizeResultRelease(
+		context.Context, computequeue.JobCapsuleID, []byte, int64,
+	) (ResultRecord, error)
+}
+
 type ResultDeliveryCoordinator struct {
-	Ledger  ResultLedger
-	Content *ContentStore
-	Clock   Clock
+	Ledger        ResultLifecycleLedger
+	Content       *ContentStore
+	ReceiptSigner ResultReceiptSigner
+	Clock         Clock
 }
 
 func (coordinator *ResultDeliveryCoordinator) validate() error {
 	if coordinator == nil || coordinator.Ledger == nil || coordinator.Content == nil ||
+		coordinator.ReceiptSigner == nil || coordinator.ReceiptSigner.DeploymentID() == uuid.Nil ||
 		coordinator.Clock == nil {
 		return ErrInvalid
 	}
@@ -168,7 +240,7 @@ func (coordinator *ResultDeliveryCoordinator) OpenAuthorized(
 		if result.Header.ResultCapsuleID != resultCapsuleID {
 			continue
 		}
-		if result.State != ResultRetained {
+		if result.State != ResultRetained && result.State != ResultDelivered {
 			return ResultDeliveryHandle{}, ErrConflict
 		}
 		file, err := coordinator.Content.OpenObject(resultCapsuleID, result.Header.ProtectedObject)
@@ -188,7 +260,8 @@ func (coordinator *ResultDeliveryCoordinator) ReadChunk(
 	chunkIndex int64,
 ) ([]byte, error) {
 	if coordinator.validate() != nil || handle.authorization.payload.Validate() != nil ||
-		handle.record.ValidateStored() != nil || handle.record.State != ResultRetained ||
+		handle.record.ValidateStored() != nil ||
+		(handle.record.State != ResultRetained && handle.record.State != ResultDelivered) ||
 		handle.record.Header.InputCapsuleID != handle.authorization.payload.InputCapsuleID ||
 		chunkIndex < 0 || chunkIndex >= handle.record.Header.ProtectedObject.ChunkCount {
 		return nil, ErrInvalid
@@ -216,6 +289,152 @@ func (coordinator *ResultDeliveryCoordinator) ReadChunk(
 	return result, nil
 }
 
+// AcknowledgeDelivery records only the original source's durable receipt of
+// one exact encrypted result. It does not assert decryption, semantic
+// validity, or canonical application.
+func (coordinator *ResultDeliveryCoordinator) AcknowledgeDelivery(
+	ctx context.Context,
+	authorization ResultMutationAuthorization,
+) (ResultRecord, error) {
+	record, now, err := coordinator.authorizedMutationRecord(
+		ctx, authorization, ResultMutationAcknowledgeDelivery,
+	)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	if record.State != ResultRetained && record.State != ResultDelivered {
+		return ResultRecord{}, ErrConflict
+	}
+	transitionAt := now
+	if transitionAt < computequeue.Timestamp(record.UpdatedAtMillis) {
+		transitionAt = computequeue.Timestamp(record.UpdatedAtMillis)
+	}
+	updated, err := coordinator.Ledger.AcknowledgeResultDelivery(
+		ctx, record.Header.ResultCapsuleID, authorization.permitDigest,
+		authorization.payload.SourceTransitionReceiptDigest, transitionAt,
+	)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	if updated.ValidateStored() != nil || !sameResult(updated, record) ||
+		updated.State != ResultDelivered ||
+		updated.DeliveryPermitDigest != authorization.permitDigest ||
+		updated.SourceDeliveryReceiptDigest != authorization.payload.SourceTransitionReceiptDigest {
+		return ResultRecord{}, ErrInvalid
+	}
+	return updated, nil
+}
+
+// ReleaseResult persists a restart-safe release intent before unlinking the
+// protected object, then records a deployment-signed cleanup receipt. A crash
+// between those steps leaves releasePending and can be resumed exactly.
+func (coordinator *ResultDeliveryCoordinator) ReleaseResult(
+	ctx context.Context,
+	authorization ResultMutationAuthorization,
+) (ResultRecord, error) {
+	record, now, err := coordinator.authorizedMutationRecord(
+		ctx, authorization, ResultMutationReleaseCustody,
+	)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	if record.State != ResultDelivered && record.State != ResultReleasePending &&
+		record.State != ResultReleased {
+		return ResultRecord{}, ErrConflict
+	}
+	transitionAt := now
+	if transitionAt < computequeue.Timestamp(record.UpdatedAtMillis) {
+		transitionAt = computequeue.Timestamp(record.UpdatedAtMillis)
+	}
+	record, err = coordinator.Ledger.RequestResultRelease(
+		ctx, record.Header.ResultCapsuleID, authorization.permitDigest,
+		authorization.payload.SourceTransitionReceiptDigest, transitionAt,
+	)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	if record.ValidateStored() != nil ||
+		record.ReleasePermitDigest != authorization.permitDigest ||
+		record.SourceReleaseReceiptDigest != authorization.payload.SourceTransitionReceiptDigest {
+		return ResultRecord{}, ErrInvalid
+	}
+	if record.State == ResultReleased {
+		if validateResultReleaseReceiptRecord(record, coordinator.ReceiptSigner) != nil {
+			return ResultRecord{}, ErrInvalid
+		}
+		return record, nil
+	}
+	if record.State != ResultReleasePending {
+		return ResultRecord{}, ErrConflict
+	}
+	if err := coordinator.Content.DeleteObject(
+		record.Header.ResultCapsuleID, record.Header.ProtectedObject,
+	); err != nil {
+		return ResultRecord{}, err
+	}
+	releasedAt := coordinator.Clock.Now().UnixMilli()
+	if releasedAt < record.UpdatedAtMillis {
+		releasedAt = record.UpdatedAtMillis
+	}
+	receiptBytes, err := coordinator.signResultReleaseReceipt(record, releasedAt)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	criticalContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	released, err := coordinator.Ledger.FinalizeResultRelease(
+		criticalContext, record.Header.ResultCapsuleID, receiptBytes, releasedAt,
+	)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	if released.ValidateStored() != nil || released.State != ResultReleased ||
+		!sameResult(released, record) ||
+		validateResultReleaseReceiptRecord(released, coordinator.ReceiptSigner) != nil {
+		return ResultRecord{}, ErrInvalid
+	}
+	return released, nil
+}
+
+func (coordinator *ResultDeliveryCoordinator) authorizedMutationRecord(
+	ctx context.Context,
+	authorization ResultMutationAuthorization,
+	expectedAction ResultMutationAction,
+) (ResultRecord, computequeue.Timestamp, error) {
+	if coordinator.validate() != nil || ctx == nil || authorization.payload.Validate() != nil ||
+		authorization.permitDigest.Validate() != nil || authorization.payload.Action != expectedAction {
+		return ResultRecord{}, 0, ErrInvalid
+	}
+	payload := authorization.payload
+	now := computequeue.Timestamp(coordinator.Clock.Now().UnixMilli())
+	if now < payload.IssuedAt || now >= payload.ExpiresAt {
+		return ResultRecord{}, 0, ErrConflict
+	}
+	results, admission, err := coordinator.Ledger.ListResultsForInput(ctx, payload.InputCapsuleID)
+	if err != nil {
+		return ResultRecord{}, 0, err
+	}
+	if validateResultMutationBinding(admission, authorization, now) != nil {
+		return ResultRecord{}, 0, ErrConflict
+	}
+	for _, record := range results {
+		if record.Header.ResultCapsuleID != payload.ResultCapsuleID {
+			continue
+		}
+		custodyDigest, err := resultCustodyReceiptReferenceDigest(record)
+		if err != nil || record.ValidateStored() != nil ||
+			record.Header.InputCapsuleID != payload.InputCapsuleID ||
+			record.Header.ResultSetDigest != payload.ResultSetDigest ||
+			record.RouteAuthorityID != payload.AuthorityID ||
+			custodyDigest != payload.ResultCustodyReceiptDigest ||
+			now >= record.Header.RetentionUntil {
+			return ResultRecord{}, 0, ErrConflict
+		}
+		return record, now, nil
+	}
+	return ResultRecord{}, 0, ErrMissing
+}
+
 type ResultAppendLease interface {
 	Result() ResultRecord
 	ExistingNextOffset() *int64
@@ -236,6 +455,9 @@ type ResultReceiptSigner interface {
 	SignJobCustodyResultReceipt(
 		serviceauthority.JobCustodyResultReceiptPayload,
 	) (serviceauthority.JobCustodyResultReceipt, error)
+	SignJobCustodyResultReleaseReceipt(
+		serviceauthority.JobCustodyResultReleaseReceiptPayload,
+	) (serviceauthority.JobCustodyResultReleaseReceipt, error)
 }
 
 type ResultCoordinator struct {
@@ -553,6 +775,25 @@ func validateResultRetrievalBinding(
 	return nil
 }
 
+func validateResultMutationBinding(
+	admission AdmissionRecord,
+	authorization ResultMutationAuthorization,
+	now computequeue.Timestamp,
+) error {
+	payload := authorization.payload
+	if admission.ValidateStored() != nil || admission.State != AdmissionRetained ||
+		payload.Validate() != nil || authorization.permitDigest.Validate() != nil ||
+		now < payload.IssuedAt || now >= payload.ExpiresAt ||
+		now >= admission.Header.RetentionUntil ||
+		admission.Header.CapsuleID != payload.InputCapsuleID ||
+		admission.RouteAuthorityID != payload.AuthorityID ||
+		admission.RequesterAuthorityDigest != payload.RequesterAuthorityDigest ||
+		admission.AdmissionPermitDigest != payload.AdmissionPermitDigest {
+		return ErrInvalid
+	}
+	return nil
+}
+
 func sameResultAuthorization(record ResultRecord, authorization WorkerResultAuthorization) bool {
 	payload := authorization.payload
 	return record.ValidateStored() == nil && payload.Validate() == nil &&
@@ -601,6 +842,103 @@ func (coordinator *ResultCoordinator) signResultCustodyReceipt(
 	return encoded, nil
 }
 
+func (coordinator *ResultDeliveryCoordinator) signResultReleaseReceipt(
+	record ResultRecord,
+	releasedAt int64,
+) ([]byte, error) {
+	if record.ValidateStored() != nil || record.State != ResultReleasePending ||
+		releasedAt < record.UpdatedAtMillis {
+		return nil, ErrInvalid
+	}
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	inputCapsuleID, inputErr := uuid.Parse(string(record.Header.InputCapsuleID))
+	resultCapsuleID, resultErr := uuid.Parse(string(record.Header.ResultCapsuleID))
+	custodyDigest, custodyErr := resultCustodyReceiptReferenceDigest(record)
+	if assignmentErr != nil || inputErr != nil || resultErr != nil || custodyErr != nil {
+		return nil, ErrInvalid
+	}
+	receipt, err := coordinator.ReceiptSigner.SignJobCustodyResultReleaseReceipt(
+		serviceauthority.JobCustodyResultReleaseReceiptPayload{
+			AssignmentID: assignmentID, CustodyReceiptDigest: string(custodyDigest),
+			DeliveryAcknowledgedAtMillis: int64(record.DeliveryAcknowledgedAt),
+			DeploymentID:                 coordinator.ReceiptSigner.DeploymentID(),
+			InputCapsuleID:               inputCapsuleID,
+			Kind:                         serviceauthority.JobCustodyResultReleaseReceiptKind,
+			ReleasedAtMilliseconds:       releasedAt, ResultCapsuleID: resultCapsuleID,
+			ResultSetDigest:             string(record.Header.ResultSetDigest),
+			SourceDeliveryReceiptDigest: string(record.SourceDeliveryReceiptDigest),
+			SourceReleaseReceiptDigest:  string(record.SourceReleaseReceiptDigest),
+			Version:                     serviceauthority.JobCustodyResultReleaseReceiptVersion,
+		},
+	)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	encoded, err := receipt.CanonicalJSON()
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	return encoded, nil
+}
+
+func resultCustodyReceiptReferenceDigest(record ResultRecord) (computequeue.Digest, error) {
+	if len(record.CustodyReceiptBytes) == 0 {
+		return "", ErrInvalid
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyResultReceipt(record.CustodyReceiptBytes)
+	if err != nil {
+		return "", ErrInvalid
+	}
+	digest, err := receipt.ReferenceDigest()
+	if err != nil {
+		return "", ErrInvalid
+	}
+	result := computequeue.Digest(digest)
+	if result.Validate() != nil {
+		return "", ErrInvalid
+	}
+	return result, nil
+}
+
+func validateResultReleaseReceiptRecord(record ResultRecord, signer ResultReceiptSigner) error {
+	if record.State != ResultReleased || len(record.ReleaseReceiptBytes) == 0 {
+		return ErrInvalid
+	}
+	receipt, err := serviceauthority.DecodeJobCustodyResultReleaseReceipt(record.ReleaseReceiptBytes)
+	if err != nil {
+		return ErrInvalid
+	}
+	payload, err := receipt.VerifiedPayload()
+	if err != nil {
+		return ErrInvalid
+	}
+	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
+	inputCapsuleID, inputErr := uuid.Parse(string(record.Header.InputCapsuleID))
+	resultCapsuleID, resultErr := uuid.Parse(string(record.Header.ResultCapsuleID))
+	custodyDigest, custodyErr := resultCustodyReceiptReferenceDigest(record)
+	if assignmentErr != nil || inputErr != nil || resultErr != nil || custodyErr != nil ||
+		payload.AssignmentID != assignmentID ||
+		payload.CustodyReceiptDigest != string(custodyDigest) ||
+		payload.DeliveryAcknowledgedAtMillis != int64(record.DeliveryAcknowledgedAt) ||
+		payload.InputCapsuleID != inputCapsuleID ||
+		payload.ReleasedAtMilliseconds != record.UpdatedAtMillis ||
+		payload.ResultCapsuleID != resultCapsuleID ||
+		payload.ResultSetDigest != string(record.Header.ResultSetDigest) ||
+		payload.SourceDeliveryReceiptDigest != string(record.SourceDeliveryReceiptDigest) ||
+		payload.SourceReleaseReceiptDigest != string(record.SourceReleaseReceiptDigest) {
+		return ErrInvalid
+	}
+	if signer != nil {
+		if payload.DeploymentID != signer.DeploymentID() ||
+			receipt.Signature.SignerID != signer.DeploymentID() ||
+			receipt.Signature.PublicSigningKeyX963 != signer.PublicSigningKeyX963() ||
+			receipt.Signature.SigningKeyFingerprint != signer.SigningKeyFingerprint() {
+			return ErrInvalid
+		}
+	}
+	return nil
+}
+
 func validateResultCustodyReceiptRecord(record ResultRecord, signer ResultReceiptSigner) error {
 	receipt, err := serviceauthority.DecodeJobCustodyResultReceipt(record.CustodyReceiptBytes)
 	if err != nil {
@@ -613,6 +951,7 @@ func validateResultCustodyReceiptRecord(record ResultRecord, signer ResultReceip
 	assignmentID, assignmentErr := uuid.Parse(string(record.Header.AssignmentID))
 	inputCapsuleID, inputErr := uuid.Parse(string(record.Header.InputCapsuleID))
 	resultCapsuleID, resultErr := uuid.Parse(string(record.Header.ResultCapsuleID))
+	committedAt := payload.CommittedAtMilliseconds
 	if assignmentErr != nil || inputErr != nil || resultErr != nil ||
 		payload.AssignmentID != assignmentID || payload.ClaimID != record.Header.ClaimID ||
 		payload.ClaimPermitDigest != string(record.ClaimPermitDigest) ||
@@ -625,7 +964,19 @@ func validateResultCustodyReceiptRecord(record ResultRecord, signer ResultReceip
 		payload.ResultSetDigest != string(record.Header.ResultSetDigest) ||
 		payload.RetentionUntilMilliseconds != int64(record.Header.RetentionUntil) ||
 		payload.WorkerExecutionReceiptDigest != string(record.Header.WorkerExecutionReceiptDigest) ||
-		payload.CommittedAtMilliseconds != record.UpdatedAtMillis {
+		committedAt < int64(record.AcceptedAt) || committedAt > record.UpdatedAtMillis {
+		return ErrInvalid
+	}
+	// Before any source lifecycle transition, updatedAt is the immutable
+	// custody-commit time. Later states advance updatedAt; the signed custody
+	// receipt must then predate (or coincide with) the first transition rather
+	// than match that mutable timestamp.
+	if record.State == ResultRetained && committedAt != record.UpdatedAtMillis {
+		return ErrInvalid
+	}
+	if record.State != ResultRetained &&
+		(committedAt > int64(record.DeliveryAcknowledgedAt) ||
+			record.DeliveryAcknowledgedAt > computequeue.Timestamp(record.UpdatedAtMillis)) {
 		return ErrInvalid
 	}
 	if signer != nil {
@@ -641,5 +992,6 @@ func validateResultCustodyReceiptRecord(record ResultRecord, signer ResultReceip
 
 func cloneResultRecord(record ResultRecord) ResultRecord {
 	record.CustodyReceiptBytes = bytes.Clone(record.CustodyReceiptBytes)
+	record.ReleaseReceiptBytes = bytes.Clone(record.ReleaseReceiptBytes)
 	return record
 }

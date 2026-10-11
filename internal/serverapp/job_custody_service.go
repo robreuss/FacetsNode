@@ -268,7 +268,7 @@ func prepareJobCustodyRuntime(
 		ReceiptSigner: signer, Clock: clock,
 	}
 	runtime.Delivery = &jobcustody.ResultDeliveryCoordinator{
-		Ledger: ledger, Content: resultContent, Clock: clock,
+		Ledger: ledger, Content: resultContent, ReceiptSigner: signer, Clock: clock,
 	}
 	return runtime, nil
 }

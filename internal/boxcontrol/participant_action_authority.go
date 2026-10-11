@@ -27,6 +27,7 @@ const (
 	ParticipantActionCancelWorkerOperation                BoxParticipantAction = "worker.operation.cancel"
 	ParticipantActionIssueJobCustodyPermit                BoxParticipantAction = "job-custody.permit.issue"
 	ParticipantActionIssueJobCustodyResultRetrievalPermit BoxParticipantAction = "job-custody.result-retrieval-permit.issue"
+	ParticipantActionIssueJobCustodyResultMutationPermit  BoxParticipantAction = "job-custody.result-mutation-permit.issue"
 	ParticipantActionIssueJobCustodyWorkerClaimPermit     BoxParticipantAction = "job-custody.worker-claim-permit.issue"
 	ParticipantActionIssueJobCustodyWorkerResultPermit    BoxParticipantAction = "job-custody.worker-result-permit.issue"
 )
@@ -45,6 +46,7 @@ func (action BoxParticipantAction) valid() bool {
 		ParticipantActionCancelWorkerOperation,
 		ParticipantActionIssueJobCustodyPermit,
 		ParticipantActionIssueJobCustodyResultRetrievalPermit,
+		ParticipantActionIssueJobCustodyResultMutationPermit,
 		ParticipantActionIssueJobCustodyWorkerClaimPermit,
 		ParticipantActionIssueJobCustodyWorkerResultPermit:
 		return true

@@ -306,6 +306,53 @@ func (store *ContentStore) OpenObject(
 	return file, nil
 }
 
+// DeleteObject relinquishes filesystem custody of one exact finalized opaque
+// object. It is idempotent after unlink so a releasePending database record can
+// safely resume after process termination. The operation proves namespace
+// removal, not secure-media erasure.
+func (store *ContentStore) DeleteObject(
+	capsuleID computequeue.JobCapsuleID,
+	descriptor computequeue.JobCapsuleProtectedObjectDescriptor,
+) error {
+	if store == nil {
+		return ErrInvalid
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	name, err := capsuleName(capsuleID)
+	if err != nil || descriptor.Validate() != nil || store.validate() != nil {
+		return ErrInvalid
+	}
+	file, err := openRegular(store.objects, name, 1, 0o400)
+	if errors.Is(err, ErrMissing) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := verifyComplete(file, descriptor); err != nil ||
+		store.validate() != nil || !stableFile(store.objects, name, file, 1, 0o400) {
+		_ = file.Close()
+		if err != nil {
+			return err
+		}
+		return ErrInvalid
+	}
+	if err := file.Close(); err != nil {
+		return ErrUnavailable
+	}
+	if err := store.objects.Remove(name); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return ErrUnavailable
+	}
+	if store.objectsDir.Sync() != nil || store.validate() != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
+
 func (store *ContentStore) finish(
 	name string,
 	descriptor computequeue.JobCapsuleProtectedObjectDescriptor,

@@ -203,6 +203,13 @@ func TestResultDeliveryCoordinatorListsAndReadsOnlyOriginalSourceResults(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	partialLifecycle := retained
+	partialLifecycle.DeliveryPermitDigest = computequeue.SHA256Digest(
+		"result-delivery-test", "partial-delivery",
+	)
+	if partialLifecycle.ValidateStored() == nil {
+		t.Fatal("retained result accepted a partial delivery transition")
+	}
 	retrievalAuthorization := ResultRetrievalAuthorization{
 		payload: ResultRetrievalPermitPayload{
 			AdmissionPermitDigest:    inputHandle.record.AdmissionPermitDigest,
@@ -216,7 +223,9 @@ func TestResultDeliveryCoordinatorListsAndReadsOnlyOriginalSourceResults(t *test
 		},
 		permitDigest: computequeue.SHA256Digest("result-delivery-test", "retrieval-permit"),
 	}
-	delivery := &ResultDeliveryCoordinator{Ledger: ledger, Content: resultContent, Clock: clock}
+	delivery := &ResultDeliveryCoordinator{
+		Ledger: ledger, Content: resultContent, ReceiptSigner: signer, Clock: clock,
+	}
 	listed, err := delivery.ListAuthorized(t.Context(), retrievalAuthorization)
 	if err != nil || len(listed) != 1 || listed[0].Header != retained.Header {
 		t.Fatalf("listed=%+v err=%v", listed, err)
@@ -249,6 +258,92 @@ func TestResultDeliveryCoordinatorListsAndReadsOnlyOriginalSourceResults(t *test
 		t.Context(), retrievalAuthorization, computequeue.JobCapsuleID(uuid.NewString()),
 	); !errors.Is(err, ErrMissing) {
 		t.Fatalf("unknown result error=%v", err)
+	}
+	custodyDigest, err := resultCustodyReceiptReferenceDigest(retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery.Clock = fixedJobCustodyClock{time.UnixMilli(1_800_000_000_100)}
+	acknowledgement := ResultMutationAuthorization{
+		payload: ResultMutationPermitPayload{
+			Action:                ResultMutationAcknowledgeDelivery,
+			AdmissionPermitDigest: inputHandle.record.AdmissionPermitDigest,
+			AuthorityID:           inputHandle.record.RouteAuthorityID,
+			ExpiresAt:             1_800_000_050_000, InputCapsuleID: inputHandle.record.Header.CapsuleID,
+			IssuedAt: 1_800_000_000_000, PermitID: uuid.New(),
+			RequesterAuthorityDigest:   inputHandle.record.RequesterAuthorityDigest,
+			ResultCapsuleID:            retained.Header.ResultCapsuleID,
+			ResultCustodyReceiptDigest: custodyDigest,
+			ResultSetDigest:            retained.Header.ResultSetDigest,
+			SourceTransitionReceiptDigest: computequeue.SHA256Digest(
+				"result-delivery-test", "source-delivered-receipt",
+			),
+			Version: ResultMutationPermitVersion,
+		},
+		permitDigest: computequeue.SHA256Digest("result-delivery-test", "acknowledgement-permit"),
+	}
+	delivered, err := delivery.AcknowledgeDelivery(t.Context(), acknowledgement)
+	if err != nil || delivered.State != ResultDelivered ||
+		delivered.SourceDeliveryReceiptDigest != acknowledgement.payload.SourceTransitionReceiptDigest {
+		t.Fatalf("delivered=%+v err=%v", delivered, err)
+	}
+	if chunk, err := delivery.ReadChunk(
+		ResultDeliveryHandle{authorization: retrievalAuthorization, record: delivered}, 0,
+	); err != nil || len(chunk) == 0 {
+		t.Fatalf("acknowledged result became unreadable: %d bytes err=%v", len(chunk), err)
+	}
+	release := ResultMutationAuthorization{
+		payload: ResultMutationPermitPayload{
+			Action:                ResultMutationReleaseCustody,
+			AdmissionPermitDigest: inputHandle.record.AdmissionPermitDigest,
+			AuthorityID:           inputHandle.record.RouteAuthorityID,
+			ExpiresAt:             1_800_000_050_000, InputCapsuleID: inputHandle.record.Header.CapsuleID,
+			IssuedAt: 1_800_000_000_000, PermitID: uuid.New(),
+			RequesterAuthorityDigest:   inputHandle.record.RequesterAuthorityDigest,
+			ResultCapsuleID:            retained.Header.ResultCapsuleID,
+			ResultCustodyReceiptDigest: custodyDigest,
+			ResultSetDigest:            retained.Header.ResultSetDigest,
+			SourceTransitionReceiptDigest: computequeue.SHA256Digest(
+				"result-delivery-test", "source-release-request",
+			),
+			Version: ResultMutationPermitVersion,
+		},
+		permitDigest: computequeue.SHA256Digest("result-delivery-test", "release-permit"),
+	}
+	delivery.Clock = fixedJobCustodyClock{time.UnixMilli(1_800_000_000_200)}
+	ledger.mu.Lock()
+	ledger.failResultReleaseFinalizeOnce = true
+	ledger.mu.Unlock()
+	if _, err := delivery.ReleaseResult(t.Context(), release); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("injected release finalization error=%v", err)
+	}
+	pending, err := ledger.LoadResult(t.Context(), retained.Header.ResultCapsuleID)
+	if err != nil || pending.State != ResultReleasePending {
+		t.Fatalf("pending release=%+v err=%v", pending, err)
+	}
+	if _, err := resultContent.OpenObject(
+		retained.Header.ResultCapsuleID, retained.Header.ProtectedObject,
+	); !errors.Is(err, ErrMissing) {
+		t.Fatalf("release intent did not unlink result before injected crash: %v", err)
+	}
+	released, err := delivery.ReleaseResult(t.Context(), release)
+	if err != nil || released.State != ResultReleased || released.ObjectPath != "" ||
+		len(released.ReleaseReceiptBytes) == 0 {
+		t.Fatalf("released=%+v err=%v", released, err)
+	}
+	if _, err := serviceauthority.DecodeJobCustodyResultReleaseReceipt(
+		released.ReleaseReceiptBytes,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if retry, err := delivery.ReleaseResult(t.Context(), release); err != nil ||
+		!bytes.Equal(retry.ReleaseReceiptBytes, released.ReleaseReceiptBytes) {
+		t.Fatalf("release retry=%+v err=%v", retry, err)
+	}
+	if _, err := delivery.OpenAuthorized(
+		t.Context(), retrievalAuthorization, retained.Header.ResultCapsuleID,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("released result remained downloadable: %v", err)
 	}
 	delivery.Clock = fixedJobCustodyClock{time.UnixMilli(int64(retrievalAuthorization.payload.ExpiresAt))}
 	if _, err := delivery.ReadChunk(deliveryHandle, 0); !errors.Is(err, ErrConflict) {
@@ -419,6 +514,98 @@ func (ledger *memoryLedger) BeginResultFinalization(
 		return nil, ErrMissing
 	}
 	return &memoryResultFinalizationLease{ledger: ledger, record: cloneResultRecord(record)}, nil
+}
+
+func (ledger *memoryLedger) AcknowledgeResultDelivery(
+	_ context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	permitDigest computequeue.Digest,
+	sourceReceiptDigest computequeue.Digest,
+	acknowledgedAt computequeue.Timestamp,
+) (ResultRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	record, present := ledger.results[resultCapsuleID]
+	if !present {
+		return ResultRecord{}, ErrMissing
+	}
+	if record.State == ResultDelivered {
+		if record.DeliveryPermitDigest != permitDigest ||
+			record.SourceDeliveryReceiptDigest != sourceReceiptDigest {
+			return ResultRecord{}, ErrConflict
+		}
+		return cloneResultRecord(record), nil
+	}
+	if record.State != ResultRetained || acknowledgedAt < computequeue.Timestamp(record.UpdatedAtMillis) {
+		return ResultRecord{}, ErrConflict
+	}
+	record.State = ResultDelivered
+	record.DeliveryAcknowledgedAt = acknowledgedAt
+	record.DeliveryPermitDigest = permitDigest
+	record.SourceDeliveryReceiptDigest = sourceReceiptDigest
+	record.UpdatedAtMillis = int64(acknowledgedAt)
+	ledger.results[resultCapsuleID] = record
+	return cloneResultRecord(record), nil
+}
+
+func (ledger *memoryLedger) RequestResultRelease(
+	_ context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	permitDigest computequeue.Digest,
+	sourceReceiptDigest computequeue.Digest,
+	requestedAt computequeue.Timestamp,
+) (ResultRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	record, present := ledger.results[resultCapsuleID]
+	if !present {
+		return ResultRecord{}, ErrMissing
+	}
+	if record.State == ResultReleasePending || record.State == ResultReleased {
+		if record.ReleasePermitDigest != permitDigest ||
+			record.SourceReleaseReceiptDigest != sourceReceiptDigest {
+			return ResultRecord{}, ErrConflict
+		}
+		return cloneResultRecord(record), nil
+	}
+	if record.State != ResultDelivered || requestedAt < record.DeliveryAcknowledgedAt {
+		return ResultRecord{}, ErrConflict
+	}
+	record.State = ResultReleasePending
+	record.ReleaseRequestedAt = requestedAt
+	record.ReleasePermitDigest = permitDigest
+	record.SourceReleaseReceiptDigest = sourceReceiptDigest
+	record.UpdatedAtMillis = int64(requestedAt)
+	ledger.results[resultCapsuleID] = record
+	return cloneResultRecord(record), nil
+}
+
+func (ledger *memoryLedger) FinalizeResultRelease(
+	_ context.Context,
+	resultCapsuleID computequeue.JobCapsuleID,
+	receiptBytes []byte,
+	releasedAt int64,
+) (ResultRecord, error) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	record, present := ledger.results[resultCapsuleID]
+	if !present {
+		return ResultRecord{}, ErrMissing
+	}
+	if record.State != ResultReleasePending || len(receiptBytes) == 0 ||
+		releasedAt < record.UpdatedAtMillis {
+		return ResultRecord{}, ErrConflict
+	}
+	if ledger.failResultReleaseFinalizeOnce {
+		ledger.failResultReleaseFinalizeOnce = false
+		return ResultRecord{}, ErrUnavailable
+	}
+	record.State = ResultReleased
+	record.ObjectPath = ""
+	record.ReleaseReceiptBytes = bytes.Clone(receiptBytes)
+	record.UpdatedAtMillis = releasedAt
+	ledger.results[resultCapsuleID] = record
+	return cloneResultRecord(record), nil
 }
 
 type memoryResultAppendLease struct {
