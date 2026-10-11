@@ -315,6 +315,7 @@ func writePortableAcceptance(path string, original []byte) error {
 		"ingressConfiguration": "passed", "offlineOnionIdentity": "passed", "isolatedServiceRuntime": "passed",
 		"isolatedControllerClaimHTTPS": "passed", "containerRecreationIdentity": "passed", "candidateMaintenance": "passed",
 		"serviceRuntime": "not-installed", "spacesSync": "not-run",
+		"jobCustodyRuntime": "not-run", "storageCapacityRuntime": "not-run",
 	}
 	return writeJSONFile(path, record)
 }
@@ -325,7 +326,8 @@ func portableAcceptanceComplete(acceptance map[string]string) bool {
 			return false
 		}
 	}
-	return acceptance["serviceRuntime"] == "not-installed" && acceptance["spacesSync"] == "not-run"
+	return acceptance["serviceRuntime"] == "not-installed" && acceptance["spacesSync"] == "not-run" &&
+		acceptance["jobCustodyRuntime"] == "not-run" && acceptance["storageCapacityRuntime"] == "not-run"
 }
 
 func serviceReleaseImages(release serviceRelease) map[string]string {

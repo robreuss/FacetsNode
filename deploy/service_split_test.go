@@ -212,6 +212,19 @@ func TestDockerfilePublishesAllServiceImages(t *testing.T) {
 	})
 }
 
+func TestPortableServiceKitIncludesDormantComputeQueueServices(t *testing.T) {
+	builder := readDeploymentFile(t, "desktop/guest-build.sh")
+	assertContainsAll(t, "portable service-kit builder", builder, []string{
+		"shared-spaces job-custody storage-capacity-authority",
+		"shared-spaces job-custody storage-capacity-authority tor postgres caddy",
+		`cp "$build_root/source/deploy/job-custody/compose.yaml" "$kit/recipes/job-custody.compose.yaml"`,
+		`cp "$build_root/source/deploy/storage-capacity/compose.yaml" "$kit/recipes/storage-capacity.compose.yaml"`,
+		`cp "$build_root/source/deploy/storage-capacity/Capacity.Caddyfile" "$kit/recipes/StorageCapacity.Caddyfile"`,
+		`jobCustodyRuntime:"not-run"`,
+		`storageCapacityRuntime:"not-run"`,
+	})
+}
+
 func TestJobCustodyCapacityTLSAndPublicIngressStayNarrow(t *testing.T) {
 	compose := readDeploymentFile(t, "job-custody/compose.yaml")
 	capacityCompose := readDeploymentFile(t, "storage-capacity/compose.yaml")

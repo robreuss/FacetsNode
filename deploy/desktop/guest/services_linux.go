@@ -111,6 +111,10 @@ func prepareServiceKit(c configuration) (serviceRelease, error) {
 			return release, errors.New("service release lacks required isolated acceptance")
 		}
 	}
+	if release.Acceptance["jobCustodyRuntime"] != "not-run" ||
+		release.Acceptance["storageCapacityRuntime"] != "not-run" {
+		return release, errors.New("dormant service runtime evidence is ambiguous")
+	}
 	return release, nil
 }
 

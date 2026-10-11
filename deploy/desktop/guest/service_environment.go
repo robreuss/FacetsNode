@@ -15,7 +15,7 @@ const sharedProject = "fbd-shared-spaces"
 
 func serviceEnvironment(root, kit string, identity applianceIdentity, images map[string]string, candidate bool) (map[string]string, map[string]string, error) {
 	common := map[string]string{"FBD_RECIPE_DIRECTORY": filepath.Join(kit, "recipes"), "FBD_CANDIDATE_MAINTENANCE": strconv.FormatBool(candidate)}
-	for _, name := range imageNames {
+	for _, name := range runtimeImageNames {
 		image := images[name]
 		if !strings.HasPrefix(image, "sha256:") || !validHex(strings.TrimPrefix(image, "sha256:"), 32) {
 			return nil, nil, errors.New("unverified runtime image")

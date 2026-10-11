@@ -20,10 +20,10 @@ type serviceContainer struct {
 }
 
 func candidateServicesReady(states map[string]string) bool {
-	if len(states) != len(imageNames) || states["tor"] != "withheld" {
+	if len(states) != len(runtimeImageNames) || states["tor"] != "withheld" {
 		return false
 	}
-	for _, name := range imageNames {
+	for _, name := range runtimeImageNames {
 		if name != "tor" && states[name] != "ready" {
 			return false
 		}
@@ -59,7 +59,7 @@ func decodeServiceContainers(raw []byte, project string) ([]serviceContainer, er
 
 func aggregateServiceHealth(device, group []serviceContainer, images map[string]string, candidate bool) (map[string]string, error) {
 	states := map[string]string{}
-	for _, name := range imageNames {
+	for _, name := range runtimeImageNames {
 		states[name] = "ready"
 	}
 	if candidate {

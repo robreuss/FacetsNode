@@ -8,7 +8,20 @@ import (
 	"strings"
 )
 
-var imageNames = []string{"device-sync", "box-controller", "shared-spaces", "postgres", "caddy", "tor"}
+// imageNames is the exact portable release set. Job Custody and Storage
+// Capacity are shipped as dormant images until their independent identities,
+// retained state, and activation policy are provisioned.
+var imageNames = []string{
+	"device-sync", "box-controller", "shared-spaces", "job-custody",
+	"storage-capacity-authority", "postgres", "caddy", "tor",
+}
+
+// runtimeImageNames is the already activated appliance surface. Keeping this
+// separate prevents merely shipping a verified image from being reported as a
+// running or accepted service.
+var runtimeImageNames = []string{
+	"device-sync", "box-controller", "shared-spaces", "postgres", "caddy", "tor",
+}
 
 type serviceImage struct {
 	Digest    string `json:"digest"`
@@ -105,7 +118,8 @@ func verifyServiceKit(root string, expected map[string]string, binding appliance
 		if json.Unmarshal(config, &platform) != nil || platform.OS != "linux" || platform.Architecture != release.Architecture {
 			return release, errors.New("wrong OCI platform")
 		}
-		if name == "device-sync" || name == "box-controller" || name == "shared-spaces" {
+		if name == "device-sync" || name == "box-controller" || name == "shared-spaces" ||
+			name == "job-custody" || name == "storage-capacity-authority" {
 			if platform.Config.Labels["org.opencontainers.image.revision"] != release.SourceRevision || platform.Config.Labels["org.opencontainers.image.source-tree"] != release.SourceTree {
 				return release, errors.New("OCI source revision mismatch")
 			}

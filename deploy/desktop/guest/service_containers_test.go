@@ -36,6 +36,12 @@ func TestServiceHealthRequiresEveryIndependentRuntimeAndWithholdsCandidateTor(t 
 		if candidateServicesReady(states) != candidate {
 			t.Fatal("candidate acceptance did not require explicit withheld ingress")
 		}
+		if _, exists := states["job-custody"]; exists {
+			t.Fatal("dormant Job Custody image was reported as a running service")
+		}
+		if _, exists := states["storage-capacity-authority"]; exists {
+			t.Fatal("dormant Storage Capacity image was reported as a running service")
+		}
 		for kind, state := range states {
 			if state != "ready" && !(candidate && kind == "tor" && state == "withheld") {
 				t.Fatal("healthy independent services were not recognized")

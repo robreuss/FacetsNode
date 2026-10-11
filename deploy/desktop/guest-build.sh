@@ -24,18 +24,22 @@ esac
 [[ $(df --output=avail -B1 /srv/facets-box-data | tail -1) -gt 12884901888 ]]
 architecture=$(dpkg --print-architecture)
 case $architecture in arm64|amd64) ;; *) exit 1;; esac
-IFS=$'\t' read -r profile_id profile_architecture profile_adapter engine_version compose_version containerd_version data_root profile_sha256 < <(
+read_appliance_profile() {
   case $selected_adapter in
     fbd-virtualization-framework) /opt/fbd/guest-agent appliance-profile ;;
     proxmox-qemu) /usr/local/libexec/facets-service-kit appliance-profile ;;
   esac
-)
+}
+IFS=$'\t' read -r profile_id profile_architecture profile_adapter engine_version compose_version containerd_version data_root profile_sha256 < <(read_appliance_profile)
 [[ $profile_id == "$expected_profile_id" && $profile_architecture == "$architecture" && $profile_adapter == "$selected_adapter" && $profile_sha256 =~ ^[0-9a-f]{64}$ ]] || exit 1
 platform="linux/$architecture"
 kit="$build_root/kit"
 install -d -m 0700 "$kit/images" "$kit/recipes"
 cp "$build_root/source/compose.yaml" "$kit/recipes/device-sync.compose.yaml"
 cp "$build_root/source/deploy/shared-spaces/compose.yaml" "$kit/recipes/shared-spaces.compose.yaml"
+cp "$build_root/source/deploy/job-custody/compose.yaml" "$kit/recipes/job-custody.compose.yaml"
+cp "$build_root/source/deploy/storage-capacity/compose.yaml" "$kit/recipes/storage-capacity.compose.yaml"
+cp "$build_root/source/deploy/storage-capacity/Capacity.Caddyfile" "$kit/recipes/StorageCapacity.Caddyfile"
 cp "$build_root/source/deploy/onion/device-sync.compose.yaml" "$kit/recipes/device-sync.onion.yaml"
 cp "$build_root/source/deploy/onion/shared-spaces.compose.yaml" "$kit/recipes/shared-spaces.onion.yaml"
 cp "$recipe_root/device-sync.compose.yaml" "$kit/recipes/device-sync.desktop.yaml"
@@ -46,7 +50,7 @@ cp "$recipe_root"/*.Caddyfile "$kit/recipes/"
 if ! docker buildx inspect fbd-builder >/dev/null 2>&1; then
   docker buildx create --name fbd-builder --driver docker-container --driver-opt memory=6g,cpu-period=100000,cpu-quota=300000 >/dev/null
 fi
-for target in device-sync box-controller shared-spaces; do
+for target in device-sync box-controller shared-spaces job-custody storage-capacity-authority; do
   docker buildx build --builder fbd-builder --platform "$platform" --load \
     --build-arg "FACETS_SERVER_SOURCE_REVISION=$revision" --build-arg "FACETS_SERVER_SOURCE_TREE=$tree" \
     --target "$target" --tag "fbd-build/$target:$revision" "$build_root/source"
@@ -55,7 +59,7 @@ docker buildx build --builder fbd-builder --platform "$platform" --load --tag "f
 docker pull --platform "$platform" postgres:17.6-bookworm
 docker pull --platform "$platform" caddy:2.10.2-alpine
 printf '{}' > "$kit/images.json"
-for name in device-sync box-controller shared-spaces tor postgres caddy; do
+for name in device-sync box-controller shared-spaces job-custody storage-capacity-authority tor postgres caddy; do
   ref="fbd-build/$name:$revision"
   case $name in postgres) ref=postgres:17.6-bookworm;; caddy) ref=caddy:2.10.2-alpine;; esac
   [[ $(docker image inspect --format '{{.Architecture}}' "$ref") == "$architecture" ]]
@@ -88,6 +92,6 @@ for name in device-sync box-controller shared-spaces tor postgres caddy; do
   mv "$kit/images.json.new" "$kit/images.json"
 done
 jq -n --arg architecture "$architecture" --arg profileID "$profile_id" --arg profileSHA256 "$profile_sha256" --arg revision "$revision" --arg tree "$tree" --slurpfile images "$kit/images.json" \
- '{version:2,architecture:$architecture,applianceProfileID:$profileID,applianceProfileSHA256:$profileSHA256,sourceRevision:$revision,sourceTree:$tree,images:$images[0],acceptance:{dockerfileTests:"passed",serviceRuntime:"not-run",spacesSync:"not-run"}}' > "$kit/service-release.json"
+ '{version:2,architecture:$architecture,applianceProfileID:$profileID,applianceProfileSHA256:$profileSHA256,sourceRevision:$revision,sourceTree:$tree,images:$images[0],acceptance:{dockerfileTests:"passed",serviceRuntime:"not-run",spacesSync:"not-run",jobCustodyRuntime:"not-run",storageCapacityRuntime:"not-run"}}' > "$kit/service-release.json"
 # The agent verifies the entire kit and the rendered deployment boundary before
 # publishing an export. A failed build must not publish a partly accepted kit.
